@@ -1,85 +1,67 @@
 # Three Rings
 
-A cross-platform Magic: The Gathering card collection manager. Track your collection against the full card catalog, on desktop, mobile, and the web.
-
-## What it does
-
-Three Rings lets a user browse the shared MTG card catalog (~100K cards, routinely updated as new sets and price data land) and maintain a personal collection that references it — quantities, printings, conditions, and eventually decks and sharing.
+A cross-platform Magic: The Gathering card collection manager. Track your collection against the full card catalog (~100K cards, routinely updated) on desktop, mobile, and the web.
 
 ## Architecture
 
-**API-first, single database.** All clients are thin: they authenticate against a Rust API server, which owns all data access to a single Postgres database. There is no client-side database and no sync engine.
+One Rust codebase, one deployable core. The `app` crate contains the entire application — Leptos UI, Leptos server functions, and the API/data-access layer as an Axum router. That crate ships two ways:
+
+- **Web:** a thin `server` binary hosts the router as an ordinary web app.
+- **Desktop/mobile:** Tauri embeds the same router as a Tokio task inside the native process (dynamic port on `127.0.0.1`), and the WebView navigates to it — full SSR and server functions in a single native binary, no sidecar. Pattern per [tauri-leptos-ssr](https://github.com/codeitlikemiley/tauri-leptos-ssr).
+
+All persistent data lives in a single Postgres database on Neon: the shared card catalog and per-user collections, joined server-side. A scheduled ingestion job keeps the catalog current from Scryfall bulk data.
 
 ```
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│   Desktop   │  │   Mobile    │  │     Web     │
-│Tauri+Leptos │  │Tauri+Leptos │  │Leptos (WASM)│
-└──────┬──────┘  └──────┬──────┘  └──────┬──────┘
-       └────────────────┼────────────────┘
-                 HTTPS / JSON API
-                        │
-              ┌─────────▼─────────┐        ┌──────────────┐
-              │  Rust API server  │◄───────│ Catalog       │
-              │   (Axum + sqlx)   │        │ ingestion job │
-              └─────────┬─────────┘        │ (Scryfall)    │
-              ┌─────────▼─────────┐        └──────────────┘
-              │  Postgres (Neon)  │
-              │ catalog + users + │
-              │    collections    │
-              └───────────────────┘
+                ┌───────────────────────────────┐
+                │           app crate           │
+                │  Leptos UI + server functions │
+                │      + Axum API router        │
+                └──────┬─────────────────┬──────┘
+              feature: ssr          feature: ssr
+                       │                 │
+        ┌──────────────▼───┐   ┌─────────▼──────────────┐
+        │  server binary   │   │  Tauri shell           │
+        │  (hosted web app)│   │  (desktop & mobile)    │
+        │                  │   │  embedded Axum + WebView│
+        └────────┬─────────┘   └─────────┬──────────────┘
+                 │                       │
+                 └──────────┬────────────┘
+                            │
+                  ┌─────────▼─────────┐      ┌───────────────┐
+                  │  Postgres (Neon)  │◄─────│ Catalog        │
+                  │ catalog + users + │      │ ingestion job  │
+                  │    collections    │      │ (Scryfall)     │
+                  └───────────────────┘      └───────────────┘
 ```
 
 ### Stack
 
-| Layer | Choice | Notes |
-|---|---|---|
-| Frontend | [Leptos](https://www.leptos.dev/) | Shared UI across all three targets |
-| Desktop & mobile shell | [Tauri](https://tauri.app/) | Rust core, native webview |
-| API server | Rust (Axum + sqlx) | Single backend for all clients |
-| Database | Postgres on [Neon](https://neon.com/) | Serverless, scale-to-zero, usage-based pricing |
-| Auth | Session/JWT at the API layer | Clients never hold database credentials |
-| Catalog ingestion | Scheduled Rust job | Pulls card data (e.g. Scryfall bulk) into the catalog tables |
+| Layer | Choice |
+|---|---|
+| UI | [Leptos](https://www.leptos.dev/) (SSR + hydration) |
+| Native shell | [Tauri v2](https://tauri.app/) with embedded Axum server |
+| API / server | Axum + sqlx, inside the shared `app` crate |
+| Database | Postgres on [Neon](https://neon.com/) |
+| Auth | Sessions/JWT at the API layer |
+| Catalog ingestion | Scheduled Rust job (Scryfall bulk data) |
 
-## Architecture decisions and rationale
+### Why
 
-These choices came out of an explicit evaluation of offline-first designs on Turso vs. an API-first design on Neon (July 2026).
+- **API-first, no offline sync.** Offline-first designs (per-user Turso DBs, sync engines) were evaluated and deliberately rejected — they added sync protocols, conflict resolution, and beta-engine risk for a requirement we dropped. If offline returns as a hard requirement, that's a data-layer rewrite, decided knowingly.
+- **Single database.** The catalog is written once per update and shared by all users; collection ↔ catalog cross-referencing is a SQL join; future sharing features are straightforward.
+- **Neon over Turso.** Without offline sync, Turso's differentiators go unused. Postgres brings maturity, full-text/trigram search for card lookup, RLS as defense-in-depth, and first-class Rust tooling.
+- **Maximal code reuse.** One `app` crate is the whole product; web hosting and native shells are thin wrappers around it. Shared types between client and server eliminate API drift.
 
-### Decision 1: API-first, no offline requirement
+### Open consideration
 
-Offline support was the requirement driving all the complexity in earlier designs. Dropping it collapses the architecture: no client-side database, no sync protocol, no conflict resolution, no per-user credential minting.
-
-**Trade-off accepted:** offline is an architecture decision, not a feature — retrofitting it later means rewriting the data layer, not iterating. This was decided deliberately. If limited offline catalog browsing is wanted later, a bundled read-only catalog file on desktop/mobile is a cheap add that doesn't reintroduce sync (see `specs/`).
-
-### Decision 2: Single database, not per-user databases
-
-Three options were evaluated:
-
-1. **Per-user DB seeded with the catalog** — rejected. A routinely-updated 100K-row catalog would be written N times (once per user DB) on every update; cost and complexity scale linearly with users. Sharing features get harder, not easier.
-2. **Single DB for catalog + all user data** — **chosen.** With an API server mediating all access, the drawbacks originally identified (custom sync engine, client-side data security) don't apply — they were artifacts of the offline requirement. Catalog updates are written once. Cross-referencing collection ↔ catalog is a server-side SQL join. Sharing features are straightforward since all data is co-located.
-3. **Split catalog DB + per-user collection DBs** — was the right shape for the offline-first design, unnecessary without it.
-
-### Decision 3: Neon over Turso
-
-Turso's differentiators — offline sync (CDC-based push/pull), embedded replicas, cheap per-user databases — are exactly the features an API-first design doesn't use. What remains favors Postgres:
-
-- Mature, boring technology vs. a beta ground-up SQLite rewrite (Turso's engine had real compat gaps at evaluation time: partial `schema.table.column` support, no `WITH RECURSIVE`, partial window functions).
-- Better full-text search and indexing for card search across 100K rows.
-- Row-level security available as defense-in-depth beneath the API's authorization.
-- First-class Rust ecosystem (sqlx/diesel, Axum).
-- Neon pricing suits prototype scale: free tier with 100 CU-hours/month, pay-as-you-go Launch plan with no monthly floor, $0.35/GB-month storage.
-
-**Revisit trigger:** if full offline becomes a hard requirement again, the fallback evaluated was Turso Sync (per-user collection DB + distributed read-only catalog file) or Postgres + a sync layer like PowerSync/ElectricSQL.
-
-### Decision 4: All-Rust stack retained
-
-Leptos + Tauri + Axum keeps the entire codebase in Rust with shared types between client and server (one crate for API request/response types eliminates a class of drift bugs).
+In the Tauri build, server functions execute on the user's machine, so the embedded server must not hold direct Postgres credentials. The data-access layer needs two backends behind one trait: direct sqlx in the hosted deployment, authenticated calls to the hosted API in native builds. Design lands in `specs/`.
 
 ## Repository layout
 
 ```
-├── README.md          # this file
-├── specs/             # feature specs and project todos — see specs/README.md
-└── (workspace crates to come: app/, server/, shared/)
+├── README.md
+├── specs/        # feature specs and todos — see specs/README.md
+└── (planned: app/, frontend/, server/, src-tauri/ per the tauri-leptos-ssr layout)
 ```
 
 ## Status
