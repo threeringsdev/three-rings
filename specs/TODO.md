@@ -6,27 +6,27 @@ Phases execute top to bottom; tasks within a phase top to bottom. A task's `(spe
 
 ## Phase 1 — architecture spike
 
-- [ ] Compare scaffold bases (start-tauri-fullstack vs. tauri-leptos-ssr); record choice + rationale in architecture-spike.md (specs: architecture-spike, ui-components)
-- [ ] Scaffold Cargo workspace from the chosen base; commit unmodified (specs: architecture-spike)
-- [ ] Set up Neon project (free tier): one trivial table, seed rows, sqlx connectivity from the server path (specs: architecture-spike)
-- [ ] One server function + one page rendering DB rows, using at least one Rust/UI component (specs: architecture-spike, ui-components)
-- [ ] Build + run: hosted web target (specs: architecture-spike)
-- [ ] Build + run: macOS desktop target (embedded Axum) (specs: architecture-spike)
-- [ ] Build + run: one mobile target (iOS or Android); record whether embedded SSR works on mobile (specs: architecture-spike)
-- [ ] Write up findings in architecture-spike.md; mark spec implemented (specs: architecture-spike)
+- [ ] Compare scaffold bases (start-tauri-fullstack vs. tauri-leptos-ssr); record choice + rationale in architecture-spike.md (specs: [architecture-spike](architecture-spike.md), [ui-components](ui-components.md))
+- [ ] Scaffold Cargo workspace from the chosen base; commit unmodified (specs: [architecture-spike](architecture-spike.md))
+- [ ] Set up Neon project (free tier): one trivial table, seed rows, sqlx connectivity from the server path (specs: [architecture-spike](architecture-spike.md))
+- [ ] One server function + one page rendering DB rows, using at least one Rust/UI component (specs: [architecture-spike](architecture-spike.md), [ui-components](ui-components.md))
+- [ ] Build + run: hosted web target (specs: [architecture-spike](architecture-spike.md))
+- [ ] Build + run: macOS desktop target (embedded Axum) (specs: [architecture-spike](architecture-spike.md))
+- [ ] Build + run: one mobile target (iOS or Android); record whether embedded SSR works on mobile (specs: [architecture-spike](architecture-spike.md))
+- [ ] Write up findings in architecture-spike.md; mark spec implemented (specs: [architecture-spike](architecture-spike.md))
 
 ## Phase 1b — UI design — parallel with Phase 1, human-led
 
-- [ ] Information architecture / nav structure (specs: ui-design)
-- [ ] Wireframe core screens (catalog search, collection, add-flow, auth, shell) (specs: ui-design)
-- [ ] Prototype the add-to-collection flow (specs: ui-design)
-- [ ] Component gap analysis vs. Rust/UI registry (specs: ui-design, ui-components)
+- [ ] Information architecture / nav structure (specs: [ui-design](ui-design.md))
+- [ ] Wireframe core screens (catalog search, collection, add-flow, auth, shell) (specs: [ui-design](ui-design.md))
+- [ ] Prototype the add-to-collection flow (specs: [ui-design](ui-design.md))
+- [ ] Component gap analysis vs. Rust/UI registry (specs: [ui-design](ui-design.md), [ui-components](ui-components.md))
 
 ## Phase 2 — foundations
 
 - [ ] CI: fmt, clippy, test, web build on push
-- [ ] Flesh out data-model spec using spike findings + designs; write initial migrations (specs: data-model)
-- [ ] Design the data-access trait split; remove spike-era direct DB access (prerequisite: Phase 1 complete) (specs: data-access-backends)
+- [ ] Flesh out data-model spec using spike findings + designs; write initial migrations (specs: [data-model](data-model.md))
+- [ ] Design the data-access trait split; remove spike-era direct DB access (prerequisite: Phase 1 complete) (specs: [data-access-backends](data-access-backends.md))
 
 ## Later / parked (not in the queue — promote to a phase before working)
 
