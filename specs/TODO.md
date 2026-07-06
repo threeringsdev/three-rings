@@ -8,7 +8,7 @@ Phases execute top to bottom; tasks within a phase top to bottom. A task's `(spe
 
 Ordered riskiest-first; see the spec's Failure policy — if the Android gate fails, STOP the phase.
 
-- [ ] Compare scaffold bases (start-tauri-fullstack vs. tauri-leptos-ssr); record choice + rationale in architecture-spike.md (specs: [architecture-spike](architecture-spike.md), [ui-components](ui-components.md))
+- [~] Compare scaffold bases (start-tauri-fullstack vs. tauri-leptos-ssr); record choice + rationale in architecture-spike.md (specs: [architecture-spike](architecture-spike.md), [ui-components](ui-components.md))
 - [ ] Scaffold Cargo workspace from the chosen base; commit unmodified (specs: [architecture-spike](architecture-spike.md))
 - [ ] Build + run: macOS desktop target (embedded Axum) (specs: [architecture-spike](architecture-spike.md))
 - [ ] Build + run: Android (emulator OK) — the architecture gate; static page sufficient (specs: [architecture-spike](architecture-spike.md))
