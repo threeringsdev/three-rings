@@ -1,7 +1,7 @@
 # 007: Architecture spike
 
 **Status:** draft
-**Depends on:** — (executes FIRST — this architecture is unproven for us; everything else waits on its findings)
+**Depends on:** —
 
 ## Problem
 

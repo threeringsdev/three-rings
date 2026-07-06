@@ -1,7 +1,7 @@
 # 008: UI design phase
 
 **Status:** draft
-**Depends on:** — (can proceed in parallel with 007)
+**Depends on:** —
 
 ## Problem
 
