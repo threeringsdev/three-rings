@@ -26,7 +26,7 @@ Ordered riskiest-first; see the spec's Failure policy — if the Android gate fa
 
 ## Phase 2 — foundations
 
-- [ ] CI: fmt, clippy, test, web build on push
+- [ ] CI: fmt, clippy, test, web build (incl. Tailwind pipeline) on push
 - [ ] Flesh out data-model spec using spike findings + designs; write initial migrations (specs: [data-model](data-model.md))
 - [ ] Design the data-access trait split; remove spike-era direct DB access (prerequisite: Phase 1 complete) (specs: [data-access-backends](data-access-backends.md))
 

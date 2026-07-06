@@ -38,12 +38,7 @@ Key rules:
 
 ## Open questions
 
+- Error-type unification: one error enum both impls map into — shape TBD.
 - Trait granularity: one big store trait vs. per-domain traits (leaning per-domain).
 - Does SSR-on-first-load in the native app work offline-tolerantly enough (embedded server up, but API unreachable) to degrade gracefully rather than white-screen?
 - Session token storage in Tauri (keychain vs. encrypted file) — overlaps with auth.
-
-## Tasks
-
-- [ ] Define trait boundaries alongside the data-model schema
-- [ ] Spike: feature-gated dual impls compiling from one `app` crate
-- [ ] Decide error-type unification strategy

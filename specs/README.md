@@ -6,6 +6,7 @@ Feature specifications and project planning for Three Rings.
 
 - One spec per file, named descriptively: `short-name.md`. The filename is the spec's stable identifier — never renamed once referenced.
 - Start from `TEMPLATE.md`.
+- Specs contain **no task lists**. All work tracking lives in [TODO.md](TODO.md); work needed to finish a draft goes in the spec's Open questions.
 - A spec moves through: `draft` → `accepted` → `implemented` (status noted at the top of each file).
   * `draft` — under discussion; **no implementation work may be based on it**
   * `accepted` — design settled; tasks gated on it may proceed (accepting a spec is a human decision)

@@ -21,5 +21,6 @@ To be worked out. Starting considerations:
 
 ## Open questions
 
+- Spike needed: cookie/session behavior inside Tauri webviews on all platforms (differs from browsers).
 - Email verification and password reset infrastructure — needed at prototype stage?
 - OAuth social login worth it for v1?

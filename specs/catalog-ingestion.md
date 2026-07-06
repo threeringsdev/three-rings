@@ -25,9 +25,3 @@ To be worked out. Starting considerations:
 
 - Where does the job run (Neon has no cron; needs a host — fly.io, GitHub Actions, etc.)?
 - Image handling: link to Scryfall-hosted images vs. caching.
-
-## Tasks
-
-- [ ] Confirm Scryfall bulk data terms and format
-- [ ] Prototype bulk load into Neon; measure duration and CU cost
-- [ ] Design diff/upsert strategy

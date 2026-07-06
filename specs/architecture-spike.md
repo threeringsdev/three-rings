@@ -1,6 +1,6 @@
 # Architecture spike
 
-**Status:** draft
+**Status:** accepted
 **Depends on:** —
 
 ## Problem

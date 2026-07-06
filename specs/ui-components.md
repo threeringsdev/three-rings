@@ -1,6 +1,6 @@
 # UI component system
 
-**Status:** draft
+**Status:** accepted
 **Depends on:** —
 
 ## Problem
@@ -26,9 +26,3 @@ Rust/UI is a shadcn-style **registry, not a crate**: components are copied into 
 - Scaffold from `start-tauri-fullstack` vs. `tauri-leptos-ssr` + manual Rust/UI setup?
 - Rust/UI is young (~300 stars) — spot-check the specific components we need (dialog, popover, table, combobox) for SSR/hydration correctness before committing broadly.
 - Theming: dark mode from day one?
-
-## Tasks
-
-- [ ] Compare the two starters; pick scaffold base
-- [ ] Copy in an initial component set and verify SSR + hydration in both web and Tauri builds
-- [ ] Wire Tailwind into CI

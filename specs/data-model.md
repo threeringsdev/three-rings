@@ -23,11 +23,6 @@ To be worked out. Starting considerations:
 
 ## Open questions
 
+- Enable RLS from day one vs. later?
 - Store full oracle text / rulings, or only what the UI needs and link out?
 - How much price history to retain?
-
-## Tasks
-
-- [ ] Draft ERD
-- [ ] Write initial sqlx migrations
-- [ ] Decide on RLS from day one vs. later

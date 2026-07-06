@@ -24,9 +24,3 @@ To be worked out. Starting considerations:
 
 - Pagination style (cursor vs. offset) for 100K-row catalog search.
 - CSV import (Moxfield/Archidekt formats) — v1 or later?
-
-## Tasks
-
-- [ ] Define shared types crate structure
-- [ ] Draft endpoint list
-- [ ] Decide pagination approach
