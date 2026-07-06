@@ -1,0 +1,22 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock  # remove this line if building a binary-only workspace
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# Frontend build output
+/dist/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
