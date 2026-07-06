@@ -28,6 +28,7 @@ In: information architecture, wireframes for core screens, interaction design fo
 
 ## Open questions
 
+- Theming: dark mode from day one, or light-only v1? (Moved from ui-components — the component system supports either.)
 - Card images: how prominent? (Drives layout and Scryfall image-loading strategy.)
 - Mobile: same feature surface as desktop, or a focused subset (lookup + quick-add)?
 - Keyboard-driven command palette for power users — v1 or later?
