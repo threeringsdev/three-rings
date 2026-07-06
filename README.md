@@ -1,6 +1,6 @@
 # Three Rings
 
-A cross-platform Magic: The Gathering card collection manager. Track your collection against the full card catalog (~100K cards, routinely updated) on desktop, mobile, and the web.
+A cross-platform Magic: The Gathering card collection manager. Track your collection against the full card catalog on desktop, mobile, and the web.
 
 ## Architecture
 
@@ -12,33 +12,33 @@ One Rust codebase, one deployable core. The `app` crate contains the entire appl
 All persistent data lives in a single Postgres database on Neon: the shared card catalog and per-user collections, joined server-side. A scheduled ingestion job keeps the catalog current from Scryfall bulk data.
 
 ```
-                ┌───────────────────────────────┐
-                │           app crate           │
-                │  Leptos UI + server functions │
-                │      + Axum API router        │
-                └──────┬─────────────────┬──────┘
-              feature: ssr          feature: ssr
-                       │                 │
-        ┌──────────────▼───┐   ┌─────────▼──────────────┐
-        │  server binary   │   │  Tauri shell           │
-        │  (hosted web app)│   │  (desktop & mobile)    │
-        │                  │   │  embedded Axum + WebView│
-        └────────┬─────────┘   └─────────┬──────────────┘
-                 │                       │
-                 └──────────┬────────────┘
-                            │
-                  ┌─────────▼─────────┐      ┌───────────────┐
-                  │  Postgres (Neon)  │◄─────│ Catalog        │
-                  │ catalog + users + │      │ ingestion job  │
-                  │    collections    │      │ (Scryfall)     │
-                  └───────────────────┘      └───────────────┘
+          ┌───────────────────────────────┐
+          │           app crate           │
+          │  Leptos UI + server functions │
+          │      + Axum API router        │
+          └──────┬─────────────────┬──────┘
+        feature: ssr          feature: ssr
+                  │                 │
+  ┌──────────────▼───┐   ┌─────────▼──────────────┐
+  │  server binary   │   │  Tauri shell           │
+  │  (hosted web app)│   │  (desktop & mobile)    │
+  │                  │   │  embedded Axum + WebView│
+  └────────┬─────────┘   └─────────┬──────────────┘
+            │                       │
+            └──────────┬────────────┘
+                      │
+            ┌─────────▼─────────┐      ┌───────────────┐
+            │  Postgres (Neon)  │◄─────│ Catalog        │
+            │ catalog + users + │      │ ingestion job  │
+            │    collections    │      │ (Scryfall)     │
+            └───────────────────┘      └───────────────┘
 ```
 
 ### Stack
 
 | Layer | Choice |
 |---|---|
-| UI | [Leptos](https://www.leptos.dev/) (SSR + hydration) |
+| UI | [Leptos](https://www.leptos.dev/) (SSR + hydration) + [Rust/UI](https://github.com/rust-ui/ui) components (Tailwind CSS) |
 | Native shell | [Tauri v2](https://tauri.app/) with embedded Axum server |
 | API / server | Axum + sqlx, inside the shared `app` crate |
 | Database | Postgres on [Neon](https://neon.com/) |
@@ -48,10 +48,6 @@ All persistent data lives in a single Postgres database on Neon: the shared card
 ### Why
 
 - **Maximal code reuse.** One `app` crate is the whole product; web hosting and native shells are thin wrappers around it. Shared types between client and server eliminate API drift.
-
-### Open consideration
-
-In the Tauri build, server functions execute on the user's machine, so the embedded server must not hold direct Postgres credentials. The data-access layer needs two backends behind one trait: direct sqlx in the hosted deployment, authenticated calls to the hosted API in native builds. Design lands in `specs/`.
 
 ## Repository layout
 
