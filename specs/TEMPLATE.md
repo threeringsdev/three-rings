@@ -18,7 +18,3 @@ The approach. Data model changes, API endpoints, UI flows as relevant.
 ## Open questions
 
 Things to resolve before this moves to `accepted`.
-
-## Tasks
-
-- [ ] ...

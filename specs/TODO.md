@@ -6,13 +6,15 @@ Phases execute top to bottom; tasks within a phase top to bottom. A task's `(spe
 
 ## Phase 1 — architecture spike
 
+Ordered riskiest-first; see the spec's Failure policy — if the Android gate fails, STOP the phase.
+
 - [ ] Compare scaffold bases (start-tauri-fullstack vs. tauri-leptos-ssr); record choice + rationale in architecture-spike.md (specs: [architecture-spike](architecture-spike.md), [ui-components](ui-components.md))
 - [ ] Scaffold Cargo workspace from the chosen base; commit unmodified (specs: [architecture-spike](architecture-spike.md))
+- [ ] Build + run: macOS desktop target (embedded Axum) (specs: [architecture-spike](architecture-spike.md))
+- [ ] Build + run: Android (emulator OK) — the architecture gate; static page sufficient (specs: [architecture-spike](architecture-spike.md))
 - [ ] Set up Neon project (free tier): one trivial table, seed rows, sqlx connectivity from the server path (specs: [architecture-spike](architecture-spike.md))
 - [ ] One server function + one page rendering DB rows, using at least one Rust/UI component (specs: [architecture-spike](architecture-spike.md), [ui-components](ui-components.md))
-- [ ] Build + run: hosted web target (specs: [architecture-spike](architecture-spike.md))
-- [ ] Build + run: macOS desktop target (embedded Axum) (specs: [architecture-spike](architecture-spike.md))
-- [ ] Build + run: one mobile target (iOS or Android); record whether embedded SSR works on mobile (specs: [architecture-spike](architecture-spike.md))
+- [ ] Verify web target: `server` binary locally, SSR + hydration (specs: [architecture-spike](architecture-spike.md))
 - [ ] Write up findings in architecture-spike.md; mark spec implemented (specs: [architecture-spike](architecture-spike.md))
 
 ## Phase 1b — UI design — parallel with Phase 1, human-led
@@ -40,3 +42,4 @@ Phases execute top to bottom; tasks within a phase top to bottom. A task's `(spe
 - 2026-07: Architecture spike prioritized ahead of data model — architecture unproven.
 - 2026-07: Spec numbering dropped; filenames are the stable IDs, this file owns execution order.
 - 2026-07: Tasks gated on spec status via `(specs: ...)` annotations; only humans accept specs.
+- 2026-07: Spike decisions: web = local run only; mobile = Android; mobile SSR failure = stop and reassess; no time-box; Android gate moved ahead of DB work (fail fast).

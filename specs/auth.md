@@ -23,8 +23,3 @@ To be worked out. Starting considerations:
 
 - Email verification and password reset infrastructure — needed at prototype stage?
 - OAuth social login worth it for v1?
-
-## Tasks
-
-- [ ] Choose auth approach
-- [ ] Spike: cookie/session behavior inside Tauri webviews on all platforms
