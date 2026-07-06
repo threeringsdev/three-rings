@@ -19,3 +19,7 @@ Feature specifications and project planning for Three Rings.
 | [004-collection-api](004-collection-api.md) | draft |
 | [005-data-access-backends](005-data-access-backends.md) | draft |
 | [006-ui-components](006-ui-components.md) | draft |
+| [007-architecture-spike](007-architecture-spike.md) | draft — **executes first** |
+| [008-ui-design](008-ui-design.md) | draft — parallel with 007 |
+
+Numbering is creation order, not execution order. Current sequence: 007 + 008 first, then 001 informed by their findings.
