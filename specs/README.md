@@ -7,6 +7,9 @@ Feature specifications and project planning for Three Rings.
 - One spec per file, named descriptively: `short-name.md`. The filename is the spec's stable identifier — never renamed once referenced.
 - Start from `TEMPLATE.md`.
 - A spec moves through: `draft` → `accepted` → `implemented` (status noted at the top of each file).
+  * `draft` — under discussion; **no implementation work may be based on it**
+  * `accepted` — design settled; tasks gated on it may proceed (accepting a spec is a human decision)
+  * `implemented` — built; kept as reference
 - **Execution order lives in exactly one place: [TODO.md](TODO.md).** This index is a registry, not a schedule.
 
 ## Working the queue — process for agents (and humans)
@@ -14,7 +17,13 @@ Feature specifications and project planning for Three Rings.
 Anyone told to "work on the next available task" follows this, with no other information required:
 
 1. Read `TODO.md`. Phases are ordered top to bottom; tasks within a phase are ordered top to bottom.
-2. **The next available task is the first task marked `[ ]`** in the topmost phase that contains one, skipping any task whose listed prerequisite task is not yet `[x]`. Tasks marked `[~]` are in progress — do not start them without being asked; do not skip past a `[~]` task's phase, work the next `[ ]` in it.
+2. **The next available task is the first task marked `[ ]`** in the topmost phase that contains one, skipping any task that is **blocked**. A task is blocked if:
+   - a listed prerequisite task is not yet `[x]`, or
+   - any spec in its `(specs: ...)` annotation does not have status `accepted` or `implemented`. Spec status is read from the spec file's header — it is never duplicated in TODO.md.
+
+   Tasks with no `(specs: ...)` annotation are ungated. Tasks marked `[~]` are in progress — do not start them without being asked; do not skip past a `[~]` task's phase, work the next `[ ]` in it.
+
+   **If every `[ ]` task is blocked by a `draft` spec**, the queue's real next action is spec review: report which specs are blocking, offer to resolve their open questions and finalize the draft, and wait for the human to flip the status to `accepted`. Never change a spec's status to `accepted` yourself.
 3. Before starting: change the task's `[ ]` to `[~]` and commit that change with message `start: <task summary>`.
 4. Read the spec the task links to (and its `Depends on:` specs) before writing any code.
 5. Definition of done — ALL of:
