@@ -24,7 +24,7 @@ Rust/UI is a shadcn-style **registry, not a crate**: components are copied into 
 
 ## Open questions
 
-- *(resolved during execution — architecture spike, task 1)* Scaffold from `start-tauri-fullstack` vs. `tauri-leptos-ssr` + manual Rust/UI setup?
+- *(resolved — architecture spike, task 1, 2026-07-06)* Scaffold from `start-tauri-fullstack` vs. `tauri-leptos-ssr` + manual Rust/UI setup? → **`tauri-leptos-ssr` + manual Rust/UI setup.** start-tauri-fullstack does not embed the server in-process (thin Tauri shell → external/networked SSR server, `csr`-default app), so it does not match this project's embedded-Axum architecture — the two starters are *not* the same pattern. Rust/UI components will be copied in ourselves, using start-tauri-fullstack's pre-wired components/Tailwind setup as reference. Details in [architecture-spike](architecture-spike.md) Findings.
 - *(resolved during execution — spike + Phase 1b gap analysis)* Rust/UI is young (~300 stars) — spot-check the components we need (dialog, popover, table, combobox) for SSR/hydration correctness before committing broadly.
 
 Theming/dark mode is a design decision — moved to [ui-design](ui-design.md). This spec only requires that the component system supports theming (it does: CSS variables + Tailwind dark variant).

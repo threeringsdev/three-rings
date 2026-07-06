@@ -46,4 +46,17 @@ None. The spike runs until success criteria are met or the failure policy trigge
 
 (Record here as the spike proceeds — this section becomes the input to data-access-backends and future specs.)
 
+### Scaffold base decision (task 1, 2026-07-06)
+
+**Chosen: [tauri-leptos-ssr](https://github.com/codeitlikemiley/tauri-leptos-ssr).** Scaffold from it; mine [start-tauri-fullstack](https://github.com/rust-ui/start-tauri-fullstack) as *reference* (Rust/UI components, sqlx wiring, mobile config) at the relevant later steps.
+
+**Key finding: the two bases implement different architectures, not two versions of one.**
+
+- **tauri-leptos-ssr embeds Axum in-process — this README verbatim.** `src-tauri/src/lib.rs` binds `TcpListener::bind("127.0.0.1:0")` (OS-assigned port, `[::1]:0` fallback), spawns `axum::serve` as a `tauri::async_runtime` task, waits for readiness, then `window.navigate("http://127.0.0.1:{port}")` (task aborted on window close). `src-tauri/Cargo.toml` depends on `app` (`features = ["ssr"]`) + `axum` + `tokio`. Layout is `app/frontend/server/src-tauri` (our planned layout). Versions current and coherent: Leptos 0.8.2, Tauri 2.5.0, axum 0.8.4. Distributed as a `cargo generate` template.
+- **start-tauri-fullstack is a thin shell pointed at an external server.** Its `run()` embeds nothing; `src-tauri/Cargo.toml` links only `tauri` + `tauri-plugin-opener` (no `app`/`axum`/`tokio`, so it *cannot* embed). WebView → fixed `localhost:3000` (desktop) and, on Android, → the dev machine's LAN IP (`tauri.android.conf.json` = `http://192.168.1.101:3000`, rewritten by `just run_android` to `ipconfig getifaddr en0`). The `app` crate defaults to the `csr` feature and the frontend is not bundled as a resource. So its "mobile support" proves only that an Android WebView can load a *networked* SSR site — not that embedded Axum SSR runs *inside* the Android process, which is our architecture gate. Adopting it as-is would be the silent CSR/remote-server fallback the Failure policy forbids.
+- This corrects ui-components.md's parenthetical "they're the same pattern" — they are not.
+- start-tauri-fullstack's real advantages (Rust/UI pre-copied, sqlx + migrations, iOS/Android configs) map to later spike steps (Neon = step 5) or ui-components work we do regardless — reusable as reference from the chosen base. Maturity also favors tauri-leptos-ssr (22★ / 31 commits / CI / cargo-generate vs. 13★ / 4 commits).
+
+**Caveat that shapes the Android gate (task 4):** tauri-leptos-ssr's embedded-server block is gated behind `#[cfg(not(debug_assertions))]` (release only); dev falls through to `devUrl` + `cargo leptos watch` (a sibling process). Because `cargo tauri android dev` builds debug, proving embedded SSR on Android will require a *release/bundled* build **or** lifting that `cfg` so the embedded server also runs in debug. Decide this when executing task 4 — do not let a debug build's `devUrl` fallback masquerade as a passing gate.
+
 - Where do DB credentials live during the spike? (Native builds talking directly to Neon is acceptable *for the spike only* — data-access-backends removes this before any real user data.)
