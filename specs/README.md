@@ -8,10 +8,10 @@ Feature specifications and project planning for Three Rings.
 - Start from `TEMPLATE.md`.
 - Specs contain **no task lists**. All work tracking lives in [TODO.md](TODO.md); work needed to finish a draft goes in the spec's Open questions.
 - A spec moves through: `draft` → `accepted` → `implemented` (status noted at the top of each file).
-- An `accepted` spec may retain open questions **only** if each is annotated *(resolved during execution — <where>)*; unannotated open questions block acceptance.
   * `draft` — under discussion; **no implementation work may be based on it**
   * `accepted` — design settled; tasks gated on it may proceed (accepting a spec is a human decision)
   * `implemented` — built; kept as reference
+- An `accepted` spec may retain open questions **only** if each is annotated *(resolved during execution — <where>)*; unannotated open questions block acceptance.
 - **Execution order lives in exactly one place: [TODO.md](TODO.md).** This index is a registry, not a schedule.
 
 ## Working the queue — process for agents (and humans)
