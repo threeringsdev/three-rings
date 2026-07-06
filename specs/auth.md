@@ -1,4 +1,4 @@
-# 003: Auth
+# Auth
 
 **Status:** draft
 **Depends on:** —

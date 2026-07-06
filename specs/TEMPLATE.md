@@ -1,4 +1,4 @@
-# NNN: Title
+# Title
 
 **Status:** draft
 **Depends on:** —

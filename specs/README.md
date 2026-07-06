@@ -4,22 +4,37 @@ Feature specifications and project planning for Three Rings.
 
 ## Conventions
 
-- One spec per file, numbered for ordering: `NNN-short-name.md`
-- Start from `TEMPLATE.md`
-- A spec moves through: `draft` → `accepted` → `implemented` (status noted at the top of each file)
-- Cross-cutting task tracking lives in `TODO.md`
+- One spec per file, named descriptively: `short-name.md`. The filename is the spec's stable identifier — never renamed once referenced.
+- Start from `TEMPLATE.md`.
+- A spec moves through: `draft` → `accepted` → `implemented` (status noted at the top of each file).
+- **Execution order lives in exactly one place: [TODO.md](TODO.md).** This index is a registry, not a schedule.
+
+## Working the queue — process for agents (and humans)
+
+Anyone told to "work on the next available task" follows this, with no other information required:
+
+1. Read `TODO.md`. Phases are ordered top to bottom; tasks within a phase are ordered top to bottom.
+2. **The next available task is the first task marked `[ ]`** in the topmost phase that contains one, skipping any task whose listed prerequisite task is not yet `[x]`. Tasks marked `[~]` are in progress — do not start them without being asked; do not skip past a `[~]` task's phase, work the next `[ ]` in it.
+3. Before starting: change the task's `[ ]` to `[~]` and commit that change with message `start: <task summary>`.
+4. Read the spec the task links to (and its `Depends on:` specs) before writing any code.
+5. Definition of done — ALL of:
+   - The work is committed (conventional message describing the change).
+   - The task's `[~]` is changed to `[x]` in the same commit as the final work.
+   - Any findings, decisions, or surprises are recorded in the linked spec (Findings/Open questions sections).
+   - New follow-up work discovered is added as new `[ ]` tasks in the appropriate phase — never silently absorbed.
+6. If a task is ambiguous after reading its spec, **stop and ask** — do not guess. Record the question in the spec's Open questions first.
+
+Task state legend: `[ ]` available · `[~]` in progress · `[x]` done.
 
 ## Index
 
 | Spec | Status |
 |---|---|
-| [001-data-model](001-data-model.md) | draft |
-| [002-catalog-ingestion](002-catalog-ingestion.md) | draft |
-| [003-auth](003-auth.md) | draft |
-| [004-collection-api](004-collection-api.md) | draft |
-| [005-data-access-backends](005-data-access-backends.md) | draft |
-| [006-ui-components](006-ui-components.md) | draft |
-| [007-architecture-spike](007-architecture-spike.md) | draft |
-| [008-ui-design](008-ui-design.md) | draft |
-
-Spec numbers are stable identifiers (creation order), never execution order. **Execution order lives in one place: [TODO.md](TODO.md).**
+| [architecture-spike](architecture-spike.md) | draft |
+| [auth](auth.md) | draft |
+| [catalog-ingestion](catalog-ingestion.md) | draft |
+| [collection-api](collection-api.md) | draft |
+| [data-access-backends](data-access-backends.md) | draft |
+| [data-model](data-model.md) | draft |
+| [ui-components](ui-components.md) | draft |
+| [ui-design](ui-design.md) | draft |

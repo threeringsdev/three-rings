@@ -1,4 +1,4 @@
-# 008: UI design phase
+# UI design phase
 
 **Status:** draft
 **Depends on:** —

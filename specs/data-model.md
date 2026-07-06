@@ -1,4 +1,4 @@
-# 001: Data model
+# Data model
 
 **Status:** draft
 **Depends on:** —

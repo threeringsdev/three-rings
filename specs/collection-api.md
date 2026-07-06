@@ -1,7 +1,7 @@
-# 004: Collection API
+# Collection API
 
 **Status:** draft
-**Depends on:** 001, 003
+**Depends on:** data-model, auth
 
 ## Problem
 

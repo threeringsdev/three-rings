@@ -1,7 +1,7 @@
-# 005: Data-access backends (hosted vs. native)
+# Data-access backends (hosted vs. native)
 
 **Status:** draft
-**Depends on:** 001, 003
+**Depends on:** data-model, auth
 
 ## Problem
 
@@ -19,7 +19,7 @@ A data-access trait (per domain area, e.g. `CatalogStore`, `CollectionStore`) th
 | | Hosted impl | Native impl |
 |---|---|---|
 | Transport | In-process sqlx against Neon | HTTPS to the hosted API |
-| Credentials | `DATABASE_URL` from environment | User's session token (from 003 auth) |
+| Credentials | `DATABASE_URL` from environment | User's session token (from auth) |
 | Authorization | Enforced here (the terminus) | Delegated — hosted API enforces |
 
 Selected at compile time via the existing cargo feature split (`ssr` + a `hosted`/`native` feature pair), so the native binary contains no sqlx/Postgres code path at all.
@@ -27,7 +27,7 @@ Selected at compile time via the existing cargo feature split (`ssr` + a `hosted
 Key rules:
 
 - **Exactly one terminus.** All authorization and credential-holding happens in the hosted deployment. The hosted impl does NOT call the API over loopback — that would add a serialization round-trip for zero security gain, since enforcement lives in the same process either way.
-- The hosted API surface and the native impl's client are generated from/checked against the same shared types (see 004) so the two backends cannot drift.
+- The hosted API surface and the native impl's client are generated from/checked against the same shared types (see collection-api) so the two backends cannot drift.
 - Native impl owns: token attachment, retry/timeout policy, and mapping HTTP errors into the same error type the sqlx impl produces.
 
 ## Alternatives considered
@@ -40,10 +40,10 @@ Key rules:
 
 - Trait granularity: one big store trait vs. per-domain traits (leaning per-domain).
 - Does SSR-on-first-load in the native app work offline-tolerantly enough (embedded server up, but API unreachable) to degrade gracefully rather than white-screen?
-- Session token storage in Tauri (keychain vs. encrypted file) — overlaps with 003.
+- Session token storage in Tauri (keychain vs. encrypted file) — overlaps with auth.
 
 ## Tasks
 
-- [ ] Define trait boundaries alongside 001's schema
+- [ ] Define trait boundaries alongside the data-model schema
 - [ ] Spike: feature-gated dual impls compiling from one `app` crate
 - [ ] Decide error-type unification strategy

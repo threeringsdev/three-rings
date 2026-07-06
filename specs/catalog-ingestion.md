@@ -1,7 +1,7 @@
-# 002: Catalog ingestion
+# Catalog ingestion
 
 **Status:** draft
-**Depends on:** 001
+**Depends on:** data-model
 
 ## Problem
 

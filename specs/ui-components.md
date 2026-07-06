@@ -1,4 +1,4 @@
-# 006: UI component system
+# UI component system
 
 **Status:** draft
 **Depends on:** —

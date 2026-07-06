@@ -1,37 +1,41 @@
-# Project TODO
+# Project TODO — execution queue
 
-Cross-cutting tasks that don't belong to a single spec. Spec-specific tasks live in their spec files.
+**This file is the single source of truth for what to work on next.** The selection algorithm and definition of done are in [README.md](README.md) ("Working the queue"). State legend: `[ ]` available · `[~]` in progress · `[x]` done.
 
-## Now — architecture spike (spec 007)
+Phases execute top to bottom. Tasks within a phase execute top to bottom unless a stated prerequisite blocks.
 
-The architecture is unproven; prove the skeleton before fleshing out the data model or features.
+## Phase 1 — architecture spike ([architecture-spike](architecture-spike.md))
 
-- [ ] Compare scaffold bases (start-tauri-fullstack vs. tauri-leptos-ssr); pick one
-- [ ] Scaffold Cargo workspace (app/, frontend/, server/, src-tauri/)
-- [ ] Set up Neon project (free tier), one trivial table + seed rows, sqlx connectivity
-- [ ] One server function + one page rendering DB rows, with one Rust/UI component
-- [ ] Build + run: hosted web, macOS desktop, one mobile target
-- [ ] Record findings in spec 007 (especially: does embedded SSR work on mobile?)
+- [ ] Compare scaffold bases (start-tauri-fullstack vs. tauri-leptos-ssr); record choice + rationale in architecture-spike.md
+- [ ] Scaffold Cargo workspace from the chosen base; commit unmodified
+- [ ] Set up Neon project (free tier): one trivial table, seed rows, sqlx connectivity from the server path
+- [ ] One server function + one page rendering DB rows, using at least one Rust/UI component
+- [ ] Build + run: hosted web target
+- [ ] Build + run: macOS desktop target (embedded Axum)
+- [ ] Build + run: one mobile target (iOS or Android); record whether embedded SSR works on mobile
+- [ ] Write up findings in architecture-spike.md; mark spec implemented
 
-## Now — UI design (spec 008, parallel)
+## Phase 1b — UI design ([ui-design](ui-design.md)) — parallel with Phase 1, human-led
 
 - [ ] Information architecture / nav structure
 - [ ] Wireframe core screens (catalog search, collection, add-flow, auth, shell)
 - [ ] Prototype the add-to-collection flow
+- [ ] Component gap analysis vs. Rust/UI registry
 
-## Next
+## Phase 2 — foundations
 
 - [ ] CI: fmt, clippy, test, web build on push
-- [ ] Flesh out spec 001 (data model) informed by spike findings + designs
-- [ ] Spec 005 (data-access backends) — remove spike-era direct DB access before real user data
+- [ ] Flesh out [data-model](data-model.md) using spike findings + designs; write initial migrations
+- [ ] Design [data-access-backends](data-access-backends.md) trait split; remove spike-era direct DB access (prerequisite: Phase 1 complete)
 
-## Later / parked
+## Later / parked (not in the queue — promote to a phase before working)
 
-- [ ] Bundled read-only catalog for offline browsing on desktop/mobile (deliberately deferred)
-- [ ] Decks and sharing features
-- [ ] Import/export (CSV, Moxfield)
+- Bundled read-only catalog for offline browsing on desktop/mobile (deliberately deferred)
+- Decks and sharing features
+- Import/export (CSV, Moxfield)
 
 ## Decisions log
 
 - 2026-07: API-first on Neon chosen over offline-first Turso designs. Rationale in README.
-- 2026-07: Architecture spike (007) prioritized ahead of data model (001) — architecture unproven.
+- 2026-07: Architecture spike prioritized ahead of data model — architecture unproven.
+- 2026-07: Spec numbering dropped; filenames are the stable IDs, this file owns execution order.
