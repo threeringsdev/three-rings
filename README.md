@@ -47,9 +47,6 @@ All persistent data lives in a single Postgres database on Neon: the shared card
 
 ### Why
 
-- **API-first, no offline sync.** Offline-first designs (per-user Turso DBs, sync engines) were evaluated and deliberately rejected — they added sync protocols, conflict resolution, and beta-engine risk for a requirement we dropped. If offline returns as a hard requirement, that's a data-layer rewrite, decided knowingly.
-- **Single database.** The catalog is written once per update and shared by all users; collection ↔ catalog cross-referencing is a SQL join; future sharing features are straightforward.
-- **Neon over Turso.** Without offline sync, Turso's differentiators go unused. Postgres brings maturity, full-text/trigram search for card lookup, RLS as defense-in-depth, and first-class Rust tooling.
 - **Maximal code reuse.** One `app` crate is the whole product; web hosting and native shells are thin wrappers around it. Shared types between client and server eliminate API drift.
 
 ### Open consideration
