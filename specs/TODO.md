@@ -34,14 +34,14 @@ Ordered riskiest-first; see the spec's Failure policy — if the Android gate fa
 
 Code leaves the laptop: CI validation, remote-checkable artifacts, agent self-sufficiency. Ordered by dependency; budget policy and design details in the spec.
 
-- [ ] GitHub: create private repo, push `main`, enable Actions, add secrets (`ANDROID_KEYSTORE` + passwords; `RAILWAY_TOKEN` when Railway exists) (specs: [delivery-pipeline](delivery-pipeline.md))
+- [ ] GitHub: create private repo, push `main`, enable Actions + auto-merge, branch protection requiring the validate check, add secrets (`ANDROID_KEYSTORE` + passwords; `RAILWAY_TOKEN` when Railway exists) (specs: [delivery-pipeline](delivery-pipeline.md))
 - [ ] Replace template `ci.yml` with the validate workflow: fmt, clippy (ssr + wasm, incl. `src-tauri` via Tauri linux deps), test, `cargo leptos build --release`; rust caching (specs: [delivery-pipeline](delivery-pipeline.md))
 - [ ] Android APK artifact job (`main` + `workflow_dispatch`): NDK r28+ (closes the 16 KB finding), aarch64 APK, signed with the keystore secret (specs: [delivery-pipeline](delivery-pipeline.md))
 - [ ] macOS `.dmg` artifact job (`main` + `workflow_dispatch`; 10× minutes — keep lean) (specs: [delivery-pipeline](delivery-pipeline.md))
 - [ ] Rolling `latest` prerelease: artifact jobs publish APK + `.dmg` to stable URLs (specs: [delivery-pipeline](delivery-pipeline.md))
-- [ ] Web deploy: multi-stage `Dockerfile` (server binary + site, `PORT`→`LEPTOS_SITE_ADDR` entrypoint) + Railway service with GitHub integration, `DATABASE_URL` in Railway vars; verify `/` + `/cards` at the public URL (specs: [delivery-pipeline](delivery-pipeline.md))
+- [ ] Web deploy: multi-stage `Dockerfile` (server binary + site, `PORT`→`LEPTOS_SITE_ADDR` entrypoint) + Railway service with GitHub integration; Neon branch split (project main → Railway `DATABASE_URL`, new `dev` branch → `.devcontainer/.env`); verify `/` + `/cards` at the public URL (specs: [delivery-pipeline](delivery-pipeline.md))
 - [ ] Agent self-sufficiency: root `CLAUDE.md` (commands, what-runs-where, queue conventions), in-container git/`gh` auth docs, update `.devcontainer/README.md` table (CI owns Android/macOS builds) (specs: [delivery-pipeline](delivery-pipeline.md))
-- [ ] Prove the loop end-to-end: fresh container → agent does a trivial task → push → merge → verify web URL, APK update, and `.dmg` away from the laptop; mark spec implemented (specs: [delivery-pipeline](delivery-pipeline.md))
+- [ ] Prove the loop end-to-end: fresh container → agent does a trivial task → PR → auto-merge on green (zero human touch) → verify web URL, APK update, and `.dmg` away from the laptop; mark spec implemented (specs: [delivery-pipeline](delivery-pipeline.md))
 
 ## Phase 3 — foundations
 
