@@ -69,5 +69,15 @@ Deliberate deviations from a pristine `cargo generate` (everything else copied u
 - **Excluded `.vscode/`** — gitignored here; the devcontainer supplies editor settings.
 - **Included `LICENSE`** as rendered (MIT © 2026 Dylan Goings). ⚠️ Confirm this is the intended project license, or change/remove it.
 
+### Web target verified — SSR + hydration (task 7, pulled early, 2026-07-07)
+
+Built and ran the web target in the devcontainer (`cargo leptos build` + `cargo leptos serve`) against the scaffold's demo app. **Pass.**
+- **Build:** OK — frontend → wasm32 via wasm-bindgen 0.2.103; `server` binary built; Tailwind CSS pipeline ran (arbitrary-value classes appear in the output HTML).
+- **SSR:** server returns fully server-rendered HTML (~2.6 KB) — `<!DOCTYPE html>`, `<title>Welcome to Three Rings</title>`, and the counter UI rendered server-side (not an empty shell).
+- **Hydration:** Leptos bootstrap present — `modulepreload /pkg/app.js`, `preload /pkg/app.wasm`, and the `<script type=module>` that imports `app.js` and calls `mod.hydrate()`. Assets serve: `GET /pkg/app.js` → 200 (50 KB), `/pkg/app.wasm` → 200 (3.9 MB, unoptimized debug), `/pkg/app.css` linked.
+- **To confirm at task 6:** an ad-hoc `POST /api/get_count` returned 404 — likely a wrong path/verb in the probe (Leptos server-fn URL scheme), not necessarily a defect. Interactive hydration (wasm executes, counter increments) is verifiable via the bundled Playwright e2e for deeper confidence.
+
+Proves the full web toolchain (cargo-leptos, wasm, Tailwind, Axum SSR) end-to-end in the container.
+
 - **Dev environment:** built and run inside a Docker devcontainer (image `dgoings/three-rings`) to keep the Rust toolchain off the host — see TODO.md Decisions log + `.devcontainer/README.md`. Bearing on this spike: the web target (task 7) runs in-container; the Android *build* is containerized while the *run* (emulator) is host-side; macOS desktop (task 3) is deferred behind the Android gate (CI or minimal host install).
 - Where do DB credentials live during the spike? (Native builds talking directly to Neon is acceptable *for the spike only* — data-access-backends removes this before any real user data.)

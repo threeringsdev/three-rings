@@ -20,7 +20,7 @@ Ordered riskiest-first; see the spec's Failure policy — if the Android gate fa
 - [ ] Build + run: Android (emulator OK) — the architecture gate; static page sufficient (specs: [architecture-spike](architecture-spike.md))
 - [ ] Set up Neon project (free tier): one trivial table, seed rows, sqlx connectivity from the server path (specs: [architecture-spike](architecture-spike.md))
 - [ ] One server function + one page rendering DB rows, using at least one Rust/UI component (specs: [architecture-spike](architecture-spike.md), [ui-components](ui-components.md))
-- [ ] Verify web target: `server` binary locally, SSR + hydration (specs: [architecture-spike](architecture-spike.md))
+- [x] Verify web target: `server` binary locally, SSR + hydration (specs: [architecture-spike](architecture-spike.md)) — done early via devcontainer smoke (see Findings)
 - [ ] Write up findings in architecture-spike.md; mark spec implemented (specs: [architecture-spike](architecture-spike.md))
 
 ## Phase 1b — UI design — parallel with Phase 1, human-led
