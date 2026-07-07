@@ -4,9 +4,15 @@
 
 Phases execute top to bottom; tasks within a phase top to bottom. A task's `(specs: ...)` lists every spec it is gated on — all must be `accepted` (status is read from the spec files, not recorded here). Tasks without a specs annotation are ungated.
 
+## Phase 0 — dev environment (devcontainer)
+
+Keeps the Rust toolchain off the host; see the Decisions log and `.devcontainer/README.md`.
+
+- [x] Author `.devcontainer/` and build the `dgoings/three-rings` dev image (v1: Rust/Leptos/Tauri CLIs — cargo-leptos, cargo-generate, cargo-tauri, leptosfmt); wire devcontainer (image, ports 3000/3001, env-file, zshrc mount)
+
 ## Phase 1 — architecture spike
 
-Ordered riskiest-first; see the spec's Failure policy — if the Android gate fails, STOP the phase.
+Ordered riskiest-first; see the spec's Failure policy — if the Android gate fails, STOP the phase. Executed inside the devcontainer (Phase 0); macOS desktop is host/CI-side — see Decisions log.
 
 - [x] Compare scaffold bases (start-tauri-fullstack vs. tauri-leptos-ssr); record choice + rationale in architecture-spike.md (specs: [architecture-spike](architecture-spike.md), [ui-components](ui-components.md))
 - [ ] Scaffold Cargo workspace from the chosen base; commit unmodified (specs: [architecture-spike](architecture-spike.md))
@@ -35,6 +41,8 @@ Ordered riskiest-first; see the spec's Failure policy — if the Android gate fa
 - Bundled read-only catalog for offline browsing on desktop/mobile (deliberately deferred)
 - Decks and sharing features
 - Import/export (CSV, Moxfield)
+- Android toolchain layer for `dgoings/three-rings` (JDK + Android SDK/NDK + rust android targets) — promote into Phase 1 immediately before the Android gate
+- macOS desktop build path — CI (macOS runner) vs. minimal host Rust — decide before the Phase 1 macOS-desktop task
 
 ## Decisions log
 
@@ -43,3 +51,6 @@ Ordered riskiest-first; see the spec's Failure policy — if the Android gate fa
 - 2026-07: Spec numbering dropped; filenames are the stable IDs, this file owns execution order.
 - 2026-07: Tasks gated on spec status via `(specs: ...)` annotations; only humans accept specs.
 - 2026-07: Spike decisions: web = local run only; mobile = Android; mobile SSR failure = stop and reassess; no time-box; Android gate moved ahead of DB work (fail fast).
+- 2026-07: Scaffold base = tauri-leptos-ssr (embedded in-process Axum matches the README); start-tauri-fullstack rejected (thin shell → external server, csr default). Rationale in architecture-spike.md Findings.
+- 2026-07: Dev environment = Docker devcontainer. Image `dgoings/three-rings` (`.devcontainer/Dockerfile`, layered on `dgoings/magic-assistant-dev`) carries the Rust/Leptos/Tauri toolchain so the host stays toolchain-free. All Rust dev + the web target build/run in the container; the Android *build* is containerized; macOS desktop + iOS and the Android *run* (emulator/device) are host-side.
+- 2026-07: Consequence of the devcontainer split — macOS desktop (Phase 1) is deferred behind the Android gate, built later via a CI macOS runner or a minimal host install (keeps the host toolchain-free until the architecture is proven). Android SDK/NDK are added to the image as a second layer just before the gate.

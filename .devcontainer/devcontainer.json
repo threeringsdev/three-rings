@@ -1,0 +1,34 @@
+{
+  "name": "Three Rings",
+  "image": "dgoings/three-rings:latest",
+  "initializeCommand": "test -f .devcontainer/.env || cp .devcontainer/.env.example .devcontainer/.env",
+  "runArgs": ["--env-file", "${localWorkspaceFolder}/.devcontainer/.env"],
+  "mounts": [
+    "source=${localWorkspaceFolder}/.devcontainer/.zshrc,target=/home/vscode/.zshrc,type=bind,consistency=cached"
+  ],
+  "forwardPorts": [3000, 3001],
+  "portsAttributes": {
+    "3000": { "label": "Leptos app (SSR)" },
+    "3001": { "label": "Leptos live-reload" }
+  },
+  "remoteUser": "vscode",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tauri-apps.tauri-vscode",
+        "bradlc.vscode-tailwindcss",
+        "tamasfe.even-better-toml",
+        "esbenp.prettier-vscode",
+        "anthropic.claude-code",
+        "augment.vscode-augment"
+      ],
+      "settings": {
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "[rust]": { "editor.defaultFormatter": "rust-lang.rust-analyzer" },
+        "rust-analyzer.cargo.features": ["ssr"],
+        "rust-analyzer.check.command": "clippy"
+      }
+    }
+  }
+}
