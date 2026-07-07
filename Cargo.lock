@@ -5144,24 +5144,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tauri_leptos_ssr"
-version = "0.1.0"
-dependencies = [
- "app",
- "axum",
- "leptos",
- "log",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-log",
- "tauri-plugin-process",
- "tauri-plugin-shell",
- "tokio",
-]
-
-[[package]]
 name = "tendril"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5209,6 +5191,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "three_rings"
+version = "0.1.0"
+dependencies = [
+ "app",
+ "axum",
+ "leptos",
+ "log",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-log",
+ "tauri-plugin-process",
+ "tauri-plugin-shell",
+ "tokio",
 ]
 
 [[package]]
