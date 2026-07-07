@@ -67,7 +67,7 @@ Deliberate deviations from a pristine `cargo generate` (everything else copied u
 - **Kept our `README.md`** (the template emits none — stripped via its `.genignore`) and **our `.gitignore`** (merged in the Playwright/`node_modules` ignores; dropped the `Cargo.lock` ignore so this app workspace commits its lockfile).
 - **Excluded `CHANGELOG.md`** — it is the *template's* sidecar→in-process migration history, not ours.
 - **Excluded `.vscode/`** — gitignored here; the devcontainer supplies editor settings.
-- **Included `LICENSE`** as rendered (MIT © 2026 Dylan Goings). ⚠️ Confirm this is the intended project license, or change/remove it.
+- **Included `LICENSE`** as rendered (MIT © 2026 Dylan Goings). ✅ Confirmed 2026-07-07: keeping MIT.
 
 ### Web target verified — SSR + hydration (task 7, pulled early, 2026-07-07)
 

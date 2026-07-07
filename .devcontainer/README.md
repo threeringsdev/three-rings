@@ -27,6 +27,23 @@ The image is **`dgoings/three-rings`**, defined by [`Dockerfile`](./Dockerfile) 
 `docker` reads `.devcontainer/.env` (gitignored) via `--env-file`; it's auto-created from
 [`.env.example`](./.env.example) on first container start. Put `DATABASE_URL` (Neon) here.
 
+## Run the web app
+From inside the container (VS Code → "Dev Containers: Reopen in Container", or `docker exec`):
+```bash
+cargo leptos watch      # build + serve with hot reload on :3000
+```
+Open http://localhost:3000 (VS Code forwards it automatically). **SSR** = view-source shows
+rendered HTML, not an empty `<body>`; **hydration** = the counter's buttons actually work (the
+wasm has taken over the server-rendered DOM).
+
+Without VS Code, from the repo root on the host:
+```bash
+docker run --rm -it -v "$PWD":/workspaces/three-rings -w /workspaces/three-rings \
+  -p 3000:3000 -p 3001:3001 --env-file .devcontainer/.env \
+  -u vscode dgoings/three-rings:latest bash -lc 'cargo leptos watch'
+```
+(First build is cold — several minutes. The VS Code container persists build caches between runs; the `--rm` one-liner does not.)
+
 ## Rebuild / push the image
 ```bash
 .devcontainer/build.sh          # build + tag dgoings/three-rings:latest
