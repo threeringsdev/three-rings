@@ -1,14 +1,27 @@
 # Rust
 /target/
 **/*.rs.bk
-Cargo.lock  # remove this line if building a binary-only workspace
+# Cargo.lock is committed — this is an application (binary) workspace.
 
 # Tauri
 src-tauri/target/
-src-tauri/gen/
+# gen/android is committed (it carries the release cleartext/signing config;
+# its own .gitignore excludes build outputs); schemas regenerate every build.
+src-tauri/gen/schemas/
+# Bundle resources the tauri CLI copies into the android project each build.
+src-tauri/gen/android/app/src/main/assets/
 
 # Frontend build output
 /dist/
+
+# App runtime state (e.g. the scaffold's file-backed counter)
+/data/
+
+# End-to-end tests (Playwright)
+node_modules/
+test-results/
+end2end/playwright-report/
+playwright/.cache/
 
 # Environment / secrets
 .env
