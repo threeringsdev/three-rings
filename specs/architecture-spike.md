@@ -1,6 +1,6 @@
 # Architecture spike
 
-**Status:** accepted
+**Status:** implemented
 **Depends on:** —
 
 ## Problem
@@ -16,10 +16,10 @@ In: project scaffold, a trivial schema (one table, e.g. `cards(id, name)` with a
 The same `app` crate, with a one-table Neon database behind it, demonstrably:
 
 - [x] Runs as an Android app (Tauri, embedded Axum — **the architecture gate**, see Failure policy)
-- [ ] Runs as a macOS desktop app (Tauri, embedded Axum, dynamic port)
+- [x] Runs as a macOS desktop app (Tauri, embedded Axum, dynamic port)
 - [x] Serves SSR + hydration via the `server` binary running locally (real deployment is out of scope)
 - [x] Renders one Rust/UI component (proves Tailwind pipeline in both build paths)
-- [ ] Dev loop works: `cargo tauri dev` / `cargo leptos watch` with hot reload
+- [x] Dev loop works: `cargo tauri dev` / `cargo leptos watch` with hot reload (watch verified end-to-end; see Findings for the `tauri dev` caveat)
 
 ## Plan
 
@@ -121,3 +121,23 @@ Verified in the devcontainer: `GET /cards` returns server-rendered HTML containi
 - **Rust/UI adoption per ui-components.md:** the registry `table.rs` is copied to `app/src/components/ui/` (ours now; trimmed unrelated Card helpers, fixed a malformed `TableCell` class). Theme tokens: minimal shadcn-style set (`:root` vars + Tailwind v4 `@theme inline` mapping) trimmed into `style/input.css` — real palette/dark-mode is ui-design's call.
 - **Caveat — `leptos_ui` force-enables `leptos/nightly`:** Rust/UI components import `clx!` from the `leptos_ui` crate, which would flip the whole workspace to nightly-feature leptos and break the stable build. The macro is ~30 lines and stable-safe, so it's vendored (`app/src/components/ui/clx.rs`); only `tw_merge` was added as a real dependency (plus `serde` for the row struct). Recorded in ui-components.md.
 - Tailwind v4 was already correctly wired by the scaffold (`tailwind-input-file` + `@import "tailwindcss"`); the same `cargo leptos build` runs in the web path and the Tauri `beforeBuildCommand`, so the component/CSS pipeline is common to both.
+
+### macOS desktop (task 3, executed last, 2026-07-07) — PASS
+
+Host-built with `cargo tauri build --bundles app` (resolves the parked CI-vs-host question in favor of the host — the toolchain was already there from the Android gate; Xcode supplies the platform bits). Launched from the shell with `DATABASE_URL` exported: embedded Axum bound a **dynamic OS-assigned port** (`127.0.0.1:54633` in the verification run), `/` served SSR, and `/cards` returned the Neon rows inside the Rust/UI table. The desktop path still uses the template's original mechanism (bundled resources + `Cargo.toml` config from `resource_dir()`), untouched by the Android-specific fixes — both branches of the platform split are now proven.
+
+### Dev loop (2026-07-07) — PASS
+
+`cargo leptos watch` on the host: source edit → automatic rebuild → server serves the change (verified in both directions with a title edit and revert). Caveat for the criterion's other half: `cargo tauri dev` drives this same watch via `beforeDevCommand` with the window pointed at `devUrl`, and in debug builds the embedded server intentionally does not start — so native dev iterates against the watch server, not embedded Axum. Fine for development; release builds exercise the embedded path (as Android and macOS above did). Exercise `cargo tauri dev` explicitly when native-shell dev work actually begins.
+
+### Conclusion (2026-07-07) — spike complete, architecture proven
+
+Every success criterion is met: the one shared `app` crate, backed by a one-table Neon database, runs as an Android app (release APK, in-process Axum SSR — the gate), a macOS desktop app (dynamic port), and a local `server` binary with SSR + hydration, rendering a Rust/UI component through the common Tailwind v4 pipeline, with a working hot-rebuild dev loop. The failure policy was never triggered.
+
+Carry-forward items (recorded above, none architecture-threatening):
+- 16 KB page alignment for Android release (NDK r28+/linker flag) — required for Play.
+- Scope Android cleartext to `127.0.0.1` via `networkSecurityConfig`; add a version check to the asset extraction.
+- Pick a canonical app identifier (no hyphens/underscores) before store/iOS work.
+- Where native builds get `DATABASE_URL` (desktop inherits the shell env today; Android has no env) — moot once data-access-backends puts the API boundary in front of the database.
+- Neon pooler (PgBouncer transaction mode) vs. sqlx migration locks — revisit with data-access-backends.
+- `leptos_ui` upstream forces `leptos/nightly` — keep vendoring `clx!` (ui-components.md).
