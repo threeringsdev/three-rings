@@ -10,6 +10,9 @@ src-tauri/gen/
 # Frontend build output
 /dist/
 
+# App runtime state (e.g. the scaffold's file-backed counter)
+/data/
+
 # End-to-end tests (Playwright)
 node_modules/
 test-results/
