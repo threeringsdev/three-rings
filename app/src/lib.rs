@@ -42,6 +42,7 @@ pub fn App() -> impl IntoView {
             <main>
                 <Routes fallback=|| "Page not found.".into_view()>
                     <Route path=StaticSegment("") view=HomePage />
+                    <Route path=StaticSegment("cards") view=CardsPage />
                 </Routes>
             </main>
         </Router>
@@ -223,12 +224,80 @@ fn HomePage() -> impl IntoView {
                         <p class="text-[#8b9cb8] text-xs">
                             "Running in Tauri WebView"
                         </p>
+                        <a class="text-[#8b9cb8] text-xs underline" href="/cards">
+                            "View the card table →"
+                        </a>
                     </div>
                 </div>
             </div>
         </div>
     }
 }
+
+/// Spike page (architecture-spike task 6): rows live in Neon, arrive through
+/// a Leptos server fn, and render with the vendored Rust/UI table.
+#[component]
+fn CardsPage() -> impl IntoView {
+    use crate::components::ui::table::*;
+
+    let cards = Resource::new(|| (), |_| get_cards());
+
+    view! {
+        <div class="mx-auto max-w-md p-8">
+            <h1 class="mb-4 text-2xl font-bold">"Cards"</h1>
+            <Suspense fallback=|| {
+                view! { <p class="text-muted-foreground text-sm">"Loading cards..."</p> }
+            }>
+                <TableWrapper>
+                    <Table>
+                        <TableCaption>
+                            "Rows from Neon, via a server fn, in a Rust/UI table."
+                        </TableCaption>
+                        <TableHeader>
+                            <TableRow>
+                                <TableHead>"ID"</TableHead>
+                                <TableHead>"Name"</TableHead>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                            {move || Suspend::new(async move {
+                                match cards.await {
+                                    Ok(cards) => {
+                                        cards
+                                            .into_iter()
+                                            .map(|card| {
+                                                view! {
+                                                    <TableRow>
+                                                        <TableCell>{card.id}</TableCell>
+                                                        <TableCell>{card.name}</TableCell>
+                                                    </TableRow>
+                                                }
+                                            })
+                                            .collect_view()
+                                            .into_any()
+                                    }
+                                    Err(e) => {
+                                        view! {
+                                            <TableRow>
+                                                <TableCell>{format!("Failed to load cards: {e}")}</TableCell>
+                                            </TableRow>
+                                        }
+                                            .into_any()
+                                    }
+                                }
+                            })}
+                        </TableBody>
+                    </Table>
+                </TableWrapper>
+            </Suspense>
+            <a class="text-muted-foreground mt-4 inline-block text-sm underline" href="/">
+                "← Home"
+            </a>
+        </div>
+    }
+}
+
+pub mod components;
 
 #[cfg(feature = "ssr")]
 pub mod db;
@@ -337,6 +406,37 @@ pub async fn increment_count() -> Result<(), ServerFnError<String>> {
             .map_err(ServerFnError::ServerError)?;
 
         Ok(())
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        Err(ServerFnError::ServerError(
+            "Server-only function".to_string(),
+        ))
+    }
+}
+
+/// A card row from the spike `cards` table (architecture-spike task 6).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Card {
+    pub id: i32,
+    pub name: String,
+}
+
+#[server(prefix = "/api")]
+pub async fn get_cards() -> Result<Vec<Card>, ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        let pool = crate::db::pool()
+            .await
+            .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+        let rows: Vec<(i32, String)> = sqlx::query_as("SELECT id, name FROM cards ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, name)| Card { id, name })
+            .collect())
     }
     #[cfg(not(feature = "ssr"))]
     {

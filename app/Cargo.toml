@@ -21,7 +21,9 @@ web-sys = { version = "0.3.80", features = ["Storage", "Window"], optional = tru
 
 http.workspace = true
 cfg-if.workspace = true
+serde.workspace = true
 thiserror.workspace = true
+tw_merge.workspace = true
 
 [features]
 default = []

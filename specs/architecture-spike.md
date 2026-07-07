@@ -17,8 +17,8 @@ The same `app` crate, with a one-table Neon database behind it, demonstrably:
 
 - [x] Runs as an Android app (Tauri, embedded Axum — **the architecture gate**, see Failure policy)
 - [ ] Runs as a macOS desktop app (Tauri, embedded Axum, dynamic port)
-- [ ] Serves SSR + hydration via the `server` binary running locally (real deployment is out of scope)
-- [ ] Renders one Rust/UI component (proves Tailwind pipeline in both build paths)
+- [x] Serves SSR + hydration via the `server` binary running locally (real deployment is out of scope)
+- [x] Renders one Rust/UI component (proves Tailwind pipeline in both build paths)
 - [ ] Dev loop works: `cargo tauri dev` / `cargo leptos watch` with hot reload
 
 ## Plan
@@ -112,3 +112,12 @@ Free-tier Neon project (human-created); `DATABASE_URL` lives in `.devcontainer/.
 - **Direct endpoint, not the pooler:** Neon's connection pooler is PgBouncer in transaction mode, which breaks sqlx's migration advisory locks. Revisit pooling when data-access-backends introduces the trait boundary.
 - **No compile-time-checked `query!` macros** — builds and CI need no live database.
 - **Probe is non-fatal:** without `DATABASE_URL` the server logs the failure and still serves, so the plain web demo keeps working.
+
+### Server fn + page + Rust/UI component (task 6, 2026-07-07) — PASS
+
+Verified in the devcontainer: `GET /cards` returns server-rendered HTML containing all three seeded card names inside the full Rust/UI table structure (`data-name="TableWrapper|Table|TableHeader|TableRow|TableCell|…"`), and the emitted `app.css` maps the theme utilities (`.bg-card` → `var(--card)`, etc.). Pieces:
+
+- **Server fn:** `get_cards()` (`#[server(prefix = "/api")]`) reads `cards` through `app::db::pool()`; `CardsPage` at `/cards` renders it via `Resource` + `Suspense` (linked from the home page).
+- **Rust/UI adoption per ui-components.md:** the registry `table.rs` is copied to `app/src/components/ui/` (ours now; trimmed unrelated Card helpers, fixed a malformed `TableCell` class). Theme tokens: minimal shadcn-style set (`:root` vars + Tailwind v4 `@theme inline` mapping) trimmed into `style/input.css` — real palette/dark-mode is ui-design's call.
+- **Caveat — `leptos_ui` force-enables `leptos/nightly`:** Rust/UI components import `clx!` from the `leptos_ui` crate, which would flip the whole workspace to nightly-feature leptos and break the stable build. The macro is ~30 lines and stable-safe, so it's vendored (`app/src/components/ui/clx.rs`); only `tw_merge` was added as a real dependency (plus `serde` for the row struct). Recorded in ui-components.md.
+- Tailwind v4 was already correctly wired by the scaffold (`tailwind-input-file` + `@import "tailwindcss"`); the same `cargo leptos build` runs in the web path and the Tauri `beforeBuildCommand`, so the component/CSS pipeline is common to both.
