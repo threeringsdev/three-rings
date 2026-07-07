@@ -30,11 +30,23 @@ Ordered riskiest-first; see the spec's Failure policy — if the Android gate fa
 - [ ] Prototype the add-to-collection flow (specs: [ui-design](ui-design.md))
 - [ ] Component gap analysis vs. Rust/UI registry (specs: [ui-design](ui-design.md), [ui-components](ui-components.md))
 
-## Phase 2 — foundations
+## Phase 2 — delivery pipeline
 
-- [ ] CI: fmt, clippy, test, web build (incl. Tailwind pipeline) on push
+Code leaves the laptop: CI validation, remote-checkable artifacts, agent self-sufficiency. Ordered by dependency; budget policy and design details in the spec.
+
+- [ ] GitHub: create private repo, push `main`, enable Actions, add secrets (`ANDROID_KEYSTORE` + passwords; `RAILWAY_TOKEN` when Railway exists) (specs: [delivery-pipeline](delivery-pipeline.md))
+- [ ] Replace template `ci.yml` with the validate workflow: fmt, clippy (ssr + wasm, incl. `src-tauri` via Tauri linux deps), test, `cargo leptos build --release`; rust caching (specs: [delivery-pipeline](delivery-pipeline.md))
+- [ ] Android APK artifact job (`main` + `workflow_dispatch`): NDK r28+ (closes the 16 KB finding), aarch64 APK, signed with the keystore secret (specs: [delivery-pipeline](delivery-pipeline.md))
+- [ ] macOS `.dmg` artifact job (`main` + `workflow_dispatch`; 10× minutes — keep lean) (specs: [delivery-pipeline](delivery-pipeline.md))
+- [ ] Rolling `latest` prerelease: artifact jobs publish APK + `.dmg` to stable URLs (specs: [delivery-pipeline](delivery-pipeline.md))
+- [ ] Web deploy: multi-stage `Dockerfile` (server binary + site, `PORT`→`LEPTOS_SITE_ADDR` entrypoint) + Railway service with GitHub integration, `DATABASE_URL` in Railway vars; verify `/` + `/cards` at the public URL (specs: [delivery-pipeline](delivery-pipeline.md))
+- [ ] Agent self-sufficiency: root `CLAUDE.md` (commands, what-runs-where, queue conventions), in-container git/`gh` auth docs, update `.devcontainer/README.md` table (CI owns Android/macOS builds) (specs: [delivery-pipeline](delivery-pipeline.md))
+- [ ] Prove the loop end-to-end: fresh container → agent does a trivial task → push → merge → verify web URL, APK update, and `.dmg` away from the laptop; mark spec implemented (specs: [delivery-pipeline](delivery-pipeline.md))
+
+## Phase 3 — foundations
+
 - [ ] Flesh out data-model spec using spike findings + designs; write initial migrations (specs: [data-model](data-model.md))
-- [ ] Design the data-access trait split; remove spike-era direct DB access (prerequisite: Phase 1 complete) (specs: [data-access-backends](data-access-backends.md))
+- [ ] Design the data-access trait split; remove spike-era direct DB access — also the path to native builds using the deployed API instead of direct Neon (specs: [data-access-backends](data-access-backends.md))
 
 ## Later / parked (not in the queue — promote to a phase before working)
 
@@ -56,3 +68,4 @@ Ordered riskiest-first; see the spec's Failure policy — if the Android gate fa
 - 2026-07-07: **Android architecture gate passed** on the Samsung Flip 7 emulator — release APK, embedded in-process Axum serving SSR + hydration + server fns. Android-specific fixes (cleartext/signing in gradle, APK-asset extraction, on_page_load navigation) recorded in architecture-spike.md Findings; `src-tauri/gen/android` is now committed since it carries the gradle config.
 - 2026-07-07: **macOS desktop built host-side** (resolves the parked CI-vs-host question) — the toolchain was already on the host from the Android gate; Xcode supplies the platform bits.
 - 2026-07-07: **Phase 1 complete — architecture spike passed on all targets**; architecture-spike.md marked implemented, carry-forward items in its Conclusion. Neon `DATABASE_URL` lives in `.devcontainer/.env` (host shell exports it for native desktop runs).
+- 2026-07-07: **Phases reorganized — delivery pipeline before data model/UI** (new Phase 2, specs/delivery-pipeline.md; foundations becomes Phase 3). Goal: agents work autonomously from any host with the repo as the contract; results checkable remotely. Decisions: GitHub private repo; two-tier CI (validate per-push linux-only; artifacts on `main` merges + manual — private-repo minutes, macOS 10×); one keystore-as-secret for in-place APK updates; rolling `latest` prerelease; web deploy = Railway building a repo Dockerfile (Render fallback; zero Actions minutes); no `DATABASE_URL` in CI. Android-in-CI uses NDK r28+ (x86_64 runners sidestep the linux-arm64 NDK gap and close the 16 KB finding).
