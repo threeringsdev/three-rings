@@ -18,7 +18,7 @@ Ordered riskiest-first; see the spec's Failure policy — if the Android gate fa
 - [x] Scaffold Cargo workspace from the chosen base; commit unmodified (specs: [architecture-spike](architecture-spike.md))
 - [x] Verify web target: `server` binary locally, SSR + hydration (specs: [architecture-spike](architecture-spike.md)) — done early via devcontainer smoke (see Findings)
 - [x] Build + run: Android (emulator OK) — the architecture gate; static page sufficient (specs: [architecture-spike](architecture-spike.md)) — **PASS** on the Flip 7 emulator, incl. hydration + server fns (see Findings)
-- [ ] Set up Neon project (free tier): one trivial table, seed rows, sqlx connectivity from the server path (specs: [architecture-spike](architecture-spike.md))
+- [x] Set up Neon project (free tier): one trivial table, seed rows, sqlx connectivity from the server path (specs: [architecture-spike](architecture-spike.md)) — verified in-container: `cards` migrated + seeded, probe read 3 rows (see Findings)
 - [ ] One server function + one page rendering DB rows, using at least one Rust/UI component (specs: [architecture-spike](architecture-spike.md), [ui-components](ui-components.md))
 - [ ] Build + run: macOS desktop target (embedded Axum) (specs: [architecture-spike](architecture-spike.md))
 - [ ] Write up findings in architecture-spike.md; mark spec implemented (specs: [architecture-spike](architecture-spike.md))

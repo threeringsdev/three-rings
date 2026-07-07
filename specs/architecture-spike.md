@@ -80,7 +80,7 @@ Built and ran the web target in the devcontainer (`cargo leptos build` + `cargo 
 Proves the full web toolchain (cargo-leptos, wasm, Tailwind, Axum SSR) end-to-end in the container.
 
 - **Dev environment:** built and run inside a Docker devcontainer (image `dgoings/three-rings`) to keep the Rust toolchain off the host — see TODO.md Decisions log + `.devcontainer/README.md`. Bearing on this spike: the web target (task 7) runs in-container; the Android *build* is containerized while the *run* (emulator) is host-side; macOS desktop (task 3) is deferred behind the Android gate (CI or minimal host install). *(Superseded 2026-07-07: the Android build moved host-side — see the Android gate finding.)*
-- Where do DB credentials live during the spike? (Native builds talking directly to Neon is acceptable *for the spike only* — data-access-backends removes this before any real user data.)
+- Where do DB credentials live during the spike? (Native builds talking directly to Neon is acceptable *for the spike only* — data-access-backends removes this before any real user data.) *Partially answered at task 5: container/server path reads `DATABASE_URL` from `.devcontainer/.env` (gitignored). Native tauri builds are still open — decide at task 6.*
 
 ### Android gate (task 4, 2026-07-07) — PASS
 
@@ -103,3 +103,12 @@ Release APK (aarch64/arm64-v8a) on the Samsung Flip 7 AVD (Android 16, API 36). 
 
 - **16 KB page size:** `libapp_lib.so` is 4 KB-aligned (NDK r27 default); Android 16 shows a compatibility dialog and runs the app in compat mode. Fix with NDK r28+ (16 KB default; r30 is already installed host-side) or `-Wl,-z,max-page-size=16384`. Play requires 16 KB alignment for new submissions.
 - **applicationId sanitization:** `tauri android init` silently mapped the identifier `com.three-rings.dev` → `com.three_rings.dev` (hyphens are illegal in Android app IDs — and underscores are illegal in iOS bundle IDs). Pick a canonical alphanumeric-and-dots identifier before any store distribution or iOS work.
+
+### Neon + sqlx from the server path (task 5, 2026-07-07) — PASS
+
+Free-tier Neon project (human-created); `DATABASE_URL` lives in `.devcontainer/.env` (gitignored, template in `.env.example`). Verified inside the devcontainer: the `server` binary logged `neon: connected, cards table has 3 rows` at startup — migration applied and seed rows read over TLS.
+
+- **Wiring:** sqlx 0.8 (`runtime-tokio`, `tls-rustls`, `postgres`, `macros`, `migrate`; default features off — rustls avoids system OpenSSL in the container). Optional dep of `app` behind the `ssr` feature, so the wasm/hydrate build never sees it. Shared pool + embedded migrations in `app::db` (tokio `OnceCell`; migrations run on first pool use). Trivial schema in `migrations/0001_create_cards.sql` — `cards(id, name)`, three seed rows.
+- **Direct endpoint, not the pooler:** Neon's connection pooler is PgBouncer in transaction mode, which breaks sqlx's migration advisory locks. Revisit pooling when data-access-backends introduces the trait boundary.
+- **No compile-time-checked `query!` macros** — builds and CI need no live database.
+- **Probe is non-fatal:** without `DATABASE_URL` the server logs the failure and still serves, so the plain web demo keeps working.

@@ -26,6 +26,9 @@ console_log = "1.0.0"
 http = "1.3.1"
 log = "0.4.27"
 simple_logger = "5.0.0"
+# Spike-only direct DB access from the server path (architecture-spike task 5);
+# data-access-backends (Phase 2) puts a trait boundary in front of this.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate"] }
 thiserror = "2.0.12"
 tokio = { version = "1.45.0", features = ["full"] }
 tower = { version = "0.5.2", features = ["full"] }

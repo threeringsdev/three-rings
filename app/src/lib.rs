@@ -231,6 +231,9 @@ fn HomePage() -> impl IntoView {
 }
 
 #[cfg(feature = "ssr")]
+pub mod db;
+
+#[cfg(feature = "ssr")]
 mod storage {
     #[cfg(feature = "spin")]
     pub async fn get(key: &str) -> Result<Option<Vec<u8>>, String> {
