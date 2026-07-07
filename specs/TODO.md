@@ -15,7 +15,7 @@ Keeps the Rust toolchain off the host; see the Decisions log and `.devcontainer/
 Ordered riskiest-first; see the spec's Failure policy — if the Android gate fails, STOP the phase. Executed inside the devcontainer (Phase 0); macOS desktop is host/CI-side — see Decisions log.
 
 - [x] Compare scaffold bases (start-tauri-fullstack vs. tauri-leptos-ssr); record choice + rationale in architecture-spike.md (specs: [architecture-spike](architecture-spike.md), [ui-components](ui-components.md))
-- [~] Scaffold Cargo workspace from the chosen base; commit unmodified (specs: [architecture-spike](architecture-spike.md))
+- [x] Scaffold Cargo workspace from the chosen base; commit unmodified (specs: [architecture-spike](architecture-spike.md))
 - [ ] Build + run: macOS desktop target (embedded Axum) (specs: [architecture-spike](architecture-spike.md))
 - [ ] Build + run: Android (emulator OK) — the architecture gate; static page sufficient (specs: [architecture-spike](architecture-spike.md))
 - [ ] Set up Neon project (free tier): one trivial table, seed rows, sqlx connectivity from the server path (specs: [architecture-spike](architecture-spike.md))

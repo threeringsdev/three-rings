@@ -59,5 +59,15 @@ None. The spike runs until success criteria are met or the failure policy trigge
 
 **Caveat that shapes the Android gate (task 4):** tauri-leptos-ssr's embedded-server block is gated behind `#[cfg(not(debug_assertions))]` (release only); dev falls through to `devUrl` + `cargo leptos watch` (a sibling process). Because `cargo tauri android dev` builds debug, proving embedded SSR on Android will require a *release/bundled* build **or** lifting that `cfg` so the embedded server also runs in debug. Decide this when executing task 4 — do not let a debug build's `devUrl` fallback masquerade as a passing gate.
 
+### Scaffold generated (task 2, 2026-07-07)
+
+Generated with `cargo generate --git https://github.com/codeitlikemiley/tauri-leptos-ssr --name three-rings --silent` inside the devcontainer, then copied into the repo. Verified: placeholder substitution correct (`three_rings` crate, `com.three-rings.dev` id, MIT © Dylan Goings, Leptos 0.8.2, `src-tauri` → `app` with `ssr` + axum + tokio), and the workspace parses (`cargo verify-project` + `cargo metadata --no-deps` OK; members app/frontend/server/three_rings). Not built yet — that is task 3+.
+
+Deliberate deviations from a pristine `cargo generate` (everything else copied unmodified):
+- **Kept our `README.md`** (the template emits none — stripped via its `.genignore`) and **our `.gitignore`** (merged in the Playwright/`node_modules` ignores; dropped the `Cargo.lock` ignore so this app workspace commits its lockfile).
+- **Excluded `CHANGELOG.md`** — it is the *template's* sidecar→in-process migration history, not ours.
+- **Excluded `.vscode/`** — gitignored here; the devcontainer supplies editor settings.
+- **Included `LICENSE`** as rendered (MIT © 2026 Dylan Goings). ⚠️ Confirm this is the intended project license, or change/remove it.
+
 - **Dev environment:** built and run inside a Docker devcontainer (image `dgoings/three-rings`) to keep the Rust toolchain off the host — see TODO.md Decisions log + `.devcontainer/README.md`. Bearing on this spike: the web target (task 7) runs in-container; the Android *build* is containerized while the *run* (emulator) is host-side; macOS desktop (task 3) is deferred behind the Android gate (CI or minimal host install).
 - Where do DB credentials live during the spike? (Native builds talking directly to Neon is acceptable *for the spike only* — data-access-backends removes this before any real user data.)
