@@ -15,7 +15,7 @@ In: project scaffold, a trivial schema (one table, e.g. `cards(id, name)` with a
 
 The same `app` crate, with a one-table Neon database behind it, demonstrably:
 
-- [ ] Runs as an Android app (Tauri, embedded Axum — **the architecture gate**, see Failure policy)
+- [x] Runs as an Android app (Tauri, embedded Axum — **the architecture gate**, see Failure policy)
 - [ ] Runs as a macOS desktop app (Tauri, embedded Axum, dynamic port)
 - [ ] Serves SSR + hydration via the `server` binary running locally (real deployment is out of scope)
 - [ ] Renders one Rust/UI component (proves Tailwind pipeline in both build paths)
@@ -79,5 +79,27 @@ Built and ran the web target in the devcontainer (`cargo leptos build` + `cargo 
 
 Proves the full web toolchain (cargo-leptos, wasm, Tailwind, Axum SSR) end-to-end in the container.
 
-- **Dev environment:** built and run inside a Docker devcontainer (image `dgoings/three-rings`) to keep the Rust toolchain off the host — see TODO.md Decisions log + `.devcontainer/README.md`. Bearing on this spike: the web target (task 7) runs in-container; the Android *build* is containerized while the *run* (emulator) is host-side; macOS desktop (task 3) is deferred behind the Android gate (CI or minimal host install).
+- **Dev environment:** built and run inside a Docker devcontainer (image `dgoings/three-rings`) to keep the Rust toolchain off the host — see TODO.md Decisions log + `.devcontainer/README.md`. Bearing on this spike: the web target (task 7) runs in-container; the Android *build* is containerized while the *run* (emulator) is host-side; macOS desktop (task 3) is deferred behind the Android gate (CI or minimal host install). *(Superseded 2026-07-07: the Android build moved host-side — see the Android gate finding.)*
 - Where do DB credentials live during the spike? (Native builds talking directly to Neon is acceptable *for the spike only* — data-access-backends removes this before any real user data.)
+
+### Android gate (task 4, 2026-07-07) — PASS
+
+Release APK (aarch64/arm64-v8a) on the Samsung Flip 7 AVD (Android 16, API 36). The embedded in-process Axum pattern works on Android, beyond the "static page" bar:
+
+- **Embedded server:** bound `127.0.0.1:<os-assigned port>` inside the app process — verified via `/proc/net/tcp` (LISTEN socket owned by the app's uid), not just logs.
+- **SSR:** the server returns fully rendered HTML (verified by curling it through `adb forward` from the host).
+- **Hydration + server fns:** the counter increments on tap — wasm hydrated the server-rendered DOM and the `increment_count`/`get_count` server functions round-trip through the in-process server.
+- **Gate honesty:** release profile (embedded server active; `devUrl` unused). A static fallback cannot masquerade as a pass: SSR ships no `index.html`, so the asset protocol shows "asset not found" (observed before the navigation fix, below).
+
+**Build environment (decision reversed — host-side, not containerized).** Google ships no linux-arm64 NDK (x86_64 only; ARM Linux hosts explicitly not on their roadmap), so the planned Android layer on our arm64 image was a dead end. An amd64 image variant under Rosetta was viable (the base image is multi-arch on Docker Hub) but heavier and slower; chose the host: Android Studio's SDK/NDK/JBR (already installed) + brew `rustup` (keg-only) + `aarch64-linux-android`/`wasm32-unknown-unknown` targets + binstalled `cargo-leptos` 0.3.7 / `tauri-cli` 2.11.4. Versions: Tauri 2.11.2, NDK 27.1, compileSdk 36, minSdk 24. Web dev stays in the container.
+
+**Three Android-specific fixes were required (all in-tree, none a fallback):**
+
+1. **Cleartext + signing** (`src-tauri/gen/android/app/build.gradle.kts`): Android blocks cleartext HTTP in release builds, and the generated release buildType is unsigned (uninstallable). Release now sets `usesCleartextTraffic=true` (TODO post-spike: scope to 127.0.0.1 via `networkSecurityConfig`) and signs with the auto-generated debug keystore (fine until Play distribution). This is why `src-tauri/gen/android` is now committed (was gitignored by the template).
+2. **Resources are not files on Android** (`src-tauri/src/lib.rs`): bundled resources live inside the APK; `resource_dir()` returns the non-filesystem URI `asset://localhost/`, so the template's `get_configuration(<resource Cargo.toml>)` + Axum `ServeDir` cannot work. The Android branch extracts the embedded `frontendDist` assets via Tauri's `AssetResolver` into `<app-data>/site` at launch and configures Leptos from env vars (no Cargo.toml on disk). Re-extracts every launch (~4 MB) — add a version check before real releases. Desktop path unchanged.
+3. **navigate() races webview creation** (`lib.rs`): Android creates its webview asynchronously; the template's `window.navigate(http://127.0.0.1:<port>)` during `setup` fires before the webview's initial load and loses — the app sticks on "asset not found: index.html". Fixed by stashing the port in managed state (`ServerPort`) and navigating from `on_page_load` once the initial load finishes (webview provably exists). Desktop keeps the setup-time navigate.
+
+**Known warts (non-blocking, pre-release TODOs):**
+
+- **16 KB page size:** `libapp_lib.so` is 4 KB-aligned (NDK r27 default); Android 16 shows a compatibility dialog and runs the app in compat mode. Fix with NDK r28+ (16 KB default; r30 is already installed host-side) or `-Wl,-z,max-page-size=16384`. Play requires 16 KB alignment for new submissions.
+- **applicationId sanitization:** `tauri android init` silently mapped the identifier `com.three-rings.dev` → `com.three_rings.dev` (hyphens are illegal in Android app IDs — and underscores are illegal in iOS bundle IDs). Pick a canonical alphanumeric-and-dots identifier before any store distribution or iOS work.

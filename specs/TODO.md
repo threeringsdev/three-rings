@@ -16,11 +16,11 @@ Ordered riskiest-first; see the spec's Failure policy — if the Android gate fa
 
 - [x] Compare scaffold bases (start-tauri-fullstack vs. tauri-leptos-ssr); record choice + rationale in architecture-spike.md (specs: [architecture-spike](architecture-spike.md), [ui-components](ui-components.md))
 - [x] Scaffold Cargo workspace from the chosen base; commit unmodified (specs: [architecture-spike](architecture-spike.md))
-- [ ] Build + run: macOS desktop target (embedded Axum) (specs: [architecture-spike](architecture-spike.md))
-- [ ] Build + run: Android (emulator OK) — the architecture gate; static page sufficient (specs: [architecture-spike](architecture-spike.md))
+- [x] Verify web target: `server` binary locally, SSR + hydration (specs: [architecture-spike](architecture-spike.md)) — done early via devcontainer smoke (see Findings)
+- [x] Build + run: Android (emulator OK) — the architecture gate; static page sufficient (specs: [architecture-spike](architecture-spike.md)) — **PASS** on the Flip 7 emulator, incl. hydration + server fns (see Findings)
 - [ ] Set up Neon project (free tier): one trivial table, seed rows, sqlx connectivity from the server path (specs: [architecture-spike](architecture-spike.md))
 - [ ] One server function + one page rendering DB rows, using at least one Rust/UI component (specs: [architecture-spike](architecture-spike.md), [ui-components](ui-components.md))
-- [x] Verify web target: `server` binary locally, SSR + hydration (specs: [architecture-spike](architecture-spike.md)) — done early via devcontainer smoke (see Findings)
+- [ ] Build + run: macOS desktop target (embedded Axum) (specs: [architecture-spike](architecture-spike.md))
 - [ ] Write up findings in architecture-spike.md; mark spec implemented (specs: [architecture-spike](architecture-spike.md))
 
 ## Phase 1b — UI design — parallel with Phase 1, human-led
@@ -41,8 +41,7 @@ Ordered riskiest-first; see the spec's Failure policy — if the Android gate fa
 - Bundled read-only catalog for offline browsing on desktop/mobile (deliberately deferred)
 - Decks and sharing features
 - Import/export (CSV, Moxfield)
-- Android toolchain layer for `dgoings/three-rings` (JDK + Android SDK/NDK + rust android targets) — promote into Phase 1 immediately before the Android gate
-- macOS desktop build path — CI (macOS runner) vs. minimal host Rust — decide before the Phase 1 macOS-desktop task
+- macOS desktop build path — CI (macOS runner) vs. host build — decide before the Phase 1 macOS-desktop task (the host gained rustup + tauri-cli at the Android gate, so a host build is now the low-friction option)
 
 ## Decisions log
 
@@ -54,3 +53,5 @@ Ordered riskiest-first; see the spec's Failure policy — if the Android gate fa
 - 2026-07: Scaffold base = tauri-leptos-ssr (embedded in-process Axum matches the README); start-tauri-fullstack rejected (thin shell → external server, csr default). Rationale in architecture-spike.md Findings.
 - 2026-07: Dev environment = Docker devcontainer. Image `dgoings/three-rings` (`.devcontainer/Dockerfile`, layered on `dgoings/magic-assistant-dev`) carries the Rust/Leptos/Tauri toolchain so the host stays toolchain-free. All Rust dev + the web target build/run in the container; the Android *build* is containerized; macOS desktop + iOS and the Android *run* (emulator/device) are host-side.
 - 2026-07: Consequence of the devcontainer split — macOS desktop (Phase 1) is deferred behind the Android gate, built later via a CI macOS runner or a minimal host install (keeps the host toolchain-free until the architecture is proven). Android SDK/NDK are added to the image as a second layer just before the gate.
+- 2026-07-07: **Android build moved host-side** (reverses the containerized-Android-build part of the devcontainer decision). Google ships no linux-arm64 NDK — official Linux tooling is x86_64-only — so the planned Android layer on the arm64 image cannot work; an amd64-under-Rosetta image variant was viable but was passed over for the host toolchain (Android Studio SDK/NDK/JBR + brew rustup + binstalled cargo-leptos/tauri-cli). Web dev stays in the container; the "toolchain-free host" goal is relaxed to "Rust via brew rustup, no ad-hoc curl installs".
+- 2026-07-07: **Android architecture gate passed** on the Samsung Flip 7 emulator — release APK, embedded in-process Axum serving SSR + hydration + server fns. Android-specific fixes (cleartext/signing in gradle, APK-asset extraction, on_page_load navigation) recorded in architecture-spike.md Findings; `src-tauri/gen/android` is now committed since it carries the gradle config.

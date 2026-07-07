@@ -10,9 +10,9 @@
 # Rebuild / push:  .devcontainer/build.sh  [--push]
 #
 # SCOPE (v1 = web-dev): the CLIs installed here unblock scaffolding and the web
-# target (server binary, SSR + hydration). The Android SDK/NDK + rust android
-# targets are added in a later layer when we reach the architecture gate — see
-# specs/architecture-spike.md. macOS desktop / iOS builds stay on the host.
+# target (server binary, SSR + hydration). Android builds happen on the HOST —
+# Google ships no linux-arm64 NDK, so an Android layer here is a dead end (see
+# specs/TODO.md Decisions log). macOS desktop / iOS builds also stay on the host.
 FROM dgoings/magic-assistant-dev:latest
 
 USER vscode

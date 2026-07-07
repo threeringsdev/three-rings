@@ -6,6 +6,12 @@
 /// Then go to /Applications -> Show Package Contents -> Contents -> MacOS -> run the binary
 struct ServerTask(tauri::async_runtime::JoinHandle<()>);
 
+/// Port of the in-process Axum server. On Android the webview is created
+/// asynchronously, so navigation happens from `on_page_load` (see below),
+/// which reads the port from managed state.
+#[cfg(all(not(debug_assertions), target_os = "android"))]
+struct ServerPort(u16);
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -33,33 +39,80 @@ pub fn run() {
             #[cfg(not(debug_assertions))]
             {
                 use leptos::prelude::get_configuration;
-                use tauri::{Manager, Url};
+                use tauri::Manager;
 
                 if std::env::var("LEPTOS_OUTPUT_NAME").is_err() {
                     std::env::set_var("LEPTOS_OUTPUT_NAME", "app");
                 }
 
-                let resource_dir = app.path().resource_dir().map_err(|e| {
-                    Box::<dyn std::error::Error>::from(format!(
-                        "Failed to get resource directory: {}",
-                        e
-                    ))
-                })?;
-                let site_root = resource_dir.join("site");
-                let cargo_toml_path = resource_dir.join("Cargo.toml");
+                // Android bundles resources inside the APK (resource_dir() is the
+                // non-filesystem URI asset://localhost/), so Axum cannot serve them
+                // via std::fs. Extract the embedded frontend assets into the app
+                // data dir and configure Leptos from env vars instead of a
+                // Cargo.toml on disk. Re-extracted on every launch; revisit with a
+                // version check before real releases.
+                #[cfg(target_os = "android")]
+                let conf = {
+                    let site_root = app_data_dir.join("site");
+                    let resolver = app.asset_resolver();
+                    for (path, _) in resolver.iter() {
+                        let path = path.to_string();
+                        let asset = resolver.get(path.clone()).ok_or_else(|| {
+                            Box::<dyn std::error::Error>::from(format!(
+                                "Missing embedded asset: {path}"
+                            ))
+                        })?;
+                        let dest = site_root.join(path.trim_start_matches('/'));
+                        if let Some(parent) = dest.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&dest, &asset.bytes).map_err(|e| {
+                            Box::<dyn std::error::Error>::from(format!(
+                                "Failed to extract asset to {}: {}",
+                                dest.display(),
+                                e
+                            ))
+                        })?;
+                    }
 
-                std::env::set_var("LEPTOS_SITE_ROOT", site_root.to_string_lossy().to_string());
+                    std::env::set_var("LEPTOS_ENV", "PROD");
+                    std::env::set_var("LEPTOS_SITE_ROOT", site_root.to_string_lossy().to_string());
 
-                let cargo_toml_str = cargo_toml_path.to_str().ok_or_else(|| {
-                    Box::<dyn std::error::Error>::from("Cargo.toml path is not valid UTF-8")
-                })?;
-                let mut conf = get_configuration(Some(cargo_toml_str)).map_err(|e| {
-                    Box::<dyn std::error::Error>::from(format!(
-                        "Failed to load leptos configuration: {}",
-                        e
-                    ))
-                })?;
-                conf.leptos_options.site_root = site_root.to_string_lossy().to_string().into();
+                    let mut conf = get_configuration(None).map_err(|e| {
+                        Box::<dyn std::error::Error>::from(format!(
+                            "Failed to load leptos configuration: {}",
+                            e
+                        ))
+                    })?;
+                    conf.leptos_options.site_root = site_root.to_string_lossy().to_string().into();
+                    conf
+                };
+
+                #[cfg(not(target_os = "android"))]
+                let conf = {
+                    let resource_dir = app.path().resource_dir().map_err(|e| {
+                        Box::<dyn std::error::Error>::from(format!(
+                            "Failed to get resource directory: {}",
+                            e
+                        ))
+                    })?;
+                    let site_root = resource_dir.join("site");
+                    let cargo_toml_path = resource_dir.join("Cargo.toml");
+
+                    std::env::set_var("LEPTOS_SITE_ROOT", site_root.to_string_lossy().to_string());
+
+                    let cargo_toml_str = cargo_toml_path.to_str().ok_or_else(|| {
+                        Box::<dyn std::error::Error>::from("Cargo.toml path is not valid UTF-8")
+                    })?;
+                    let mut conf = get_configuration(Some(cargo_toml_str)).map_err(|e| {
+                        Box::<dyn std::error::Error>::from(format!(
+                            "Failed to load leptos configuration: {}",
+                            e
+                        ))
+                    })?;
+                    conf.leptos_options.site_root = site_root.to_string_lossy().to_string().into();
+                    conf
+                };
 
                 let router = app::build_router(conf.leptos_options);
 
@@ -103,15 +156,31 @@ pub fn run() {
                     }
                 });
 
-                let window = app.get_webview_window("main").ok_or_else(|| {
-                    Box::<dyn std::error::Error>::from("Failed to get main window")
-                })?;
-                let url = Url::parse(&format!("http://127.0.0.1:{}", port)).map_err(|e| {
-                    Box::<dyn std::error::Error>::from(format!("Failed to parse URL: {}", e))
-                })?;
-                window.navigate(url).map_err(|e| {
-                    Box::<dyn std::error::Error>::from(format!("Failed to navigate window: {}", e))
-                })?;
+                // Android's webview is created asynchronously: a navigate() issued
+                // here races the webview's initial asset-protocol load and loses.
+                // Stash the port and navigate from on_page_load instead.
+                #[cfg(target_os = "android")]
+                app.manage(ServerPort(port));
+
+                #[cfg(not(target_os = "android"))]
+                {
+                    let window = app.get_webview_window("main").ok_or_else(|| {
+                        Box::<dyn std::error::Error>::from("Failed to get main window")
+                    })?;
+                    let url =
+                        tauri::Url::parse(&format!("http://127.0.0.1:{}", port)).map_err(|e| {
+                            Box::<dyn std::error::Error>::from(format!(
+                                "Failed to parse URL: {}",
+                                e
+                            ))
+                        })?;
+                    window.navigate(url).map_err(|e| {
+                        Box::<dyn std::error::Error>::from(format!(
+                            "Failed to navigate window: {}",
+                            e
+                        ))
+                    })?;
+                }
             }
             let _ = app;
             Ok(())
@@ -123,6 +192,25 @@ pub fn run() {
                 if let Some(task) = window.try_state::<ServerTask>() {
                     task.0.abort();
                     println!("Axum server task aborted successfully.");
+                }
+            }
+        })
+        .on_page_load(|_webview, _payload| {
+            // Android release: the initial page is the asset protocol's
+            // "asset not found: index.html" (SSR ships no index.html). Once that
+            // load finishes the webview provably exists, so redirect it to the
+            // in-process server. Guarded so it fires only for non-server URLs.
+            #[cfg(all(not(debug_assertions), target_os = "android"))]
+            {
+                use tauri::Manager;
+                if matches!(_payload.event(), tauri::webview::PageLoadEvent::Finished)
+                    && _payload.url().host_str() != Some("127.0.0.1")
+                {
+                    if let Some(port) = _webview.try_state::<ServerPort>() {
+                        if let Ok(url) = format!("http://127.0.0.1:{}", port.0).parse() {
+                            let _ = _webview.navigate(url);
+                        }
+                    }
                 }
             }
         })
