@@ -26,7 +26,8 @@ Out (explicit non-goals for this phase):
 
 ### Platform and repo
 
-- **GitHub, private repo** (`three-rings` on the maintainer's personal account). Actions budget: 2,000 min/month free, linux 1×, macOS 10× — the CI design below exists to respect this.
+- **GitHub, private repo** (`three-rings`) — owned by a free GitHub **organization**, not the personal account: Blacksmith (below) installs only on organizations. Everything else stays on GitHub as before (secrets, releases, branch protection, auto-merge).
+- **CI runners: [Blacksmith](https://www.blacksmith.sh/)** — drop-in replacement for GitHub-hosted runners; each job opts in via its `runs-on` label and nothing else changes. Budget: 3,000 free Blacksmith minutes/month (denominated in 2 vCPU linux-x64 minutes), then pay-as-you-go (linux x64 $0.004/min, macOS M4 $0.08/min); GitHub separately charges a $0.002/min control-plane fee on all Actions minutes (since 2026-03) regardless of runner. The two-tier CI design below exists to respect this — macOS still costs ~20× the linux rate. Maintainer choice (2026-07-09, superseding the GitHub-hosted draft); any job reverts to a GitHub-hosted label independently if Blacksmith misbehaves.
 - **Secrets:** `ANDROID_KEYSTORE` (+ passwords); `RENDER_DEPLOY_HOOK` only if Render's GitHub auto-deploy needs supplementing. **No `DATABASE_URL` in GitHub** — no CI job talks to Neon; the deployed app reads it from Render's own environment variables.
 - **Merge policy — agents open PRs; auto-merge on green.** Branch protection on `main` requires the validate workflow; repo enables auto-merge. The validate suite is therefore the de facto reviewer — a wrong-but-green change ships itself to the rolling release and Render, and the human reviews *outcomes* (artifacts, deployed app) rather than diffs. Accepted deliberately for maximum autonomy; tighten to human-tap-merge later if trust breaks. This makes validate quality (clippy `-D warnings`, tests) load-bearing.
 
@@ -34,10 +35,10 @@ Out (explicit non-goals for this phase):
 
 The template's shipped `ci.yml` tests the *template* (it `cargo generate`s a copy); it is replaced, keeping its apt-dependency list and job shapes as reference.
 
-- **Validate** — every push and PR, linux only: `cargo fmt --check`, clippy over the workspace with `-D warnings` (ssr and wasm targets), `cargo test`, `cargo leptos build --release` (exercises the Tailwind pipeline). CI installs the Tauri linux system deps, so `src-tauri` is linted here even though the devcontainer excludes it. Rust caching (e.g. Swatinem/rust-cache) throughout.
-- **Artifacts** — merges to `main` plus `workflow_dispatch` only (agent iteration on branches stays cheap; merging is what mints checkable artifacts):
-  - **Android APK**: x86_64 linux runner (the NDK works there — CI sidesteps the linux-arm64 NDK gap that pushed local Android builds host-side). Use **NDK r28+**, which defaults to 16 KB page alignment and closes that spike finding. `cargo tauri android build --apk --target aarch64`.
-  - **macOS `.dmg`**: macos runner (10× minutes — this job is the reason artifacts don't run per-push). Unsigned/ad-hoc; opened via right-click → Open.
+- **Validate** — every push and PR, linux only (`blacksmith-4vcpu-ubuntu-2404`): `cargo fmt --check`, clippy over the workspace with `-D warnings` (ssr and wasm targets), `cargo test`, `cargo leptos build --release` (exercises the Tailwind pipeline). CI installs the Tauri linux system deps, so `src-tauri` is linted here even though the devcontainer excludes it. Rust caching throughout via `useblacksmith/rust-cache` (Blacksmith's sticky-disk fork of Swatinem/rust-cache).
+- **Artifacts** — never per-push on branches (agent iteration stays cheap; merging is what mints checkable artifacts). Cadence splits by job *cost*, not by target — a UI change lands in the shared `app` crate and alters every artifact, so per-target path filtering would rarely skip a build honestly:
+  - **Android APK** — merges to `main` plus `workflow_dispatch`, with `paths-ignore` skipping docs-only pushes (`specs/**`, `**.md`). x86_64 linux runner (`blacksmith-4vcpu-ubuntu-2404` — must stay x64: Blacksmith's arm64 shapes would reintroduce the linux-arm64 NDK gap that pushed local Android builds host-side). Use **NDK r28+**, which defaults to 16 KB page alignment and closes that spike finding. `cargo tauri android build --apk --target aarch64`. Roughly 30 free-tier minutes per merge — cheap enough to keep the phone-checkable rolling release always fresh.
+  - **macOS `.dmg`** — `workflow_dispatch` only, from the start. Blacksmith macOS runner (`blacksmith-6vcpu-macos-latest`, Apple Silicon M4) at $0.08/min — ~20× the free-tier basis rate — would exhaust the tier in ~15 merges if it ran per-merge. The gate costs little: the `.dmg`'s consumer is a human at a Mac (who can click "Run workflow" right there), and pre-merge desktop checks happen as local host builds anyway. Unsigned/ad-hoc; opened via right-click → Open.
 
 ### APK signing: one keystore, stored as a secret
 
@@ -45,9 +46,9 @@ Generate a debug-grade keystore once; store it (base64) as a GitHub secret and s
 
 ### Rolling release
 
-Artifact jobs upload the APK and `.dmg` to a single rolling **`latest` prerelease** (replaced each time). Stable URLs, reachable from a phone browser (GitHub login — private repo). Real version tags come later, when there is something to version.
+Artifact jobs upload the APK and `.dmg` to a single rolling **`latest` prerelease** — each job replaces its own asset, and since the `.dmg` builds on dispatch cadence the two assets may come from different commits. Stable URLs, reachable from a phone browser (GitHub login — private repo). Real version tags come later, when there is something to version.
 
-Every publish stamps provenance: the release body carries the source commit SHA + timestamp, and the Android build sets `versionName` to include the short SHA (with a monotonically increasing `versionCode`, e.g. the workflow run number) — so "which build am I holding?" always has an answer, and in-place APK upgrades keep working.
+Every publish stamps provenance: the release body carries the source commit SHA + timestamp per asset, and the Android build sets `versionName` to include the short SHA (with a monotonically increasing `versionCode`, e.g. the workflow run number) — so "which build am I holding?" always has an answer, and in-place APK upgrades keep working.
 
 ### Web deploy: Render from a Dockerfile
 
@@ -57,6 +58,7 @@ Every publish stamps provenance: the release body carries the source commit SHA 
 - **Neon branch split:** the Neon project's **main branch** backs the Render deployment; a child **`dev` branch** backs laptop/container development (`.devcontainer/.env` repointed to it). Agent experiments and dev migrations can't disturb the deployed app's data, and the dev/prod pattern is established before there is real data. Free tier covers both branches.
 - Live proof: the Render URL serves `/` (SSR + hydration) and `/cards` (Neon rows).
 - Render is the maintainer's platform choice (2026-07-09, superseding the design-time Railway draft). Nothing here depends on Render specifics beyond "PaaS that builds a Dockerfile from GitHub"; Fly.io is the named fallback.
+- **Free tier, spin-down accepted** (2026-07-09): idle services cold-start on the next request, which is fine for remote checking. Move to the paid always-on instance only if it grates in practice.
 
 ### Agent self-sufficiency contract
 
@@ -69,13 +71,14 @@ The repo alone (plus documented secrets) must get an agent from clone to verifie
 ## Success criteria
 
 - [ ] Push a branch → validation verdict (fmt, clippy, test, web build) visible on GitHub from any device
-- [ ] Merge to `main` → rolling `latest` release carries a fresh APK (installs in place over the previous one) and macOS `.dmg`
+- [ ] Merge to `main` (non-docs) → rolling `latest` release carries a fresh APK (installs in place over the previous one); docs-only merges skip the build
+- [ ] `workflow_dispatch` of the macOS job → fresh `.dmg` on the same rolling release
 - [ ] Merge to `main` → Render URL serves SSR `/` and `/cards` with Neon rows
 - [ ] A fresh container started from the repo alone (plus documented secrets) lets an agent build, test, run the web target, and push a branch
-- [ ] The loop proven once end-to-end: agent does a trivial task in a fresh container → pushes → merge → all three artifacts checked away from the laptop
+- [ ] The loop proven once end-to-end: agent does a trivial task in a fresh container → pushes → merge → web URL + APK checked away from the laptop, `.dmg` dispatched and checked
 
 ## Open questions
 
-- Actions minutes burn rate in practice — if the Android job proves slow/expensive even on merges, demote it to `workflow_dispatch`-only and revisit caching.
-- Render free-tier fit for an always-on SSR process — free web services spin down after idle (cold start on next request); validate whether that's tolerable for "check the deployed app from anywhere", upgrade to the paid always-on instance if not. Fly.io is the fallback platform.
+- *(resolved 2026-07-09)* ~~Blacksmith free-tier burn rate in practice~~ — defused in Design: the macOS job (the fast drain) is `workflow_dispatch`-only from the start, and docs-only pushes skip the Android job (~30 free-tier min/merge otherwise) — comfortably inside 3,000 min/month. Revisit caching only if the Android job misbehaves.
+- *(resolved 2026-07-09)* ~~Render free-tier fit for an always-on SSR process~~ — free-tier spin-down (cold start after idle) is **accepted for now**; a cold start is tolerable for "check the deployed app from anywhere". Recorded in Design; upgrade to the paid always-on instance only if it grates in practice. Fly.io remains the fallback platform.
 - *(resolved 2026-07-07)* ~~Where PR review fits once agents are pushing branches~~ — **PR + auto-merge on green**, for maximum autonomy; the validate workflow is the merge gate and the human reviews outcomes via artifacts. Recorded in Design; revisit toward human-tap-merge only if it misbehaves.
