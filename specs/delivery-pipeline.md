@@ -14,7 +14,7 @@ CI build steps are needed as the app evolves regardless; this phase builds them 
 
 ## Scope
 
-In: GitHub repo + secrets, CI validation workflow, Android/macOS artifact builds, a rolling release, web deployment to Railway, the agent self-sufficiency contract (root `CLAUDE.md`, in-container auth docs), and one end-to-end proof of the loop.
+In: GitHub repo + secrets, CI validation workflow, Android/macOS artifact builds, a rolling release, web deployment to Render, the agent self-sufficiency contract (root `CLAUDE.md`, in-container auth docs), and one end-to-end proof of the loop.
 
 Out (explicit non-goals for this phase):
 
@@ -27,8 +27,8 @@ Out (explicit non-goals for this phase):
 ### Platform and repo
 
 - **GitHub, private repo** (`three-rings` on the maintainer's personal account). Actions budget: 2,000 min/month free, linux 1×, macOS 10× — the CI design below exists to respect this.
-- **Secrets:** `RAILWAY_TOKEN` (deploy trigger, if needed beyond Railway's GitHub integration), `ANDROID_KEYSTORE` (+ passwords). **No `DATABASE_URL` in GitHub** — no CI job talks to Neon; the deployed app reads it from Railway's own environment variables.
-- **Merge policy — agents open PRs; auto-merge on green.** Branch protection on `main` requires the validate workflow; repo enables auto-merge. The validate suite is therefore the de facto reviewer — a wrong-but-green change ships itself to the rolling release and Railway, and the human reviews *outcomes* (artifacts, deployed app) rather than diffs. Accepted deliberately for maximum autonomy; tighten to human-tap-merge later if trust breaks. This makes validate quality (clippy `-D warnings`, tests) load-bearing.
+- **Secrets:** `ANDROID_KEYSTORE` (+ passwords); `RENDER_DEPLOY_HOOK` only if Render's GitHub auto-deploy needs supplementing. **No `DATABASE_URL` in GitHub** — no CI job talks to Neon; the deployed app reads it from Render's own environment variables.
+- **Merge policy — agents open PRs; auto-merge on green.** Branch protection on `main` requires the validate workflow; repo enables auto-merge. The validate suite is therefore the de facto reviewer — a wrong-but-green change ships itself to the rolling release and Render, and the human reviews *outcomes* (artifacts, deployed app) rather than diffs. Accepted deliberately for maximum autonomy; tighten to human-tap-merge later if trust breaks. This makes validate quality (clippy `-D warnings`, tests) load-bearing.
 
 ### CI: two tiers (budget policy)
 
@@ -49,14 +49,14 @@ Artifact jobs upload the APK and `.dmg` to a single rolling **`latest` prereleas
 
 Every publish stamps provenance: the release body carries the source commit SHA + timestamp, and the Android build sets `versionName` to include the short SHA (with a monotonically increasing `versionCode`, e.g. the workflow run number) — so "which build am I holding?" always has an answer, and in-place APK upgrades keep working.
 
-### Web deploy: Railway from a Dockerfile
+### Web deploy: Render from a Dockerfile
 
 - Multi-stage `Dockerfile` at the repo root: build stage runs `cargo leptos build --release`; runtime stage is a slim Debian image holding the `server` binary and `target/site`. The Dockerfile doubles as documentation of the runtime environment.
-- Entrypoint maps Railway's injected `PORT` to `LEPTOS_SITE_ADDR=0.0.0.0:$PORT`.
-- Railway's GitHub integration builds and deploys on push to `main` **on Railway's infrastructure** — zero Actions minutes. `DATABASE_URL` lives in Railway service variables.
-- **Neon branch split:** the Neon project's **main branch** backs the Railway deployment; a child **`dev` branch** backs laptop/container development (`.devcontainer/.env` repointed to it). Agent experiments and dev migrations can't disturb the deployed app's data, and the dev/prod pattern is established before there is real data. Free tier covers both branches.
-- Live proof: the Railway URL serves `/` (SSR + hydration) and `/cards` (Neon rows).
-- Railway was chosen over Fly.io/Shuttle at design time; Render is the named fallback if Railway disappoints. Nothing below depends on Railway specifics beyond "PaaS that builds a Dockerfile from GitHub".
+- Entrypoint maps Render's injected `PORT` to `LEPTOS_SITE_ADDR=0.0.0.0:$PORT`.
+- Render's GitHub integration builds and deploys on push to `main` **on Render's infrastructure** — zero Actions minutes. `DATABASE_URL` lives in Render environment variables.
+- **Neon branch split:** the Neon project's **main branch** backs the Render deployment; a child **`dev` branch** backs laptop/container development (`.devcontainer/.env` repointed to it). Agent experiments and dev migrations can't disturb the deployed app's data, and the dev/prod pattern is established before there is real data. Free tier covers both branches.
+- Live proof: the Render URL serves `/` (SSR + hydration) and `/cards` (Neon rows).
+- Render is the maintainer's platform choice (2026-07-09, superseding the design-time Railway draft). Nothing here depends on Render specifics beyond "PaaS that builds a Dockerfile from GitHub"; Fly.io is the named fallback.
 
 ### Agent self-sufficiency contract
 
@@ -70,12 +70,12 @@ The repo alone (plus documented secrets) must get an agent from clone to verifie
 
 - [ ] Push a branch → validation verdict (fmt, clippy, test, web build) visible on GitHub from any device
 - [ ] Merge to `main` → rolling `latest` release carries a fresh APK (installs in place over the previous one) and macOS `.dmg`
-- [ ] Merge to `main` → Railway URL serves SSR `/` and `/cards` with Neon rows
+- [ ] Merge to `main` → Render URL serves SSR `/` and `/cards` with Neon rows
 - [ ] A fresh container started from the repo alone (plus documented secrets) lets an agent build, test, run the web target, and push a branch
 - [ ] The loop proven once end-to-end: agent does a trivial task in a fresh container → pushes → merge → all three artifacts checked away from the laptop
 
 ## Open questions
 
 - Actions minutes burn rate in practice — if the Android job proves slow/expensive even on merges, demote it to `workflow_dispatch`-only and revisit caching.
-- Railway free/hobby tier fit for an always-on SSR process (cold starts, sleep behavior) — validate during execution; Render is the fallback.
+- Render free-tier fit for an always-on SSR process — free web services spin down after idle (cold start on next request); validate whether that's tolerable for "check the deployed app from anywhere", upgrade to the paid always-on instance if not. Fly.io is the fallback platform.
 - *(resolved 2026-07-07)* ~~Where PR review fits once agents are pushing branches~~ — **PR + auto-merge on green**, for maximum autonomy; the validate workflow is the merge gate and the human reviews outcomes via artifacts. Recorded in Design; revisit toward human-tap-merge only if it misbehaves.
