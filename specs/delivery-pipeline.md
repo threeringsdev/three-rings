@@ -26,7 +26,7 @@ Out (explicit non-goals for this phase):
 
 ### Platform and repo
 
-- **GitHub, private repo** (`three-rings`) — owned by a free GitHub **organization**, not the personal account: Blacksmith (below) installs only on organizations. Everything else stays on GitHub as before (secrets, releases, branch protection, auto-merge).
+- **GitHub, public repo** (`threeringsdev/three-rings`) — owned by a free GitHub **organization**, not the personal account: Blacksmith (below) installs only on organizations. Public rather than private (2026-07-09): free-plan orgs can't enforce branch protection or auto-merge on private repos, and the merge gate below depends on both — public unlocks them at zero cost. (Public also makes GitHub-hosted minutes free; Blacksmith stays the runner choice for speed and its own free tier.)
 - **CI runners: [Blacksmith](https://www.blacksmith.sh/)** — drop-in replacement for GitHub-hosted runners; each job opts in via its `runs-on` label and nothing else changes. Budget: 3,000 free Blacksmith minutes/month (denominated in 2 vCPU linux-x64 minutes), then pay-as-you-go (linux x64 $0.004/min, macOS M4 $0.08/min); GitHub separately charges a $0.002/min control-plane fee on all Actions minutes (since 2026-03) regardless of runner. The two-tier CI design below exists to respect this — macOS still costs ~20× the linux rate. Maintainer choice (2026-07-09, superseding the GitHub-hosted draft); any job reverts to a GitHub-hosted label independently if Blacksmith misbehaves.
 - **Secrets:** `ANDROID_KEYSTORE` (+ passwords); `RENDER_DEPLOY_HOOK` only if Render's GitHub auto-deploy needs supplementing. **No `DATABASE_URL` in GitHub** — no CI job talks to Neon; the deployed app reads it from Render's own environment variables.
 - **Merge policy — agents open PRs; auto-merge on green.** Branch protection on `main` requires the validate workflow; repo enables auto-merge. The validate suite is therefore the de facto reviewer — a wrong-but-green change ships itself to the rolling release and Render, and the human reviews *outcomes* (artifacts, deployed app) rather than diffs. Accepted deliberately for maximum autonomy; tighten to human-tap-merge later if trust breaks. This makes validate quality (clippy `-D warnings`, tests) load-bearing.
@@ -46,7 +46,7 @@ Generate a debug-grade keystore once; store it (base64) as a GitHub secret and s
 
 ### Rolling release
 
-Artifact jobs upload the APK and `.dmg` to a single rolling **`latest` prerelease** — each job replaces its own asset, and since the `.dmg` builds on dispatch cadence the two assets may come from different commits. Stable URLs, reachable from a phone browser (GitHub login — private repo). Real version tags come later, when there is something to version.
+Artifact jobs upload the APK and `.dmg` to a single rolling **`latest` prerelease** — each job replaces its own asset, and since the `.dmg` builds on dispatch cadence the two assets may come from different commits. Stable URLs, reachable from a phone browser (public repo — no login needed). Real version tags come later, when there is something to version.
 
 Every publish stamps provenance: the release body carries the source commit SHA + timestamp per asset, and the Android build sets `versionName` to include the short SHA (with a monotonically increasing `versionCode`, e.g. the workflow run number) — so "which build am I holding?" always has an answer, and in-place APK upgrades keep working.
 
