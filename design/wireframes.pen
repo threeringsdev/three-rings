@@ -4525,32 +4525,6 @@
                   "fontFamily": "$font",
                   "fontSize": 14,
                   "fontWeight": "normal"
-                },
-                {
-                  "type": "frame",
-                  "id": "vI1qK",
-                  "x": 1084,
-                  "y": 9.5,
-                  "name": "Kbd Hint",
-                  "enabled": false,
-                  "fill": "$hover",
-                  "cornerRadius": 4,
-                  "padding": [
-                    2,
-                    7
-                  ],
-                  "children": [
-                    {
-                      "type": "text",
-                      "id": "e9xV3",
-                      "name": "Kbd Label",
-                      "fill": "$text-2",
-                      "content": "/",
-                      "fontFamily": "$font",
-                      "fontSize": 11,
-                      "fontWeight": "normal"
-                    }
-                  ]
                 }
               ]
             }
@@ -14185,32 +14159,6 @@
                           "fontFamily": "$font",
                           "fontSize": 14,
                           "fontWeight": "normal"
-                        },
-                        {
-                          "type": "frame",
-                          "id": "URrRz",
-                          "x": 1084,
-                          "y": 9.5,
-                          "name": "Kbd Hint",
-                          "enabled": false,
-                          "fill": "$hover",
-                          "cornerRadius": 4,
-                          "padding": [
-                            2,
-                            7
-                          ],
-                          "children": [
-                            {
-                              "type": "text",
-                              "id": "hr4nG",
-                              "name": "Kbd Label",
-                              "fill": "$text-2",
-                              "content": "/",
-                              "fontFamily": "$font",
-                              "fontSize": 11,
-                              "fontWeight": "normal"
-                            }
-                          ]
                         }
                       ]
                     }
@@ -14713,32 +14661,6 @@
                           "fontFamily": "$font",
                           "fontSize": 14,
                           "fontWeight": "normal"
-                        },
-                        {
-                          "type": "frame",
-                          "id": "Wke9Q",
-                          "x": 1084,
-                          "y": 9.5,
-                          "name": "Kbd Hint",
-                          "enabled": false,
-                          "fill": "$hover",
-                          "cornerRadius": 4,
-                          "padding": [
-                            2,
-                            7
-                          ],
-                          "children": [
-                            {
-                              "type": "text",
-                              "id": "a1O50E",
-                              "name": "Kbd Label",
-                              "fill": "$text-2",
-                              "content": "/",
-                              "fontFamily": "$font",
-                              "fontSize": 11,
-                              "fontWeight": "normal"
-                            }
-                          ]
                         }
                       ]
                     }
@@ -15477,32 +15399,6 @@
                           "fontFamily": "$font",
                           "fontSize": 14,
                           "fontWeight": "normal"
-                        },
-                        {
-                          "type": "frame",
-                          "id": "W46uKJ",
-                          "x": 1084,
-                          "y": 9.5,
-                          "name": "Kbd Hint",
-                          "enabled": false,
-                          "fill": "$hover",
-                          "cornerRadius": 4,
-                          "padding": [
-                            2,
-                            7
-                          ],
-                          "children": [
-                            {
-                              "type": "text",
-                              "id": "Wuf11",
-                              "name": "Kbd Label",
-                              "fill": "$text-2",
-                              "content": "/",
-                              "fontFamily": "$font",
-                              "fontSize": 11,
-                              "fontWeight": "normal"
-                            }
-                          ]
                         }
                       ]
                     }
