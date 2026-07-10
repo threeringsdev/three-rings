@@ -7717,7 +7717,7 @@
                                       "id": "Twup1",
                                       "name": "Counts Summary",
                                       "fill": "$text-2",
-                                      "content": "120 here (102 own + 18 rolled up) · 6 wanted",
+                                      "content": "121 here (103 own + 18 rolled up) · 6 wanted",
                                       "fontFamily": "$font",
                                       "fontSize": 13,
                                       "fontWeight": "normal"
@@ -8194,45 +8194,6 @@
                           ]
                         }
                       ]
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "R6aKt",
-                  "layoutPosition": "absolute",
-                  "x": 540,
-                  "y": 838,
-                  "name": "Undo Toast",
-                  "enabled": false,
-                  "fill": "$text",
-                  "cornerRadius": 8,
-                  "gap": 14,
-                  "padding": [
-                    10,
-                    16
-                  ],
-                  "alignItems": "center",
-                  "children": [
-                    {
-                      "type": "text",
-                      "id": "Rl9Ql",
-                      "name": "Toast Text",
-                      "fill": "#FFFFFF",
-                      "content": "Added 1 Lightning Strike to Trade Binder",
-                      "fontFamily": "$font",
-                      "fontSize": 13,
-                      "fontWeight": "normal"
-                    },
-                    {
-                      "type": "text",
-                      "id": "U6FBV",
-                      "name": "Toast Undo",
-                      "fill": "#93C5FD",
-                      "content": "Undo",
-                      "fontFamily": "$font",
-                      "fontSize": 13,
-                      "fontWeight": "600"
                     }
                   ]
                 }
@@ -9084,7 +9045,7 @@
                               "content": "Lightning Strike",
                               "fontFamily": "$font",
                               "fontSize": 13,
-                              "fontWeight": "500"
+                              "fontWeight": "normal"
                             },
                             {
                               "type": "text",
@@ -9095,34 +9056,6 @@
                               "fontFamily": "$font",
                               "fontSize": 11,
                               "fontWeight": "normal"
-                            },
-                            {
-                              "type": "frame",
-                              "id": "gWvpP",
-                              "x": 1035,
-                              "y": 7,
-                              "name": "QA Enter Chip",
-                              "enabled": false,
-                              "fill": "$text",
-                              "cornerRadius": 4,
-                              "gap": 4,
-                              "padding": [
-                                3,
-                                8
-                              ],
-                              "alignItems": "center",
-                              "children": [
-                                {
-                                  "type": "text",
-                                  "id": "p500YW",
-                                  "name": "QA Enter Label",
-                                  "fill": "#FFFFFF",
-                                  "content": "⏎ Have",
-                                  "fontFamily": "$font",
-                                  "fontSize": 11,
-                                  "fontWeight": "500"
-                                }
-                              ]
                             }
                           ]
                         },
@@ -14103,7 +14036,7 @@
               "id": "yZB4X",
               "name": "Caption Mb1",
               "fill": "$text-2",
-              "content": "Mb1 · Inbox — field in thumb reach",
+              "content": "Mb1 · Inbox — field always present",
               "fontFamily": "$font",
               "fontSize": 12,
               "fontWeight": "600"
@@ -14750,8 +14683,8 @@
                       "height": 36,
                       "fill": "#FFFFFF",
                       "cornerRadius": 6,
-                      "stroke": "$border",
-                      "strokeWidth": 1,
+                      "stroke": "$accent",
+                      "strokeWidth": 1.5,
                       "gap": 8,
                       "padding": [
                         0,
@@ -14773,10 +14706,10 @@
                           "type": "text",
                           "id": "Wtz2e",
                           "name": "Search Placeholder",
-                          "fill": "$text-3",
+                          "fill": "$text",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Add or find cards…",
+                          "content": "ligh",
                           "fontFamily": "$font",
                           "fontSize": 14,
                           "fontWeight": "normal"
@@ -15487,7 +15420,7 @@
                               "id": "oKjaA",
                               "name": "M Counts Summary",
                               "fill": "$text-2",
-                              "content": "7 here · unsorted",
+                              "content": "8 here · unsorted",
                               "fontFamily": "$font",
                               "fontSize": 12,
                               "fontWeight": "normal"
@@ -15514,8 +15447,8 @@
                       "height": 36,
                       "fill": "#FFFFFF",
                       "cornerRadius": 6,
-                      "stroke": "$border",
-                      "strokeWidth": 1,
+                      "stroke": "$accent",
+                      "strokeWidth": 1.5,
                       "gap": 8,
                       "padding": [
                         0,

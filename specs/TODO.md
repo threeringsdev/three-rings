@@ -29,6 +29,7 @@ Ordered riskiest-first; see the spec's Failure policy — if the Android gate fa
 - [x] Wireframe core screens (catalog search, collection, add-flow, auth, shell) (specs: [ui-design](ui-design.md)) — design/wireframes.pen: 9 screens + overlay, desktop + mobile; see spec Findings
 - [x] Prototype the add-to-collection flow (specs: [ui-design](ui-design.md)) — storyboards in design/wireframes.pen + input-cost accounting; see spec Findings
 - [ ] Component gap analysis vs. Rust/UI registry (specs: [ui-design](ui-design.md), [ui-components](ui-components.md))
+- [ ] Wireframe hygiene: delete disabled ghost nodes flagged by layout scans (mobile `/`-hint frames and similar), so problem scans stay a usable signal (specs: [ui-design](ui-design.md))
 
 ## Phase 2 — delivery pipeline
 
@@ -52,6 +53,7 @@ Code leaves the laptop: CI validation, remote-checkable artifacts, agent self-su
 ## Later / parked (not in the queue — promote to a phase before working)
 
 - Bundled read-only catalog for offline browsing on desktop/mobile (deliberately deferred)
+- Validate the add-flow keystroke budget against real usage (disambiguation frequency at 4–6 typed chars; ⇧⏎ set-count for playsets) — needs the implemented add flow; projected numbers in ui-design Findings
 - Decks and sharing features
 - Import/export (CSV, Moxfield)
 
