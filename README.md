@@ -51,12 +51,23 @@ All persistent data lives in a single Postgres database on Neon: the shared card
 
 ## Repository layout
 
+Cargo workspace of four crates plus supporting directories, following the [tauri-leptos-ssr](https://github.com/codeitlikemiley/tauri-leptos-ssr) layout:
+
 ```
-├── README.md
-├── specs/        # feature specs and todos — see specs/README.md
-└── (planned: app/, frontend/, server/, src-tauri/ per the tauri-leptos-ssr layout)
+├── app/            # the product: Leptos UI + server functions + Axum router (shared lib crate)
+├── frontend/       # thin wasm lib crate that hydrates `app` in the browser (cargo-leptos lib-package)
+├── server/         # thin bin crate hosting `app`'s router as the web app (cargo-leptos bin-package)
+├── src-tauri/      # Tauri v2 shell for desktop & mobile, embedding the same router
+├── end2end/        # Playwright end-to-end tests (run via `cargo leptos end-to-end`)
+├── migrations/     # sqlx Postgres migrations
+├── public/         # static assets, synced to the site root at build time
+├── style/          # Tailwind CSS input (compiled by cargo-leptos)
+├── specs/          # feature specs and the execution queue — see specs/README.md
+├── .devcontainer/  # containerized Rust toolchain — see specs/dev-environment.md
+├── .github/        # CI workflows — see specs/delivery-pipeline.md
+└── Cargo.toml      # workspace root + cargo-leptos configuration
 ```
 
 ## Status
 
-Pre-implementation. Planning lives in `specs/`.
+Early implementation. The architecture spike and containerized dev environment are built; feature work is queued in [specs/TODO.md](specs/TODO.md), gated on the specs in [specs/](specs/).
