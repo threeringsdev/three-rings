@@ -29,7 +29,7 @@ Ordered riskiest-first; see the spec's Failure policy — if the Android gate fa
 - [x] Wireframe core screens (catalog search, collection, add-flow, auth, shell) (specs: [ui-design](ui-design.md)) — design/wireframes.pen: 9 screens + overlay, desktop + mobile; see spec Findings
 - [x] Prototype the add-to-collection flow (specs: [ui-design](ui-design.md)) — storyboards in design/wireframes.pen + input-cost accounting; see spec Findings
 - [x] Component gap analysis vs. Rust/UI registry (specs: [ui-design](ui-design.md), [ui-components](ui-components.md)) — design/component-gap-analysis.md: 27 primitives vs rust-ui@43e1e32, 3 gaps (tree, count stepper, selection tray) + SSR code review of 6 components; see spec Findings
-- [~] Design the global ⌘K command palette (actions, scope, wireframe) (specs: [ui-design](ui-design.md))
+- [x] Design the global ⌘K command palette (actions, scope, wireframe) (specs: [ui-design](ui-design.md)) — design/command-palette.md + ⌘K region in wireframes.pen (P1/P2); places + 3-command registry, desktop-only; see spec Findings
 - [x] Wireframe hygiene: delete disabled ghost nodes flagged by layout scans (mobile `/`-hint frames and similar), so problem scans stay a usable signal (specs: [ui-design](ui-design.md)) — 4 ghost `/`-hint frames deleted; scans clean bar the intentional filter-sheet clip; see spec Findings
 
 ## Phase 2 — delivery pipeline

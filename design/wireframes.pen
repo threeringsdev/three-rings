@@ -3474,7 +3474,8 @@
                   "width": "fill_container",
                   "content": "Inbox",
                   "fontFamily": "$font",
-                  "fontSize": 15
+                  "fontSize": 15,
+                  "fontWeight": "normal"
                 },
                 {
                   "type": "text",
@@ -3530,7 +3531,8 @@
                   "width": "fill_container",
                   "content": "Binders",
                   "fontFamily": "$font",
-                  "fontSize": 15
+                  "fontSize": 15,
+                  "fontWeight": "normal"
                 },
                 {
                   "type": "text",
@@ -3586,7 +3588,8 @@
                   "width": "fill_container",
                   "content": "Decks",
                   "fontFamily": "$font",
-                  "fontSize": 15
+                  "fontSize": 15,
+                  "fontWeight": "normal"
                 },
                 {
                   "type": "text",
@@ -3663,7 +3666,8 @@
                   "width": "fill_container",
                   "content": "Shopping list",
                   "fontFamily": "$font",
-                  "fontSize": 15
+                  "fontSize": 15,
+                  "fontWeight": "normal"
                 },
                 {
                   "type": "text",
@@ -15838,6 +15842,626 @@
           "width": 300,
           "height": 0,
           "content": "1 tap focus (once) + ~5 chars + 1 tap on match per card. Keyboard stays up between adds."
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "Ahzx3",
+      "x": 2600,
+      "y": 1249,
+      "name": "⌘K — Command palette",
+      "gap": 48,
+      "padding": 24,
+      "children": [
+        {
+          "type": "note",
+          "id": "afos3",
+          "name": "Note — ⌘K palette",
+          "width": 300,
+          "height": 0,
+          "content": "⌘K — Command palette (v1): centered modal over a scrim, logged-in desktop only (hardware-keyboard accelerator; no mobile trigger in v1). ⌘K/Ctrl+K toggles; / stays the quick-add binding. ⏎ opens a place or runs a command. Empty query = RECENT + COMMANDS with the first row pre-selected, so ⌘K ⏎ returns to the last collection. Spec: design/command-palette.md."
+        },
+        {
+          "type": "frame",
+          "id": "vrBv9",
+          "name": "Cell P1",
+          "layout": "vertical",
+          "gap": 8,
+          "children": [
+            {
+              "type": "text",
+              "id": "HeQk5",
+              "name": "Caption P1",
+              "fill": "$text-2",
+              "content": "P1 · at rest — ⌘K",
+              "fontFamily": "$font",
+              "fontSize": 12,
+              "fontWeight": "600"
+            },
+            {
+              "type": "frame",
+              "id": "dgEgM",
+              "name": "Palette P1",
+              "width": 400,
+              "fill": "#FFFFFF",
+              "cornerRadius": 12,
+              "stroke": "$border",
+              "strokeWidth": 1,
+              "effect": {
+                "type": "shadow",
+                "shadowType": "outer",
+                "color": "#0000001F",
+                "offset": {
+                  "x": 0,
+                  "y": 6
+                },
+                "blur": 24
+              },
+              "layout": "vertical",
+              "gap": 2,
+              "padding": 6,
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "ZWG42",
+                  "name": "P1 Field",
+                  "width": "fill_container",
+                  "height": 40,
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 6,
+                  "stroke": "$accent",
+                  "strokeWidth": 1.5,
+                  "gap": 8,
+                  "padding": [
+                    0,
+                    10
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "EY9Wy",
+                      "name": "P1 Search Icon",
+                      "width": 16,
+                      "height": 16,
+                      "icon": "search",
+                      "library": "lucide",
+                      "fill": "$text-3"
+                    },
+                    {
+                      "type": "text",
+                      "id": "jWvDz",
+                      "name": "P1 Placeholder",
+                      "fill": "$text-3",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Where to?",
+                      "fontFamily": "$font",
+                      "fontSize": 14,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "tdFHy",
+                  "name": "P1 Label Recent",
+                  "width": "fill_container",
+                  "padding": [
+                    6,
+                    8,
+                    2,
+                    8
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "izRRK",
+                      "name": "P1 Label Recent Text",
+                      "fill": "$text-3",
+                      "content": "RECENT",
+                      "fontFamily": "$font",
+                      "fontSize": 10,
+                      "fontWeight": "normal",
+                      "letterSpacing": 0.5
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "Axg3q",
+                  "name": "Trade Binder",
+                  "width": "fill_container",
+                  "fill": "$hover",
+                  "cornerRadius": 5,
+                  "gap": 8,
+                  "padding": [
+                    7,
+                    8
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "qTCcm",
+                      "name": "Trade Binder Name",
+                      "fill": "$text",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Trade Binder",
+                      "fontFamily": "$font",
+                      "fontSize": 13,
+                      "fontWeight": "500"
+                    },
+                    {
+                      "type": "text",
+                      "id": "gydbx",
+                      "name": "Trade Binder Meta",
+                      "fill": "$text-3",
+                      "content": "Binders",
+                      "fontFamily": "$font",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "YM2KT",
+                  "name": "Grixis Control",
+                  "width": "fill_container",
+                  "cornerRadius": 5,
+                  "gap": 8,
+                  "padding": [
+                    7,
+                    8
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "tXiIr",
+                      "name": "Grixis Control Name",
+                      "fill": "$text",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Grixis Control",
+                      "fontFamily": "$font",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "text",
+                      "id": "C2YEdf",
+                      "name": "Grixis Control Meta",
+                      "fill": "$text-3",
+                      "content": "Decks",
+                      "fontFamily": "$font",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "ixLcZ",
+                  "name": "Shopping list",
+                  "width": "fill_container",
+                  "cornerRadius": 5,
+                  "gap": 8,
+                  "padding": [
+                    7,
+                    8
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "QCQEJ",
+                      "name": "Shopping list Name",
+                      "fill": "$text",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Shopping list",
+                      "fontFamily": "$font",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "UBZSV",
+                  "name": "P1 Label Commands",
+                  "width": "fill_container",
+                  "padding": [
+                    8,
+                    8,
+                    2,
+                    8
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "CLHyh",
+                      "name": "P1 Label Commands Text",
+                      "fill": "$text-3",
+                      "content": "COMMANDS",
+                      "fontFamily": "$font",
+                      "fontSize": 10,
+                      "fontWeight": "normal",
+                      "letterSpacing": 0.5
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "S5susY",
+                  "name": "New binder…",
+                  "width": "fill_container",
+                  "cornerRadius": 5,
+                  "gap": 8,
+                  "padding": [
+                    7,
+                    8
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "lzrIR",
+                      "name": "New binder… Name",
+                      "fill": "$text",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "New binder…",
+                      "fontFamily": "$font",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "lJ628",
+                  "name": "New deck…",
+                  "width": "fill_container",
+                  "cornerRadius": 5,
+                  "gap": 8,
+                  "padding": [
+                    7,
+                    8
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "HrqFJ",
+                      "name": "New deck… Name",
+                      "fill": "$text",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "New deck…",
+                      "fontFamily": "$font",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "H9pTK",
+                  "name": "Undo last move",
+                  "width": "fill_container",
+                  "cornerRadius": 5,
+                  "gap": 8,
+                  "padding": [
+                    7,
+                    8
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "EoLUz",
+                      "name": "Undo last move Name",
+                      "fill": "$text",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Undo last move",
+                      "fontFamily": "$font",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "p8A2hz",
+                  "name": "P1 Footer",
+                  "width": "fill_container",
+                  "stroke": "$border",
+                  "strokeWidth": {
+                    "top": 1
+                  },
+                  "gap": 14,
+                  "padding": [
+                    8,
+                    8,
+                    4,
+                    8
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "al8cN",
+                      "name": "P1 Hint ↑↓ navigate",
+                      "fill": "$text-3",
+                      "content": "↑↓ navigate",
+                      "fontFamily": "$font",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "text",
+                      "id": "R1ITb",
+                      "name": "P1 Hint ⏎ open",
+                      "fill": "$text-3",
+                      "content": "⏎ open",
+                      "fontFamily": "$font",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "text",
+                      "id": "yR5rO",
+                      "name": "P1 Hint esc close",
+                      "fill": "$text-3",
+                      "content": "esc close",
+                      "fontFamily": "$font",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "QCnd5",
+          "name": "Cell P2",
+          "layout": "vertical",
+          "gap": 8,
+          "children": [
+            {
+              "type": "text",
+              "id": "V4NVRh",
+              "name": "Caption P2",
+              "fill": "$text-2",
+              "content": "P2 · typed \"tra\" — fuzzy places",
+              "fontFamily": "$font",
+              "fontSize": 12,
+              "fontWeight": "600"
+            },
+            {
+              "type": "frame",
+              "id": "e8SQ8",
+              "name": "Palette P2",
+              "width": 400,
+              "fill": "#FFFFFF",
+              "cornerRadius": 12,
+              "stroke": "$border",
+              "strokeWidth": 1,
+              "effect": {
+                "type": "shadow",
+                "shadowType": "outer",
+                "color": "#0000001F",
+                "offset": {
+                  "x": 0,
+                  "y": 6
+                },
+                "blur": 24
+              },
+              "layout": "vertical",
+              "gap": 2,
+              "padding": 6,
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "JoX73",
+                  "name": "P2 Field",
+                  "width": "fill_container",
+                  "height": 40,
+                  "fill": "#FFFFFF",
+                  "cornerRadius": 6,
+                  "stroke": "$accent",
+                  "strokeWidth": 1.5,
+                  "gap": 8,
+                  "padding": [
+                    0,
+                    10
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "xvNnT",
+                      "name": "P2 Search Icon",
+                      "width": 16,
+                      "height": 16,
+                      "icon": "search",
+                      "library": "lucide",
+                      "fill": "$text-3"
+                    },
+                    {
+                      "type": "text",
+                      "id": "DDWov",
+                      "name": "P2 Typed",
+                      "fill": "$text",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "tra",
+                      "fontFamily": "$font",
+                      "fontSize": 14,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "czlpU",
+                  "name": "P2 Label Collections",
+                  "width": "fill_container",
+                  "padding": [
+                    6,
+                    8,
+                    2,
+                    8
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "Y4GkY",
+                      "name": "P2 Label Collections Text",
+                      "fill": "$text-3",
+                      "content": "COLLECTIONS",
+                      "fontFamily": "$font",
+                      "fontSize": 10,
+                      "fontWeight": "normal",
+                      "letterSpacing": 0.5
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "hxdHy",
+                  "name": "P2 Trade Binder",
+                  "width": "fill_container",
+                  "fill": "$hover",
+                  "cornerRadius": 5,
+                  "gap": 8,
+                  "padding": [
+                    7,
+                    8
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "V4HxaV",
+                      "name": "P2 Trade Binder Name",
+                      "fill": "$text",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Trade Binder",
+                      "fontFamily": "$font",
+                      "fontSize": 13,
+                      "fontWeight": "500"
+                    },
+                    {
+                      "type": "text",
+                      "id": "z0O4PQ",
+                      "name": "P2 Trade Binder Meta",
+                      "fill": "$text-3",
+                      "content": "Binders",
+                      "fontFamily": "$font",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "sKn9g",
+                  "name": "P2 Trade duplicates",
+                  "width": "fill_container",
+                  "cornerRadius": 5,
+                  "gap": 8,
+                  "padding": [
+                    7,
+                    8
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "ViRmZ",
+                      "name": "P2 Trade duplicates Name",
+                      "fill": "$text",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Trade duplicates",
+                      "fontFamily": "$font",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "text",
+                      "id": "i0Vf4",
+                      "name": "P2 Trade duplicates Meta",
+                      "fill": "$text-3",
+                      "content": "Bulk Box",
+                      "fontFamily": "$font",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "gGpyO",
+                  "name": "P2 Footer",
+                  "width": "fill_container",
+                  "stroke": "$border",
+                  "strokeWidth": {
+                    "top": 1
+                  },
+                  "gap": 14,
+                  "padding": [
+                    8,
+                    8,
+                    4,
+                    8
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "J9CMOP",
+                      "name": "P2 Hint ↑↓ navigate",
+                      "fill": "$text-3",
+                      "content": "↑↓ navigate",
+                      "fontFamily": "$font",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "text",
+                      "id": "kQCtw",
+                      "name": "P2 Hint ⏎ open",
+                      "fill": "$text-3",
+                      "content": "⏎ open",
+                      "fontFamily": "$font",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "text",
+                      "id": "utQap",
+                      "name": "P2 Hint esc close",
+                      "fill": "$text-3",
+                      "content": "esc close",
+                      "fontFamily": "$font",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
         }
       ]
     }
