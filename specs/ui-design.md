@@ -44,9 +44,14 @@ Where desired > present in a collection, the gap splits into two actionable buck
 
 ## Information architecture
 
-- **Desktop:** persistent left sidebar with the collection tree — nested, collapsible, drag to reparent/reorder, rolled-up present-count badge per collection, Inbox pinned at top with an unsorted-count badge. Main nav: **Search** (catalog), **Collections**, **All cards**, **Shopping list**.
-- **All cards:** a virtual root aggregating every collection — the "everything I own" view, searchable and filterable. Needed because the tree can have several top-level collections.
-- **Mobile:** same feature surface; navigation collapses (Collections as a root tab with drill-down, Inbox badge on the tab) rather than features being cut.
+Designed and approved in Phase 1b — full detail (shells, route map, auth split) in [design/information-architecture.md](../design/information-architecture.md). This section reflects the approved design; the revisions from the draft are recorded in Findings.
+
+- **Two top-level modes:** **Catalog** (the public card universe — Scryfall-caliber queries, browsing, discovery) and **My cards** (the collection tree, counts, needs, moves). No generic Search destination; no top-level shopping list.
+- **My cards:** the tree carries the whole IA — rooted at **All cards** (the virtual root is the root folder and the mode's landing view), **Inbox** pinned above it, the **shopping list** pinned below as a system row. Desktop: persistent sidebar — nested, collapsible, drag to reparent/reorder, rolled-up present-count badges. Tree management is in-place (context menus); needs views stay contextual, off needs chips.
+- **Search is two surfaces:** an in-collection type-ahead (filters the collection + inline-adds catalog matches — the time-to-enter-50-cards path) and Catalog mode with a sticky `Adding to:` destination picker on results.
+- **Card detail:** hover opens a preview overlay everywhere; click navigates to a dedicated card page (`/cards/:id`). Touch: tap → bottom sheet → expand to page.
+- **Mobile:** two tabs (Catalog / My cards, Inbox badge on the tab); My cards is drill-down; same feature surface, navigation collapses rather than features being cut.
+- **Auth split:** Catalog and card pages are public (add actions prompt login); everything under `/my/*` is session-gated.
 
 ## Core screens
 
@@ -103,9 +108,13 @@ Flagged here, designed there:
 - **data-model:** collections table (parent, type, name), per-entry desired + present counts, owned as a computed aggregate, move-history table, desired at oracle-vs-printing granularity. (The current draft models a single flat collection and excludes decks.)
 - **collection-api:** move endpoints (single + batch), needs/shopping-list computation, collection-tree CRUD.
 
+## Findings
+
+- 2026-07-10 — **IA / nav structure designed and approved** (Phase 1b task 1); deliverable: [design/information-architecture.md](../design/information-architecture.md). Maintainer-approved revisions to this spec as accepted: (1) the four-item main nav (Search / Collections / All cards / Shopping list) became two modes — Catalog and My cards; (2) All cards is the tree's root, not a sibling destination; (3) the shopping list is a pinned system row inside My cards, not top-level; (4) search is two context-specific surfaces (in-collection type-ahead; Catalog query builder with a sticky destination picker), not a destination; (5) card detail is hover-preview plus a dedicated public `/cards/:id` page; (6) Catalog and card pages are public, `/my/*` is auth-gated. The Information architecture section above was rewritten to match.
+
 ## Open questions
 
-- Theming: dark mode from day one, or light-only v1? (Moved from ui-components — the component system supports either.)
-- Card images: how prominent? (Drives layout and Scryfall image-loading strategy.)
-- Keyboard-driven command palette for power users — v1 or later?
-- Pick-list ergonomics: does checking items one-by-one beat a single "confirm all pulled" action at the shelf? (Validate in low-fi testing.)
+- Theming: dark mode from day one, or light-only v1? (Moved from ui-components — the component system supports either.) *(resolved during execution — Phase 1b higher-fidelity/visual-direction pass)*
+- Card images: how prominent? (Drives layout and Scryfall image-loading strategy.) *(resolved during execution — Phase 1b wireframes)*
+- Keyboard-driven command palette for power users — v1 or later? *(resolved during execution — Phase 1b component gap analysis)*
+- Pick-list ergonomics: does checking items one-by-one beat a single "confirm all pulled" action at the shelf? (Validate in low-fi testing.) *(resolved during execution — Phase 1b move-flow prototype validation)*
