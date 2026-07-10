@@ -42,18 +42,20 @@ The collection tree carries the entire IA, keeping the file-explorer metaphor en
 
 ## Catalog mode
 
-The Scryfall-caliber query surface: full-query search plus structured filters (set, color, type, rarity), grid/list results toggle.
+The Scryfall-caliber query surface. **Filters live in the mode's sidebar** — the same panel slot the collection tree occupies in My cards — with the query field above the results in the main panel. Filter edits apply immediately: results update live, no explicit submit. Query text and filter state both serialize into the URL (`?q=…` plus filter params) so any search is shareable and restorable.
 
-Catalog has no collection context, so adding needs a target: a **sticky destination picker in the Catalog toolbar** (`Adding to: 📥 Inbox ▾`) that persists across searches and defaults to Inbox. Every result carries the spec's `+ Want` / `+ Have` quick actions against that target. For scattered destinations, the selection tray is the batch alternative — gather results, pick a destination once.
+Catalog has no collection context, so adding needs a target: a **sticky destination picker in the results toolbar** (`Adding to: 📥 Inbox ▾`) that persists across searches and defaults to Inbox. Every result carries the spec's `+ Want` / `+ Have` quick actions against that target. For scattered destinations, the selection tray is the batch alternative — gather results, pick a destination once.
 
 ```
-┌─ Catalog ─────────────────────────────────────┐
-│ [query: t:instant c:ur cmc<=2    ] [filters ▾]│
-│ Adding to: 📥 Inbox ▾          [grid | list]  │
-│ ┌────┐ ┌────┐ ┌────┐                          │
-│ │card│ │card│ │card│   each: +Want +Have ⋯    │
-│ └────┘ └────┘ └────┘                          │
-└───────────────────────────────────────────────┘
+┌─ Catalog ─────────────────────────────────────────┐
+│ Filters      │ [query: t:instant c:ur cmc<=2    ] │
+│ ──────────   │ Adding to: 📥 Inbox ▾ [grid | list]│
+│ Set      ▾   │ ┌────┐ ┌────┐ ┌────┐               │
+│ Color    ▾   │ │card│ │card│ │card│  each: +Want  │
+│ Type     ▾   │ └────┘ └────┘ └────┘  +Have ⋯      │
+│ Rarity   ▾   │   …results update live as          │
+│              │    filters are edited…             │
+└──────────────┴────────────────────────────────────┘
 ```
 
 ## Two search surfaces
@@ -79,12 +81,13 @@ Two tiers, one component:
 
 ## Desktop shell
 
-A slim top bar carries the mode switch (`Catalog | My cards`) and the user menu. My cards shows the tree sidebar; Catalog uses the full width for query building and results. The selection tray docks at the bottom of the window, persists across both modes, and every move fires an undo toast.
+A slim top bar carries the mode switch (`Catalog | My cards`) and the user menu. Both modes share the same layout skeleton — a sidebar rail plus a main panel — and each mode fills the rail with its own content: My cards the collection tree, Catalog the filter panel. The selection tray docks at the bottom of the window, persists across both modes, and every move fires an undo toast.
 
 ## Mobile shell
 
 Two tabs, matching the modes: `[📖 Catalog] [🗂 My cards •7]` (badge = Inbox unsorted count).
 
+- **Catalog tab:** query field on top, results beneath; the filter rail collapses into a slide-over sheet, and results update live the same way.
 - **My cards tab** is a drill-down: the root screen mirrors the sidebar — All cards pinned at top above a delimiter, then Inbox first among the top-level collections, shopping list pinned at bottom; tapping pushes into a collection, back walks up the tree.
 - The selection tray docks above the tab bar and survives tab switches.
 - Same feature surface as desktop — navigation collapses, features don't (per spec).
@@ -96,7 +99,7 @@ One Leptos route table, identical across web and the Tauri WebView.
 | Route | View | Access |
 |---|---|---|
 | `/` | redirect → `/my` (authed) or `/catalog` (anonymous) | public |
-| `/catalog` | query builder + results; `?q=…` holds query state | public |
+| `/catalog` | filter rail + live results; `?q=…` + filter params hold search state | public |
 | `/cards/:id` | dedicated card page | public |
 | `/my` | All cards (the everything view; My cards landing) | auth |
 | `/my/collections/:id` | collection / deck view (Inbox included) | auth |
