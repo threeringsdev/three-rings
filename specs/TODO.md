@@ -28,7 +28,8 @@ Ordered riskiest-first; see the spec's Failure policy — if the Android gate fa
 - [x] Information architecture / nav structure (specs: [ui-design](ui-design.md)) — two modes (Catalog / My cards); see design/information-architecture.md + spec Findings
 - [x] Wireframe core screens (catalog search, collection, add-flow, auth, shell) (specs: [ui-design](ui-design.md)) — design/wireframes.pen: 9 screens + overlay, desktop + mobile; see spec Findings
 - [x] Prototype the add-to-collection flow (specs: [ui-design](ui-design.md)) — storyboards in design/wireframes.pen + input-cost accounting; see spec Findings
-- [~] Component gap analysis vs. Rust/UI registry (specs: [ui-design](ui-design.md), [ui-components](ui-components.md))
+- [x] Component gap analysis vs. Rust/UI registry (specs: [ui-design](ui-design.md), [ui-components](ui-components.md)) — design/component-gap-analysis.md: 27 primitives vs rust-ui@43e1e32, 3 gaps (tree, count stepper, selection tray) + SSR code review of 6 components; see spec Findings
+- [ ] Design the global ⌘K command palette (actions, scope, wireframe) (specs: [ui-design](ui-design.md))
 - [x] Wireframe hygiene: delete disabled ghost nodes flagged by layout scans (mobile `/`-hint frames and similar), so problem scans stay a usable signal (specs: [ui-design](ui-design.md)) — 4 ghost `/`-hint frames deleted; scans clean bar the intentional filter-sheet clip; see spec Findings
 
 ## Phase 2 — delivery pipeline
@@ -46,6 +47,7 @@ Code leaves the laptop: CI validation, remote-checkable artifacts, agent self-su
 
 ## Phase 3 — foundations
 
+- [ ] Build the component bench page — every vendored component with variants, one route (specs: [ui-component-bench](ui-component-bench.md))
 - [ ] Flesh out data-model spec using spike findings + designs; write initial migrations (specs: [data-model](data-model.md))
 - [ ] Design the data-access trait split; remove spike-era direct DB access — also the path to native builds using the deployed API instead of direct Neon (specs: [data-access-backends](data-access-backends.md))
 - [ ] Flesh out catalog-search spec: Scryfall query-syntax subset, query↔rail sync contract, live-results budget (specs: [catalog-search](catalog-search.md))
