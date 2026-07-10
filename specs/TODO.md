@@ -47,6 +47,7 @@ Code leaves the laptop: CI validation, remote-checkable artifacts, agent self-su
 
 - [ ] Flesh out data-model spec using spike findings + designs; write initial migrations (specs: [data-model](data-model.md))
 - [ ] Design the data-access trait split; remove spike-era direct DB access — also the path to native builds using the deployed API instead of direct Neon (specs: [data-access-backends](data-access-backends.md))
+- [ ] Flesh out catalog-search spec: Scryfall query-syntax subset, query↔rail sync contract, live-results budget (specs: [catalog-search](catalog-search.md))
 
 ## Later / parked (not in the queue — promote to a phase before working)
 

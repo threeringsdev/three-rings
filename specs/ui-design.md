@@ -110,6 +110,7 @@ Flagged here, designed there:
 
 ## Findings
 
+- 2026-07-10 — **Catalog search interaction split out** (during Phase 1b wireframes): the filter rail is a curated everyday subset, not Scryfall's full advanced-search form; the query bar targets Scryfall syntax as fully as practical. The query↔rail sync contract (only recognized terms reflect into the rail; unrecognized terms preserved verbatim) is proposed in [catalog-search](catalog-search.md) (draft) — behavioral contract lives there, wireframes stay structural.
 - 2026-07-10 — **IA / nav structure designed and approved** (Phase 1b task 1); deliverable: [design/information-architecture.md](../design/information-architecture.md). Maintainer-approved revisions to this spec as accepted: (1) the four-item main nav (Search / Collections / All cards / Shopping list) became two modes — Catalog and My cards; (2) All cards is a pinned virtual view above the tree, its counts including Inbox, not a sibling nav destination; (3) the shopping list is a pinned system row inside My cards, not top-level; (4) search is two context-specific surfaces (in-collection type-ahead; Catalog query builder with a sticky destination picker), not a destination; (5) card detail is hover-preview plus a dedicated public `/cards/:id` page; (6) Catalog and card pages are public, `/my/*` is auth-gated. The Information architecture section above was rewritten to match.
 
 ## Open questions

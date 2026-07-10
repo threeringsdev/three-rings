@@ -41,12 +41,14 @@ Task state legend: `[ ]` available · `[~]` in progress · `[x]` done.
 
 | Spec | Status |
 |---|---|
-| [architecture-spike](architecture-spike.md) | accepted |
+| [architecture-spike](architecture-spike.md) | implemented |
 | [auth](auth.md) | draft |
 | [catalog-ingestion](catalog-ingestion.md) | draft |
+| [catalog-search](catalog-search.md) | draft |
 | [collection-api](collection-api.md) | draft |
 | [data-access-backends](data-access-backends.md) | draft |
 | [data-model](data-model.md) | draft |
-| [dev-environment](dev-environment.md) | draft |
+| [delivery-pipeline](delivery-pipeline.md) | accepted |
+| [dev-environment](dev-environment.md) | implemented |
 | [ui-components](ui-components.md) | accepted |
-| [ui-design](ui-design.md) | draft |
+| [ui-design](ui-design.md) | accepted |
