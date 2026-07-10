@@ -28,7 +28,7 @@ Ordered riskiest-first; see the spec's Failure policy — if the Android gate fa
 - [x] Information architecture / nav structure (specs: [ui-design](ui-design.md)) — two modes (Catalog / My cards); see design/information-architecture.md + spec Findings
 - [x] Wireframe core screens (catalog search, collection, add-flow, auth, shell) (specs: [ui-design](ui-design.md)) — design/wireframes.pen: 9 screens + overlay, desktop + mobile; see spec Findings
 - [x] Prototype the add-to-collection flow (specs: [ui-design](ui-design.md)) — storyboards in design/wireframes.pen + input-cost accounting; see spec Findings
-- [ ] Component gap analysis vs. Rust/UI registry (specs: [ui-design](ui-design.md), [ui-components](ui-components.md))
+- [~] Component gap analysis vs. Rust/UI registry (specs: [ui-design](ui-design.md), [ui-components](ui-components.md))
 - [ ] Wireframe hygiene: delete disabled ghost nodes flagged by layout scans (mobile `/`-hint frames and similar), so problem scans stay a usable signal (specs: [ui-design](ui-design.md))
 
 ## Phase 2 — delivery pipeline
