@@ -1,6 +1,6 @@
 # UI design phase
 
-**Status:** draft
+**Status:** accepted
 **Depends on:** —
 
 ## Problem
