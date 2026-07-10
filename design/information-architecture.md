@@ -99,7 +99,7 @@ One Leptos route table, identical across web and the Tauri WebView.
 | Route | View | Access |
 |---|---|---|
 | `/` | redirect → `/my` (authed) or `/catalog` (anonymous) | public |
-| `/catalog` | filter rail + live results; `?q=…` + filter params hold search state | public |
+| `/catalog` | catalog search, live results; `?q=…` + filter params hold search state | public |
 | `/cards/:id` | dedicated card page | public |
 | `/my` | All cards (the everything view; My cards landing) | auth |
 | `/my/collections/:id` | collection / deck view (Inbox included) | auth |
