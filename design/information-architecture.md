@@ -20,20 +20,21 @@ The collection tree carries the entire IA, keeping the file-explorer metaphor en
 
 ```
 ┌─ My cards sidebar ────┐
-│ 📥 Inbox         (7)  │  ← pinned; unsorted-count badge
-│ 🗂 All cards    (812) │  ← virtual root = the tree root and the mode's landing view
-│   ▾ Binders     (640) │
-│     • Trade     (120) │
-│     • Bulk      (520) │
-│   ▾ Decks       (172) │
-│     • Grixis    (100) │
+│ 🗂 All cards    (812) │  ← pinned virtual view: everything, Inbox included; landing view
+│ ───────────────────── │  ← delimiter: aggregate above, actual collections below
+│ 📥 Inbox         (7)  │  ← pinned first in the tree; unsorted-count badge
+│ ▾ Binders       (640) │
+│   • Trade       (120) │
+│   • Bulk        (520) │
+│ ▾ Decks         (172) │
+│   • Grixis      (100) │
 │ ───────────────────── │
 │ 🛒 Shopping list (2)  │  ← pinned system row; badge = distinct cards short
 └───────────────────────┘
 ```
 
-- **All cards is the tree's root**, not a sibling destination. Expanding it reveals the top-level collections; selecting it opens the "everything I own" view. (The spec's virtual root, promoted to root folder.)
-- **Inbox** is a real collection (undeletable, renamable) pinned above the root; the pin targets its collection route.
+- **All cards** is a pinned virtual view at the very top, separated from the tree by a delimiter. It aggregates every collection — Inbox included (Inbox's 7 are part of the 812) — and is the mode's landing view. It is not a tree node: the collections below aren't visually nested under it, only accounted within it.
+- **Inbox** is a real collection (undeletable, renamable) pinned first in the tree, above the user's collections; the pin targets its collection route.
 - **Shopping list** is a pinned system row below the tree — always one click away in the mode where you act on it, without being a top-level destination.
 - Tree behaviors per the spec: nested, collapsible, drag to reparent/reorder, rolled-up present-count badges.
 - Tree management (create / rename / delete / move) happens in place via context menus — there is no separate "manage collections" page.
@@ -84,7 +85,7 @@ A slim top bar carries the mode switch (`Catalog | My cards`) and the user menu.
 
 Two tabs, matching the modes: `[📖 Catalog] [🗂 My cards •7]` (badge = Inbox unsorted count).
 
-- **My cards tab** is a drill-down: the root screen lists Inbox (pinned), the All cards root with top-level collections beneath, and the shopping list (pinned at bottom); tapping pushes into a collection, back walks up the tree.
+- **My cards tab** is a drill-down: the root screen mirrors the sidebar — All cards pinned at top above a delimiter, then Inbox first among the top-level collections, shopping list pinned at bottom; tapping pushes into a collection, back walks up the tree.
 - The selection tray docks above the tab bar and survives tab switches.
 - Same feature surface as desktop — navigation collapses, features don't (per spec).
 
@@ -97,7 +98,7 @@ One Leptos route table, identical across web and the Tauri WebView.
 | `/` | redirect → `/my` (authed) or `/catalog` (anonymous) | public |
 | `/catalog` | query builder + results; `?q=…` holds query state | public |
 | `/cards/:id` | dedicated card page | public |
-| `/my` | All cards (tree root) | auth |
+| `/my` | All cards (the everything view; My cards landing) | auth |
 | `/my/collections/:id` | collection / deck view (Inbox included) | auth |
 | `/my/collections/:id/needs` | needs view; pick list opens from here | auth |
 | `/my/shopping` | global shopping list | auth |
@@ -108,7 +109,7 @@ One Leptos route table, identical across web and the Tauri WebView.
 ## Feeds into
 
 - **Wireframes (next Phase 1b task):** screen-level layout for each route above; deck-view internals (type grouping, commander header) are deliberately unspecified here.
-- **data-model:** nothing new beyond the spec's ripples; note that Inbox-as-real-collection and All-cards-as-root need no special tables — root is virtual, Inbox is a flagged row.
+- **data-model:** nothing new beyond the spec's ripples; note that Inbox-as-real-collection and the All-cards view need no special tables — All cards is virtual, Inbox is a flagged row.
 - **collection-api:** public vs. authed route split implies catalog/card endpoints are anonymous-safe; collection endpoints are session-scoped.
 
 ## Deviations from the spec draft
@@ -116,7 +117,7 @@ One Leptos route table, identical across web and the Tauri WebView.
 Maintainer-approved 2026-07-10 during this task; recorded in the spec's Findings:
 
 1. The four-item main nav (Search / Collections / All cards / Shopping list) is replaced by the two modes.
-2. All cards is the collection tree's root, not a sibling destination.
+2. All cards is a pinned virtual view above the tree (its counts include Inbox), not a nav destination beside Collections.
 3. The shopping list is a pinned system row inside My cards, not top-level.
 4. "Search" splits into the two surfaces above; neither is a nav destination.
 5. Card detail is hover-preview + dedicated page (tap → sheet → expand on touch).
