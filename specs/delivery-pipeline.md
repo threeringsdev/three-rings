@@ -78,12 +78,20 @@ The repo alone (plus documented secrets) must get an agent from clone to verifie
 
 ## Success criteria
 
-- [ ] Push a branch → validation verdict (fmt, clippy, test, web build) visible on GitHub from any device
-- [ ] Merge to `main` (non-docs) → rolling `latest` release carries a fresh APK (installs in place over the previous one); docs-only merges skip the build
+- [x] Push a branch → validation verdict (fmt, clippy, test, web build) visible on GitHub from any device
+- [x] Merge to `main` (non-docs) → rolling `latest` release carries a fresh APK (installs in place over the previous one); docs-only merges skip the build
 - [ ] `workflow_dispatch` of the macOS job → fresh ad-hoc-signed `.dmg` on the rolling release, opening on any Mac via a one-time right-click → Open (Developer ID / notarized zero-prompt download is deferred — see [macOS `.dmg` signing](#macos-dmg-signing))
-- [ ] Merge to `main` → Render URL serves SSR `/` and `/cards` with Neon rows
+- [x] Merge to `main` → Render URL serves SSR `/` and `/cards` with Neon rows — live at https://three-rings-6p5o.onrender.com
 - [ ] A fresh container started from the repo alone (plus documented secrets) lets an agent build, test, run the web target, and push a branch
 - [ ] The loop proven once end-to-end: agent does a trivial task in a fresh container → pushes → merge → web URL + APK checked away from the laptop, `.dmg` dispatched and checked
+
+## Findings
+
+*(Web deploy, 2026-07-11.)*
+
+- **Dockerfile shape.** Multi-stage: build `rust:1-bookworm` runs the merge gate's `cargo leptos build --release`; runtime `debian:bookworm-slim` (same Debian release → matching glibc) carries only the `server` binary, `target/site`, and `ca-certificates`. Result: **114 MB** image. TLS backend is `ring` (confirmed via `Cargo.lock`) — no `openssl`/`cmake` build deps, and the only runtime OS package needed is `ca-certificates` (sqlx's rustls validates Neon's cert against the system store). `cargo-leptos` pinned to **0.3.7** (host/CI parity), installed via `cargo-binstall` (prebuilt, no source compile). `migrations/` is embedded at compile time by `sqlx::migrate!`, so the runtime image ships no SQL and needs no `Cargo.toml`.
+- **Runtime config is entirely env-driven.** In the runtime image `get_configuration(None)` has no `Cargo.toml`, so `LEPTOS_OUTPUT_NAME`/`LEPTOS_SITE_ROOT=/app/site`/`LEPTOS_SITE_PKG_DIR`/`LEPTOS_ENV=PROD` are baked in as `ENV`. The entrypoint maps Render's injected `$PORT` → `LEPTOS_SITE_ADDR=0.0.0.0:$PORT` (fallback `3000` for a plain `docker run`). The **only** manual env var on the service is `DATABASE_URL` (Neon **production** branch, direct/non-pooled host — the server keeps its own sqlx pool, so Neon's PgBouncer pooler is unnecessary).
+- **Render specifics.** Service `three-rings` (`srv-d99aubucjfls7380s240`), Docker runtime, auto-deploy on `main`, **free tier** (spin-down accepted), region **Ohio**. First deploy went `live` in ~6 min. Verified locally against the Neon **dev** branch before merge, then live at **https://three-rings-6p5o.onrender.com** (`/` SSRs, `/cards` renders the 3 production rows). The Render **MCP `create_web_service` can't create Docker services** — the service is created in the dashboard (it was briefly created in the wrong workspace, then recreated under the personal team); MCP is still usable for reading state, setting env vars, and watching deploys.
 
 ## Open questions
 
