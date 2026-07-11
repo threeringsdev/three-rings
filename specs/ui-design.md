@@ -120,7 +120,7 @@ Flagged here, designed there:
 
 ## Open questions
 
-- Theming: dark mode from day one, or light-only v1? (Moved from ui-components — the component system supports either.) *(resolved during execution — Phase 1b higher-fidelity/visual-direction pass)*
+- *(resolved 07-08-2026)* Theming: dark mode from day one 
 - Card images: how prominent? (Drives layout and Scryfall image-loading strategy.) *(resolved during execution — Phase 1b wireframes; see Findings: images lead in catalog/detail, collection rows text-only)*
 - Keyboard-driven command palette for power users — v1 or later? *(resolved 2026-07-10 — v1, maintainer decision at gap-analysis design review; see Findings and the Phase 1b palette design task)*
 - Pick-list ergonomics: does checking items one-by-one beat a single "confirm all pulled" action at the shelf? (Validate in low-fi testing.) *(resolved during execution — Phase 1b move-flow prototype validation)*
