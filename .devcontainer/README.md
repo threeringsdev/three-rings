@@ -67,6 +67,17 @@ Docker Hub) and never commit one. Supply auth to the container at runtime, two w
 A minimally-scoped token (`repo`, `workflow`) is enough to clone, push branches,
 and open PRs. The token stays out of the image and out of git.
 
+## Claude Code auth
+
+The container's `~/.claude/.credentials.json` is lost on every rebuild, so
+`claude` re-prompts for login. Same fix as `GH_TOKEN`: generate a long-lived
+OAuth token on the host with `claude setup-token` (Pro/Max subscription) and
+add `CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...` to `.devcontainer/.env` —
+`claude` reads it and skips login (terminal and VS Code extension alike).
+Optional extra: persist history/settings across rebuilds with a named volume —
+`"source=three-rings-claude,target=/home/vscode/.claude,type=volume"` in
+`devcontainer.json` → `mounts`.
+
 ## Run the web app
 From inside the container (VS Code → "Dev Containers: Reopen in Container", or `docker exec`):
 ```bash
