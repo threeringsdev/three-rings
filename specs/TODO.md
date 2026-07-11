@@ -47,7 +47,8 @@ Code leaves the laptop: CI validation, remote-checkable artifacts, agent self-su
 
 ## Phase 3 — foundations
 
-- [ ] Flesh out data-model spec using spike findings + designs; write initial migrations (specs: [data-model](data-model.md))
+- [ ] Flesh out auth spec + enable Neon Auth: turn on Neon Auth (provisions `neon_auth.users_sync`), validate the session in the Axum API, verify Tauri-webview token behavior, and provision the non-owner RLS application role/`app.user_id` GUC the data model needs (specs: [auth](auth.md))
+- [ ] Flesh out data-model spec using spike findings + designs; write initial migrations — collection tables FK `neon_auth.users_sync`, so the Neon Auth task above lands first (specs: [data-model](data-model.md), [auth](auth.md))
 - [ ] Design the data-access trait split; remove spike-era direct DB access — also the path to native builds using the deployed API instead of direct Neon (specs: [data-access-backends](data-access-backends.md))
 - [ ] Flesh out catalog-search spec: Scryfall query-syntax subset, query↔rail sync contract, live-results budget (specs: [catalog-search](catalog-search.md))
 - [ ] Build the component bench page — every vendored component with variants, one route (specs: [ui-component-bench](ui-component-bench.md))
@@ -73,6 +74,7 @@ Phase 2 loop-proof capstone rides on it. Design in the spec.
 
 ## Decisions log
 
+- 2026-07-11: **Auth = Neon Auth; a Neon Auth task added to Phase 3 ahead of the data-model migrations** (data-model spec review, maintainer's option 1). Neon Auth (Stack Auth-backed) manages users in `neon_auth.users_sync` (`id text` PK; `email`/`name`/`created_at`/`updated_at`/`deleted_at` soft-delete; `raw_json`), so data-model *references* that table with **text** `user_id` FKs instead of defining its own `users`, and its collection tables can't migrate until Neon Auth is enabled. Resolves auth's roll-our-own-vs-hosted question. RLS stays app-enforced via the `app.user_id` GUC set by the hosted Axum API (the authorization terminus per data-access-backends) — deliberately **not** Neon's Data API / JWT-RLS path. Caveats carried into the auth task: async user sync + soft delete → hard-FK-vs-soft-reference and first-login Inbox provisioning are open.
 - 2026-07: API-first on Neon chosen over offline-first Turso designs. Rationale in README.
 - 2026-07: Architecture spike prioritized ahead of data model — architecture unproven.
 - 2026-07: Spec numbering dropped; filenames are the stable IDs, this file owns execution order.
