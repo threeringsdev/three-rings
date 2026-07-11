@@ -59,7 +59,11 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
-          local-cache: true
+          # local-cache: false — the cached NDK restores WITHOUT clang (bin/clang
+          # missing), breaking the aarch64 link with exit 127. Only the first cold
+          # build worked; every cache-hit build failed. Fresh download (~20-30s) is
+          # complete and reliable.
+          local-cache: false
 
       - name: Export NDK env
         run: |
