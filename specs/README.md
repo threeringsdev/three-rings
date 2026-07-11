@@ -41,6 +41,7 @@ Task state legend: `[ ]` available · `[~]` in progress · `[x]` done.
 
 | Spec | Status |
 |---|---|
+| [agent-harness](agent-harness.md) | draft |
 | [architecture-spike](architecture-spike.md) | implemented |
 | [auth](auth.md) | draft |
 | [catalog-ingestion](catalog-ingestion.md) | draft |
