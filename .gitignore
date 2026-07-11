@@ -33,3 +33,6 @@ playwright/.cache/
 .idea/
 .vscode/
 *.swp
+
+# Claude Code — personal/local settings (shared config lives in .claude/settings.json)
+.claude/settings.local.json

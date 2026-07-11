@@ -37,16 +37,16 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up JDK 17 (Temurin)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install Android platform + build-tools
         run: |
@@ -86,6 +86,7 @@ jobs:
             libjavascriptcoregtk-4.1-dev
 
       - name: Rust cache
+        # v3 = latest; Blacksmith's fork still targets node20 (bump when they ship node24).
         uses: useblacksmith/rust-cache@v3
 
       - name: Install cargo-binstall
@@ -233,7 +234,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust (stable + wasm32)
         uses: dtolnay/rust-toolchain@stable
@@ -241,6 +242,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Rust cache
+        # v3 = latest; Blacksmith's fork still targets node20 (bump when they ship node24).
         uses: useblacksmith/rust-cache@v3
 
       - name: Install cargo-binstall

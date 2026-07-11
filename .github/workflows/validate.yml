@@ -24,7 +24,7 @@ jobs:
     name: Format, Clippy, Test & Build
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -48,6 +48,7 @@ jobs:
             libjavascriptcoregtk-4.1-dev
 
       - name: Rust cache
+        # v3 = latest; Blacksmith's fork still targets node20 (bump when they ship node24).
         uses: useblacksmith/rust-cache@v3
 
       - name: Install cargo-binstall
