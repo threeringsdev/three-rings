@@ -1,7 +1,7 @@
 # Data model
 
 **Status:** accepted
-**Depends on:** [auth](auth.md) — Neon Auth provisions the `neon_auth.users_sync` table this schema references (see [Users & the auth boundary](#users--the-auth-boundary))
+**Depends on:** [auth](auth.md) — Neon Auth (Better Auth) provides the `neon_auth."user"` table this schema references (see [Users & the auth boundary](#users--the-auth-boundary))
 
 Design inputs (not hard dependencies): the [architecture-spike](architecture-spike.md)
 Findings (Neon + sqlx constraints), the accepted [ui-design](ui-design.md) concept
@@ -47,9 +47,10 @@ owns `users`); decks-beyond-basics, sharing, trade, import/export (future specs)
   the printing `id`, the set `id`) so ingestion upserts are natural and idempotent.
   User-owned rows (`collections`, `holdings`, `desires`, `moves`) use
   `uuid DEFAULT gen_random_uuid()` — non-enumerable (matters for a public-repo app)
-  and consistent across the schema. The **user identifier is `text`**, not `uuid`:
-  it comes from Neon Auth's `neon_auth.users_sync.id` (see below), so every
-  `user_id` column and the RLS GUC are `text`.
+  and consistent across the schema. The **user identifier is `uuid`**: it is
+  `neon_auth."user".id`, which Neon Auth (Better Auth) issues as `uuid` (verified
+  against the live table — see below). So every `user_id` column and the RLS GUC are
+  `uuid`.
 - **Timestamps** are `timestamptz`, default `now()`.
 - **Money** is `numeric(10,2)`; **counts/quantities** are `integer` with
   `CHECK (quantity > 0)`.
@@ -154,48 +155,54 @@ linked, not cached (caching is catalog-ingestion's call).
 
 ### Users & the auth boundary
 
-Per the maintainer decision (2026-07-11), auth is **[Neon Auth](auth.md)** (Stack
-Auth-backed), which manages users for us: enabling it provisions a
-`neon_auth.users_sync` table in the database, kept in sync from the auth provider.
-Data-model **references** that table; it does not define its own `users`.
+Per the maintainer decision (2026-07-11), auth is **[Neon Auth](auth.md)**, which
+turns out to be **Better Auth** running inside the Neon platform (confirmed against
+the live database, not the earlier Stack Auth assumption). It stores its tables
+**directly** in a `neon_auth` schema in our database — a live table, *not* an
+async-synced mirror. Data-model **references** the users table; it does not define
+its own `users`.
 
-The `neon_auth.users_sync` contract this schema relies on:
+The `neon_auth."user"` contract this schema relies on (Better Auth schema, verified
+2026-07-11 on both branches):
 
 ```sql
--- Provisioned and maintained by Neon Auth (do not create or migrate this):
--- neon_auth.users_sync (
---   id         text PRIMARY KEY,   -- the user id our tables FK to (TEXT, not uuid)
---   email      text,
---   name       text,
---   created_at timestamptz,
---   updated_at timestamptz,
---   deleted_at timestamptz,        -- soft delete: row stays, deleted_at is set
---   raw_json   jsonb
+-- Owned and maintained by Neon Auth / Better Auth (do NOT create or migrate this):
+-- neon_auth."user" (            -- "user" is a reserved word → always quote it
+--   id            uuid PRIMARY KEY,   -- the user id our tables FK to (UUID)
+--   email         text NOT NULL,
+--   name          text NOT NULL,
+--   emailVerified boolean,
+--   image         text,
+--   createdAt     timestamptz,
+--   updatedAt     timestamptz,
+--   role, banned, banReason, banExpires  -- admin/ban fields (unused by us)
 -- )
+-- Siblings in the schema: session, account, verification, jwks, organization, …
 ```
 
-Two properties shape the FK design:
+What this means for the FK design (all simpler than the earlier draft assumed):
 
-- **`id` is `text`** → every `user_id` in this schema is `text` (and the RLS GUC
-  is compared as text, no `::uuid` cast).
-- **Sync is asynchronous and deletes are soft.** A just-signed-up user may act
-  before their `users_sync` row lands (a hard FK would raise), and user deletion
-  sets `deleted_at` rather than removing the row (so `ON DELETE CASCADE` never
-  fires from it). Whether to use a hard FK to `neon_auth.users_sync(id)` or a soft
-  reference (validate/handle the race in the API, app-driven cleanup on
-  soft-delete) is **the auth task's to finalize** — the DDL below writes the FK as
-  the intent, annotated.
+- **`id` is `uuid`** → every `user_id` in this schema is `uuid` and the RLS GUC is
+  compared with a `::uuid` cast.
+- **It's the real, in-database table** (same branch, same transaction visibility),
+  so there is **no async-sync race** — a hard FK is safe. Better Auth **hard-deletes**
+  a user row (no `deleted_at`), so `ON DELETE CASCADE` from our tables actually
+  fires. The DDL below uses a hard FK with `ON DELETE CASCADE`.
+- Mild caveat: the `neon_auth` schema is Neon-managed and could change under a
+  future Better Auth migration; if one ever conflicts with our FK, revisit. Not a
+  day-one concern.
 
-Consequence for ordering: the **Neon Auth task lands first** (Phase 3, ahead of
-this task — the maintainer's option-1 choice), so `neon_auth.users_sync` exists
-before the collection migrations run. See [Migration plan](#migration-plan).
+Consequence for ordering: Neon Auth is **already provisioned on both branches**
+(`production` and `dev`), so `neon_auth."user"` already exists — the collection
+migrations are unblocked. The Neon Auth task (Phase 3, ahead of this one) is now
+about wiring the app to it, not provisioning. See [Migration plan](#migration-plan).
 
 ### Collection schema (the tree)
 
 ```sql
 CREATE TABLE collections (
     id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id    text NOT NULL REFERENCES neon_auth.users_sync(id),  -- Neon Auth id (text); hard-FK vs. soft-ref: auth task decides
+    user_id    uuid NOT NULL REFERENCES neon_auth."user"(id) ON DELETE CASCADE,  -- Neon Auth (Better Auth) user id
     parent_id  uuid REFERENCES collections(id) ON DELETE CASCADE,  -- NULL = top level
     kind       collection_kind NOT NULL,
     name       text NOT NULL,
@@ -293,7 +300,7 @@ is the first candidate for a materialized view.
 ```sql
 CREATE TABLE moves (
     id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id            text NOT NULL REFERENCES neon_auth.users_sync(id),  -- Neon Auth id (text)
+    user_id            uuid NOT NULL REFERENCES neon_auth."user"(id) ON DELETE CASCADE,  -- Neon Auth (Better Auth) user id
     printing_id        uuid NOT NULL REFERENCES printings(id),
     finish             card_finish   NOT NULL,
     condition          card_condition NOT NULL,
@@ -345,8 +352,8 @@ data-access-backends — RLS is a backstop, not the sole layer).
   ALTER TABLE collections ENABLE ROW LEVEL SECURITY;
   ALTER TABLE collections FORCE ROW LEVEL SECURITY;
   CREATE POLICY collections_owner ON collections
-      USING (user_id = current_setting('app.user_id', true))          -- text, no cast
-      WITH CHECK (user_id = current_setting('app.user_id', true));
+      USING (user_id = current_setting('app.user_id', true)::uuid)
+      WITH CHECK (user_id = current_setting('app.user_id', true)::uuid);
   ```
   Tables keyed by `collection_id` (not `user_id` directly) scope via an `EXISTS`
   on the owning collection, or carry a denormalized `user_id` for a direct
@@ -358,8 +365,9 @@ data-access-backends — RLS is a backstop, not the sole layer).
 - **Mechanism.** The app connects as a **non-owner application role** (the migration
   owner bypasses RLS, hence `FORCE`), and every request runs its queries inside a
   transaction that first does `SET LOCAL app.user_id = <authenticated user id>`.
-  The id is the **Neon Auth user id (text)** the hosted Axum API extracts from the
-  validated session — the API stays the authorization terminus per
+  The id is the **Neon Auth user id (uuid)** — the `sub` claim of the verified JWT —
+  the hosted Axum API extracts from the validated session; the API stays the
+  authorization terminus per
   data-access-backends; we deliberately do **not** use Neon's Data API / JWT-RLS
   path (`auth.user_id()` from `pg_session_jwt`), which would move enforcement out
   of the API. Policies read `current_setting('app.user_id', true)`. This requires
@@ -373,15 +381,14 @@ data-access-backends — RLS is a backstop, not the sole layer).
 — *not* the PgBouncer pooler, whose transaction mode breaks migration advisory
 locks (architecture-spike Finding). Numbered `NNNN_description.sql`.
 
-The **Neon Auth task lands first** (option 1), provisioning
-`neon_auth.users_sync`, so both groups below can run in sequence when this task
-starts. Kept as two groups for clarity (and because the catalog group has no auth
-dependency at all):
+Neon Auth is **already provisioned on both branches**, so `neon_auth."user"`
+exists and both groups below can run in sequence. Kept as two groups for clarity
+(and because the catalog group has no auth dependency at all):
 
 1. **Catalog group (no auth dependency):** drop the spike `cards` table, then
    `sets`, `cards`, `printings`, `prices`, `rulings`, the enums, `pg_trgm` + base
    indexes, and permissive read policies.
-2. **Collection group (references `neon_auth.users_sync`):** `collections`,
+2. **Collection group (references `neon_auth."user"`):** `collections`,
    `deck_commanders`, `holdings`, `desires`, `moves`, plus RLS enable/force/policies
    and the application role.
 
@@ -399,25 +406,28 @@ recreating it; there is no real data to preserve.
   transaction.
 - **Latest-only prices** — one upserted row per printing; a price time-series is
   deferred to a later table.
-- **Auth = Neon Auth; users via `neon_auth.users_sync`** — data-model references
-  the Neon-managed table (text `user_id` FKs), doesn't define its own `users`.
-  Sequencing resolved via **option 1**: a Neon Auth task is added to Phase 3 ahead
-  of this one, so `users_sync` exists before the collection migrations run.
+- **Auth = Neon Auth (Better Auth); users via `neon_auth."user"`** — data-model
+  references the Neon-managed live table with **`uuid`** `user_id` FKs
+  (`ON DELETE CASCADE`), doesn't define its own `users`. Neon Auth is already
+  provisioned on both branches, so the table exists; the Phase 3 Neon Auth task
+  wires the app to it rather than provisioning. *(Corrected 2026-07-11 against the
+  live DB: earlier text-id / `users_sync` / async-sync assumptions came from stale
+  Stack Auth docs and were wrong — see Findings in [auth](auth.md).)*
 
 ## Open questions
 
 Accepted with these deferred; none blocks acceptance — each notes where it resolves.
 
-- **Hard FK vs. soft reference to `neon_auth.users_sync(id)`.** The sync is
-  asynchronous (a new user can act before their row lands → a hard FK raises) and
-  deletes are soft (`deleted_at`, so `ON DELETE CASCADE` never fires). Keep a hard
-  FK (and handle the first-request race in the API) or drop to a soft reference with
-  app-driven cleanup on soft-delete? The DDL here writes the hard FK as the intent.
-  *(resolved during execution — the Neon Auth task, shared with data-access-backends)*
+- ~~Hard FK vs. soft reference to the users table~~ **Resolved by the live-DB
+  finding (2026-07-11):** Better Auth's `neon_auth."user"` is a real in-database
+  table with a `uuid` PK and hard deletes, so a hard FK with `ON DELETE CASCADE` is
+  correct — no async-sync race, no soft-delete to work around. (The question only
+  existed under the mistaken Stack Auth `users_sync` model.)
 - **Inbox provisioning on first login.** Each user needs their one `is_inbox`
-  collection; given async user sync, where/when is it created (lazily on first
-  `/my` load vs. an auth post-signup hook)? *(resolved during execution — the Neon
-  Auth task / collection-api)*
+  collection; decide where/when it's created (lazily on first `/my` load vs. a
+  Better Auth post-signup webhook — `project_config.webhook_config` exists). No async
+  race to worry about now. *(resolved during execution — the Neon Auth task /
+  collection-api)*
 - **Denormalize `user_id` onto `holdings`/`desires`/`deck_commanders`** for direct
   RLS policies (simpler/faster) vs. `EXISTS`-on-collection policies (no
   duplication, must stay consistent)? Leaning denormalize. *(resolved during
