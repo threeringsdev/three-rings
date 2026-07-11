@@ -148,3 +148,19 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
   - **Remaining** (task stays `[~]`): the non-owner RLS role (step 2, ops), set
     `trusted_origins` (step 3), then the Axum JWKS middleware + cookie proxy + Tauri
     spike (steps 4–6). None blocked on the maintainer except the DB role.
+- 2026-07-11 — **Ops progress + JWKS finding.**
+  - **`trusted_origins`** — added the Render URL `https://three-rings-6p5o.onrender.com`
+    to the production branch (CSRF + redirect allowlist); `allow_localhost=true`
+    already covers `http://localhost:3000` for dev.
+  - **App role** — `neondb_owner` has `USAGE`/`SELECT`/`REFERENCES` on
+    `neon_auth."user"`, so the hard FK is confirmed workable. Creating the non-owner
+    `app_runtime` role is pending the maintainer's explicit approval of the exact
+    grant (the safety classifier flagged it); it will be created **without a
+    password** so the credential is set + copied from the Neon Console, never the
+    chat. Grants keep the current public schema readable so the rotation is safe
+    before the RLS tables land.
+  - **JWKS algorithm = EdDSA / Ed25519** (`kty:OKP`, one key, `kid` present) on both
+    branches → verify with `jsonwebtoken` (v9, EdDSA) building a `DecodingKey` from
+    the OKP `x`; cache the JWKS and refresh on unknown `kid`. RSA-only JWKS helper
+    crates (and possibly `axum-jwks`) won't handle OKP, so use `jsonwebtoken`
+    directly. Middleware config: issuer = base-URL origin, `sub` = user uuid.
