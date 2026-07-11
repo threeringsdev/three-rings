@@ -1,0 +1,86 @@
+name: Validate
+
+# Merge gate: runs on every push and every PR, linux only.
+# Branch protection on `main` requires this workflow, and auto-merge ships on
+# green — so this suite is the de facto reviewer and is deliberately strict.
+on:
+  push:
+  pull_request:
+
+# Superseded pushes on the same ref cancel their in-flight run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Least privilege: this merge gate only checks out and builds code.
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Format, Clippy, Test & Build
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      # Tauri's linux system deps so `src-tauri` lints here even though the
+      # devcontainer excludes it.
+      - name: Install system dependencies (Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      - name: Rust cache
+        uses: useblacksmith/rust-cache@v3
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@v1.14.1
+
+      - name: Add cargo bin to PATH
+        shell: bash
+        run: echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> $GITHUB_PATH
+
+      - name: Install cargo-leptos
+        run: cargo binstall -y cargo-leptos
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The Tauri build script reads this dir; create it before any check of
+      # src-tauri.
+      - name: Create resource dirs for Tauri build script
+        run: mkdir -p target/site/pkg
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # Native workspace including src-tauri, excluding the wasm-only frontend.
+      - name: Clippy (native workspace incl. src-tauri)
+        run: cargo clippy --workspace --exclude frontend --all-targets -- -D warnings
+
+      # The frontend crate is the cargo-leptos lib-package (cdylib) — lint it on wasm.
+      - name: Clippy (frontend on wasm)
+        run: cargo clippy -p frontend --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Test (native workspace, excl. frontend)
+        run: cargo test --workspace --exclude frontend
+
+      # Exercises the full Tailwind + wasm build pipeline.
+      - name: Build with cargo-leptos
+        run: cargo leptos build --release

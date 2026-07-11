@@ -1,0 +1,319 @@
+name: Artifacts
+
+# Artifacts tier of the two-tier CI (see specs/delivery-pipeline.md). Mints
+# checkable native builds and publishes them to a single rolling `latest`
+# prerelease. The Android APK builds on every non-docs merge to main (and on
+# demand); the macOS .dmg is dispatch-only because the Blacksmith macOS runner
+# costs ~20x the linux basis rate.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'specs/**'
+      - '**.md'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Android APK -> signed, uploaded to the rolling `latest` prerelease.
+  # Runs on push-to-main (non-docs) and workflow_dispatch.
+  # x86_64 linux runner ONLY: Blacksmith arm64 shapes reintroduce the
+  # linux-arm64 NDK gap (Google ships no arm64 Linux NDK).
+  # -------------------------------------------------------------------------
+  android-apk:
+    name: Android APK
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: write
+    # Serialize the two artifact jobs so their read-modify-write of the shared
+    # release body never races (both jobs run on workflow_dispatch). A queued
+    # job holds no runner, so the macOS runner is not billed while it waits.
+    concurrency:
+      group: rolling-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform + build-tools
+        run: |
+          yes | sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      # NDK r28+ defaults to 16 KB page alignment, closing the spike's
+      # 16 KB-page compatibility finding without a linker flag.
+      - name: Set up Android NDK (r28+)
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28
+          local-cache: true
+
+      - name: Export NDK env
+        run: |
+          echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          echo "NDK_HOME=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+
+      - name: Install Rust (stable + wasm32 + aarch64-android)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, aarch64-linux-android
+
+      - name: Install system dependencies (Tauri, Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      - name: Rust cache
+        uses: useblacksmith/rust-cache@v3
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@v1.20.1
+
+      - name: Install cargo-leptos + tauri-cli
+        run: cargo binstall -y cargo-leptos@0.3.7 tauri-cli@2.11.4
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      # The Tauri build script expects the resource dir to exist.
+      - name: Create resource dirs for Tauri build script
+        run: mkdir -p target/site/pkg
+
+      # SIGNING: decode the persistent keystore secret and write the gradle
+      # keystore.properties that app/build.gradle.kts consumes for the release
+      # signingConfig. NEVER echo the secret or the passwords.
+      - name: Configure Android signing
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANDROID_KEYSTORE}" ]; then
+            echo "::error::ANDROID_KEYSTORE secret is not set" >&2
+            exit 1
+          fi
+          KEYSTORE_PATH="${RUNNER_TEMP}/release.keystore"
+          printf '%s' "${ANDROID_KEYSTORE}" | base64 --decode > "${KEYSTORE_PATH}"
+          # keystore.properties lives at the android project root (rootProject),
+          # matching build.gradle.kts and the committed .gitignore entry.
+          {
+            printf 'storeFile=%s\n' "${KEYSTORE_PATH}"
+            printf 'storePassword=%s\n' "${ANDROID_KEYSTORE_PASSWORD}"
+            printf 'keyAlias=%s\n' "${ANDROID_KEY_ALIAS}"
+            printf 'password=%s\n' "${ANDROID_KEY_PASSWORD}"
+          } > src-tauri/gen/android/keystore.properties
+          echo "Wrote keystore.properties and decoded keystore (contents not shown)."
+
+      # VERSIONING: versionName carries the short SHA; versionCode is the
+      # monotonic run number. build.gradle.kts reads these env vars.
+      - name: Compute version stamp
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          BASE_VERSION="$(jq -r '.version' src-tauri/tauri.conf.json)"
+          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "ANDROID_VERSION_NAME=${BASE_VERSION}+${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "ANDROID_VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+
+      - name: Build signed release APK (aarch64)
+        run: cargo tauri android build --apk --target aarch64
+
+      - name: Locate + stage APK
+        id: apk
+        run: |
+          set -euo pipefail
+          APK="$(find src-tauri/gen/android/app/build/outputs/apk -type f \
+            -name 'app-*-release.apk' ! -path '*baselineProfiles*' | head -n1)"
+          if [ -z "${APK}" ]; then
+            echo "::error::No signed release APK found under outputs/apk" >&2
+            find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' || true
+            exit 1
+          fi
+          STAGED="${RUNNER_TEMP}/three-rings-latest.apk"
+          cp "${APK}" "${STAGED}"
+          echo "path=${STAGED}" >> "$GITHUB_OUTPUT"
+          echo "Staged ${APK} -> ${STAGED}"
+
+      - name: Publish APK to rolling `latest` release
+        env:
+          ASSET_PATH: ${{ steps.apk.outputs.path }}
+        run: |
+          set -euo pipefail
+          BUILD_TS="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          # Ensure the single rolling prerelease exists.
+          if ! gh release view latest >/dev/null 2>&1; then
+            gh release create latest \
+              --prerelease \
+              --title "Rolling latest" \
+              --notes "Rolling development build." \
+              --target "${GITHUB_SHA}"
+          fi
+
+          # Replace only this target's asset (stable name -> clobber in place).
+          gh release upload latest "${ASSET_PATH}" --clobber
+
+          # Rebuild the body, preserving the .dmg section written by the other job.
+          CURRENT_BODY="$(gh release view latest --json body -q .body 2>/dev/null || true)"
+          export CURRENT_BODY BUILD_TS
+          python3 - > "${RUNNER_TEMP}/notes.md" <<'PY'
+          import os, re
+          cur = os.environ.get("CURRENT_BODY", "") or ""
+          m = re.search(r"<!-- BEGIN dmg -->.*?<!-- END dmg -->", cur, re.S)
+          dmg = m.group(0) if m else (
+              "<!-- BEGIN dmg -->\n"
+              "### macOS .dmg\n"
+              "_None yet — run this workflow via **Run workflow** to publish one._\n"
+              "<!-- END dmg -->"
+          )
+          apk = (
+              "<!-- BEGIN apk -->\n"
+              "### Android APK (`three-rings-latest.apk`)\n"
+              f"- commit `{os.environ['SHORT_SHA']}` ({os.environ['GITHUB_SHA']})\n"
+              f"- versionName `{os.environ['ANDROID_VERSION_NAME']}` / "
+              f"versionCode `{os.environ['ANDROID_VERSION_CODE']}`\n"
+              f"- built {os.environ['BUILD_TS']} (run #{os.environ['GITHUB_RUN_NUMBER']})\n"
+              "- installs in place over the previous APK\n"
+              "<!-- END apk -->"
+          )
+          header = (
+              "# Rolling `latest`\n\n"
+              "Unstable development build. Each target's asset is replaced in "
+              "place; the APK and `.dmg` may come from different commits.\n"
+          )
+          print(f"{header}\n{apk}\n\n{dmg}\n")
+          PY
+          gh release edit latest --notes-file "${RUNNER_TEMP}/notes.md"
+
+  # -------------------------------------------------------------------------
+  # macOS .dmg -> unsigned/ad-hoc, uploaded to the SAME rolling `latest`
+  # prerelease. workflow_dispatch ONLY: the Apple Silicon runner is ~$0.08/min
+  # (~20x the linux basis rate), so it is human-triggered, never per-merge.
+  # -------------------------------------------------------------------------
+  macos-dmg:
+    name: macOS .dmg
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: blacksmith-6vcpu-macos-latest
+    permissions:
+      contents: write
+    # Shares the `rolling-release` concurrency group with android-apk. On a
+    # single workflow_dispatch run GitHub serializes same-group jobs (one runs,
+    # the other pends), so the two jobs never interleave their read-modify-write
+    # of the shared `latest` release body. That serialization is what keeps the
+    # notes-body merge correct; assets are independently safe via `--clobber`.
+    concurrency:
+      group: rolling-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable + wasm32)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Rust cache
+        uses: useblacksmith/rust-cache@v3
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@v1.20.1
+
+      - name: Install cargo-leptos + tauri-cli
+        run: cargo binstall -y cargo-leptos@0.3.7 tauri-cli@2.11.4
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Create resource dirs for Tauri build script
+        run: mkdir -p target/site/pkg
+
+      - name: Build .dmg (unsigned / ad-hoc)
+        run: cargo tauri build
+
+      - name: Locate + stage .dmg
+        id: dmg
+        run: |
+          set -euo pipefail
+          DMG="$(find . -type f -name '*.dmg' -path '*bundle/dmg*' | head -n1)"
+          if [ -z "${DMG}" ]; then
+            echo "::error::No .dmg found under target/**/bundle/dmg" >&2
+            find . -type f -name '*.dmg' || true
+            exit 1
+          fi
+          STAGED="${RUNNER_TEMP}/three-rings-latest.dmg"
+          cp "${DMG}" "${STAGED}"
+          echo "path=${STAGED}" >> "$GITHUB_OUTPUT"
+          echo "Staged ${DMG} -> ${STAGED}"
+
+      - name: Publish .dmg to rolling `latest` release
+        env:
+          ASSET_PATH: ${{ steps.dmg.outputs.path }}
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          BUILD_TS="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          export SHORT_SHA BUILD_TS
+
+          if ! gh release view latest >/dev/null 2>&1; then
+            gh release create latest \
+              --prerelease \
+              --title "Rolling latest" \
+              --notes "Rolling development build." \
+              --target "${GITHUB_SHA}"
+          fi
+
+          gh release upload latest "${ASSET_PATH}" --clobber
+
+          # Rebuild the body, preserving the APK section written by the other job.
+          CURRENT_BODY="$(gh release view latest --json body -q .body 2>/dev/null || true)"
+          export CURRENT_BODY
+          python3 - > "${RUNNER_TEMP}/notes.md" <<'PY'
+          import os, re
+          cur = os.environ.get("CURRENT_BODY", "") or ""
+          m = re.search(r"<!-- BEGIN apk -->.*?<!-- END apk -->", cur, re.S)
+          apk = m.group(0) if m else (
+              "<!-- BEGIN apk -->\n"
+              "### Android APK\n"
+              "_None yet — merge a non-docs change to `main` to publish one._\n"
+              "<!-- END apk -->"
+          )
+          dmg = (
+              "<!-- BEGIN dmg -->\n"
+              "### macOS .dmg (`three-rings-latest.dmg`)\n"
+              f"- commit `{os.environ['SHORT_SHA']}` ({os.environ['GITHUB_SHA']})\n"
+              f"- built {os.environ['BUILD_TS']} (run #{os.environ['GITHUB_RUN_NUMBER']})\n"
+              "- unsigned / ad-hoc: open via right-click -> Open\n"
+              "<!-- END dmg -->"
+          )
+          header = (
+              "# Rolling `latest`\n\n"
+              "Unstable development build. Each target's asset is replaced in "
+              "place; the APK and `.dmg` may come from different commits.\n"
+          )
+          print(f"{header}\n{apk}\n\n{dmg}\n")
+          PY
+          gh release edit latest --notes-file "${RUNNER_TEMP}/notes.md"
