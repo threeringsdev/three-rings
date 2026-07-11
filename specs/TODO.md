@@ -47,7 +47,7 @@ Code leaves the laptop: CI validation, remote-checkable artifacts, agent self-su
 
 ## Phase 3 — foundations
 
-- [ ] Flesh out auth spec + enable Neon Auth: turn on Neon Auth (provisions `neon_auth.users_sync`), validate the session in the Axum API, verify Tauri-webview token behavior, and provision the non-owner RLS application role/`app.user_id` GUC the data model needs (specs: [auth](auth.md))
+- [~] Flesh out auth spec + enable Neon Auth: turn on Neon Auth (provisions `neon_auth.users_sync`), validate the session in the Axum API, verify Tauri-webview token behavior, and provision the non-owner RLS application role/`app.user_id` GUC the data model needs (specs: [auth](auth.md))
 - [ ] Flesh out data-model spec using spike findings + designs; write initial migrations — collection tables FK `neon_auth.users_sync`, so the Neon Auth task above lands first (specs: [data-model](data-model.md), [auth](auth.md))
 - [ ] Design the data-access trait split; remove spike-era direct DB access — also the path to native builds using the deployed API instead of direct Neon (specs: [data-access-backends](data-access-backends.md))
 - [ ] Flesh out catalog-search spec: Scryfall query-syntax subset, query↔rail sync contract, live-results budget (specs: [catalog-search](catalog-search.md))
