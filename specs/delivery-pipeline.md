@@ -19,7 +19,7 @@ In: GitHub repo + secrets, CI validation workflow, Android/macOS artifact builds
 Out (explicit non-goals for this phase):
 
 - **Native builds reaching the database.** The released APK's `/cards` fails politely until [data-access-backends](data-access-backends.md) puts an API boundary in front of Neon (native → deployed API is exactly that later work). The web deploy is the DB-connected artifact for now.
-- Store distribution (Play, App Store), macOS signing/notarization, iOS.
+- Store distribution (Play, App Store) and iOS. **Developer ID signing + notarization** of the macOS `.dmg` is *deferred, not dropped* (see [macOS `.dmg` signing](#macos-dmg-signing)) — blocked on org Account-Holder access to a Developer ID cert; the interim `.dmg` is ad-hoc signed and opens via a one-time right-click → Open.
 - Production-grade infra (custom domains, CDN, observability beyond platform defaults).
 
 ## Design
@@ -28,7 +28,7 @@ Out (explicit non-goals for this phase):
 
 - **GitHub, public repo** (`threeringsdev/three-rings`) — owned by a free GitHub **organization**, not the personal account: Blacksmith (below) installs only on organizations. Public rather than private (2026-07-09): free-plan orgs can't enforce branch protection or auto-merge on private repos, and the merge gate below depends on both — public unlocks them at zero cost. (Public also makes GitHub-hosted minutes free; Blacksmith stays the runner choice for speed and its own free tier.)
 - **CI runners: [Blacksmith](https://www.blacksmith.sh/)** — drop-in replacement for GitHub-hosted runners; each job opts in via its `runs-on` label and nothing else changes. Budget: 3,000 free Blacksmith minutes/month (denominated in 2 vCPU linux-x64 minutes), then pay-as-you-go (linux x64 $0.004/min, macOS M4 $0.08/min); GitHub separately charges a $0.002/min control-plane fee on all Actions minutes (since 2026-03) regardless of runner. The two-tier CI design below exists to respect this — macOS still costs ~20× the linux rate. Maintainer choice (2026-07-09, superseding the GitHub-hosted draft); any job reverts to a GitHub-hosted label independently if Blacksmith misbehaves.
-- **Secrets:** `ANDROID_KEYSTORE` (+ passwords); `RENDER_DEPLOY_HOOK` only if Render's GitHub auto-deploy needs supplementing. **No `DATABASE_URL` in GitHub** — no CI job talks to Neon; the deployed app reads it from Render's own environment variables.
+- **Secrets:** `ANDROID_KEYSTORE` (+ passwords); `RENDER_DEPLOY_HOOK` only if Render's GitHub auto-deploy needs supplementing. **No `DATABASE_URL` in GitHub** — no CI job talks to Neon; the deployed app reads it from Render's own environment variables. The macOS Developer ID + notarization secrets (`APPLE_*`) are deferred with that work (see [macOS `.dmg` signing](#macos-dmg-signing)).
 - **Merge policy — agents open PRs; auto-merge on green.** Branch protection on `main` requires the validate workflow; repo enables auto-merge. The validate suite is therefore the de facto reviewer — a wrong-but-green change ships itself to the rolling release and Render, and the human reviews *outcomes* (artifacts, deployed app) rather than diffs. Accepted deliberately for maximum autonomy; tighten to human-tap-merge later if trust breaks. This makes validate quality (clippy `-D warnings`, tests) load-bearing.
 
 ### CI: two tiers (budget policy)
@@ -43,6 +43,14 @@ The template's shipped `ci.yml` tests the *template* (it `cargo generate`s a cop
 ### APK signing: one keystore, stored as a secret
 
 Generate a debug-grade keystore once; store it (base64) as a GitHub secret and sign CI release builds with it. If each run generated its own keystore, every install would demand uninstall/reinstall (signature mismatch); one persistent key makes rolling builds update in place on the phone. The local `~/.android/debug.keystore` stays for host builds — device installs from mixed sources still conflict; prefer CI builds on the phone.
+
+### macOS `.dmg` signing
+
+Two-stage, gated by what the org's Apple Developer roles allow:
+
+- **Now — valid ad-hoc.** `bundle.macOS.signingIdentity = "-"` makes Tauri `codesign` the whole bundle ad-hoc, producing a *valid* signature. Without it the bundle is only linker-signed (inner binary only), so its seal is invalid and a downloaded `.dmg` reads as **"damaged"** under Gatekeeper. Ad-hoc is not notarized, so a download still prompts once — but as the normal right-click → **Open** / "Open Anyway", on *any* Mac, no Terminal. Sufficient for a handful of known testers.
+- **Later — Developer ID + notarization** (zero prompt on download). Blocked: only the org's **Account Holder** can create a **Developer ID Application** certificate. The maintainer's role can create Apple Development / Apple Distribution / Mac App Distribution / Mac Installer Distribution certs — none of which notarize a downloadable `.dmg` (Gatekeeper requires notarization, which Apple's notary service only accepts for Developer-ID-signed apps). Mac Development + registered devices was rejected: it doesn't remove the Gatekeeper prompt (still un-notarized) and restricts execution to registered UDIDs — worse for testers, no upside.
+  - **Drop-in recipe when the cert is available:** the Account Holder creates the Developer ID Application cert once and hands over the exported `.p12` (CI needs only the `.p12` + password, not portal access). Secrets: `APPLE_CERTIFICATE` (base64 `.p12`), `APPLE_CERTIFICATE_PASSWORD`, plus an App Store Connect API key for notarization — `APPLE_API_ISSUER`, `APPLE_API_KEY_ID`, `APPLE_API_KEY_P8` (base64 `.p8`). In the `macos-dmg` job: import the `.p12` into a temp keychain (`security create-keychain … import … set-key-partition-list`), derive `APPLE_SIGNING_IDENTITY` via `security find-identity -p codesigning` (match `Developer ID Application`), write the `.p8` to a temp file for `APPLE_API_KEY_PATH`, then `cargo tauri build` signs with hardened runtime, notarizes, and staples automatically.
 
 ### Rolling release
 
@@ -72,7 +80,7 @@ The repo alone (plus documented secrets) must get an agent from clone to verifie
 
 - [ ] Push a branch → validation verdict (fmt, clippy, test, web build) visible on GitHub from any device
 - [ ] Merge to `main` (non-docs) → rolling `latest` release carries a fresh APK (installs in place over the previous one); docs-only merges skip the build
-- [ ] `workflow_dispatch` of the macOS job → fresh `.dmg` on the same rolling release
+- [ ] `workflow_dispatch` of the macOS job → fresh ad-hoc-signed `.dmg` on the rolling release, opening on any Mac via a one-time right-click → Open (Developer ID / notarized zero-prompt download is deferred — see [macOS `.dmg` signing](#macos-dmg-signing))
 - [ ] Merge to `main` → Render URL serves SSR `/` and `/cards` with Neon rows
 - [ ] A fresh container started from the repo alone (plus documented secrets) lets an agent build, test, run the web target, and push a branch
 - [ ] The loop proven once end-to-end: agent does a trivial task in a fresh container → pushes → merge → web URL + APK checked away from the laptop, `.dmg` dispatched and checked

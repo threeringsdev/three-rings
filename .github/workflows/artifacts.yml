@@ -263,7 +263,10 @@ jobs:
       - name: Create resource dirs for Tauri build script
         run: mkdir -p target/site/pkg
 
-      - name: Build .dmg (unsigned / ad-hoc)
+      # Ad-hoc signed via tauri.conf.json bundle.macOS.signingIdentity "-" (valid
+      # bundle signature so it isn't flagged "damaged"). Not notarized — see the
+      # spec's "macOS .dmg signing" for the deferred Developer ID path.
+      - name: Build .dmg (ad-hoc signed)
         run: cargo tauri build
 
       - name: Locate + stage .dmg
@@ -318,7 +321,7 @@ jobs:
               "### macOS .dmg (`three-rings-latest.dmg`)\n"
               f"- commit `{os.environ['SHORT_SHA']}` ({os.environ['GITHUB_SHA']})\n"
               f"- built {os.environ['BUILD_TS']} (run #{os.environ['GITHUB_RUN_NUMBER']})\n"
-              "- unsigned / ad-hoc: open via right-click -> Open\n"
+              "- ad-hoc signed (not notarized): first launch, right-click -> Open (or System Settings -> Privacy & Security -> Open Anyway)\n"
               "<!-- END dmg -->"
           )
           header = (
