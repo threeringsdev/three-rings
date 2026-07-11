@@ -1,0 +1,32 @@
+# Keep the build context small and secret-free. Only the Cargo workspace
+# (app/, frontend/, server/, src-tauri/, migrations/, style/, public/ + the
+# root manifests) is needed to run `cargo leptos build --release`.
+
+# Build artifacts — rebuilt fresh inside the image
+target/
+**/target/
+
+# VCS, CI, editor, and agent tooling
+.git/
+.github/
+.vscode/
+.claude/
+.superpowers/
+
+# Secrets — never ship the dev DATABASE_URL into an image layer
+.devcontainer/
+**/.env
+**/.env.*
+
+# Node / Playwright e2e (not a workspace member)
+end2end/
+**/node_modules/
+
+# Docs & design — not needed to build the server or site
+docs/
+design/
+specs/
+
+# Prebuilt native artifacts
+*.dmg
+*.apk
