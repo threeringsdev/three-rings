@@ -92,7 +92,10 @@ jobs:
         uses: cargo-bins/cargo-binstall@v1.20.1
 
       - name: Install cargo-leptos + tauri-cli
-        run: cargo binstall -y cargo-leptos@0.3.7 tauri-cli@2.11.4
+        # --force: rust-cache (cache-bin) can restore a .crates2.json marking
+        # these as installed while their binaries were cleaned from the cached
+        # ~/.cargo/bin, so binstall would skip them. --force always reinstalls.
+        run: cargo binstall -y --force cargo-leptos@0.3.7 tauri-cli@2.11.4
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
@@ -244,7 +247,10 @@ jobs:
         uses: cargo-bins/cargo-binstall@v1.20.1
 
       - name: Install cargo-leptos + tauri-cli
-        run: cargo binstall -y cargo-leptos@0.3.7 tauri-cli@2.11.4
+        # --force: rust-cache (cache-bin) can restore a .crates2.json marking
+        # these as installed while their binaries were cleaned from the cached
+        # ~/.cargo/bin, so binstall would skip them. --force always reinstalls.
+        run: cargo binstall -y --force cargo-leptos@0.3.7 tauri-cli@2.11.4
         env:
           GITHUB_TOKEN: ${{ github.token }}
 

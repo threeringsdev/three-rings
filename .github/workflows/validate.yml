@@ -58,7 +58,12 @@ jobs:
         run: echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> $GITHUB_PATH
 
       - name: Install cargo-leptos
-        run: cargo binstall -y cargo-leptos
+        # --force: useblacksmith/rust-cache (cache-bin) cleans binstall'ed
+        # binaries out of the cached ~/.cargo/bin on save but keeps the
+        # .crates2.json manifest, so a later cache-hit run makes binstall
+        # think cargo-leptos is installed and skip it — leaving `cargo leptos`
+        # missing at build time. --force always reinstalls the binary.
+        run: cargo binstall -y --force cargo-leptos
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
