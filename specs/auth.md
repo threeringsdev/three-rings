@@ -165,9 +165,14 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     `neon_auth."user"`, so the hard FK is confirmed workable. Non-owner
     `app_runtime` role **created 2026-07-12 on both branches** (LOGIN, CRUD +
     default privileges on `public`, RLS-subject; no superuser/bypassrls/DDL),
-    **without a password** — the credential is set + copied from the Neon Console,
-    never the chat. Grants keep the current `public` schema working so the rotation
-    is safe.
+    initially **without a password**. Set the credential via the branch **SQL
+    Editor** — `ALTER ROLE app_runtime PASSWORD '…'` — **not** the Console's
+    role UI: Neon's control plane can't set/reset the password of a role created
+    in SQL (the Console shows the role's connection string but with no password),
+    so the SQL Editor is the way. Then paste the password into the
+    Console-provided string (`postgresql://app_runtime:<pw>@<host>/neondb?sslmode=require&channel_binding=require`;
+    drop to `channel_binding=prefer` if sqlx's SCRAM trips). Never the chat.
+    Grants keep the current `public` schema working so the rotation is safe.
   - **Migrations move out of the app** (decided 2026-07-12, replacing the earlier
     dual-URL idea): the app never runs DDL. `MIGRATOR.run` leaves startup; migrations
     run as a **Render pre-deploy step** under `neondb_owner` (owner URL in Render env
