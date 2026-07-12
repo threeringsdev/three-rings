@@ -87,12 +87,19 @@ of our stack integrate differently:
 3. ~~Set `trusted_origins`~~ **Done** — Render URL on production; `allow_localhost`
    covers dev. Add the per-branch `base_url`/`jwks_url` to app config (`.env.example`
    has the dev URL; Render gets production).
-4. **Move migrations out of the app** (shared with data-model): drop `MIGRATOR.run`
-   from startup; add a migrate step (subcommand/bin) run as a Render **pre-deploy
-   command** under an owner `MIGRATION_DATABASE_URL` (Render + local only); document
-   the local migrate command. *Then* rotate Render's `DATABASE_URL` → `app_runtime`.
-5. Axum JWKS-verify middleware (EdDSA) → `sub` → `SET LOCAL app.user_id`; 401 on
-   missing/invalid.
+4. ~~Move migrations out of the app~~ **Done** (PR #3): `MIGRATOR.run` dropped from
+   startup; `server --migrate` step added (reads owner `MIGRATION_DATABASE_URL`).
+   Delivery is **Option B** — [`scripts/migrate.sh`](../scripts/migrate.sh) run
+   manually from the dev container (Render free tier has no pre-deploy hook; owner
+   cred stays off Render + CI). See [data-model](data-model.md) → Migration plan.
+   Still pending (maintainer, ops): set the `app_runtime` passwords and rotate
+   Render's `DATABASE_URL` → `app_runtime`.
+5. ~~Axum JWKS-verify middleware (EdDSA)~~ **Verification core done** (2026-07-12,
+   `app/src/auth.rs`): fetch+cache the branch JWKS, verify EdDSA signature +
+   issuer + expiry, extract `sub` uuid, expose an `AuthUser` bearer extractor;
+   `/api/me` probe route (401 without a valid token). Still to wire in this task:
+   `SET LOCAL app.user_id` (arrives with the data-model per-request tx) and the
+   cookie token source (step 6, path B). 401 on missing/invalid confirmed.
 6. Sign-in/up/refresh proxy + httpOnly cookie session (path B); minimal Leptos
    `/login` + `/signup` screens per the wireframes.
 7. **Tauri token spike (host-side):** confirm the cookie session round-trips through
@@ -161,9 +168,14 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     `neon_auth."user"`, so the hard FK is confirmed workable. Non-owner
     `app_runtime` role **created 2026-07-12 on both branches** (LOGIN, CRUD +
     default privileges on `public`, RLS-subject; no superuser/bypassrls/DDL),
-    **without a password** — the credential is set + copied from the Neon Console,
-    never the chat. Grants keep the current `public` schema working so the rotation
-    is safe.
+    initially **without a password**. Set the credential via the branch **SQL
+    Editor** — `ALTER ROLE app_runtime PASSWORD '…'` — **not** the Console's
+    role UI: Neon's control plane can't set/reset the password of a role created
+    in SQL (the Console shows the role's connection string but with no password),
+    so the SQL Editor is the way. Then paste the password into the
+    Console-provided string (`postgresql://app_runtime:<pw>@<host>/neondb?sslmode=require&channel_binding=require`;
+    drop to `channel_binding=prefer` if sqlx's SCRAM trips). Never the chat.
+    Grants keep the current `public` schema working so the rotation is safe.
   - **Migrations move out of the app** (decided 2026-07-12, replacing the earlier
     dual-URL idea): the app never runs DDL. `MIGRATOR.run` leaves startup; migrations
     run as a **Render pre-deploy step** under `neondb_owner` (owner URL in Render env
@@ -174,3 +186,21 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     the OKP `x`; cache the JWKS and refresh on unknown `kid`. RSA-only JWKS helper
     crates (and possibly `axum-jwks`) won't handle OKP, so use `jsonwebtoken`
     directly. Middleware config: issuer = base-URL origin, `sub` = user uuid.
+- 2026-07-12 — **JWKS middleware built** (`app/src/auth.rs`, ssr-only; step 5).
+  `Verifier` fetches `<base_url>/.well-known/jwks.json`, caches by `kid`,
+  refreshes lazily on an unknown `kid` (covers rotation), and verifies
+  `Algorithm::EdDSA` + issuer + `exp`; `DecodingKey::from_ed_der(&x)` takes the
+  raw base64url `x` (32 bytes) despite the `_der` name. An `AuthUser`
+  `FromRequestParts` extractor yields the `sub` uuid; a `/api/me` probe route
+  returns it (401 otherwise). New deps (all ssr-optional): `jsonwebtoken`,
+  `reqwest` (rustls, no OpenSSL), `base64`, `uuid`. Live dev JWKS confirmed to
+  match the parser: one key `{kty:OKP, crv:Ed25519, alg:EdDSA, kid, x}`.
+  - **Unconfirmed until a real token exists:** the exact `iss` claim value.
+    Better Auth may set it to the full base_url *or* its origin, so the verifier
+    accepts **both** for now; narrow it to the observed value during step 6
+    (sign-in flow), when a live token is available to inspect.
+  - Deliberately **not** wired yet: `SET LOCAL app.user_id` (needs the
+    data-model per-request transaction) and the httpOnly-cookie token source
+    (step 6, path B) — the extractor reads `Authorization: Bearer` today, which
+    the cookie proxy will feed later. End-to-end signature verification against a
+    real signed token is deferred to step 6 for the same reason.

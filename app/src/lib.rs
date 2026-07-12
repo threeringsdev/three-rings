@@ -300,6 +300,9 @@ fn CardsPage() -> impl IntoView {
 pub mod components;
 
 #[cfg(feature = "ssr")]
+pub mod auth;
+
+#[cfg(feature = "ssr")]
 pub mod db;
 
 #[cfg(feature = "ssr")]
@@ -446,8 +449,17 @@ pub async fn get_cards() -> Result<Vec<Card>, ServerFnError<String>> {
     }
 }
 
+/// Probe endpoint proving JWT auth end-to-end: verifies the bearer token and
+/// echoes the caller's user id. 401 without a valid token. Superseded by real
+/// `/my/*` routes once the data model lands; kept minimal until then.
+#[cfg(feature = "ssr")]
+async fn me(user: crate::auth::AuthUser) -> String {
+    user.user_id.to_string()
+}
+
 #[cfg(feature = "ssr")]
 pub fn build_router(leptos_options: LeptosOptions) -> axum::Router {
+    use axum::routing::get;
     use axum::Router;
     use leptos_axum::{generate_route_list, LeptosRoutes};
     use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -465,6 +477,7 @@ pub fn build_router(leptos_options: LeptosOptions) -> axum::Router {
         .allow_headers([axum::http::header::CONTENT_TYPE]);
 
     Router::new()
+        .route("/api/me", get(me))
         .leptos_routes(&leptos_options, routes, {
             let leptos_options = leptos_options.clone();
             move || shell(leptos_options.clone())

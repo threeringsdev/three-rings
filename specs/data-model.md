@@ -381,18 +381,30 @@ data-access-backends — RLS is a backstop, not the sole layer).
 — *not* the PgBouncer pooler, whose transaction mode breaks migration advisory
 locks (architecture-spike Finding). Numbered `NNNN_description.sql`.
 
-**How migrations run (decided 2026-07-12).** Neon has no managed migration runner
-(unlike Supabase's CLI+platform), so we run them ourselves — but **not from the
-app**. The spike wired `MIGRATOR.run` into server startup ([app/src/db.rs](../app/src/db.rs));
-that call is removed. Migrations run as a **separate deploy step** under the
-`neondb_owner` credential (a Render **pre-deploy command**; the owner URL lives only
-in Render env + local dev, **never GitHub** — consistent with the standing "no
-DATABASE_URL in GitHub" rule). The running web server connects as the non-owner
-**`app_runtime`** role (created 2026-07-12 on both branches: CRUD + RLS-subject, no
-DDL/superuser/bypassrls), so the long-running process never holds owner/DDL power.
-Local dev runs the same migrate step manually against the `dev` branch when the
-schema changes. This removes the app-startup DDL entirely — the runtime needs only
-one credential (`app_runtime`), no in-app role juggling.
+**How migrations run (decided 2026-07-12; delivery revised 2026-07-12 — Option B).**
+Neon has no managed migration runner (unlike Supabase's CLI+platform), so we run
+them ourselves — but **not from the app**. The spike wired `MIGRATOR.run` into
+server startup ([app/src/db.rs](../app/src/db.rs)); that call is removed. Migrations
+run as a **separate owner-privileged step** (`server --migrate`, reading
+`MIGRATION_DATABASE_URL` = the `neondb_owner` credential). The running web server
+connects as the non-owner **`app_runtime`** role (created 2026-07-12 on both
+branches: CRUD + RLS-subject, no DDL/superuser/bypassrls), so the long-running
+process never holds owner/DDL power.
+
+*Who invokes that step* depends on the plan. The clean target is a **Render
+pre-deploy command** (`/app/server --migrate`), which runs migrations in-deploy
+under an owner URL in Render env only. **But Render's free tier has no pre-deploy
+hook**, and our standing rule keeps DB creds out of GitHub Actions, so on free tier
+we use **Option B: apply migrations manually from the trusted dev container** via
+[`scripts/migrate.sh`](../scripts/migrate.sh) (`dev` default, `prod` with a
+confirmation), reading owner strings from `.devcontainer/.env`. The owner credential
+then lives **only** on the maintainer's machine — never on Render (so an app
+compromise yields only `app_runtime`) and never in CI. Render holds just
+`DATABASE_URL` = `app_runtime`. Discipline: run `scripts/migrate.sh prod` **before**
+pushing code that depends on the new schema (expand-first / backward-compatible
+migrations). Upgrade path: on a paid Render plan, move this to a pre-deploy command
+and drop the manual step. This removes app-startup DDL entirely — the runtime needs
+only one credential (`app_runtime`), no in-app role juggling.
 
 Neon Auth is **already provisioned on both branches**, so `neon_auth."user"`
 exists and both groups below can run in sequence. Kept as two groups for clarity
