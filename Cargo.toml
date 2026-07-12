@@ -7,11 +7,23 @@ license = "MIT"
 authors = ["Dylan Goings <dylan.goings@atomicobject.com>"]
 
 
-# need to be applied only to wasm build
+# Size-optimized profile for the wasm hydrate bundle (download size matters).
+# cargo-leptos builds the frontend lib with this (lib-profile-release default).
 [profile.release]
 codegen-units = 1
 lto = true
 opt-level = 'z'
+
+# Fast profile for the native SSR `server` binary — it isn't size-constrained
+# like the wasm bundle, so the compile-expensive LTO / single-codegen-unit /
+# size-opt above only slow it down for no runtime benefit. Selected via
+# cargo-leptos `bin-profile-release` below. See specs/delivery-pipeline.md →
+# "Build performance (deploy time)".
+[profile.server-release]
+inherits = "release"
+lto = false
+codegen-units = 16
+opt-level = 2
 
 [workspace.dependencies]
 leptos = { version = "0.8.2" }
@@ -55,6 +67,11 @@ name = "app"
 
 # the package in the workspace that contains the server binary (binary crate)
 bin-package = "server"
+
+# Build the SSR server binary with the fast native profile (no wasm-only LTO /
+# codegen-units=1 / opt-z). The frontend wasm lib keeps [profile.release] via the
+# default lib-profile-release. See specs/delivery-pipeline.md → Build performance.
+bin-profile-release = "server-release"
 
 # the package in the workspace that contains the frontend wasm binary (library crate)
 lib-package = "frontend"
