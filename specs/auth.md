@@ -91,8 +91,12 @@ of our stack integrate differently:
    from startup; add a migrate step (subcommand/bin) run as a Render **pre-deploy
    command** under an owner `MIGRATION_DATABASE_URL` (Render + local only); document
    the local migrate command. *Then* rotate Render's `DATABASE_URL` → `app_runtime`.
-5. Axum JWKS-verify middleware (EdDSA) → `sub` → `SET LOCAL app.user_id`; 401 on
-   missing/invalid.
+5. ~~Axum JWKS-verify middleware (EdDSA)~~ **Verification core done** (2026-07-12,
+   `app/src/auth.rs`): fetch+cache the branch JWKS, verify EdDSA signature +
+   issuer + expiry, extract `sub` uuid, expose an `AuthUser` bearer extractor;
+   `/api/me` probe route (401 without a valid token). Still to wire in this task:
+   `SET LOCAL app.user_id` (arrives with the data-model per-request tx) and the
+   cookie token source (step 6, path B). 401 on missing/invalid confirmed.
 6. Sign-in/up/refresh proxy + httpOnly cookie session (path B); minimal Leptos
    `/login` + `/signup` screens per the wireframes.
 7. **Tauri token spike (host-side):** confirm the cookie session round-trips through
@@ -174,3 +178,21 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     the OKP `x`; cache the JWKS and refresh on unknown `kid`. RSA-only JWKS helper
     crates (and possibly `axum-jwks`) won't handle OKP, so use `jsonwebtoken`
     directly. Middleware config: issuer = base-URL origin, `sub` = user uuid.
+- 2026-07-12 — **JWKS middleware built** (`app/src/auth.rs`, ssr-only; step 5).
+  `Verifier` fetches `<base_url>/.well-known/jwks.json`, caches by `kid`,
+  refreshes lazily on an unknown `kid` (covers rotation), and verifies
+  `Algorithm::EdDSA` + issuer + `exp`; `DecodingKey::from_ed_der(&x)` takes the
+  raw base64url `x` (32 bytes) despite the `_der` name. An `AuthUser`
+  `FromRequestParts` extractor yields the `sub` uuid; a `/api/me` probe route
+  returns it (401 otherwise). New deps (all ssr-optional): `jsonwebtoken`,
+  `reqwest` (rustls, no OpenSSL), `base64`, `uuid`. Live dev JWKS confirmed to
+  match the parser: one key `{kty:OKP, crv:Ed25519, alg:EdDSA, kid, x}`.
+  - **Unconfirmed until a real token exists:** the exact `iss` claim value.
+    Better Auth may set it to the full base_url *or* its origin, so the verifier
+    accepts **both** for now; narrow it to the observed value during step 6
+    (sign-in flow), when a live token is available to inspect.
+  - Deliberately **not** wired yet: `SET LOCAL app.user_id` (needs the
+    data-model per-request transaction) and the httpOnly-cookie token source
+    (step 6, path B) — the extractor reads `Authorization: Bearer` today, which
+    the cookie proxy will feed later. End-to-end signature verification against a
+    real signed token is deferred to step 6 for the same reason.
