@@ -68,6 +68,63 @@ Every publish stamps provenance: the release body carries the source commit SHA 
 - Render is the maintainer's platform choice (2026-07-09, superseding the design-time Railway draft). Nothing here depends on Render specifics beyond "PaaS that builds a Dockerfile from GitHub"; Fly.io is the named fallback.
 - **Free tier, spin-down accepted** (2026-07-09): idle services cold-start on the next request, which is fine for remote checking. Move to the paid always-on instance only if it grates in practice.
 
+### Build performance (deploy time)
+
+Render rebuilds the image from scratch on every push to `main`, and the first
+cut was doing the two most wasteful things possible for a Rust build:
+
+1. **Global release profile.** `[profile.release]` set `lto=true` +
+   `codegen-units=1` + `opt-level='z'` — intended (per the Cargo.toml comment)
+   for the size-sensitive **wasm bundle**, but with no profile split it also hit
+   the **native `server` binary**, i.e. fat LTO and single-unit codegen on the
+   heaviest crate (axum/hyper/tokio/sqlx/rustls/reqwest/leptos-ssr), which also
+   defeats codegen parallelism so more build CPU wouldn't help.
+2. **No dependency caching.** The Dockerfile `COPY . .` *before* the build, so any
+   source change invalidates the layer and all ~300 dependency crates recompile.
+
+**Fix, two parts:**
+
+- **Profile split — done 2026-07-12.** New `[profile.server-release]`
+  (`inherits="release"`, `lto=false`, `codegen-units=16`, `opt-level=2`), selected
+  for the binary via cargo-leptos `bin-profile-release`; the wasm lib keeps the
+  size-optimized `[profile.release]` (`lib-profile-release` default). Server-side
+  runtime perf is unaffected in practice; compile time drops and parallelism
+  returns. Measured cold `cargo build -p server` on an 18-core host: **44.3s →
+  31.5s (~29% faster)**. The bigger signal is core utilization — OLD used only
+  ~4.2× parallelism (fat LTO is serial, `cgu=1` throttles), NEW ~10.5×: the old
+  profile *can't* use a big builder. Caveat: NEW does ~1.8× more total CPU work
+  (LTO-free but parallel), so break-even is ~7 cores; below that the server slice
+  could be slower. Render's build core count is unverified — confirm on the first
+  post-merge deploy vs the historical ~6 min, and dial `codegen-units` down if a
+  low-core builder regresses. (This is why cargo-chef, below, is the more robust
+  win — it's core-count-independent.)
+
+- **cargo-chef dependency caching — planned (Dockerfile refactor).** Restructure
+  the build stage so dependencies compile in a layer keyed only on
+  `Cargo.toml`/`Cargo.lock`:
+  - `chef` base: `FROM rust:1-bookworm AS chef`, install `cargo-chef` (binstall).
+  - `planner`: `COPY . .` → `cargo chef prepare --recipe-path recipe.json`.
+  - `builder`: `COPY --from=planner /app/recipe.json .` →
+    `cargo chef cook --release --recipe-path recipe.json` (deps only) → then
+    `COPY . .` → `cargo leptos build --release` (only app code recompiles).
+  - **Dual-target wrinkle:** cargo-leptos builds *both* the native bin and the
+    `wasm32-unknown-unknown` frontend lib, so `cook` must cover both targets (a
+    native cook **and** `--target wasm32-unknown-unknown`) and use the **same
+    profile names** cargo-leptos will use (`server-release` for the bin), or those
+    crates rebuild anyway. Acceptable first step: cache the native tree only
+    (already the heavy, now-LTO-free part) and iterate.
+  - Also pin/prefetch the `tailwindcss` binary cargo-leptos downloads (via
+    `LEPTOS_TAILWIND_VERSION`) into a cached layer so it isn't refetched each build.
+  - Optional: **mold** linker (`-fuse-ld=mold`) — link time matters more with LTO
+    off. Cheap add.
+  - **Caveat:** the payoff needs Render to persist Docker layer cache across
+    deploys. Render reuses build cache best-effort but can cold-start it;
+    cargo-chef helps whenever warm and is neutral when cold. If Render's cache
+    proves unreliable, escalate to **sccache with an S3 backend** (always-warm,
+    external) — deferred until measured need.
+  - **Scope:** Dockerfile-only. No effect on the container dev flow or the merge
+    gate; verified by a Render deploy timing before/after the refactor.
+
 ### Agent self-sufficiency contract
 
 The repo alone (plus documented secrets) must get an agent from clone to verified push, on any host:
