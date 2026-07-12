@@ -7,10 +7,11 @@ async fn main() {
         std::env::set_var("LEPTOS_OUTPUT_NAME", "app");
     }
 
-    // Deploy-time migration step: `server --migrate` runs pending migrations as
-    // the owner/migration role and exits, so the serving process below can run
+    // Owner-privileged migration step: `server --migrate` runs pending migrations
+    // as the owner/migration role and exits, so the serving process below can run
     // as a non-owner role with no DDL rights (specs/data-model.md → Migration
-    // plan). Wire it as a Render pre-deploy command.
+    // plan). Invoked via scripts/migrate.sh (Option B, free tier); a Render
+    // pre-deploy command is the future paid path.
     if std::env::args().any(|arg| arg == "--migrate") {
         match app::db::migrate().await {
             Ok(()) => {

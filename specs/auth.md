@@ -87,10 +87,13 @@ of our stack integrate differently:
 3. ~~Set `trusted_origins`~~ **Done** — Render URL on production; `allow_localhost`
    covers dev. Add the per-branch `base_url`/`jwks_url` to app config (`.env.example`
    has the dev URL; Render gets production).
-4. **Move migrations out of the app** (shared with data-model): drop `MIGRATOR.run`
-   from startup; add a migrate step (subcommand/bin) run as a Render **pre-deploy
-   command** under an owner `MIGRATION_DATABASE_URL` (Render + local only); document
-   the local migrate command. *Then* rotate Render's `DATABASE_URL` → `app_runtime`.
+4. ~~Move migrations out of the app~~ **Done** (PR #3): `MIGRATOR.run` dropped from
+   startup; `server --migrate` step added (reads owner `MIGRATION_DATABASE_URL`).
+   Delivery is **Option B** — [`scripts/migrate.sh`](../scripts/migrate.sh) run
+   manually from the dev container (Render free tier has no pre-deploy hook; owner
+   cred stays off Render + CI). See [data-model](data-model.md) → Migration plan.
+   Still pending (maintainer, ops): set the `app_runtime` passwords and rotate
+   Render's `DATABASE_URL` → `app_runtime`.
 5. ~~Axum JWKS-verify middleware (EdDSA)~~ **Verification core done** (2026-07-12,
    `app/src/auth.rs`): fetch+cache the branch JWKS, verify EdDSA signature +
    issuer + expiry, extract `sub` uuid, expose an `AuthUser` bearer extractor;
