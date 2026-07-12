@@ -99,31 +99,61 @@ cut was doing the two most wasteful things possible for a Rust build:
   low-core builder regresses. (This is why cargo-chef, below, is the more robust
   win — it's core-count-independent.)
 
-- **cargo-chef dependency caching — planned (Dockerfile refactor).** Restructure
-  the build stage so dependencies compile in a layer keyed only on
-  `Cargo.toml`/`Cargo.lock`:
-  - `chef` base: `FROM rust:1-bookworm AS chef`, install `cargo-chef` (binstall).
-  - `planner`: `COPY . .` → `cargo chef prepare --recipe-path recipe.json`.
-  - `builder`: `COPY --from=planner /app/recipe.json .` →
-    `cargo chef cook --release --recipe-path recipe.json` (deps only) → then
-    `COPY . .` → `cargo leptos build --release` (only app code recompiles).
-  - **Dual-target wrinkle:** cargo-leptos builds *both* the native bin and the
-    `wasm32-unknown-unknown` frontend lib, so `cook` must cover both targets (a
-    native cook **and** `--target wasm32-unknown-unknown`) and use the **same
-    profile names** cargo-leptos will use (`server-release` for the bin), or those
-    crates rebuild anyway. Acceptable first step: cache the native tree only
-    (already the heavy, now-LTO-free part) and iterate.
-  - Also pin/prefetch the `tailwindcss` binary cargo-leptos downloads (via
-    `LEPTOS_TAILWIND_VERSION`) into a cached layer so it isn't refetched each build.
-  - Optional: **mold** linker (`-fuse-ld=mold`) — link time matters more with LTO
-    off. Cheap add.
-  - **Caveat:** the payoff needs Render to persist Docker layer cache across
-    deploys. Render reuses build cache best-effort but can cold-start it;
-    cargo-chef helps whenever warm and is neutral when cold. If Render's cache
-    proves unreliable, escalate to **sccache with an S3 backend** (always-warm,
-    external) — deferred until measured need.
-  - **Scope:** Dockerfile-only. No effect on the container dev flow or the merge
-    gate; verified by a Render deploy timing before/after the refactor.
+- **cargo-chef dependency caching — done 2026-07-12 (Dockerfile refactor).**
+  Stages: `chef` (rust:1-bookworm + mold + binstalled cargo-leptos@0.3.7 /
+  cargo-chef@0.1.77 + pinned frontend tools) → `planner` (`COPY . .` →
+  `cargo chef prepare`) → `builder` (two cooks, then `COPY . .` →
+  `cargo leptos build --release`) → the unchanged slim runtime. Findings:
+  - **The cooks must mirror cargo-leptos's real invocations** (verified against
+    the cargo-leptos 0.3.7 source), or the deps silently recompile in the final
+    step. Two cooks: native `--package server --bin server
+    --no-default-features --profile server-release`, and wasm `--package
+    frontend --no-default-features --release --target wasm32-unknown-unknown
+    --target-dir target/front`. Non-obvious bits: cargo-leptos builds the
+    frontend lib into a **separate `target/front` target dir**, and `-p`
+    scoping keeps `src-tauri`'s dep tree out of the cook (its Linux system libs
+    aren't in the image). `cargo chef prepare` correctly preserves
+    `[profile.server-release]` and `.cargo/config.toml` in the recipe.
+  - **Measured (local Docker, linux/arm64, 18-core M-series):** cold **137s**
+    (native cook 92.3s + wasm cook 23.7s + final build 9.0s); after a
+    source-only edit, warm rebuild **9s total** — both cook layers CACHED, the
+    final step recompiles only `app`/`frontend`/`server` (~7.5s). ~15× on the
+    compile phase; absolute times will differ on Render's builder but the
+    cached/uncached split is core-count-independent. Verified end-to-end: the
+    warm image SSRs `/` and `/cards` fails politely without `DATABASE_URL`.
+  - **Tool prefetch went further than the planned `LEPTOS_TAILWIND_VERSION`
+    pin:** cargo-leptos prefers tools already on `PATH` (`which` lookup in
+    `exe.rs`) over its download/cache machinery, so the chef stage installs
+    pinned **tailwindcss v4.2.1**, **binaryen version_123 (wasm-opt)**, and
+    **wasm-bindgen 0.2.103** into `/usr/local/bin` — zero per-build downloads
+    *and* zero GitHub "latest" API checks (unpinned cargo-leptos queries the
+    GitHub API for newer tools on a builder with an empty cache — a rate-limit
+    /flakiness risk on shared PaaS builder IPs). The `WASM_BINDGEN_VERSION`
+    build arg must track the exact `wasm-bindgen = "=0.2.103"` pin in
+    Cargo.toml; a mismatch fails the build loudly (CLI schema check).
+  - **mold linker added**, scoped to the native linux triples via
+    `$CARGO_HOME/config.toml` so wasm is untouched; cook and final build see
+    identical rustflags, keeping fingerprints (and so the dep cache) stable.
+  - **Render layer-cache caveat — resolved: Render persists build cache across
+    deploys.** Direct evidence from the `dep-d9a0364...` build log (2026-07-12):
+    `importing cache manifest` (registry-backed OCI cache) followed by `CACHED`
+    on intermediate *build-stage* layers from a deploy 53 minutes earlier, on
+    an ephemeral builder. Docs concur ("Render caches all intermediate build
+    layers"; failures no longer clear the cache). Eviction/longevity is
+    unquantified, so the **sccache + S3** escalation stays the named fallback
+    if cook layers prove cold in practice — confirm on the second post-merge
+    deploy (its log should show the two `cargo chef cook` layers `CACHED`).
+  - **Surprise: `main`'s Render deploy was already broken.** PR #5 squash-merged
+    *without* the branch's `e5df220` Dockerfile fix, so main's Dockerfile still
+    copied `target/release/server` — a path the profile split emptied — and the
+    d7b3dc0 deploy failed at the runtime COPY (`build_failed`, 21:05Z). The
+    standalone fix (`e5df220`) then landed mid-task as PR #6 (auto-merged
+    21:31Z, forcing a rebase of this refactor); the new layout preserves it
+    (runtime copies `target/server-release/server`).
+  - **Scope held:** Dockerfile-only — Cargo.toml untouched (`codegen-units`
+    stays 16; Render builder core count still unverified, watch the first
+    post-merge deploy), container dev flow and merge gate unaffected
+    (`cargo leptos build --release` verified locally).
 
 ### Agent self-sufficiency contract
 
