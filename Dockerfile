@@ -21,7 +21,10 @@ RUN curl -fsSL https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/
 WORKDIR /app
 COPY . .
 
-# Produces target/release/server + target/site. cargo-leptos downloads the
+# Produces target/server-release/server + target/site. The server binary lands in
+# target/server-release/ (not target/release/) because cargo-leptos builds the bin
+# with the `server-release` profile — see bin-profile-release in Cargo.toml and
+# specs/delivery-pipeline.md → "Build performance". cargo-leptos downloads the
 # standalone tailwindcss binary for the build arch on first run (needs network).
 RUN cargo leptos build --release
 
@@ -37,7 +40,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=build /app/target/release/server /app/server
+COPY --from=build /app/target/server-release/server /app/server
 COPY --from=build /app/target/site /app/site
 
 # Leptos reads these at runtime — get_configuration(None) has no Cargo.toml to
