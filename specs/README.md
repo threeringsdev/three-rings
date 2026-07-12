@@ -43,12 +43,12 @@ Task state legend: `[ ]` available · `[~]` in progress · `[x]` done.
 |---|---|
 | [agent-harness](agent-harness.md) | draft |
 | [architecture-spike](architecture-spike.md) | implemented |
-| [auth](auth.md) | draft |
+| [auth](auth.md) | accepted |
 | [catalog-ingestion](catalog-ingestion.md) | draft |
 | [catalog-search](catalog-search.md) | draft |
 | [collection-api](collection-api.md) | draft |
 | [data-access-backends](data-access-backends.md) | draft |
-| [data-model](data-model.md) | draft |
+| [data-model](data-model.md) | accepted |
 | [delivery-pipeline](delivery-pipeline.md) | accepted |
 | [dev-environment](dev-environment.md) | implemented |
 | [ui-component-bench](ui-component-bench.md) | draft |

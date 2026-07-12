@@ -6,6 +6,24 @@ async fn main() {
     if std::env::var("LEPTOS_OUTPUT_NAME").is_err() {
         std::env::set_var("LEPTOS_OUTPUT_NAME", "app");
     }
+
+    // Deploy-time migration step: `server --migrate` runs pending migrations as
+    // the owner/migration role and exits, so the serving process below can run
+    // as a non-owner role with no DDL rights (specs/data-model.md → Migration
+    // plan). Wire it as a Render pre-deploy command.
+    if std::env::args().any(|arg| arg == "--migrate") {
+        match app::db::migrate().await {
+            Ok(()) => {
+                log!("migrations: up to date");
+                return;
+            }
+            Err(e) => {
+                log!("migrations FAILED: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let conf = get_configuration(None).unwrap();
     let addr = conf.leptos_options.site_addr;
     let leptos_options = conf.leptos_options;
