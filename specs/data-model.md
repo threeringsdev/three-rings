@@ -381,6 +381,19 @@ data-access-backends — RLS is a backstop, not the sole layer).
 — *not* the PgBouncer pooler, whose transaction mode breaks migration advisory
 locks (architecture-spike Finding). Numbered `NNNN_description.sql`.
 
+**How migrations run (decided 2026-07-12).** Neon has no managed migration runner
+(unlike Supabase's CLI+platform), so we run them ourselves — but **not from the
+app**. The spike wired `MIGRATOR.run` into server startup ([app/src/db.rs](../app/src/db.rs));
+that call is removed. Migrations run as a **separate deploy step** under the
+`neondb_owner` credential (a Render **pre-deploy command**; the owner URL lives only
+in Render env + local dev, **never GitHub** — consistent with the standing "no
+DATABASE_URL in GitHub" rule). The running web server connects as the non-owner
+**`app_runtime`** role (created 2026-07-12 on both branches: CRUD + RLS-subject, no
+DDL/superuser/bypassrls), so the long-running process never holds owner/DDL power.
+Local dev runs the same migrate step manually against the `dev` branch when the
+schema changes. This removes the app-startup DDL entirely — the runtime needs only
+one credential (`app_runtime`), no in-app role juggling.
+
 Neon Auth is **already provisioned on both branches**, so `neon_auth."user"`
 exists and both groups below can run in sequence. Kept as two groups for clarity
 (and because the catalog group has no auth dependency at all):

@@ -82,17 +82,22 @@ of our stack integrate differently:
 
 1. ~~Enable Neon Auth~~ **Done** — already provisioned on both branches (2026-07-06
    production, 2026-07-11 dev). Config captured in Findings.
-2. **[maintainer / ops]** Create the non-owner application role; point the runtime
-   `DATABASE_URL` at it (migrations still run as owner). Shared with data-model.
-3. Set `trusted_origins` (localhost:3000 + the Render URL) via `configure_neon_auth`;
-   add the per-branch `base_url` / `jwks_url` to app config (`.env.example` + Render).
-4. Axum JWKS-verify middleware → `sub` → `SET LOCAL app.user_id`; 401 on
+2. ~~Create the non-owner app role~~ **Done** — `app_runtime` on both branches
+   (2026-07-12). Credential still to be set in the Console + placed in Render/local env.
+3. ~~Set `trusted_origins`~~ **Done** — Render URL on production; `allow_localhost`
+   covers dev. Add the per-branch `base_url`/`jwks_url` to app config (`.env.example`
+   has the dev URL; Render gets production).
+4. **Move migrations out of the app** (shared with data-model): drop `MIGRATOR.run`
+   from startup; add a migrate step (subcommand/bin) run as a Render **pre-deploy
+   command** under an owner `MIGRATION_DATABASE_URL` (Render + local only); document
+   the local migrate command. *Then* rotate Render's `DATABASE_URL` → `app_runtime`.
+5. Axum JWKS-verify middleware (EdDSA) → `sub` → `SET LOCAL app.user_id`; 401 on
    missing/invalid.
-5. Sign-in/up/refresh proxy + httpOnly cookie session (path B); minimal Leptos
+6. Sign-in/up/refresh proxy + httpOnly cookie session (path B); minimal Leptos
    `/login` + `/signup` screens per the wireframes.
-6. **Tauri token spike (host-side):** confirm the cookie session round-trips through
+7. **Tauri token spike (host-side):** confirm the cookie session round-trips through
    the embedded Axum server in the webview on desktop + Android.
-7. Decide the deferred toggles (email verification, password reset, OAuth social) and
+8. Decide the deferred toggles (email verification, password reset, OAuth social) and
    record in Findings.
 
 ## Open questions
@@ -153,12 +158,17 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     to the production branch (CSRF + redirect allowlist); `allow_localhost=true`
     already covers `http://localhost:3000` for dev.
   - **App role** — `neondb_owner` has `USAGE`/`SELECT`/`REFERENCES` on
-    `neon_auth."user"`, so the hard FK is confirmed workable. Creating the non-owner
-    `app_runtime` role is pending the maintainer's explicit approval of the exact
-    grant (the safety classifier flagged it); it will be created **without a
-    password** so the credential is set + copied from the Neon Console, never the
-    chat. Grants keep the current public schema readable so the rotation is safe
-    before the RLS tables land.
+    `neon_auth."user"`, so the hard FK is confirmed workable. Non-owner
+    `app_runtime` role **created 2026-07-12 on both branches** (LOGIN, CRUD +
+    default privileges on `public`, RLS-subject; no superuser/bypassrls/DDL),
+    **without a password** — the credential is set + copied from the Neon Console,
+    never the chat. Grants keep the current `public` schema working so the rotation
+    is safe.
+  - **Migrations move out of the app** (decided 2026-07-12, replacing the earlier
+    dual-URL idea): the app never runs DDL. `MIGRATOR.run` leaves startup; migrations
+    run as a **Render pre-deploy step** under `neondb_owner` (owner URL in Render env
+    + local dev only, never GitHub). The web server runs as `app_runtime` with one
+    credential. See [data-model](data-model.md) → Migration plan.
   - **JWKS algorithm = EdDSA / Ed25519** (`kty:OKP`, one key, `kid` present) on both
     branches → verify with `jsonwebtoken` (v9, EdDSA) building a `DecodingKey` from
     the OKP `x`; cache the JWKS and refresh on unknown `kid`. RSA-only JWKS helper
