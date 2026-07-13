@@ -126,10 +126,12 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
 
 - ~~Spike: session/token behavior inside Tauri webviews vs. the browser~~
   **Resolved (2026-07-13, desktop):** same-origin httpOnly cookies on the
-  embedded `127.0.0.1` server work in the webview (password + OTP flows);
-  Google is unavailable inside the webview — upstream rejects `127.0.0.1`
-  callback URLs *and* Google blocks OAuth in embedded webviews — future path
-  is system-browser + deep link (parked in TODO).
+  embedded `127.0.0.1` server work in the webview — the full gated
+  sign-up → OTP → auto-sign-in flow passes in the app window. Google is
+  unavailable *inside* the webview (upstream rejects `127.0.0.1` callback
+  URLs; Google blocks OAuth in embedded webviews) — the desktop path is the
+  system browser + loopback callback to the embedded server, designed in
+  Findings and queued as a Phase 3 task.
 - ~~Frontend fork (A) vs. (B)~~ **Resolved: (B) server-side proxy + our own
   httpOnly cookies**, implemented and verified — including Google, which stays
   path B via the verifier/challenge exchange (no cross-origin cookies
@@ -268,16 +270,29 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     `EMAIL_NOT_VERIFIED` → we re-send a code and surface the OTP step.
     OTP method beats link for this stack: the code is entered in-app, so the
     flow is identical in browser and Tauri webviews.
-  - **Tauri desktop spike:** release `.app` runs the embedded Axum on a
-    dynamic `127.0.0.1` port; the upstream accepts that origin for
-    password/OTP (sign-in through the embedded server verified). **Google
-    inside the webview is a dead end** — upstream rejects `127.0.0.1`
-    callback URLs (`INVALID_CALLBACKURL`; literal `localhost` is accepted)
-    and Google itself blocks OAuth in embedded webviews (`disallowed_useragent`)
-    — the login page now says so instead of no-op'ing; system-browser +
-    deep-link is the future desktop path (parked). Packaged `.app`s get env
-    from the launching shell only — the spike run passes `NEON_AUTH_BASE_URL`
-    on the command line; native config baking belongs to data-access-backends.
+  - **Tauri desktop spike — PASS (2026-07-13, maintainer-confirmed):**
+    release `.app` runs the embedded Axum on a dynamic `127.0.0.1` port; the
+    full gated flow works *inside the WKWebView* — sign-up → "check your
+    email" card → OTP → auto-signed-in footer — so the webview carries our
+    httpOnly cookies exactly like a browser. **Google inside the webview is a
+    dead end** — upstream rejects `127.0.0.1` callback URLs
+    (`INVALID_CALLBACKURL`; literal `localhost` is accepted) and Google
+    itself blocks OAuth in embedded webviews (`disallowed_useragent`, the
+    same policy that makes every desktop app open the system browser) — the
+    login page says so instead of no-op'ing. **Desktop Google plan (queued,
+    TODO Phase 3):** open the flow in the *system browser* (Tauri v2 opener)
+    with `callbackURL = http://localhost:<embedded port>/auth/callback` —
+    both halves verified viable (upstream trusts `localhost` callbacks;
+    Google allows loopback redirects for native apps). The one real change:
+    the embedded single-user server must hold the OAuth *challenge* in
+    memory between start and callback (the system browser never has our
+    cookie); webview refetches auth state on window focus. Also noted:
+    OAuth-created accounts have no password credential, so the same email
+    can't password-sign-up ("User already exists") — Better Auth account
+    linking exists if that UX ever matters (parked). Packaged `.app`s get
+    env from the launching shell only — the spike run passes
+    `NEON_AUTH_BASE_URL` on the command line; native config baking belongs
+    to data-access-backends.
   - **Regression caught: a unit `Suspense` fallback breaks hydration
     app-wide.** The first `AuthStatus` used `<Suspense fallback=|| ()>`;
     under leptos 0.8's out-of-order streaming that SSRs a `<!--<() />-->`
