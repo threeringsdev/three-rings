@@ -289,10 +289,13 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     cookie); webview refetches auth state on window focus. Also noted:
     OAuth-created accounts have no password credential, so the same email
     can't password-sign-up ("User already exists") — Better Auth account
-    linking exists if that UX ever matters (parked). Packaged `.app`s get
-    env from the launching shell only — the spike run passes
-    `NEON_AUTH_BASE_URL` on the command line; native config baking belongs
-    to data-access-backends.
+    linking exists if that UX ever matters (parked). Packaged release apps get
+    no environment at all (Finder-launched `.app`, Android APK) — surfaced in
+    the field as "Google sign-in isn't available right now" (the server fn
+    500s with no `NEON_AUTH_BASE_URL`) — so the Tauri shell now bakes the
+    **production** auth base URL as a release-build default (non-secret;
+    exported env still wins, so terminal launches can point at dev). Fuller
+    native config plumbing still belongs to data-access-backends.
   - **Regression caught: a unit `Suspense` fallback breaks hydration
     app-wide.** The first `AuthStatus` used `<Suspense fallback=|| ()>`;
     under leptos 0.8's out-of-order streaming that SSRs a `<!--<() />-->`
