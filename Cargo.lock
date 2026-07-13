@@ -108,6 +108,7 @@ dependencies = [
  "leptos_router",
  "reqwest 0.12.28",
  "serde",
+ "serde_json",
  "spin-sdk",
  "sqlx",
  "thiserror 2.0.18",

@@ -43,6 +43,8 @@ pub fn App() -> impl IntoView {
                 <Routes fallback=|| "Page not found.".into_view()>
                     <Route path=StaticSegment("") view=HomePage />
                     <Route path=StaticSegment("cards") view=CardsPage />
+                    <Route path=StaticSegment("login") view=auth_pages::LoginPage />
+                    <Route path=StaticSegment("signup") view=auth_pages::SignupPage />
                 </Routes>
             </main>
         </Router>
@@ -220,13 +222,14 @@ fn HomePage() -> impl IntoView {
                     </div>
 
                     // Footer info
-                    <div class="pt-4 border-t border-[#3a4a5c]">
+                    <div class="pt-4 border-t border-[#3a4a5c] space-y-1">
                         <p class="text-[#8b9cb8] text-xs">
                             "Running in Tauri WebView"
                         </p>
                         <a class="text-[#8b9cb8] text-xs underline" href="/cards">
                             "View the card table →"
                         </a>
+                        <auth_pages::AuthStatus />
                     </div>
                 </div>
             </div>
@@ -297,6 +300,8 @@ fn CardsPage() -> impl IntoView {
     }
 }
 
+pub mod account;
+pub mod auth_pages;
 pub mod components;
 
 #[cfg(feature = "ssr")]
@@ -457,6 +462,79 @@ async fn me(user: crate::auth::AuthUser) -> String {
     user.user_id.to_string()
 }
 
+/// Lands the Google sign-in redirect (specs/auth.md → Integration
+/// architecture): exchanges the callback's session verifier plus the
+/// challenge held in our httpOnly cookie for an upstream session, re-hosts
+/// it in our cookies, and bounces to `/`. Any missing piece or upstream
+/// refusal bounces to `/login?error=google` — the flow is restartable.
+#[cfg(feature = "ssr")]
+async fn auth_callback(
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use crate::auth::{cookies, upstream};
+    use axum::http::header::{LOCATION, SET_COOKIE};
+    use axum::http::StatusCode;
+
+    let origin = cookies::request_origin(&headers);
+    let secure = cookies::request_is_secure(&headers);
+
+    let session = match (
+        params.get(upstream::SESSION_VERIFIER_PARAM),
+        cookies::cookie_value(&headers, cookies::CHALLENGE_COOKIE),
+    ) {
+        (Some(verifier), Some(challenge)) => {
+            upstream::social_complete(&origin, verifier, &challenge).await
+        }
+        _ => Err(upstream::UpstreamError::Http(
+            "missing verifier or challenge".into(),
+        )),
+    };
+
+    let mut response = axum::http::Response::builder().status(StatusCode::SEE_OTHER);
+    match session {
+        Ok(session) => match upstream::mint_jwt(&origin, &session.cookie_value).await {
+            Ok(jwt) => {
+                response = response
+                    .header(LOCATION, "/")
+                    .header(
+                        SET_COOKIE,
+                        cookies::set_cookie(
+                            cookies::SESSION_COOKIE,
+                            &session.cookie_value,
+                            cookies::SESSION_MAX_AGE,
+                            secure,
+                        ),
+                    )
+                    .header(
+                        SET_COOKIE,
+                        cookies::set_cookie(
+                            cookies::JWT_COOKIE,
+                            &jwt,
+                            cookies::JWT_MAX_AGE,
+                            secure,
+                        ),
+                    );
+            }
+            Err(e) => {
+                leptos::logging::log!("google callback: token mint failed: {e}");
+                response = response.header(LOCATION, "/login?error=google");
+            }
+        },
+        Err(e) => {
+            leptos::logging::log!("google callback: exchange failed: {e}");
+            response = response.header(LOCATION, "/login?error=google");
+        }
+    }
+    response
+        .header(
+            SET_COOKIE,
+            cookies::clear_cookie(cookies::CHALLENGE_COOKIE, secure),
+        )
+        .body(axum::body::Body::empty())
+        .expect("static redirect response construction cannot fail")
+}
+
 #[cfg(feature = "ssr")]
 pub fn build_router(leptos_options: LeptosOptions) -> axum::Router {
     use axum::routing::get;
@@ -478,6 +556,7 @@ pub fn build_router(leptos_options: LeptosOptions) -> axum::Router {
 
     Router::new()
         .route("/api/me", get(me))
+        .route("/auth/callback", get(auth_callback))
         .leptos_routes(&leptos_options, routes, {
             let leptos_options = leptos_options.clone();
             move || shell(leptos_options.clone())
