@@ -61,10 +61,14 @@ pub fn LoginPage() -> impl IntoView {
         None => {}
     });
 
-    Effect::new(move |_| {
-        if let Some(Ok(url)) = google.value().get() {
-            redirect_browser(&url);
-        }
+    Effect::new(move |_| match google.value().get() {
+        Some(Ok(url)) => redirect_browser(&url),
+        // Upstream refuses e.g. 127.0.0.1 callback URLs (Tauri's embedded
+        // origin) — say so instead of silently doing nothing.
+        Some(Err(_)) => set_error.set(Some(
+            "Google sign-in isn't available here — use email and password.".into(),
+        )),
+        None => {}
     });
 
     let google_error = move || {
@@ -263,7 +267,7 @@ pub fn AuthStatus() -> impl IntoView {
 
     view! {
         <div class="text-[#8b9cb8] text-xs">
-            <Suspense fallback=|| ()>
+            <Suspense fallback=|| view! { <span>"…"</span> }>
                 {move || Suspend::new(async move {
                     match user.await {
                         Ok(Some(CurrentUser { email, name, .. })) => {

@@ -97,31 +97,49 @@ of our stack integrate differently:
 5. ~~Axum JWKS-verify middleware (EdDSA)~~ **Verification core done** (2026-07-12,
    `app/src/auth.rs`): fetch+cache the branch JWKS, verify EdDSA signature +
    issuer + expiry, extract `sub` uuid, expose an `AuthUser` bearer extractor;
-   `/api/me` probe route (401 without a valid token). Still to wire in this task:
-   `SET LOCAL app.user_id` (arrives with the data-model per-request tx) and the
-   cookie token source (step 6, path B). 401 on missing/invalid confirmed.
-6. Sign-in/up/refresh proxy + httpOnly cookie session (path B); minimal Leptos
-   `/login` + `/signup` screens per the wireframes.
-7. **Tauri token spike (host-side):** confirm the cookie session round-trips through
-   the embedded Axum server in the webview on desktop + Android.
-8. Decide the deferred toggles (email verification, password reset, OAuth social) and
-   record in Findings.
+   `/api/me` probe route (401 without a valid token). **Correction 2026-07-13:**
+   this core silently 401'd every *real* token (`InvalidAudience` — see
+   Findings); fixed in step 6. `SET LOCAL app.user_id` still arrives with the
+   data-model per-request tx.
+6. ~~Sign-in/up/refresh proxy + httpOnly cookie session (path B); minimal Leptos
+   `/login` + `/signup` screens~~ **Done 2026-07-13** — `app/src/auth/upstream.rs`
+   (Better Auth REST client), `app/src/auth/cookies.rs` (our `tr_session` /
+   `tr_jwt` / `tr_challenge` httpOnly cookies), `app/src/account.rs` (server
+   fns at stable `/api/*` endpoints), `app/src/auth_pages.rs` (`/login`,
+   `/signup`, OTP step, home-footer status), `/auth/callback` route (Google).
+   All flows verified live against the dev branch — see Findings.
+7. **Tauri token spike (host-side)** — desktop `.app` built and run: the
+   embedded Axum serves the auth server fns on its dynamic `127.0.0.1` port and
+   the upstream accepts that origin for the password/OTP flows (verified by
+   driving the embedded server directly); webview cookie round-trip result in
+   Findings. Android leg deferred (CI builds it; same webview family as the
+   spiked desktop path).
+8. ~~Decide the deferred toggles~~ **Decided 2026-07-13 (maintainer):** email
+   verification **on** (`require_email_verification=true`, OTP method, both
+   branches — flipped via Console), Google OAuth **on** (was already enabled,
+   shared credentials, both branches). Password reset not yet wired — queued
+   as a follow-up task in TODO.md.
 
 ## Open questions
 
 Accepted with these deferred to this task's execution; none blocks acceptance.
 
-- Spike (still needed): session/token behavior inside Tauri webviews on all
-  platforms vs. the browser, for the chosen frontend path (B). *(resolved during
-  execution — this task)*
-- Frontend fork **(A) client-side Better Auth + Bearer JWT** vs. **(B) server-side
-  proxy + our own httpOnly cookie** — leaning B; settle with the Tauri spike.
-  *(resolved during execution — this task)*
-- Email verification / password reset — Better Auth covers these (currently off:
-  `verify_email_on_sign_up=false`); decide what to turn on for the prototype.
-  *(resolved during execution — this task)*
-- OAuth social login — Google is available (shared credentials) out of the box;
-  worth enabling for v1? *(resolved during execution — this task)*
+- ~~Spike: session/token behavior inside Tauri webviews vs. the browser~~
+  **Resolved (2026-07-13, desktop):** same-origin httpOnly cookies on the
+  embedded `127.0.0.1` server work in the webview (password + OTP flows);
+  Google is unavailable inside the webview — upstream rejects `127.0.0.1`
+  callback URLs *and* Google blocks OAuth in embedded webviews — future path
+  is system-browser + deep link (parked in TODO).
+- ~~Frontend fork (A) vs. (B)~~ **Resolved: (B) server-side proxy + our own
+  httpOnly cookies**, implemented and verified — including Google, which stays
+  path B via the verifier/challenge exchange (no cross-origin cookies
+  anywhere; see Findings).
+- ~~Email verification / password reset~~ **Resolved:** verification **on**
+  (OTP; `require_email_verification=true` on both branches). Password reset
+  exists upstream (`/forget-password`) but isn't wired — follow-up task.
+- ~~OAuth social login~~ **Resolved:** Google **on** (shared credentials, both
+  branches); web flow verified live. Own Google credentials only needed if we
+  outgrow the shared ones (branding/quotas).
 - Self-hosting / lock-in: Neon Auth is hosted, but the engine is **Better Auth**
   (MIT, fully self-hostable) and the schema lives in our own DB — a real exit path.
   *(accepted risk — Better Auth OSS is the fallback)*
@@ -204,3 +222,77 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     (step 6, path B) — the extractor reads `Authorization: Bearer` today, which
     the cookie proxy will feed later. End-to-end signature verification against a
     real signed token is deferred to step 6 for the same reason.
+- 2026-07-13 — **Path B shipped and verified live (step 6); toggles decided
+  (step 8); desktop spike run (step 7).** The whole surface was probed against
+  the live dev auth service before implementation; everything below is
+  observed behavior, not documentation.
+  - **The step-5 verifier rejected every real token** — `jsonwebtoken` v9
+    fails tokens carrying an `aud` claim unless an expected audience is
+    configured (`InvalidAudience`), and live tokens carry `aud`. Both `iss`
+    and `aud` are the base URL's **origin** (no `/neondb/auth` path; live
+    token inspected), so the verifier now validates both against the origin.
+    Real-token verification is exercised on every sign-in (the proxy verifies
+    each JWT it mints). JWT lifetime is **15 min**; sessions are **7 days**;
+    claims carry `email`/`name`/`emailVerified` (used for `CurrentUser`).
+  - **Upstream mechanics (all verified by probe):** every state-changing call
+    must send an `Origin` header the service trusts (`MISSING_ORIGIN`
+    otherwise) — the proxy derives it from the request's
+    `x-forwarded-proto`/`host`; sessions arrive only as the
+    `__Secure-neon-auth.session_token` Set-Cookie (body `token` is the
+    unsigned form; bearer replay is *not* accepted — cookie replay is), and
+    `GET /token` mints the JWT. OTP endpoints:
+    `POST /email-otp/send-verification-otp` + `POST /email-otp/verify-email`.
+  - **Google stays pure path B.** Mechanism read from Neon's own server SDK
+    (`neon-js` `packages/auth/src/server/middleware/oauth.ts`) and confirmed
+    live: `POST /sign-in/social` returns the hosted-flow URL *and* a
+    `session_challange` cookie (upstream's typo) that we re-host as our
+    httpOnly `tr_challenge`; the browser returns to
+    `/auth/callback?neon_auth_session_verifier=…`; the server exchanges
+    verifier + challenge via `GET /get-session?…` for the session. No
+    cross-origin cookies at any point (the naive "fetch `/token` from the
+    browser after callback" bridge would die on partitioned/blocked
+    third-party cookies — this is why the SDK flow was worth excavating).
+    **Verified end-to-end with a real Google consent** (web, dev branch).
+  - **Our cookies** (httpOnly, SameSite=Lax, `Secure` when forwarded-proto is
+    https): `tr_session` (upstream session value, 7 d), `tr_jwt` (15 min),
+    `tr_challenge` (10 min, OAuth window only). `AuthUser` reads Bearer first,
+    then `tr_jwt`; `current_user` re-mints an expired JWT from `tr_session`
+    transparently (the refresh path — verified: session-only request returns
+    the user and a fresh `tr_jwt`).
+  - **Verification toggles:** the Console's toggle maps to
+    `require_email_verification` (the API's `verify_email_on_sign_up` stays
+    `false` — behaviorally irrelevant: with require on, sign-up creates the
+    account, issues **no** session, and **auto-mails the OTP**). Verified on
+    the gated config: sign-up → `VerificationRequired` → mailed code →
+    `verify-email` → auto-signed-in with cookies; unverified sign-in →
+    `EMAIL_NOT_VERIFIED` → we re-send a code and surface the OTP step.
+    OTP method beats link for this stack: the code is entered in-app, so the
+    flow is identical in browser and Tauri webviews.
+  - **Tauri desktop spike:** release `.app` runs the embedded Axum on a
+    dynamic `127.0.0.1` port; the upstream accepts that origin for
+    password/OTP (sign-in through the embedded server verified). **Google
+    inside the webview is a dead end** — upstream rejects `127.0.0.1`
+    callback URLs (`INVALID_CALLBACKURL`; literal `localhost` is accepted)
+    and Google itself blocks OAuth in embedded webviews (`disallowed_useragent`)
+    — the login page now says so instead of no-op'ing; system-browser +
+    deep-link is the future desktop path (parked). Packaged `.app`s get env
+    from the launching shell only — the spike run passes `NEON_AUTH_BASE_URL`
+    on the command line; native config baking belongs to data-access-backends.
+  - **Regression caught: a unit `Suspense` fallback breaks hydration
+    app-wide.** The first `AuthStatus` used `<Suspense fallback=|| ()>`;
+    under leptos 0.8's out-of-order streaming that SSRs a `<!--<() />-->`
+    marker which desyncs the hydration cursor — the wasm then panics
+    ("expected a marker node", reported at the unrelated `Stylesheet`) and
+    **all** interactivity dies on every route, not just the one rendering the
+    component. Fix: any real element as fallback (`<span>"…"</span>`).
+    Found/verified with a headless console-error probe
+    (`end2end/hydration-check.mjs`); the full login→footer→sign-out UI drive
+    is `end2end/auth-e2e.mjs` (playwright, ad-hoc — not wired into CI).
+    Rule of thumb recorded: never use `()` as a `Suspense` fallback.
+  - **Ops:** Render got `NEON_AUTH_BASE_URL` (production base URL, non-secret,
+    set by maintainer). Host-side note: `cargo leptos watch` reads a root
+    `.env`, but the bare server binary does not — and a `.env` with `&` in
+    `DATABASE_URL` can't be shell-`source`d (parse it like
+    `scripts/migrate.sh` does). Dev-branch test users left behind:
+    `tr-spike-1@example.com`, `dylan.goings+tr-dev{1,2,3}@atomicobject.com`
+    (harmless; clear from the Neon Auth console at will).
