@@ -49,3 +49,23 @@ pub fn take_session() -> Option<Session> {
         .expect("session lock poisoned")
         .take()
 }
+
+/// Complete a Google sign-in whose callback returned through the deep link
+/// (Android: the OS freezes the backgrounded app, so the system browser
+/// can't reach the embedded server the way desktop browsers can; the public
+/// web origin's `/auth/app-return` page hands the verifier back via
+/// `three-rings://auth/callback` instead — specs/auth.md). Exchanges the
+/// verifier + parked challenge for a session and parks that for the
+/// webview's `current_user` poll, exactly like the loopback callback path.
+/// A stolen verifier is useless without the challenge held here, so a rogue
+/// app claiming the scheme gains nothing.
+pub async fn complete_google_return(verifier: &str) -> Result<(), String> {
+    let origin = embedded_origin().ok_or("not running with an embedded server")?;
+    let challenge = take_challenge()
+        .ok_or("no pending sign-in challenge (app restarted mid-flow? — start over)")?;
+    let session = super::upstream::social_complete(&origin, verifier, &challenge)
+        .await
+        .map_err(|e| e.to_string())?;
+    stash_session(session);
+    Ok(())
+}

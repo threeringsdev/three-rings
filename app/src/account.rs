@@ -315,8 +315,25 @@ pub async fn google_sign_in() -> Result<String, ServerFnError<String>> {
         let origin = native_origin
             .clone()
             .unwrap_or_else(|| cookies::request_origin(&headers));
-        let callback = format!("{origin}/auth/callback");
-        let error_url = format!("{origin}/login?error=google");
+        // Where Google sends the browser back. Web and desktop take this
+        // origin directly (a desktop browser can reach the embedded loopback
+        // server). Android cannot: the OS freezes the backgrounded app, so
+        // its loopback server never answers the redirect (observed live —
+        // Chrome timed out on localhost:36265). Route Android through the
+        // public web origin, whose /auth/app-return page bounces the
+        // verifier into the app via the three-rings:// deep link.
+        let (callback, error_url) = if native_origin.is_some() && cfg!(target_os = "android") {
+            // Non-secret, like the baked auth URL in src-tauri; env wins.
+            let web = std::env::var("TR_WEB_ORIGIN")
+                .unwrap_or_else(|_| "https://three-rings-6p5o.onrender.com".into());
+            let bounce = format!("{web}/auth/app-return");
+            (bounce.clone(), bounce)
+        } else {
+            (
+                format!("{origin}/auth/callback"),
+                format!("{origin}/login?error=google"),
+            )
+        };
         let (url, challenge) = upstream::social_start(&origin, "google", &callback, &error_url)
             .await
             .map_err(ssr::server_err)?;

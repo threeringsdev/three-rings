@@ -9,6 +9,12 @@
     "beforeDevCommand": "cd .. && cargo leptos watch",
     "beforeBuildCommand": "cd .. && cargo leptos build --release"
   },
+  "plugins": {
+    "deep-link": {
+      "mobile": [{ "scheme": ["three-rings"] }],
+      "desktop": { "schemes": ["three-rings"] }
+    }
+  },
   "app": {
     "windows": [
       {

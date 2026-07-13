@@ -364,3 +364,46 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     `DATABASE_URL`/`NEON_AUTH_BASE_URL` without shell gymnastics; dev-mode
     Google needs `TR_EMBEDDED_ORIGIN=http://localhost:3000` exported so the
     watch server holds the handoff state).
+- 2026-07-13 (Android follow-up) — **Android Google return rebuilt as a deep
+  link: a frozen backgrounded app cannot serve its loopback callback.**
+  - **Diagnosis.** On-device test: the browser opened, Google authenticated,
+    the upstream redirected to `http://localhost:36265/auth/callback?…verifier`
+    — and Chrome *timed out*. A killed app would have refused the connection
+    instantly; a timeout means the kernel completed the TCP handshake on the
+    listening socket but the app never served the request. That is Android's
+    cached-app freezer suspending the backgrounded app while Chrome was
+    foreground. Desktop is unaffected (macOS doesn't freeze the app; its flow
+    keeps working) — this is exactly RFC 8252's split: loopback redirects for
+    desktop, app-claimed links for mobile.
+  - **Rejected: custom scheme as the upstream callback.** Probed live:
+    `POST /sign-in/social` with `callbackURL: "three-rings://auth/callback"`
+    → `INVALID_CALLBACKURL`; the service only takes http(s). Verified App
+    Links were also passed over — they need `assetlinks.json` + the signing
+    cert fingerprint for no real gain here.
+  - **Design shipped.** Android's `google_sign_in` (runtime
+    `cfg!(target_os = "android")`, so host clippy still checks it) sends the
+    *public web origin*'s `/auth/app-return` as both callback and error URL
+    (probe-verified: the prod upstream accepts the Render callback with a
+    `localhost` Origin header). That page (static HTML in `build_router`, no
+    server state, query forwarded client-side from `location.search` so
+    nothing user-controlled is interpolated) bounces onto
+    `three-rings://auth/callback?…verifier` — JS auto-attempt plus a visible
+    "Open the app" link, since Chrome may demand a user gesture for custom
+    schemes. The deep link foregrounds the app (manifest already
+    `singleTask`); `tauri-plugin-deep-link`'s `on_open_url` extracts the
+    verifier and `app::auth::native::complete_google_return` runs the
+    verifier + parked-challenge exchange in-process, parking the session for
+    the webview's existing `current_user` poll. The intent-filter is injected
+    into `gen/android`'s manifest at build time by the plugin from
+    `tauri.conf.json` (`plugins.deep-link.mobile`), so CI's APK claims the
+    scheme with no manifest edit.
+  - **Notes.** The web origin is baked like the auth URL
+    (`TR_WEB_ORIGIN` env wins; Render default in `account.rs`). Scheme
+    squatting is harmless: a rogue app catching the verifier lacks the
+    challenge, which never leaves our process. If Android *kills* (not
+    freezes) the app mid-flow the parked challenge is lost and the exchange
+    fails with a logged "start over" error — acceptable, the flow is
+    restartable. The bounce page ships with the web deploy and the APK builds
+    on the same merge, so both surfaces update together. Desktop keeps the
+    loopback path untouched (the deep-link handler is registered there too
+    but never exercised).
