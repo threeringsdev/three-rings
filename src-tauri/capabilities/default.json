@@ -6,6 +6,14 @@
     "main"
   ],
   "permissions": [
-    "core:default"
-  ]
+    "core:default",
+    "allow-open-url"
+  ],
+  "remote": {
+    "urls": [
+      "http://localhost:*",
+      "http://127.0.0.1:*"
+    ]
+  },
+  "local": true
 }

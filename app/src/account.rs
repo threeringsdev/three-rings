@@ -249,11 +249,17 @@ pub async fn fetch_current_user() -> Result<Option<CurrentUser>, ServerFnError<S
                 return Ok(Some(claims.into()));
             }
         }
-        let Some(session_value) = cookies::cookie_value(&headers, cookies::SESSION_COOKIE) else {
-            return Ok(None);
-        };
-        let session = upstream::Session {
-            cookie_value: session_value,
+        let session = match cookies::cookie_value(&headers, cookies::SESSION_COOKIE) {
+            Some(session_value) => upstream::Session {
+                cookie_value: session_value,
+            },
+            // Tauri: a system-browser Google flow may have parked a session
+            // on the embedded server — claim it and re-host it as ordinary
+            // webview cookies (the login page polls this fn for exactly that).
+            None => match crate::auth::native::take_session() {
+                Some(session) => session,
+                None => return Ok(None),
+            },
         };
         match ssr::establish_session(&origin, secure, &session).await {
             Ok(user) => Ok(Some(user)),
@@ -291,20 +297,32 @@ pub async fn sign_out() -> Result<(), ServerFnError<String>> {
 }
 
 /// Start the Google sign-in: returns the provider URL for the browser to
-/// navigate to, holding the upstream's challenge in our httpOnly cookie for
-/// the `/auth/callback` exchange.
+/// navigate to, holding the upstream's challenge for the `/auth/callback`
+/// exchange — in our httpOnly cookie on the web, and *also* in the embedded
+/// server's memory under a Tauri shell (the flow runs in the system browser
+/// there, which never carries our webview cookies).
 #[server(prefix = "/api", endpoint = "google_sign_in")]
 pub async fn google_sign_in() -> Result<String, ServerFnError<String>> {
     #[cfg(feature = "ssr")]
     {
-        use crate::auth::{cookies, upstream};
+        use crate::auth::{cookies, native, upstream};
         let headers = ssr::request_headers().await?;
-        let origin = cookies::request_origin(&headers);
         let secure = cookies::request_is_secure(&headers);
+        // Under Tauri, use the shell-exported loopback origin for both the
+        // upstream Origin header and the callback: the auth service trusts
+        // `localhost` but rejects the `127.0.0.1` spelling the webview uses.
+        let native_origin = native::embedded_origin();
+        let origin = native_origin
+            .clone()
+            .unwrap_or_else(|| cookies::request_origin(&headers));
         let callback = format!("{origin}/auth/callback");
-        let (url, challenge) = upstream::social_start(&origin, "google", &callback)
+        let error_url = format!("{origin}/login?error=google");
+        let (url, challenge) = upstream::social_start(&origin, "google", &callback, &error_url)
             .await
             .map_err(ssr::server_err)?;
+        if native_origin.is_some() {
+            native::stash_challenge(challenge.clone());
+        }
         ssr::append_set_cookie(&cookies::set_cookie(
             cookies::CHALLENGE_COOKIE,
             &challenge,

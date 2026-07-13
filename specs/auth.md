@@ -311,3 +311,53 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     `scripts/migrate.sh` does). Dev-branch test users left behind:
     `tr-spike-1@example.com`, `dylan.goings+tr-dev{1,2,3}@atomicobject.com`
     (harmless; clear from the Neon Auth console at will).
+- 2026-07-13 (later) — **Production shakedown fixes + desktop Google built.**
+  Maintainer testing on the deployed app surfaced four issues; root causes
+  and fixes:
+  - **First-time Google users bounced back signed out** (second attempt
+    worked). No callback error was ever logged and `/auth/callback` was never
+    reached — Better Auth routes *new* social users via `newUserCallbackURL`,
+    which we didn't send, so first-timers skipped our exchange entirely.
+    `social_start` now sends `callbackURL`, `newUserCallbackURL` (same URL),
+    and `errorCallbackURL` (`/login?error=google`). Needs a fresh Google
+    account (or a deleted user row) to re-verify in production.
+  - **Sign-up had no Google option** — the button is now a shared
+    `GoogleButton` component on both `/login` and `/signup` (social sign-in
+    creates the account on first use, so one flow serves both).
+  - **No way off `/login`//`/signup` without browser chrome** — both cards
+    (and the OTP step) got a "← Back to home" link; native apps have no back
+    button.
+  - **Desktop/Android Google implemented** (the queued system-browser task):
+    the Tauri shell exports `TR_EMBEDDED_ORIGIN=http://localhost:<port>`;
+    `google_sign_in` then uses that for the upstream Origin + callback URL
+    and parks the OAuth challenge in process memory
+    (`app/src/auth/native.rs` — safe: the embedded server is single-user);
+    the webview opens the flow in the **system browser** via the shell
+    plugin (`withGlobalTauri` + `shell:allow-open`, called through
+    `js_sys::Reflect`) and polls `current_user` every 2 s (≤3 min); the
+    callback lands in the external browser on the embedded server, exchanges
+    verifier + memory-challenge, parks the session, and shows "return to the
+    app"; the poll claims the session and re-hosts it as webview cookies.
+    Verified by simulation against the live dev service (localhost callback
+    accepted; memory-challenge exchange fired upstream; bogus verifier
+    correctly rejected `VERIFICATION_NOT_FOUND`), then **confirmed end-to-end
+    on the desktop app by the maintainer** (browser opens → consent →
+    "return to the app" → footer signed-in via the poll). Android rides the
+    identical code path (loopback callback + opener Intent) — check on device
+    from the next rolling APK.
+  - **Getting the browser to open took three Tauri v2 lessons**, recorded so
+    nobody relearns them: (1) `window.__TAURI__.shell.open` accepted the call
+    and rejected the promise *silently* — surfaced by attaching a rejection
+    handler that reports into the UI; (2) app-defined commands are ACL-gated
+    like plugin commands ("Command open_url not allowed by ACL") — permissions
+    must be *generated* via `tauri_build::AppManifest::commands` and allowed
+    in the capability; (3) the actual root cause of every denial: our pages
+    live on `http://127.0.0.1:<port>` / `http://localhost:3000`, which Tauri
+    classifies as **remote** origins — capabilities don't apply there until
+    the capability opts in (`remote.urls`). Also swapped the deprecated shell
+    `open` for `tauri-plugin-opener` (the deprecation would fail CI's
+    `clippy -D warnings`), and the server now loads a workspace `.env` at
+    startup (dotenvy — host-side `cargo tauri dev`/`cargo leptos watch` get
+    `DATABASE_URL`/`NEON_AUTH_BASE_URL` without shell gymnastics; dev-mode
+    Google needs `TR_EMBEDDED_ORIGIN=http://localhost:3000` exported so the
+    watch server holds the handoff state).

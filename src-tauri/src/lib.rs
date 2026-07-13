@@ -12,10 +12,26 @@ struct ServerTask(tauri::async_runtime::JoinHandle<()>);
 #[cfg(all(not(debug_assertions), target_os = "android"))]
 struct ServerPort(u16);
 
+/// Open a URL in the system browser (Google OAuth hand-off — the webview
+/// itself is refused by Google). Invoked from the wasm frontend via
+/// `window.__TAURI__.core.invoke("open_url", …)`; the opener plugin's Rust
+/// API routes to `open` on desktop and an Intent on Android.
+#[tauri::command]
+fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("refusing to open a non-http(s) url".into());
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_log::Builder::default().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
@@ -140,6 +156,13 @@ pub fn run() {
                     Ok::<_, Box<dyn std::error::Error>>((port, listener))
                 })?;
 
+                // Tell the app crate it runs as a single-user embedded server:
+                // enables the system-browser Google flow (localhost callback +
+                // in-memory challenge/session handoff — app/src/auth/native.rs).
+                // `localhost`, not `127.0.0.1`: the auth service only trusts
+                // the former in callback URLs.
+                std::env::set_var("TR_EMBEDDED_ORIGIN", format!("http://localhost:{}", port));
+
                 let server_task = tauri::async_runtime::spawn(async move {
                     let _ = axum::serve(listener, router.into_make_service()).await;
                 });
@@ -214,7 +237,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![])
+        .invoke_handler(tauri::generate_handler![open_url])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

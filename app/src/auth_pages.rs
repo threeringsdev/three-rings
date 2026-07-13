@@ -39,10 +39,189 @@ fn redirect_browser(url: &str) {
     }
 }
 
+/// Inside a Tauri shell, open the URL in the *system browser* — Google
+/// refuses OAuth in embedded webviews. Calls the app's `open_url` command via
+/// `window.__TAURI__.core.invoke`; `on_reject` fires with a message if the
+/// shell rejects it (so failures surface in the UI instead of a silent
+/// "waiting" state). Returns false when not running under Tauri (plain web).
+fn tauri_open_url(url: &str, on_reject: impl Fn(String) + 'static) -> bool {
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+        let Some(w) = web_sys::window() else {
+            return false;
+        };
+        let Ok(tauri) = js_sys::Reflect::get(&w, &JsValue::from_str("__TAURI__")) else {
+            return false;
+        };
+        if tauri.is_undefined() || tauri.is_null() {
+            return false;
+        }
+        let Ok(core) = js_sys::Reflect::get(&tauri, &JsValue::from_str("core")) else {
+            return false;
+        };
+        let Ok(invoke) = js_sys::Reflect::get(&core, &JsValue::from_str("invoke")) else {
+            return false;
+        };
+        let Ok(invoke) = invoke.dyn_into::<js_sys::Function>() else {
+            return false;
+        };
+        let args = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&args, &JsValue::from_str("url"), &JsValue::from_str(url));
+        let Ok(result) = invoke.call2(&core, &JsValue::from_str("open_url"), &args) else {
+            return false;
+        };
+        let Ok(promise) = result.dyn_into::<js_sys::Promise>() else {
+            return false;
+        };
+        let catch = Closure::once(move |err: JsValue| {
+            on_reject(
+                err.as_string()
+                    .unwrap_or_else(|| "could not open the browser".into()),
+            );
+        });
+        let _ = promise.catch(&catch);
+        catch.forget();
+        true
+    }
+    #[cfg(not(feature = "hydrate"))]
+    {
+        let _ = (url, on_reject);
+        false
+    }
+}
+
+/// Start a browser interval; returns its id. Hydrate-only (client).
+fn set_poll_interval(f: impl FnMut() + 'static, ms: i32) -> Option<i32> {
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::closure::Closure;
+        use wasm_bindgen::JsCast;
+        let cb = Closure::wrap(Box::new(f) as Box<dyn FnMut()>);
+        let id = web_sys::window()?
+            .set_interval_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), ms)
+            .ok()?;
+        // Leaked deliberately: one short-lived closure per sign-in attempt,
+        // cleared via clear_poll_interval when the flow resolves.
+        cb.forget();
+        Some(id)
+    }
+    #[cfg(not(feature = "hydrate"))]
+    {
+        let _ = (f, ms);
+        None
+    }
+}
+
+fn clear_poll_interval(id: i32) {
+    #[cfg(feature = "hydrate")]
+    {
+        if let Some(w) = web_sys::window() {
+            w.clear_interval_with_handle(id);
+        }
+    }
+    #[cfg(not(feature = "hydrate"))]
+    {
+        let _ = id;
+    }
+}
+
+/// "Continue with Google", shared by the login and signup cards.
+///
+/// Web: navigates this window into the hosted flow (`/auth/callback` lands us
+/// back signed in). Tauri: opens the flow in the system browser and polls
+/// `current_user` until the embedded server has parked the session
+/// (specs/auth.md → desktop Google plan), then heads home.
+#[component]
+fn GoogleButton(set_error: WriteSignal<Option<String>>) -> impl IntoView {
+    let google = ServerAction::<GoogleSignIn>::new();
+    let poll = Action::new(|_: &()| crate::account::fetch_current_user());
+    let navigate = use_navigate();
+    let (waiting, set_waiting) = signal(false);
+    let interval_id: StoredValue<Option<i32>> = StoredValue::new(None);
+    let attempts: StoredValue<i32> = StoredValue::new(0);
+
+    let stop_polling = move || {
+        if let Some(id) = interval_id.try_get_value().flatten() {
+            clear_poll_interval(id);
+            interval_id.try_set_value(None);
+        }
+    };
+
+    Effect::new(move |_| match google.value().get() {
+        Some(Ok(url)) => {
+            let on_reject = move |message: String| {
+                stop_polling();
+                set_waiting.set(false);
+                set_error.set(Some(format!("Couldn't open the browser: {message}")));
+            };
+            if tauri_open_url(&url, on_reject) {
+                set_waiting.set(true);
+                attempts.set_value(0);
+                let id = set_poll_interval(
+                    move || {
+                        attempts.try_update_value(|n| *n += 1);
+                        if attempts.try_get_value().unwrap_or(i32::MAX) > 90 {
+                            stop_polling();
+                        } else {
+                            poll.dispatch(());
+                        }
+                    },
+                    2000,
+                );
+                interval_id.set_value(id);
+            } else {
+                redirect_browser(&url);
+            }
+        }
+        // Transport/config failure — on the web this shouldn't happen; keep
+        // the message honest either way.
+        Some(Err(_)) => set_error.set(Some(
+            "Google sign-in isn't available right now — use email and password.".into(),
+        )),
+        None => {}
+    });
+
+    Effect::new(move |_| {
+        if let Some(Ok(Some(_user))) = poll.value().get() {
+            stop_polling();
+            navigate("/", Default::default());
+        }
+    });
+
+    on_cleanup(stop_polling);
+
+    view! {
+        <button
+            class=BUTTON_GHOST
+            on:click=move |_| {
+                google.dispatch(GoogleSignIn {});
+            }
+            disabled=move || google.pending().get() || waiting.get()
+        >
+            {move || {
+                if waiting.get() { "Waiting for Google…" } else { "Continue with Google" }
+            }}
+        </button>
+    }
+}
+
+/// Muted escape hatch back to the home page — native apps have no browser
+/// back button.
+#[component]
+fn BackHome() -> impl IntoView {
+    view! {
+        <p class=MUTED_TEXT>
+            <a class="underline" href="/">
+                "← Back to home"
+            </a>
+        </p>
+    }
+}
+
 #[component]
 pub fn LoginPage() -> impl IntoView {
     let sign_in = ServerAction::<SignIn>::new();
-    let google = ServerAction::<GoogleSignIn>::new();
     let navigate = use_navigate();
     let query = use_query_map();
 
@@ -58,16 +237,6 @@ pub fn LoginPage() -> impl IntoView {
         }
         Some(Ok(AuthOutcome::Failed { message })) => set_error.set(Some(message)),
         Some(Err(_)) => set_error.set(Some("Something went wrong — try again.".into())),
-        None => {}
-    });
-
-    Effect::new(move |_| match google.value().get() {
-        Some(Ok(url)) => redirect_browser(&url),
-        // Upstream refuses e.g. 127.0.0.1 callback URLs (Tauri's embedded
-        // origin) — say so instead of silently doing nothing.
-        Some(Err(_)) => set_error.set(Some(
-            "Google sign-in isn't available here — use email and password.".into(),
-        )),
         None => {}
     });
 
@@ -105,15 +274,7 @@ pub fn LoginPage() -> impl IntoView {
                             {move || if sign_in.pending().get() { "Signing in…" } else { "Sign in" }}
                         </button>
                     </ActionForm>
-                    <button
-                        class=BUTTON_GHOST
-                        on:click=move |_| {
-                            google.dispatch(GoogleSignIn {});
-                        }
-                        disabled=move || google.pending().get()
-                    >
-                        "Continue with Google"
-                    </button>
+                    <GoogleButton set_error=set_error />
                     <Show when=move || error.get().is_some() || google_error().is_some()>
                         <p class=ERROR_TEXT>
                             {move || error.get().or_else(|| google_error().map(str::to_string))}
@@ -122,6 +283,7 @@ pub fn LoginPage() -> impl IntoView {
                     <p class=MUTED_TEXT>
                         "No account? " <a class="underline text-white" href="/signup">"Sign up"</a>
                     </p>
+                    <BackHome />
                 </div>
             </Show>
         </div>
@@ -180,6 +342,7 @@ pub fn SignupPage() -> impl IntoView {
                             }}
                         </button>
                     </ActionForm>
+                    <GoogleButton set_error=set_error />
                     <Show when=move || error.get().is_some()>
                         <p class=ERROR_TEXT>{move || error.get()}</p>
                     </Show>
@@ -187,6 +350,7 @@ pub fn SignupPage() -> impl IntoView {
                         "Already have an account? "
                         <a class="underline text-white" href="/login">"Sign in"</a>
                     </p>
+                    <BackHome />
                 </div>
             </Show>
         </div>
@@ -248,6 +412,7 @@ fn OtpCard(email: String) -> impl IntoView {
             <Show when=move || error.get().is_some()>
                 <p class=ERROR_TEXT>{move || error.get()}</p>
             </Show>
+            <BackHome />
         </div>
     }
 }
@@ -267,6 +432,8 @@ pub fn AuthStatus() -> impl IntoView {
 
     view! {
         <div class="text-[#8b9cb8] text-xs">
+            // NB: never a unit fallback — `|| ()` desyncs hydration app-wide
+            // (specs/auth.md Findings, 2026-07-13).
             <Suspense fallback=|| view! { <span>"…"</span> }>
                 {move || Suspend::new(async move {
                     match user.await {

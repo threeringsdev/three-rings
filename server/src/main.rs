@@ -3,6 +3,12 @@ use leptos::prelude::*;
 
 #[tokio::main]
 async fn main() {
+    // Load a workspace-root .env when present (host-side dev: DATABASE_URL,
+    // NEON_AUTH_BASE_URL — see .devcontainer/.env.example). No-op when the
+    // file doesn't exist (Render, containers pass real env). dotenvy never
+    // overrides variables already set in the environment.
+    dotenvy::dotenv().ok();
+
     if std::env::var("LEPTOS_OUTPUT_NAME").is_err() {
         std::env::set_var("LEPTOS_OUTPUT_NAME", "app");
     }
