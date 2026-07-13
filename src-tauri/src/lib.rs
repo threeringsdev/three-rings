@@ -32,6 +32,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_log::Builder::default().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
@@ -195,6 +196,43 @@ pub fn run() {
                 // Stash the port and navigate from on_page_load instead.
                 #[cfg(target_os = "android")]
                 app.manage(ServerPort(port));
+
+                // Android's Google flow returns through the three-rings://
+                // deep link (a frozen backgrounded app can't answer the
+                // browser on its loopback port — specs/auth.md): complete
+                // the verifier exchange here, in-process, now that the OS
+                // has foregrounded us. The webview's current_user polling
+                // then claims the parked session. Registered on desktop too
+                // (the scheme is in tauri.conf.json), where it is simply
+                // never exercised — desktop returns via the loopback server.
+                {
+                    use tauri_plugin_deep_link::DeepLinkExt;
+                    app.deep_link().on_open_url(|event| {
+                        for url in event.urls() {
+                            let verifier = url
+                                .query_pairs()
+                                .find(|(k, _)| k == app::auth::upstream::SESSION_VERIFIER_PARAM)
+                                .map(|(_, v)| v.into_owned());
+                            match verifier {
+                                Some(verifier) => {
+                                    tauri::async_runtime::spawn(async move {
+                                        match app::auth::native::complete_google_return(&verifier)
+                                            .await
+                                        {
+                                            Ok(()) => {
+                                                log::info!("google deep-link return: session parked")
+                                            }
+                                            Err(e) => {
+                                                log::error!("google deep-link return failed: {e}")
+                                            }
+                                        }
+                                    });
+                                }
+                                None => log::warn!("deep link without a session verifier: {url}"),
+                            }
+                        }
+                    });
+                }
 
                 #[cfg(not(target_os = "android"))]
                 {

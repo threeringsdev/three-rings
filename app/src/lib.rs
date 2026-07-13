@@ -556,6 +556,38 @@ async fn auth_callback(
     }
 }
 
+/// The Android return leg of the Google flow (specs/auth.md → Android
+/// deep-link return). Android freezes the backgrounded app, so the system
+/// browser cannot reach the embedded loopback server the way it does on
+/// desktop — the OAuth callback lands here on the *public web origin*
+/// instead, and this page hands the verifier back to the app through its
+/// `three-rings://` deep link (the scheme is registered in
+/// `src-tauri/tauri.conf.json`). The query is forwarded client-side from
+/// `location.search`, so nothing user-controlled is interpolated into the
+/// page. Auto-navigation to a custom scheme may need a user gesture in
+/// Chrome, hence the visible link.
+#[cfg(feature = "ssr")]
+async fn auth_app_return() -> axum::response::Response {
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(axum::body::Body::from(
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
+             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+             <title>Three Rings</title></head>\
+             <body style=\"background:#1a2332;color:#fff;font-family:sans-serif;\
+             display:grid;place-items:center;height:100vh;text-align:center\">\
+             <div><p>Returning to Three Rings\u{2026}</p>\
+             <p><a id=\"open\" style=\"color:#8ab4f8\" href=\"three-rings://auth/callback\">\
+             Open the app</a></p>\
+             <p style=\"opacity:.7\">You can close this tab once the app opens.</p></div>\
+             <script>var t=\"three-rings://auth/callback\"+location.search;\
+             document.getElementById(\"open\").href=t;location.replace(t);</script>\
+             </body></html>",
+        ))
+        .expect("static page construction cannot fail")
+}
+
 /// Bounce a failed Google callback to the login page (flow is restartable).
 #[cfg(feature = "ssr")]
 fn google_error_redirect(clear_challenge: String) -> axum::response::Response {
@@ -589,6 +621,7 @@ pub fn build_router(leptos_options: LeptosOptions) -> axum::Router {
     Router::new()
         .route("/api/me", get(me))
         .route("/auth/callback", get(auth_callback))
+        .route("/auth/app-return", get(auth_app_return))
         .leptos_routes(&leptos_options, routes, {
             let leptos_options = leptos_options.clone();
             move || shell(leptos_options.clone())
