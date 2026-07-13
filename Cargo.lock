@@ -101,6 +101,7 @@ dependencies = [
  "base64 0.22.1",
  "cfg-if",
  "http",
+ "js-sys",
  "jsonwebtoken",
  "leptos",
  "leptos_axum",
@@ -116,6 +117,7 @@ dependencies = [
  "tower-http",
  "tw_merge",
  "uuid",
+ "wasm-bindgen",
  "web-sys",
 ]
 

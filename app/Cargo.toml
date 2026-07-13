@@ -23,6 +23,8 @@ serde_json = { version = "1", optional = true }
 base64 = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 web-sys = { version = "0.3.80", features = ["Storage", "Window", "Location"], optional = true }
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen = { workspace = true, optional = true }
 
 http.workspace = true
 cfg-if.workspace = true
@@ -32,7 +34,7 @@ tw_merge.workspace = true
 
 [features]
 default = []
-hydrate = ["leptos/hydrate", "dep:web-sys"]
+hydrate = ["leptos/hydrate", "dep:web-sys", "dep:js-sys", "dep:wasm-bindgen"]
 ssr = [
     "leptos/ssr",
     "leptos_meta/ssr",

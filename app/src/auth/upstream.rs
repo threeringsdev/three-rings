@@ -257,10 +257,18 @@ pub async fn sign_out(origin: &str, session: &str) -> Result<(), UpstreamError> 
 
 /// Start a social sign-in. Returns the provider URL to send the browser to,
 /// plus the challenge cookie value to re-host on our origin for the callback.
+///
+/// `newUserCallbackURL` must be sent explicitly: without it, *first-time*
+/// social users are redirected without ever reaching our exchange (observed
+/// in production as "Google worked but I came back signed out; the second
+/// attempt worked" — the second attempt takes the existing-user
+/// `callbackURL` path). `errorCallbackURL` keeps provider-side failures on
+/// our login page instead of a dead end.
 pub async fn social_start(
     origin: &str,
     provider: &str,
     callback_url: &str,
+    error_url: &str,
 ) -> Result<(String, String), UpstreamError> {
     #[derive(Deserialize)]
     struct SocialResponse {
@@ -270,7 +278,12 @@ pub async fn social_start(
         reqwest::Method::POST,
         "/sign-in/social",
         origin,
-        Some(serde_json::json!({ "provider": provider, "callbackURL": callback_url })),
+        Some(serde_json::json!({
+            "provider": provider,
+            "callbackURL": callback_url,
+            "newUserCallbackURL": callback_url,
+            "errorCallbackURL": error_url,
+        })),
         None,
         None,
     )

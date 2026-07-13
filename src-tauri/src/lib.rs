@@ -140,6 +140,13 @@ pub fn run() {
                     Ok::<_, Box<dyn std::error::Error>>((port, listener))
                 })?;
 
+                // Tell the app crate it runs as a single-user embedded server:
+                // enables the system-browser Google flow (localhost callback +
+                // in-memory challenge/session handoff — app/src/auth/native.rs).
+                // `localhost`, not `127.0.0.1`: the auth service only trusts
+                // the former in callback URLs.
+                std::env::set_var("TR_EMBEDDED_ORIGIN", format!("http://localhost:{}", port));
+
                 let server_task = tauri::async_runtime::spawn(async move {
                     let _ = axum::serve(listener, router.into_make_service()).await;
                 });

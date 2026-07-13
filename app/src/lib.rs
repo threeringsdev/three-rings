@@ -478,11 +478,15 @@ async fn auth_callback(
 
     let origin = cookies::request_origin(&headers);
     let secure = cookies::request_is_secure(&headers);
+    let native = crate::auth::native::embedded_origin().is_some();
 
-    let session = match (
-        params.get(upstream::SESSION_VERIFIER_PARAM),
-        cookies::cookie_value(&headers, cookies::CHALLENGE_COOKIE),
-    ) {
+    // On the web the challenge rides our httpOnly cookie; under a Tauri shell
+    // the flow ran in the system browser (which has no webview cookies), so
+    // the embedded server holds it in memory instead.
+    let challenge = cookies::cookie_value(&headers, cookies::CHALLENGE_COOKIE)
+        .or_else(crate::auth::native::take_challenge);
+
+    let session = match (params.get(upstream::SESSION_VERIFIER_PARAM), challenge) {
         (Some(verifier), Some(challenge)) => {
             upstream::social_complete(&origin, verifier, &challenge).await
         }
@@ -491,11 +495,32 @@ async fn auth_callback(
         )),
     };
 
-    let mut response = axum::http::Response::builder().status(StatusCode::SEE_OTHER);
+    let clear_challenge = cookies::clear_cookie(cookies::CHALLENGE_COOKIE, secure);
     match session {
         Ok(session) => match upstream::mint_jwt(&origin, &session.cookie_value).await {
             Ok(jwt) => {
-                response = response
+                if native {
+                    // The system browser is a bystander here: park the session
+                    // for the webview's `current_user` poll to claim, and tell
+                    // the human to head back to the app.
+                    crate::auth::native::stash_session(session);
+                    return axum::http::Response::builder()
+                        .status(StatusCode::OK)
+                        .header(
+                            axum::http::header::CONTENT_TYPE,
+                            "text/html; charset=utf-8",
+                        )
+                        .header(SET_COOKIE, clear_challenge)
+                        .body(axum::body::Body::from(
+                            "<!DOCTYPE html><html><body style=\"background:#1a2332;color:#fff;\
+                             font-family:sans-serif;display:grid;place-items:center;height:100vh\">\
+                             <p>Signed in \u{2014} you can close this tab and return to Three Rings.</p>\
+                             </body></html>",
+                        ))
+                        .expect("static page construction cannot fail");
+                }
+                axum::http::Response::builder()
+                    .status(StatusCode::SEE_OTHER)
                     .header(LOCATION, "/")
                     .header(
                         SET_COOKIE,
@@ -514,25 +539,32 @@ async fn auth_callback(
                             cookies::JWT_MAX_AGE,
                             secure,
                         ),
-                    );
+                    )
+                    .header(SET_COOKIE, clear_challenge)
+                    .body(axum::body::Body::empty())
+                    .expect("static redirect construction cannot fail")
             }
             Err(e) => {
                 leptos::logging::log!("google callback: token mint failed: {e}");
-                response = response.header(LOCATION, "/login?error=google");
+                google_error_redirect(clear_challenge)
             }
         },
         Err(e) => {
             leptos::logging::log!("google callback: exchange failed: {e}");
-            response = response.header(LOCATION, "/login?error=google");
+            google_error_redirect(clear_challenge)
         }
     }
-    response
-        .header(
-            SET_COOKIE,
-            cookies::clear_cookie(cookies::CHALLENGE_COOKIE, secure),
-        )
+}
+
+/// Bounce a failed Google callback to the login page (flow is restartable).
+#[cfg(feature = "ssr")]
+fn google_error_redirect(clear_challenge: String) -> axum::response::Response {
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::SEE_OTHER)
+        .header(axum::http::header::LOCATION, "/login?error=google")
+        .header(axum::http::header::SET_COOKIE, clear_challenge)
         .body(axum::body::Body::empty())
-        .expect("static redirect response construction cannot fail")
+        .expect("static redirect construction cannot fail")
 }
 
 #[cfg(feature = "ssr")]

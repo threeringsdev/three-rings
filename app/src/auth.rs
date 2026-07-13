@@ -13,6 +13,7 @@
 //! core.
 
 pub mod cookies;
+pub mod native;
 pub mod upstream;
 
 use std::collections::HashMap;
