@@ -128,7 +128,8 @@ of our stack integrate differently:
    social-only users** (better-auth source; see Findings) — that is the
    "add a password to a Google-first account" path, and the sign-up
    `USER_ALREADY_EXISTS` message now points at it. Full cycle verified live
-   on dev; the Google-first leg awaits the maintainer's click-through.
+   on dev; the Google-first leg **maintainer-confirmed live on production**
+   (2026-07-13).
 
 ## Open questions
 
@@ -157,8 +158,9 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
   `/email-otp/reset-password` explicitly *creates* the `credential` account
   when the user has none (source quoted in Findings; hosted routes verified
   live), so a Google-first user runs the ordinary "Forgot password?" flow to
-  add one. Shipped with the reset flow; the maintainer's google-account
-  click-through is the outstanding live confirmation.
+  add one. Shipped with the reset flow and **maintainer-confirmed live on
+  production (2026-07-13)** — password and Google sign-in coexist on the
+  account afterwards.
 - Self-hosting / lock-in: Neon Auth is hosted, but the engine is **Better Auth**
   (MIT, fully self-hostable) and the schema lives in our own DB — a real exit path.
   *(accepted risk — Better Auth OSS is the fallback)*
@@ -463,3 +465,12 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     probed live), so the pointer to the reset path lives on the sign-up
     `USER_ALREADY_EXISTS` message and the login page's "Forgot password?",
     not on sign-in errors.
+- 2026-07-13 (confirmed) — **Google-first add-password confirmed live on
+  production by the maintainer**: "Forgot password?" with the google-only
+  account set a password and returned signed in; password and Google sign-in
+  coexist on the account afterwards. That closes the Phase 3 auth queue —
+  the full surface (email+password with OTP verification, Google on web /
+  desktop / Android, password reset, credential-adding for social-first
+  accounts) is live and verified on all three platforms. Still riding other
+  specs: `app_runtime` credential rotation (step 4 ops note) and the
+  `SET LOCAL app.user_id` RLS wiring (data-model per-request transaction).
