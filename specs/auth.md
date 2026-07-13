@@ -340,6 +340,24 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     app"; the poll claims the session and re-hosts it as webview cookies.
     Verified by simulation against the live dev service (localhost callback
     accepted; memory-challenge exchange fired upstream; bogus verifier
-    correctly rejected `VERIFICATION_NOT_FOUND`); the real-consent leg is a
-    desktop click-through, and Android rides the identical code path
-    (loopback + shell-open intent) via the CI APK.
+    correctly rejected `VERIFICATION_NOT_FOUND`), then **confirmed end-to-end
+    on the desktop app by the maintainer** (browser opens → consent →
+    "return to the app" → footer signed-in via the poll). Android rides the
+    identical code path (loopback callback + opener Intent) — check on device
+    from the next rolling APK.
+  - **Getting the browser to open took three Tauri v2 lessons**, recorded so
+    nobody relearns them: (1) `window.__TAURI__.shell.open` accepted the call
+    and rejected the promise *silently* — surfaced by attaching a rejection
+    handler that reports into the UI; (2) app-defined commands are ACL-gated
+    like plugin commands ("Command open_url not allowed by ACL") — permissions
+    must be *generated* via `tauri_build::AppManifest::commands` and allowed
+    in the capability; (3) the actual root cause of every denial: our pages
+    live on `http://127.0.0.1:<port>` / `http://localhost:3000`, which Tauri
+    classifies as **remote** origins — capabilities don't apply there until
+    the capability opts in (`remote.urls`). Also swapped the deprecated shell
+    `open` for `tauri-plugin-opener` (the deprecation would fail CI's
+    `clippy -D warnings`), and the server now loads a workspace `.env` at
+    startup (dotenvy — host-side `cargo tauri dev`/`cargo leptos watch` get
+    `DATABASE_URL`/`NEON_AUTH_BASE_URL` without shell gymnastics; dev-mode
+    Google needs `TR_EMBEDDED_ORIGIN=http://localhost:3000` exported so the
+    watch server holds the handoff state).
