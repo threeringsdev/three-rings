@@ -12,6 +12,9 @@
 //! the httpOnly-cookie proxy (path B) layers a cookie source on top of the same
 //! core.
 
+pub mod cookies;
+pub mod upstream;
+
 use std::collections::HashMap;
 
 use axum::extract::FromRequestParts;
@@ -24,12 +27,18 @@ use serde::Deserialize;
 use tokio::sync::{OnceCell, RwLock};
 use uuid::Uuid;
 
-/// Claims we require from a Better Auth JWT. `sub` is the user id
+/// Claims we use from a Better Auth JWT. `sub` is the user id
 /// (`neon_auth."user".id`, a uuid); `exp` is validated by `jsonwebtoken`.
+/// The profile fields ride along in the token (observed live, 2026-07-13)
+/// and save an upstream round-trip when describing the signed-in user.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Claims {
     pub sub: String,
     pub exp: usize,
+    pub email: Option<String>,
+    pub name: Option<String>,
+    #[serde(rename = "emailVerified")]
+    pub email_verified: Option<bool>,
 }
 
 /// Why authentication failed. Missing/invalid → 401; config/JWKS problems are
@@ -86,29 +95,26 @@ struct JwkSet {
 /// Verifies EdDSA JWTs against a cached, lazily-refreshed branch JWKS.
 pub struct Verifier {
     jwks_url: String,
-    /// Accepted `iss` values. The exact Better Auth `iss` claim is unconfirmed
-    /// without a live token, so we accept both the full base_url and its origin
-    /// (see the module Findings note in specs/auth.md).
-    issuers: Vec<String>,
+    /// Both `iss` and `aud` are the base URL's *origin* (no `/neondb/auth`
+    /// path) — confirmed against a live token 2026-07-13. `aud` must be
+    /// validated explicitly: `jsonwebtoken` v9 rejects any token carrying an
+    /// `aud` claim unless the expected audience is configured (this was the
+    /// step-5 middleware's silent 401 against real tokens).
+    origin: String,
     keys: RwLock<HashMap<String, DecodingKey>>,
 }
 
 impl Verifier {
-    /// Build from `NEON_AUTH_BASE_URL` (the JWT issuer / auth base URL). The
-    /// JWKS lives at `<base_url>/.well-known/jwks.json`.
+    /// Build from `NEON_AUTH_BASE_URL` (the auth base URL). The JWKS lives at
+    /// `<base_url>/.well-known/jwks.json`.
     pub fn from_env() -> Result<Self, AuthError> {
         let base_url = std::env::var("NEON_AUTH_BASE_URL")
             .map_err(|_| AuthError::Configuration("NEON_AUTH_BASE_URL is not set".into()))?;
         let base_url = base_url.trim_end_matches('/').to_string();
         let jwks_url = format!("{base_url}/.well-known/jwks.json");
-        let origin = origin_of(&base_url);
-        let mut issuers = vec![base_url];
-        if !issuers.contains(&origin) {
-            issuers.push(origin);
-        }
         Ok(Self {
             jwks_url,
-            issuers,
+            origin: origin_of(&base_url),
             keys: RwLock::new(HashMap::new()),
         })
     }
@@ -164,7 +170,8 @@ impl Verifier {
         };
 
         let mut validation = Validation::new(Algorithm::EdDSA);
-        validation.set_issuer(&self.issuers);
+        validation.set_issuer(&[&self.origin]);
+        validation.set_audience(&[&self.origin]);
         validation.set_required_spec_claims(&["exp", "sub"]);
         let data =
             decode::<Claims>(token, &key, &validation).map_err(|_| AuthError::InvalidToken)?;
@@ -179,6 +186,12 @@ async fn verifier() -> Result<&'static Verifier, AuthError> {
     VERIFIER
         .get_or_try_init(|| async { Verifier::from_env() })
         .await
+}
+
+/// Verify a JWT with the process-wide verifier — the entry point for code
+/// outside the extractor (the cookie-session server fns).
+pub async fn verify_token(token: &str) -> Result<Claims, AuthError> {
+    verifier().await?.verify(token).await
 }
 
 /// The `scheme://host[:port]` origin of a URL, for issuer matching. Falls back
@@ -206,7 +219,11 @@ where
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let token = bearer(parts).ok_or(AuthError::MissingToken)?;
+        // Native/API clients send `Authorization: Bearer`; browser and Tauri
+        // webview sessions carry the JWT in our httpOnly cookie (path B).
+        let token = bearer(parts)
+            .or_else(|| cookies::cookie_value(&parts.headers, cookies::JWT_COOKIE))
+            .ok_or(AuthError::MissingToken)?;
         let claims = verifier().await?.verify(&token).await?;
         let user_id = Uuid::parse_str(&claims.sub).map_err(|_| AuthError::InvalidToken)?;
         Ok(AuthUser { user_id })
