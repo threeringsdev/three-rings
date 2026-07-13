@@ -61,6 +61,17 @@ pub fn run() {
                     std::env::set_var("LEPTOS_OUTPUT_NAME", "app");
                 }
 
+                // Packaged release apps (Finder-launched .app, Android APK)
+                // receive no shell environment, so default the auth service to
+                // the production branch (non-secret, specs/auth.md). Exported
+                // env still wins — terminal launches can point at dev.
+                if std::env::var("NEON_AUTH_BASE_URL").is_err() {
+                    std::env::set_var(
+                        "NEON_AUTH_BASE_URL",
+                        "https://ep-curly-pond-atsb6fgp.neonauth.c-9.us-east-1.aws.neon.tech/neondb/auth",
+                    );
+                }
+
                 // Android bundles resources inside the APK (resource_dir() is the
                 // non-filesystem URI asset://localhost/), so Axum cannot serve them
                 // via std::fs. Extract the embedded frontend assets into the app
