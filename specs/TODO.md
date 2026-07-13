@@ -55,7 +55,7 @@ Code leaves the laptop: CI validation, remote-checkable artifacts, agent self-su
 - [ ] Design the data-access trait split; remove spike-era direct DB access — also the path to native builds using the deployed API instead of direct Neon (specs: [data-access-backends](data-access-backends.md))
 - [ ] Flesh out catalog-search spec: Scryfall query-syntax subset, query↔rail sync contract, live-results budget (specs: [catalog-search](catalog-search.md))
 - [ ] Build the component bench page — every vendored component with variants, one route (specs: [ui-component-bench](ui-component-bench.md))
-- [ ] Desktop Google OAuth via the system browser: open the flow with the Tauri v2 opener, `callbackURL = http://localhost:<embedded port>/auth/callback` (upstream trusts `localhost`; Google allows loopback for native apps), embedded single-user server holds the OAuth challenge in memory between start and callback, webview refetches auth state on focus — design in auth.md Findings (specs: [auth](auth.md))
+- [~] Desktop Google OAuth via the system browser: open the flow with the Tauri v2 opener, `callbackURL = http://localhost:<embedded port>/auth/callback` (upstream trusts `localhost`; Google allows loopback for native apps), embedded single-user server holds the OAuth challenge in memory between start and callback, webview refetches auth state on focus — design in auth.md Findings (specs: [auth](auth.md))
 - [ ] Password reset flow — Better Auth `/forget-password`/reset endpoints + minimal screens; decide reset-link vs OTP shape to match the verification UX (specs: [auth](auth.md))
 
 ## Phase 4 — remote agent harness ("the agent box")
