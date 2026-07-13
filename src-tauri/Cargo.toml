@@ -26,3 +26,4 @@ app = { path = "../app", default-features = false, features = ["ssr"] }
 leptos = { workspace = true, features = ["ssr"] }
 axum = { workspace = true }
 tokio = { workspace = true }
+tauri-plugin-opener = "2"

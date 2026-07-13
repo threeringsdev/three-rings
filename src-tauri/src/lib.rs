@@ -14,21 +14,24 @@ struct ServerPort(u16);
 
 /// Open a URL in the system browser (Google OAuth hand-off — the webview
 /// itself is refused by Google). Invoked from the wasm frontend via
-/// `window.__TAURI__.core.invoke("open_url", …)`; the shell plugin's Rust API
-/// routes to `open` on desktop and an Intent on Android.
+/// `window.__TAURI__.core.invoke("open_url", …)`; the opener plugin's Rust
+/// API routes to `open` on desktop and an Intent on Android.
 #[tauri::command]
 fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
-    use tauri_plugin_shell::ShellExt;
+    use tauri_plugin_opener::OpenerExt;
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("refusing to open a non-http(s) url".into());
     }
-    app.shell().open(url, None).map_err(|e| e.to_string())
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_log::Builder::default().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
