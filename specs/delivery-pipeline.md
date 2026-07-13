@@ -143,6 +143,16 @@ cut was doing the two most wasteful things possible for a Rust build:
     unquantified, so the **sccache + S3** escalation stays the named fallback
     if cook layers prove cold in practice — confirm on the second post-merge
     deploy (its log should show the two `cargo chef cook` layers `CACHED`).
+    - **Post-merge verification (2026-07-13):** first chef deploy (d838abe)
+      fully cold, **6m13s**, live. Second deploy (ba90076, the auth merge)
+      changed Cargo.toml/lock → new recipe → the two cooks *correctly* re-ran
+      (native ~3m) while every chef toolchain layer (rustup target, mold,
+      binstall, pinned tools) was `CACHED` from the registry import — **7m00s**
+      total, i.e. a manifest-changing deploy costs about what the old
+      always-full-rebuild did, and only then. The no-manifest-change warm case
+      rides the docs-only deploy of the PR that closes the follow-up task
+      (cook layers expected `CACHED`, only `app`/`frontend`/`server`
+      recompile) — recorded on that PR post-merge.
   - **Surprise: `main`'s Render deploy was already broken.** PR #5 squash-merged
     *without* the branch's `e5df220` Dockerfile fix, so main's Dockerfile still
     copied `target/release/server` — a path the profile split emptied — and the
