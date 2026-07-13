@@ -218,6 +218,45 @@ pub async fn verify_email_otp(
     Ok(session_from(&resp).ok())
 }
 
+/// Ask the service to email a password-reset OTP (the email-otp plugin's
+/// dedicated route, verified live on the hosted service). Anti-enumerating:
+/// unknown emails still return success, so callers can't probe for accounts.
+pub async fn request_password_reset(origin: &str, email: &str) -> Result<(), UpstreamError> {
+    call(
+        reqwest::Method::POST,
+        "/email-otp/request-password-reset",
+        origin,
+        Some(serde_json::json!({ "email": email })),
+        None,
+        None,
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Exchange the emailed reset OTP for a new password. The upstream *creates*
+/// the `credential` account when the user was social-only (read out of the
+/// better-auth email-otp plugin source and verified live) — this is the
+/// designed "add a password to a Google-first account" path. It also marks
+/// the email verified, and issues **no** session: sign in afterwards.
+pub async fn reset_password(
+    origin: &str,
+    email: &str,
+    otp: &str,
+    password: &str,
+) -> Result<(), UpstreamError> {
+    call(
+        reqwest::Method::POST,
+        "/email-otp/reset-password",
+        origin,
+        Some(serde_json::json!({ "email": email, "otp": otp, "password": password })),
+        None,
+        None,
+    )
+    .await
+    .map(|_| ())
+}
+
 /// Mint a short-lived EdDSA JWT from the session (the JWT plugin's `/token`;
 /// only the cookie form of the session is accepted — verified live).
 pub async fn mint_jwt(origin: &str, session: &str) -> Result<String, UpstreamError> {

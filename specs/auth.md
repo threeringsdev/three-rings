@@ -117,8 +117,18 @@ of our stack integrate differently:
 8. ~~Decide the deferred toggles~~ **Decided 2026-07-13 (maintainer):** email
    verification **on** (`require_email_verification=true`, OTP method, both
    branches — flipped via Console), Google OAuth **on** (was already enabled,
-   shared credentials, both branches). Password reset not yet wired — queued
-   as a follow-up task in TODO.md.
+   shared credentials, both branches). Password reset wired in step 9.
+9. ~~Password reset~~ **Done 2026-07-13** — the email-otp plugin's dedicated
+   routes (`POST /email-otp/request-password-reset`, `POST
+   /email-otp/reset-password`, both verified live): `request_password_reset`
+   / `reset_password` server fns, ResetCard behind "Forgot password?" on
+   `/login`, auto-sign-in after reset (the upstream issues no session and
+   marks the email verified, so the follow-up sign-in can't bounce into
+   verification). The same reset **creates the `credential` account for
+   social-only users** (better-auth source; see Findings) — that is the
+   "add a password to a Google-first account" path, and the sign-up
+   `USER_ALREADY_EXISTS` message now points at it. Full cycle verified live
+   on dev; the Google-first leg awaits the maintainer's click-through.
 
 ## Open questions
 
@@ -142,13 +152,13 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
 - ~~OAuth social login~~ **Resolved:** Google **on** (shared credentials, both
   branches); web flow verified live. Own Google credentials only needed if we
   outgrow the shared ones (branding/quotas).
-- Google-first account + email/password: signing up (or in) with an email that
-  already has a Google identity fails `User already exists`, with no way to
-  attach a password. What does the hosted service expose for adding a
-  credential to a social-only account — the email-otp `forget-password` reset
-  on a credential-less user, a set-password call, or account-linking config?
-  Probe live, like everything else here. *(queued as a Phase 3 task alongside
-  the password reset flow)*
+- ~~Google-first account + email/password~~ **Resolved (2026-07-13): the
+  email-otp reset doubles as "set a password".** better-auth's
+  `/email-otp/reset-password` explicitly *creates* the `credential` account
+  when the user has none (source quoted in Findings; hosted routes verified
+  live), so a Google-first user runs the ordinary "Forgot password?" flow to
+  add one. Shipped with the reset flow; the maintainer's google-account
+  click-through is the outstanding live confirmation.
 - Self-hosting / lock-in: Neon Auth is hosted, but the engine is **Better Auth**
   (MIT, fully self-hostable) and the schema lives in our own DB — a real exit path.
   *(accepted risk — Better Auth OSS is the fallback)*
@@ -421,3 +431,35 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
   (`newUserCallbackURL`) in production. The auth surface is now verified on
   web, desktop, and Android; remaining auth work is queued in TODO Phase 3
   (password reset; adding a password to a Google-first account).
+- 2026-07-13 (password reset) — **Reset flow shipped on the email-otp
+  plugin's dedicated routes; the same reset adds passwords to Google-first
+  accounts.**
+  - The hosted service exposes `POST /email-otp/request-password-reset`
+    `{email}` (anti-enumerating — unknown emails still return success) and
+    `POST /email-otp/reset-password` `{email, otp, password}`, both probed
+    live before building. The older `type: "forget-password"` spelling of
+    `send-verification-otp` also works; the classic link-based
+    `/request-password-reset` exists too, but the OTP shape matches our
+    existing verification UX (decided per the task note).
+  - The reset handler (better-auth `plugins/email-otp/routes.ts`) *creates*
+    the `credential` account when the user has none — social-only users gain
+    email+password through the ordinary reset. It also sets
+    `emailVerified: true` and issues **no** session, so our `reset_password`
+    server fn signs in with the fresh credentials immediately after (the
+    SignedIn end-state every other flow has).
+  - OTPs are stored **hashed** in `neon_auth.verification` on the hosted
+    service (observed live — a 43-char digest, not the code), so live tests
+    read codes from the mailbox, not the DB.
+  - Verified live on dev, API + headless UI: sign-up → verify → request
+    reset → reset → auto-signed-in with both cookies; old password rejected;
+    OTP replay rejected (`INVALID_OTP`); `/login` hydrates clean with the
+    nested reset card and the sign-in e2e passes with the rotated password.
+    The **google-only create-credential leg** is source-verified; live
+    confirmation = the maintainer running "Forgot password?" with the
+    google-only account (dev `dylan@dgoings.com` — the `neon_auth.account`
+    table before/after shows the created `credential` row).
+  - Google-only users attempting password sign-in get the plain
+    `INVALID_EMAIL_OR_PASSWORD` (no distinguishing code — anti-enumeration,
+    probed live), so the pointer to the reset path lives on the sign-up
+    `USER_ALREADY_EXISTS` message and the login page's "Forgot password?",
+    not on sign-in errors.
