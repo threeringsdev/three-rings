@@ -7,7 +7,8 @@ use leptos::prelude::*;
 use leptos_router::hooks::{use_navigate, use_query_map};
 
 use crate::account::{
-    AuthOutcome, CurrentUser, GoogleSignIn, ResendVerification, SignIn, SignUp, VerifyEmail,
+    AuthOutcome, CurrentUser, GoogleSignIn, RequestPasswordReset, ResendVerification,
+    ResetPassword, SignIn, SignUp, VerifyEmail,
 };
 
 const CARD: &str =
@@ -227,6 +228,8 @@ pub fn LoginPage() -> impl IntoView {
 
     // None → credentials form; Some(email) → the OTP verification step.
     let (otp_email, set_otp_email) = signal(None::<String>);
+    // true → the password-reset card replaces the credentials form.
+    let (reset_mode, set_reset_mode) = signal(false);
     let (error, set_error) = signal(None::<String>);
 
     Effect::new(move |_| match sign_in.value().get() {
@@ -253,38 +256,58 @@ pub fn LoginPage() -> impl IntoView {
                     view! { <OtpCard email=otp_email.get().unwrap_or_default() /> }
                 }
             >
-                <div class=CARD>
-                    <h1 class="text-2xl font-medium text-white">"Sign in"</h1>
-                    <ActionForm action=sign_in attr:class="space-y-4">
-                        <input
-                            class=INPUT
-                            type="email"
-                            name="email"
-                            placeholder="Email"
-                            required
-                        />
-                        <input
-                            class=INPUT
-                            type="password"
-                            name="password"
-                            placeholder="Password"
-                            required
-                        />
-                        <button class=BUTTON type="submit" disabled=move || sign_in.pending().get()>
-                            {move || if sign_in.pending().get() { "Signing in…" } else { "Sign in" }}
-                        </button>
-                    </ActionForm>
-                    <GoogleButton set_error=set_error />
-                    <Show when=move || error.get().is_some() || google_error().is_some()>
-                        <p class=ERROR_TEXT>
-                            {move || error.get().or_else(|| google_error().map(str::to_string))}
+                <Show
+                    when=move || !reset_mode.get()
+                    fallback=move || view! { <ResetCard set_reset_mode=set_reset_mode /> }
+                >
+                    <div class=CARD>
+                        <h1 class="text-2xl font-medium text-white">"Sign in"</h1>
+                        <ActionForm action=sign_in attr:class="space-y-4">
+                            <input
+                                class=INPUT
+                                type="email"
+                                name="email"
+                                placeholder="Email"
+                                required
+                            />
+                            <input
+                                class=INPUT
+                                type="password"
+                                name="password"
+                                placeholder="Password"
+                                required
+                            />
+                            <button
+                                class=BUTTON
+                                type="submit"
+                                disabled=move || sign_in.pending().get()
+                            >
+                                {move || {
+                                    if sign_in.pending().get() { "Signing in…" } else { "Sign in" }
+                                }}
+                            </button>
+                        </ActionForm>
+                        <GoogleButton set_error=set_error />
+                        <Show when=move || error.get().is_some() || google_error().is_some()>
+                            <p class=ERROR_TEXT>
+                                {move || error.get().or_else(|| google_error().map(str::to_string))}
+                            </p>
+                        </Show>
+                        <p class=MUTED_TEXT>
+                            <button
+                                class="underline"
+                                on:click=move |_| set_reset_mode.set(true)
+                            >
+                                "Forgot password?"
+                            </button>
                         </p>
-                    </Show>
-                    <p class=MUTED_TEXT>
-                        "No account? " <a class="underline text-white" href="/signup">"Sign up"</a>
-                    </p>
-                    <BackHome />
-                </div>
+                        <p class=MUTED_TEXT>
+                            "No account? "
+                            <a class="underline text-white" href="/signup">"Sign up"</a>
+                        </p>
+                        <BackHome />
+                    </div>
+                </Show>
             </Show>
         </div>
     }
@@ -353,6 +376,135 @@ pub fn SignupPage() -> impl IntoView {
                     <BackHome />
                 </div>
             </Show>
+        </div>
+    }
+}
+
+/// Two-step password reset: request the emailed code, then set the new
+/// password with it. Doubles as **"add a password to a Google-first
+/// account"** — the upstream creates the credential account when none
+/// exists (specs/auth.md). On success the server fn signs the user in with
+/// the fresh credentials, so this lands on the home page like any sign-in.
+#[component]
+fn ResetCard(set_reset_mode: WriteSignal<bool>) -> impl IntoView {
+    let request = ServerAction::<RequestPasswordReset>::new();
+    let reset = ServerAction::<ResetPassword>::new();
+    let navigate = use_navigate();
+
+    // Mirrors the email input so the OTP step knows the address once the
+    // request action resolves (the form itself posts via ActionForm).
+    let (email_draft, set_email_draft) = signal(String::new());
+    let (sent_to, set_sent_to) = signal(None::<String>);
+    let (error, set_error) = signal(None::<String>);
+
+    Effect::new(move |_| match request.value().get() {
+        Some(Ok(())) => {
+            set_error.set(None);
+            set_sent_to.set(Some(email_draft.get_untracked()));
+        }
+        Some(Err(_)) => set_error.set(Some("Couldn't send the code — try again.".into())),
+        None => {}
+    });
+
+    Effect::new(move |_| match reset.value().get() {
+        Some(Ok(AuthOutcome::SignedIn(_))) => navigate("/", Default::default()),
+        Some(Ok(AuthOutcome::Failed { message })) => set_error.set(Some(message)),
+        // Reset marks the email verified upstream, so this shouldn't fire;
+        // keep the arm honest in case that behavior shifts.
+        Some(Ok(AuthOutcome::VerificationRequired { .. })) => {
+            set_error.set(Some("Verify your email first, then sign in.".into()))
+        }
+        Some(Err(_)) => set_error.set(Some("Something went wrong — try again.".into())),
+        None => {}
+    });
+
+    view! {
+        <div class=CARD>
+            <h1 class="text-2xl font-medium text-white">"Reset password"</h1>
+            <Show
+                when=move || sent_to.get().is_none()
+                fallback=move || {
+                    let email = sent_to.get().unwrap_or_default();
+                    let email_display = email.clone();
+                    let email_field = email.clone();
+                    let email_resend = email.clone();
+                    view! {
+                        <p class=MUTED_TEXT>
+                            "We sent a reset code to "
+                            <span class="text-white">{email_display}</span>
+                        </p>
+                        <ActionForm action=reset attr:class="space-y-4">
+                            <input type="hidden" name="email" value=email_field />
+                            <input
+                                class=INPUT
+                                type="text"
+                                name="otp"
+                                placeholder="Reset code"
+                                inputmode="numeric"
+                                autocomplete="one-time-code"
+                                required
+                            />
+                            <input
+                                class=INPUT
+                                type="password"
+                                name="password"
+                                placeholder="New password (8+ characters)"
+                                required
+                                minlength="8"
+                            />
+                            <button
+                                class=BUTTON
+                                type="submit"
+                                disabled=move || reset.pending().get()
+                            >
+                                {move || {
+                                    if reset.pending().get() { "Saving…" } else { "Set new password" }
+                                }}
+                            </button>
+                        </ActionForm>
+                        <button
+                            class=BUTTON_GHOST
+                            on:click=move |_| {
+                                request
+                                    .dispatch(RequestPasswordReset {
+                                        email: email_resend.clone(),
+                                    });
+                            }
+                            disabled=move || request.pending().get()
+                        >
+                            "Re-send code"
+                        </button>
+                    }
+                }
+            >
+                <p class=MUTED_TEXT>
+                    "Enter your account email and we'll send a reset code. This also \
+                     works for adding a password to an account created with Google."
+                </p>
+                <ActionForm action=request attr:class="space-y-4">
+                    <input
+                        class=INPUT
+                        type="email"
+                        name="email"
+                        placeholder="Email"
+                        required
+                        on:input=move |ev| set_email_draft.set(event_target_value(&ev))
+                    />
+                    <button class=BUTTON type="submit" disabled=move || request.pending().get()>
+                        {move || {
+                            if request.pending().get() { "Sending…" } else { "Email me a reset code" }
+                        }}
+                    </button>
+                </ActionForm>
+            </Show>
+            <Show when=move || error.get().is_some()>
+                <p class=ERROR_TEXT>{move || error.get()}</p>
+            </Show>
+            <p class=MUTED_TEXT>
+                <button class="underline" on:click=move |_| set_reset_mode.set(false)>
+                    "← Back to sign in"
+                </button>
+            </p>
         </div>
     }
 }

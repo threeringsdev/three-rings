@@ -132,9 +132,19 @@ pub async fn sign_up(
             // Account created, no session: the upstream mailed a verification
             // OTP as part of sign-up — don't send a duplicate here.
             Ok(None) => Ok(AuthOutcome::VerificationRequired { email }),
-            Err(upstream::UpstreamError::Api { message, .. }) => {
-                Ok(AuthOutcome::Failed { message })
-            }
+            Err(upstream::UpstreamError::Api { code, message }) => Ok(AuthOutcome::Failed {
+                // The Google-first dead end (specs/auth.md): this email may
+                // exist with only a Google identity — point at the path that
+                // adds a password (the reset flow) instead of stranding them.
+                message: if code == "USER_ALREADY_EXISTS" {
+                    "An account with this email already exists — sign in instead. \
+                     If you signed up with Google, use “Forgot password?” on the \
+                     sign-in page to add a password."
+                        .into()
+                } else {
+                    message
+                },
+            }),
             Err(e) => Err(ssr::server_err(e)),
         }
     }
@@ -228,6 +238,69 @@ pub async fn resend_verification(email: String) -> Result<(), ServerFnError<Stri
     #[cfg(not(feature = "ssr"))]
     {
         let _ = email;
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// Mail a password-reset code. Also the entry point for **adding a password
+/// to a Google-first account** — the upstream reset creates the credential
+/// account when none exists (specs/auth.md). Success says nothing about
+/// whether the account exists: the upstream anti-enumerates unknown emails.
+#[server(prefix = "/api", endpoint = "request_password_reset")]
+pub async fn request_password_reset(email: String) -> Result<(), ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::auth::{cookies, upstream};
+        let headers = ssr::request_headers().await?;
+        let origin = cookies::request_origin(&headers);
+        upstream::request_password_reset(&origin, &email)
+            .await
+            .map_err(ssr::server_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = email;
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// Set a new password with the emailed reset code, then sign straight in
+/// with it — the upstream reset issues no session of its own, and it marks
+/// the email verified, so the sign-in can't bounce into the verification
+/// step.
+#[server(prefix = "/api", endpoint = "reset_password")]
+pub async fn reset_password(
+    email: String,
+    otp: String,
+    password: String,
+) -> Result<AuthOutcome, ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::auth::{cookies, upstream};
+        let headers = ssr::request_headers().await?;
+        let origin = cookies::request_origin(&headers);
+        let secure = cookies::request_is_secure(&headers);
+        match upstream::reset_password(&origin, &email, &otp, &password).await {
+            Ok(()) => match upstream::sign_in_email(&origin, &email, &password).await {
+                Ok(session) => Ok(AuthOutcome::SignedIn(
+                    ssr::establish_session(&origin, secure, &session).await?,
+                )),
+                // The password *was* reset; only the follow-up sign-in
+                // hiccuped. Say so rather than implying the reset failed.
+                Err(upstream::UpstreamError::Api { .. }) => Ok(AuthOutcome::Failed {
+                    message: "Password updated — sign in with it.".into(),
+                }),
+                Err(e) => Err(ssr::server_err(e)),
+            },
+            Err(upstream::UpstreamError::Api { message, .. }) => {
+                Ok(AuthOutcome::Failed { message })
+            }
+            Err(e) => Err(ssr::server_err(e)),
+        }
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (email, otp, password);
         Err(ServerFnError::ServerError("server-only".into()))
     }
 }
