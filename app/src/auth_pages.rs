@@ -39,13 +39,15 @@ fn redirect_browser(url: &str) {
     }
 }
 
-/// Inside a Tauri shell, open the URL in the *system browser* via the shell
-/// plugin (`window.__TAURI__.shell.open`) — Google refuses OAuth in embedded
-/// webviews. Returns false when not running under Tauri (plain web).
-fn tauri_shell_open(url: &str) -> bool {
+/// Inside a Tauri shell, open the URL in the *system browser* — Google
+/// refuses OAuth in embedded webviews. Calls the app's `open_url` command via
+/// `window.__TAURI__.core.invoke`; `on_reject` fires with a message if the
+/// shell rejects it (so failures surface in the UI instead of a silent
+/// "waiting" state). Returns false when not running under Tauri (plain web).
+fn tauri_open_url(url: &str, on_reject: impl Fn(String) + 'static) -> bool {
     #[cfg(feature = "hydrate")]
     {
-        use wasm_bindgen::{JsCast, JsValue};
+        use wasm_bindgen::{closure::Closure, JsCast, JsValue};
         let Some(w) = web_sys::window() else {
             return false;
         };
@@ -55,20 +57,36 @@ fn tauri_shell_open(url: &str) -> bool {
         if tauri.is_undefined() || tauri.is_null() {
             return false;
         }
-        let Ok(shell) = js_sys::Reflect::get(&tauri, &JsValue::from_str("shell")) else {
+        let Ok(core) = js_sys::Reflect::get(&tauri, &JsValue::from_str("core")) else {
             return false;
         };
-        let Ok(open) = js_sys::Reflect::get(&shell, &JsValue::from_str("open")) else {
+        let Ok(invoke) = js_sys::Reflect::get(&core, &JsValue::from_str("invoke")) else {
             return false;
         };
-        let Ok(open) = open.dyn_into::<js_sys::Function>() else {
+        let Ok(invoke) = invoke.dyn_into::<js_sys::Function>() else {
             return false;
         };
-        open.call1(&shell, &JsValue::from_str(url)).is_ok()
+        let args = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&args, &JsValue::from_str("url"), &JsValue::from_str(url));
+        let Ok(result) = invoke.call2(&core, &JsValue::from_str("open_url"), &args) else {
+            return false;
+        };
+        let Ok(promise) = result.dyn_into::<js_sys::Promise>() else {
+            return false;
+        };
+        let catch = Closure::once(move |err: JsValue| {
+            on_reject(
+                err.as_string()
+                    .unwrap_or_else(|| "could not open the browser".into()),
+            );
+        });
+        let _ = promise.catch(&catch);
+        catch.forget();
+        true
     }
     #[cfg(not(feature = "hydrate"))]
     {
-        let _ = url;
+        let _ = (url, on_reject);
         false
     }
 }
@@ -132,7 +150,12 @@ fn GoogleButton(set_error: WriteSignal<Option<String>>) -> impl IntoView {
 
     Effect::new(move |_| match google.value().get() {
         Some(Ok(url)) => {
-            if tauri_shell_open(&url) {
+            let on_reject = move |message: String| {
+                stop_polling();
+                set_waiting.set(false);
+                set_error.set(Some(format!("Couldn't open the browser: {message}")));
+            };
+            if tauri_open_url(&url, on_reject) {
                 set_waiting.set(true);
                 attempts.set_value(0);
                 let id = set_poll_interval(

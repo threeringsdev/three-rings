@@ -12,6 +12,19 @@ struct ServerTask(tauri::async_runtime::JoinHandle<()>);
 #[cfg(all(not(debug_assertions), target_os = "android"))]
 struct ServerPort(u16);
 
+/// Open a URL in the system browser (Google OAuth hand-off — the webview
+/// itself is refused by Google). Invoked from the wasm frontend via
+/// `window.__TAURI__.core.invoke("open_url", …)`; the shell plugin's Rust API
+/// routes to `open` on desktop and an Intent on Android.
+#[tauri::command]
+fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_shell::ShellExt;
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("refusing to open a non-http(s) url".into());
+    }
+    app.shell().open(url, None).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -221,7 +234,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![])
+        .invoke_handler(tauri::generate_handler![open_url])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
