@@ -142,6 +142,13 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
 - ~~OAuth social login~~ **Resolved:** Google **on** (shared credentials, both
   branches); web flow verified live. Own Google credentials only needed if we
   outgrow the shared ones (branding/quotas).
+- Google-first account + email/password: signing up (or in) with an email that
+  already has a Google identity fails `User already exists`, with no way to
+  attach a password. What does the hosted service expose for adding a
+  credential to a social-only account — the email-otp `forget-password` reset
+  on a credential-less user, a set-password call, or account-linking config?
+  Probe live, like everything else here. *(queued as a Phase 3 task alongside
+  the password reset flow)*
 - Self-hosting / lock-in: Neon Auth is hosted, but the engine is **Better Auth**
   (MIT, fully self-hostable) and the schema lives in our own DB — a real exit path.
   *(accepted risk — Better Auth OSS is the fallback)*
@@ -407,3 +414,10 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     on the same merge, so both surfaces update together. Desktop keeps the
     loopback path untouched (the deep-link handler is registered there too
     but never exercised).
+- 2026-07-13 (verified) — **Android deep-link return confirmed on device by
+  the maintainer**: Continue with Google → Chrome → bounce page → app
+  foregrounds signed in, on the *first* pass. Since the prod user row had been
+  deleted beforehand, this same run re-proved the first-time-Google fix
+  (`newUserCallbackURL`) in production. The auth surface is now verified on
+  web, desktop, and Android; remaining auth work is queued in TODO Phase 3
+  (password reset; adding a password to a Google-first account).
