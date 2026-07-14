@@ -11,6 +11,10 @@ on:
     paths-ignore:
       - 'specs/**'
       - '**.md'
+      # Dev-environment / agent config — never affects the shipped artifacts.
+      - '.devcontainer/**'
+      - '.claude/**'
+      - '.mcp.json'
   workflow_dispatch:
 
 env:

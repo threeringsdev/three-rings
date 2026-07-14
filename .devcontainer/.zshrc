@@ -1,5 +1,5 @@
 # Three Rings devcontainer shell config (bind-mounted to /home/vscode/.zshrc).
-export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 
 export CARGO_TERM_COLOR=always
