@@ -502,7 +502,10 @@ Neon **dev** branch via `scripts/migrate.sh dev`:
 - `0003_collections.sql` — the `collection_kind`/`card_condition` enums, the five
   user tables, the `owned_by_card` view, RLS enable+force+policies, `app_runtime`
   CRUD grants.
-- `0004_catalog_app_readonly.sql` — the default-ACL correction below.
+- `0004_catalog_app_readonly.sql` — revokes app_runtime write on the existing
+  catalog tables (default-ACL finding below).
+- `0005_default_privileges_readonly.sql` — narrows the default privilege so all
+  *future* tables are app_runtime-read-only (default-ACL finding below).
 
 **RLS is real, verified end-to-end.** A rolled-back probe transaction as
 `app_runtime`: `SET LOCAL app.user_id = <a real neon_auth."user".id>`, insert a
@@ -510,16 +513,29 @@ collection, see it (count 1); switch the GUC to a random uuid → the row vanish
 (count 0). `relrowsecurity` + `relforcerowsecurity` confirmed on all five user
 tables and off on the catalog tables; the five owner policies present.
 
-**Neon default-ACL finding → `0004`.** `app_runtime` is granted CRUD (`arwd`) on
-*every* table `neondb_owner` creates, via a pre-existing `pg_default_acl` entry (set
-when the role was provisioned, 2026-07-12) — so `0002`'s catalog tables landed
-writable by the app role and its explicit `GRANT SELECT` was redundant. The spec
-requires catalog writes only through the owner/ingestion role, so `0004` revokes
-`INSERT/UPDATE/DELETE/TRUNCATE` on the catalog tables from `app_runtime`, leaving
-`SELECT`. Verified: `has_table_privilege('app_runtime','cards','INSERT')` is now
-false, `SELECT` true. **Future catalog tables (e.g. catalog-search's) must repeat
-this revoke**, or the role's default privileges get narrowed globally — a
-data-access/ops call.
+**Neon default-ACL finding → `0004` + `0005`.** `app_runtime` was granted CRUD
+(`arwd`) on *every* table `neondb_owner` creates, via a pre-existing `pg_default_acl`
+entry (`FOR ROLE neondb_owner IN SCHEMA public`, set when the role was provisioned
+2026-07-12) — so `0002`'s catalog tables landed writable by the app role and its
+explicit `GRANT SELECT` was redundant. The spec requires catalog writes only through
+the owner/ingestion role. Fixed in two parts:
+- `0004` revokes `INSERT/UPDATE/DELETE/TRUNCATE` on the *existing* catalog tables
+  from `app_runtime`, leaving `SELECT`.
+- `0005` narrows the **default privilege at the source** — `ALTER DEFAULT
+  PRIVILEGES FOR ROLE neondb_owner IN SCHEMA public REVOKE INSERT, UPDATE, DELETE ON
+  TABLES FROM app_runtime` — so *future* owner-created tables grant `app_runtime`
+  only `SELECT` by default. This removes the standing footgun: future **catalog**
+  tables are auto read-only (no per-table revoke); future **user** tables get
+  read-by-default plus an explicit CRUD grant (as `0003` does), where a *forgotten*
+  grant fails closed (deny) rather than silently over-permitting.
+
+Verified against dev: the table default ACL is now `app_runtime=r`;
+`has_table_privilege('app_runtime','cards','INSERT')` is false / `SELECT` true; and a
+rolled-back `CREATE TABLE` probe shows a brand-new table grants `app_runtime`
+`SELECT` only (INSERT/UPDATE/DELETE false). Sequences (default `rU`) left alone —
+inert, since app_runtime can't INSERT into the one identity table (`rulings`).
+Convention going forward: **every user-table migration explicitly `GRANT`s CRUD to
+`app_runtime`; catalog tables need no grant** (SELECT is the default).
 
 **`owned_by_card` uses `security_invoker = true`** so it runs with the querying
 `app_runtime`'s RLS context (the `app.user_id` GUC), not the RLS-forced owner's —
