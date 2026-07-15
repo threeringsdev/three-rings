@@ -1,6 +1,6 @@
 # UI component bench
 
-**Status:** draft
+**Status:** accepted
 **Depends on:** [ui-components](ui-components.md)
 
 ## Problem
@@ -30,9 +30,10 @@ In:
 
 - One route rendering every vendored component in `app/src/components/ui/` with
   representative variants/states; kept permanently in the repo.
-- Two jobs: **(1) styling review** (see every affected component at once after a
-  theme/class edit) and **(2) adoption-time SSR/hydration verification** — the
-  runtime home the gap analysis deferred to (concrete checklist below).
+- Two jobs: **(1) styling review** — a static panel of the current theme tokens
+  atop every component below, so a theme/class edit's effect is visible at a
+  glance — and **(2) adoption-time SSR/hydration verification**, the runtime home
+  the gap analysis deferred to (concrete checklist below).
 - **Reachable inside the native shells** (`cargo tauri dev` → WKWebView;
   `cargo tauri android dev` → Android WebView), because the anchor-positioning
   hazard only appears on those engines.
@@ -62,11 +63,38 @@ component APIs.
 - One section renders a component's meaningful variants (e.g. button:
   default/outline/destructive/disabled; dialog: a trigger that opens it). Demos
   are minimal — enough to see styling and prove interactivity, not documentation.
-- **Bench-local theme toggle from the start:** a light/dark switch that flips the
-  `dark` class on the bench's own container so both themes are reviewable. This
-  is scoped to the bench subtree and does **not** wait on ui-design's open
-  app-wide theming question; when that lands, the bench adopts the real
-  `theme_toggle` component and drives the app-level mechanism.
+- **Bench-local light/dark toggle — the one dynamic control.** A switch that
+  flips the `dark` class on the bench's container, re-rendering both the theme
+  panel (below) and every component section in the toggled mode. Scoped to the
+  bench subtree; does **not** wait on ui-design's open app-wide theming question.
+  Note the current reality: [`style/input.css`](../style/input.css) has **no
+  `.dark` block yet** (theming is ui-design's call), so the toggle is wired and
+  ready but only shows a real difference once the dark palette lands — at which
+  point the bench adopts the real `theme_toggle` component and drives the
+  app-level mechanism.
+
+### Theme panel (static)
+
+Rust/UI's registry demo ships a "create" page that live-edits a small set of
+theme variables (color / font / border-radius) and watches every component react.
+The bench carries that *legibility* — **statically**. A panel at the top of the
+page displays the **current primary theme tokens** so the theme → component
+relationship is visible at a glance, without building an editor:
+
+- **One row per primary token.** Today, from
+  [`style/input.css`](../style/input.css): the color tokens `--background`,
+  `--foreground`, `--card`, `--card-foreground`, `--muted`, `--muted-foreground`,
+  `--border`, `--ring`, plus `--radius` (a font token joins them if ui-design's
+  theming introduces one). Each row is a swatch/preview + the token name + its
+  resolved value.
+- **Read-only** — no sliders or pickers. Editing the theme means editing
+  `style/input.css` and reloading; that *is* the styling workflow. The only
+  dynamic input on the page is the light/dark toggle above.
+- **Reflects the *active* mode's resolved values**, so toggling dark updates the
+  panel alongside the components. The panel should read the live computed token
+  values (swatches via `var(--token)`; the value text via the element's computed
+  style) — single source of truth = the CSS — so it can never drift from a
+  Rust-side copy of the palette.
 
 ### Adoption convention — "complete by construction"
 
@@ -108,8 +136,10 @@ treatment; the bench merely compiling on the stable toolchain confirms it.)
 
 ### Styling workflow (job 1)
 
-Edit theme variables or a component's classes, reload the bench, see every
-affected component at once in both themes.
+Edit the theme tokens in [`style/input.css`](../style/input.css) (or a
+component's classes), reload the bench: the theme panel re-renders with the new
+token values and every affected component below updates with it — in either mode
+via the light/dark toggle.
 
 ## Open questions
 
@@ -144,6 +174,14 @@ affected component at once in both themes.
     per-adoption verification checklist that turns "verify at the bench" into a
     repeatable procedure, and makes native-webview reachability a hard scope
     requirement (the anchor-positioning hazard is invisible on the web target).
+  - **Static theme panel added (maintainer request).** Mirrors Rust/UI's "create"
+    demo but *static*: the bench displays the current primary theme tokens (the
+    [`style/input.css`](../style/input.css) color set + `--radius`; a font token
+    later) as read-only swatches so the theme → component effect is legible, with
+    the light/dark toggle as the single dynamic control. The panel reads live
+    computed values (no Rust-side palette copy) so it can't drift; note
+    `style/input.css` has no `.dark` block yet, so the toggle is wired but visibly
+    inert until ui-design's theming lands.
   - **Gating = `component-bench` cargo feature** (over `debug_assertions`):
     dev-only, stripped from production/shipped builds, but switch-on-able in a
     local release build to exercise the embedded-Axum release SSR path.
