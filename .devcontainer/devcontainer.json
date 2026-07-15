@@ -4,7 +4,8 @@
   "initializeCommand": "test -f .devcontainer/.env || cp .devcontainer/.env.example .devcontainer/.env",
   "runArgs": ["--env-file", "${localWorkspaceFolder}/.devcontainer/.env"],
   "mounts": [
-    "source=${localWorkspaceFolder}/.devcontainer/.zshrc,target=/home/vscode/.zshrc,type=bind,consistency=cached"
+    "source=${localWorkspaceFolder}/.devcontainer/.zshrc,target=/home/vscode/.zshrc,type=bind,consistency=cached",
+    "source=three-rings-claude,target=/home/vscode/.claude,type=volume"
   ],
   "forwardPorts": [3000, 3001],
   "portsAttributes": {

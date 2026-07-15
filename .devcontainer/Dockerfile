@@ -32,3 +32,10 @@ RUN curl -L --proto '=https' --tlsv1.2 -sSf \
       tauri-cli \
       leptosfmt \
  && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/git"
+
+# Claude Code CLI (native installer → ~/.local/bin). Auth comes from the
+# runtime env (CLAUDE_CODE_OAUTH_TOKEN in .devcontainer/.env) or a persisted
+# /login — never baked in (image is public on Docker Hub). Project plugins/MCP
+# servers come from the repo's .claude/settings.json + .mcp.json at run time.
+RUN curl -fsSL https://claude.ai/install.sh | bash
+ENV PATH=/home/vscode/.local/bin:${PATH}

@@ -67,16 +67,48 @@ Docker Hub) and never commit one. Supply auth to the container at runtime, two w
 A minimally-scoped token (`repo`, `workflow`) is enough to clone, push branches,
 and open PRs. The token stays out of the image and out of git.
 
-## Claude Code auth
+## Claude Code in the container
 
-The container's `~/.claude/.credentials.json` is lost on every rebuild, so
-`claude` re-prompts for login. Same fix as `GH_TOKEN`: generate a long-lived
-OAuth token on the host with `claude setup-token` (Pro/Max subscription) and
-add `CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...` to `.devcontainer/.env` —
-`claude` reads it and skips login (terminal and VS Code extension alike).
-Optional extra: persist history/settings across rebuilds with a named volume —
-`"source=three-rings-claude,target=/home/vscode/.claude,type=volume"` in
-`devcontainer.json` → `mounts`.
+The image ships the `claude` CLI (native installer → `~/.local/bin`), and the
+repo carries the config that recreates the host experience in any fresh
+container — nothing to set up by hand except the two tokens below.
+
+**Auth — two layers, use both:**
+
+- **`CLAUDE_CODE_OAUTH_TOKEN` in `.devcontainer/.env` (stateless).** Run
+  `claude setup-token` on the host (Pro/Max subscription; one-year,
+  inference-only token) and paste the `sk-ant-oat01-...` value into `.env`.
+  Every container — including the throwaway `docker run --rm` path — starts
+  authenticated, terminal and VS Code extension alike. Treat like a password.
+- **Named volume `three-rings-claude` → `/home/vscode/.claude` (stateful).**
+  `devcontainer.json` mounts it, so anything written under `~/.claude` —
+  `/login` credentials, installed plugins, history — survives rebuilds on this
+  machine. One caveat: claude.ai **cloud connectors** (Gmail, Linear, …) are
+  only guaranteed to load under an interactive `/login`, not the env token; if
+  you want them in-container, `/login` once and the volume keeps it.
+
+**Plugins** are pinned in the checked-in [`.claude/settings.json`](../.claude/settings.json)
+(`enabledPlugins`, all from the built-in `claude-plugins-official` marketplace:
+neon, rust-analyzer-lsp, typescript-lsp, frontend-design, superpowers,
+context7, skill-creator). A fresh container auto-installs them on first run
+after a one-time trust prompt; the volume then caches them. `rust-analyzer`
+is already in the image for the LSP plugin, and `ENABLE_LSP_TOOL=1` is set in
+the same settings file.
+
+**MCP servers** live in the repo-root [`.mcp.json`](../.mcp.json) (project
+scope, auto-approved via `enableAllProjectMcpServers` in settings.json):
+
+- **render** — deploy status/logs over HTTP; needs `RENDER_API_KEY` in
+  `.devcontainer/.env` (the checked-in config only references
+  `${RENDER_API_KEY}`, never the key itself).
+- **neon** — comes from the neon plugin above, not `.mcp.json`.
+- Host-only, deliberately not ported: **pencil** (darwin-arm64 binary tied to
+  the host VS Code app) and **auggie** (needs the Augment CLI + its own auth;
+  install and `auggie login` in-container if you ever want it there).
+
+Personal preferences (model, output style, vim mode, permission allowlist)
+belong in `.claude/settings.local.json` — gitignored but inside the
+bind-mounted workspace, so they follow you into every container automatically.
 
 ## Run the web app
 From inside the container (VS Code → "Dev Containers: Reopen in Container", or `docker exec`):
