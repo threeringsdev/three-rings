@@ -287,7 +287,7 @@ CREATE TABLE collections (
 CREATE UNIQUE INDEX collections_one_inbox ON collections (user_id) WHERE is_inbox;
 CREATE INDEX collections_user_parent_idx ON collections (user_id, parent_id);
 
-CREATE TABLE deck_commanders (                  -- 0..2 commanders (partners); decks only, enforced in app
+CREATE TABLE deck_commanders (                  -- SUPERSEDED (see card-tagging) — commander becomes a built-in tag
     collection_id uuid NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
     printing_id   uuid NOT NULL REFERENCES printings(id),
     PRIMARY KEY (collection_id, printing_id)
@@ -302,6 +302,11 @@ CREATE TABLE deck_commanders (                  -- 0..2 commanders (partners); d
   schema constraint.
 - `position` uses fractional indexing (LexoRank-style) so drag-to-reorder writes
   one row, not the whole sibling list.
+- **`deck_commanders` is superseded by [card-tagging](card-tagging.md)** (review
+  2026-07-15): commander is one case of a broader per-card annotation need (boards,
+  companion, user categories), so it becomes a built-in **tag**. That spec adds
+  `tags` + `card_tags` and drops this (empty) table in a follow-up migration.
+  Built + shipped in migrations `0002`–`0005` (this table exists on dev until then).
 
 ### The three counts — two holding tables
 
@@ -342,6 +347,12 @@ CREATE TABLE desires (
 - A pinned `printing_id` should share the row's `oracle_id`; cross-table CHECKs
   aren't possible, so the API enforces it (candidate for a trigger if it proves
   fragile).
+- **Deck boards (pending [card-tagging](card-tagging.md), review 2026-07-15):** a
+  `board card_board` column (`main`/`side`/`maybe`, default `main`) is added to
+  **both** tables and joined into their uniqueness keys, so a deck can hold
+  distinct per-board quantities of a card (2 main + 1 side). Quantity-bearing, so
+  it lives in this grain rather than as a tag; owned/present aggregates sum across
+  boards and are unaffected. Not yet migrated — `0002`–`0005` predate it.
 
 **Derived counts (views/queries, never stored):**
 

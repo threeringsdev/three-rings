@@ -121,8 +121,10 @@ collection** — the discipline that keeps a 100K-card view bounded.
   ownership block (your copies & locations) present only when authed.
 - **`CollectionView`** — the collection's metadata + child collections + one
   keyset page of `CardRow`s + rollup counts. Decks additionally carry format,
-  commander(s), and the needs chip summary
-  (`6 missing — 4 owned elsewhere · 2 to buy`).
+  commander(s) (the `commander` **built-in tag** — see
+  [card-tagging](card-tagging.md), which retires the `deck_commanders` table), and
+  the needs chip summary (`6 missing — 4 owned elsewhere · 2 to buy`). `CardRow`
+  carries its assigned **tags** and **board** in a deck context.
 - **`AllCardsView`** — the virtual everything-view: aggregates across all
   collections incl. Inbox; present is replaced by a location summary per card
   (`7 across 3 collections`, expandable to per-location).
@@ -179,6 +181,32 @@ correction makes it materially more likely than data-model assumed.
   request (All cards / collection list) ensures the user's one `is_inbox` row
   exists, made idempotent by the `collections_one_inbox` unique index. No
   webhook infrastructure; this resolves data-model's open question.
+
+### Tags & boards (surface for [card-tagging](card-tagging.md))
+
+**Gating note.** These operations belong to [card-tagging](card-tagging.md)
+(`draft`, review 2026-07-15) and land with **its** task, not the base
+collection-api endpoints task — they are listed here because collection-api owns
+the wire surface, but they are *not* part of this spec's accepted surface until
+card-tagging is accepted. card-tagging retires the `deck_commanders` table
+(commander becomes a built-in tag).
+
+New `CollectionStore` methods, projected to HTTP like the rest:
+
+- **Tag CRUD** — create / rename / delete an **account**- or **deck**-scoped tag;
+  list the tags in scope for a collection (system built-ins + the user's account
+  tags + that deck's tags). Deleting a tag cascades its `card_tags`.
+- **Assignment** — add / remove a tag on a card in a collection (anchored at
+  `(collection, oracle)`); read a card's tags; read a deck's cards grouped by a
+  tag (or by a built-in such as `commander`). The API enforces that the card is in
+  the deck, that a deck-scoped tag is only applied within its own collection, and
+  removes a card's tags when its last holding **and** desire leave the deck.
+- **Board** — set / change a card's board within a deck (`main`/`side`/`maybe`):
+  a quantity-preserving `holdings`/`desires` update that splits a stack when only
+  part of it changes board. **Not a `moves` entry** — it re-labels in place.
+- **Commander / companion** — assigned through the tag-assignment endpoint using
+  the built-in tags; the API enforces the ≤ 2 / ≤ 1 caps and recomputes the deck's
+  color identity from its `commander`-tagged cards.
 
 ### Error model
 
