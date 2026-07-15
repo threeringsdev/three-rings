@@ -61,7 +61,7 @@ pub fn BenchPage() -> impl IntoView {
                 "min-h-screen bg-background text-foreground"
             }
         }>
-            <div class="mx-auto flex max-w-5xl gap-8 p-8">
+            <div class="flex gap-8 p-8">
                 <nav class="sticky top-8 hidden h-fit w-40 shrink-0 flex-col gap-1 text-sm sm:flex">
                     <span class="text-muted-foreground mb-1 font-medium">"Sections"</span>
                     <a class="hover:underline" href="#theme">
