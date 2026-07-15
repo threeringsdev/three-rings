@@ -61,12 +61,10 @@ Build the schema, the data-access layer, the API, and the catalog. Spec-review
 (fleshing drafts → `accepted`) is the README's blocked-queue meta-action, not a
 task here; these tasks are the implementation, each gated on its `accepted` spec
 and carrying the `mark <spec> implemented` step on that spec's terminal task
-(see the 2026-07-15 Decisions entry). catalog-search, catalog-ingestion, and
-ui-component-bench are still `draft`, so their tasks stay blocked until review
-accepts them — the queue's signal to review those next. The ui-component-bench
-task leads the phase but is **independent UI infra** — gated only on its own
-spec, not the data chain — so once accepted it's buildable in parallel with (or
-ahead of) the data work.
+(see the 2026-07-15 Decisions entry). catalog-search and catalog-ingestion are
+still `draft`, so their tasks stay blocked until review accepts them — the
+queue's signal to review those next. (ui-component-bench led the phase as
+independent UI infra and is done — spec `implemented`.)
 
 - [x] ui-component-bench → the bench page (independent UI infra — gated only on its own spec, runnable in parallel with the data chain below). Feature-gated (`component-bench`) `/dev/components` route in `app`: section registry + jump-nav, the `table` section, a static theme-token panel + bench-local light/dark toggle, and the "add a component's bench section in the same commit" adoption convention; reachable in the native webviews (WKWebView / Android WebView) for the anchor-positioning check. mark ui-component-bench implemented once the harness + convention are in place and the current vendored set (`table`) is covered (specs: [ui-component-bench](ui-component-bench.md)) — **done**: `app/src/bench/` registry + demos, one `--features component-bench` flag wired through `frontend`/`server`/`src-tauri` + `beforeDevCommand`, bench clippy lines in validate.yml, SSR/hydration/toggle verified via [end2end/bench-check.mjs](../end2end/bench-check.mjs) and feature-off exclusion confirmed; spec → implemented (route-macro workaround + decisions in its Findings)
 - [ ] data-model → migrations. Write + run the initial migrations (catalog group; collection group + RLS enable/force/policies + the `app_runtime` role) via [`scripts/migrate.sh`](../scripts/migrate.sh); collection tables FK `neon_auth."user"` (uuid, hard `ON DELETE CASCADE`); resolves data-model's execution-deferred OQs (denormalized `user_id`, condition/language granularity); mark data-model implemented (specs: [data-model](data-model.md), [auth](auth.md))
