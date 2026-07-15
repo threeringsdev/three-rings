@@ -1,7 +1,19 @@
 # Catalog search
 
 **Status:** draft
-**Depends on:** [ui-design](ui-design.md), [catalog-ingestion](catalog-ingestion.md)
+**Depends on:** [ui-design](ui-design.md), [data-model](data-model.md)
+
+The queryable field vocabulary and the base search indexes come from
+[data-model](data-model.md) — which says *"the query→SQL translation is
+catalog-search's"* and *"Data-model provides the base; catalog-search
+refines"*; the two-surface UX and the rail's curated vocabulary come from
+[ui-design](ui-design.md). **[catalog-ingestion](catalog-ingestion.md) is a
+runtime sibling, not a design dependency** — both are downstream of data-model,
+and search returns *real* results only once ingestion has loaded the catalog.
+[collection-api](collection-api.md)'s search endpoint executes this query
+grammar and already settled the backend as **SQL against our ingested catalog**
+(not a Scryfall proxy) — which is what makes catalog-ingestion real Phase 4 work
+(see its TODO tasks).
 
 ## Problem
 
@@ -20,6 +32,16 @@ Proposed model — **one filter state, two views over it**:
 - Query-bar terms the rail understands ("matched" terms: name, text, set, color, type, rarity, mana value) reflect back into rail state — checkboxes, badges.
 - Query-bar terms the rail has no widget for (e.g. `is:commander`, `year<=2003`) are preserved verbatim as opaque terms — they simply never appear in the rail. A small "N advanced terms" indicator on the rail can acknowledge them.
 - Consequence: editing the query never destroys rail state and vice versa; the query text is always the complete serialization of the search (and is what goes in the URL).
+
+**Multi-face note (from data-model's 2026-07-14 Scryfall shape review):** for
+multi-face layouts the top-level `oracle_text` is `NULL` — the per-face text lives
+in `cards.card_faces jsonb`. So the `tsvector` backing `o:` (oracle text) must
+concatenate `card_faces[].oracle_text`, or back-face text (e.g. a transform card's
+reverse) won't match. Scryfall's "match if any face qualifies" semantics apply to
+`t:`/`pow`/`tough` too. Newly stored fields are available as filter inputs when this
+spec defines its rail/query vocabulary: `produced_mana` (`produces:`), `legalities`
+(`f:`/`banned:`/`legal:`), `frame_effects`/`promo_types`/`full_art`/`textless`
+(`is:`), and `digital`/`games` (`game:`/`is:digital`).
 
 ## Open questions
 

@@ -1,6 +1,6 @@
 # Auth
 
-**Status:** accepted
+**Status:** implemented
 **Depends on:** —
 
 ## Problem
