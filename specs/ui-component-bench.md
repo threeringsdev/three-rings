@@ -1,6 +1,6 @@
 # UI component bench
 
-**Status:** accepted
+**Status:** implemented
 **Depends on:** [ui-components](ui-components.md)
 
 ## Problem
@@ -156,13 +156,72 @@ via the light/dark toggle.
   buildable in parallel with the data/API layer (gated only on this spec, not on
   any data task) — pulled ahead of the data chain in Phase 4 rather than trailing
   it.
-- **Feature-wiring convenience (execution):** keep `component-bench` on across the
-  three dev entry points (`cargo leptos watch`, `cargo tauri dev`,
-  `cargo tauri android dev`) while keeping it off in the CI/Render release builds
-  — settle the exact flag plumbing (leptos `--lib-features`/`--bin-features`,
-  `src-tauri` feature set) when the bench is built.
+- ~~Feature-wiring convenience (execution): keep `component-bench` on across the
+  three dev entry points while keeping it off in the CI/Render release builds —
+  settle the exact flag plumbing.~~ **Resolved (2026-07-15, implementation):**
+  `frontend`, `server`, and `src-tauri` each define a `component-bench` feature
+  forwarding to `app/component-bench`, so one cargo-leptos flag switches both
+  halves: `cargo leptos watch --features component-bench` (applies to lib *and*
+  bin targets). `tauri.conf.json`'s `beforeDevCommand` carries the flag, which
+  covers `cargo tauri dev` and `cargo tauri android dev` (both iterate against
+  the watch server via `devUrl`). The `[[workspace.metadata.leptos]]`
+  `bin-features`/`lib-features` stay empty, so the CI/Render release builds
+  (plain `cargo leptos build --release`) exclude the bench with zero changes.
+  Local bench-enabled release build (the embedded-Axum release SSR path):
+  `cargo leptos build --release --features component-bench`, then
+  `cargo tauri build --features component-bench` (the src-tauri feature puts the
+  bench in the embedded router; the leptos flag puts it in the wasm bundle that
+  build bundles as `frontendDist`).
 
 ## Findings
+
+- 2026-07-15 — **Implemented** (`/dev/components`, feature-gated, `table`
+  section + static theme panel + bench-local dark toggle + jump-nav; spec →
+  implemented). Execution decisions beyond the accepted spec, and what
+  verification showed:
+  - **Feature plumbing** (resolves the last OQ; details there): per-crate
+    forwarding features + one `--features component-bench` flag on
+    cargo-leptos, which applies to both lib and bin targets;
+    `beforeDevCommand` carries it for the Tauri dev entry points; release
+    builds unchanged.
+  - **Route registration mechanics.** The `view!` macro can't express a
+    feature-gated route: `#[cfg]` isn't supported on a `<Route>` node, an
+    expression child of `<Routes>` is treated as a render child (not a route
+    def), and the tempting `impl MatchNestedRoutes for ()` stub is a trap —
+    `()` *matches every path* (it would shadow the 404 fallback) and
+    generates a phantom `PathSegment::Unit` route on the server. So `App`
+    now composes the route tuple in plain Rust (`view! { ...4 <Route/>s }
+    .into_inner()`, with the bench route appended under `#[cfg]`) and feeds
+    `Routes` through its props builder (`RoutesProps::builder()`), keeping a
+    single source of truth for the route list.
+  - **Theme panel values fill in post-hydration.** SSR can't resolve CSS
+    custom properties, so rows render an `…` placeholder server-side; a
+    hydrate-gated `Effect` reads `getComputedStyle` off each row's
+    `NodeRef` (re-running on mode toggle, since swatches update via CSS but
+    the value *text* doesn't). web-sys grew `Element`/`HtmlDivElement`/
+    `CssStyleDeclaration` features for this.
+  - **CI coverage added** ([validate.yml](../.github/workflows/validate.yml)
+    "Clippy (component bench)"): the bench is cfg'd out of every existing
+    gate command, so without explicit `--features` clippy lines (ssr native +
+    hydrate wasm) its code would never be linted — cfg'd-out rot ships
+    itself. No bench tests were added; the gate's coverage is compile+lint,
+    and runtime behavior is the drive below.
+  - **Verification** (host, dev profile): SSR body carries the bench markup
+    (`table` rows, `data-state="selected"`, `var(--token)` swatches);
+    hydration is clean (no console errors/warnings) with theme values
+    resolving and the dark toggle flipping the container class — automated
+    as [end2end/bench-check.mjs](../end2end/bench-check.mjs) (checklist
+    items 1–2 for future sections); feature-off build 404s `/dev/components`
+    while `/`, `/cards`, `/login`, `/signup` all still SSR + hydrate clean
+    (guarding the routing refactor). Checklist items 3–5 are N/A for
+    `table` (no `use_random_id`, no JS assets, no anchor positioning; it was
+    the spike's runtime-verified component) — they start applying with the
+    first interactive adoption. Native-webview *reachability* is wired via
+    `beforeDevCommand`; item 5's WKWebView/Android WebView pass stays a
+    per-adoption step for anchor-positioned components.
+  - Incidental: `end2end/package-lock.json` is out of sync with its
+    `package.json` (`npm ci` refuses; predates this task, left as found —
+    the drives above ran against an existing install).
 
 - 2026-07-15 — **Spec fleshed out for review (maintainer session).**
   - **Elevated the verification-harness purpose** to co-equal with styling

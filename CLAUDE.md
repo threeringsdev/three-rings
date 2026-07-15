@@ -62,7 +62,14 @@ name `app`, `site-root = target/site`, `site-pkg-dir = pkg`,
 cargo leptos watch          # dev: build + serve, hot reload on :3000 (live-reload :3001)
 cargo leptos build --release  # production build (server binary + target/site, runs Tailwind)
 cargo leptos serve          # serve a release build
+cargo leptos watch --features component-bench   # dev incl. /dev/components — the UI component bench
 ```
+
+The `component-bench` cargo feature gates the `/dev/components` bench page
+(specs/ui-component-bench.md): on for dev (the flag above; `cargo tauri dev`'s
+`beforeDevCommand` carries it already), off in every release/CI build.
+**Vendoring a new UI component includes adding its bench section in the same
+commit** — registry and convention in `app/src/bench/`.
 
 SSR is confirmed when view-source shows rendered HTML (not an empty `<body>`);
 hydration is confirmed when the counter buttons work (wasm took over the DOM).

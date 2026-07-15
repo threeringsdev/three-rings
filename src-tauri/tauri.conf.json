@@ -6,7 +6,7 @@
   "build": {
     "frontendDist": "../target/site",
     "devUrl": "http://localhost:3000",
-    "beforeDevCommand": "cd .. && cargo leptos watch",
+    "beforeDevCommand": "cd .. && cargo leptos watch --features component-bench",
     "beforeBuildCommand": "cd .. && cargo leptos build --release"
   },
   "plugins": {
