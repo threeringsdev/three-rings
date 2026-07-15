@@ -50,6 +50,6 @@ Task state legend: `[ ]` available · `[~]` in progress · `[x]` done.
 | [data-model](data-model.md) | accepted |
 | [delivery-pipeline](delivery-pipeline.md) | implemented |
 | [dev-environment](dev-environment.md) | implemented |
-| [ui-component-bench](ui-component-bench.md) | draft |
+| [ui-component-bench](ui-component-bench.md) | implemented |
 | [ui-components](ui-components.md) | implemented |
 | [ui-design](ui-design.md) | implemented |

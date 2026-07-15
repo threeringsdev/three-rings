@@ -110,9 +110,14 @@ mkdir -p target/site/pkg                                                # Tauri 
 cargo fmt --all -- --check
 cargo clippy --workspace --exclude frontend --all-targets -- -D warnings   # native workspace incl. src-tauri
 cargo clippy -p frontend --target wasm32-unknown-unknown -- -D warnings     # wasm hydrate crate
+cargo clippy -p app --features ssr,component-bench --all-targets -- -D warnings          # bench code, ssr half
+cargo clippy -p app --features hydrate,component-bench --target wasm32-unknown-unknown -- -D warnings  # bench code, wasm half
 cargo test --workspace --exclude frontend
 cargo leptos build --release                                            # full Tailwind + wasm pipeline
 ```
+
+The two `component-bench` clippy lines are part of the gate: the bench is
+cfg'd out of every release build, so nothing else compiles that code.
 
 **In the web-dev container**, add `--exclude three_rings` to the native clippy
 and test commands — the container omits Tauri's Linux libs, so the Tauri shell
@@ -174,6 +179,10 @@ optional. Types in use in this repo: `docs`, `design`, `chore`, plus `feat` /
 - Flipping a task to in-progress is its own commit: `start: <task summary>`.
 - The commit that finishes a task flips its `[~]` → `[x]` in TODO.md **in that
   same commit**.
+
+PRs are **squash-merged**, so the PR *title* becomes the commit message on
+`main` — format it as a conventional commit too. (History shows leaked GitHub
+defaults like `Docs/spec review data layer (#18)`; don't add more.)
 
 ## CI, artifacts, secrets, deploy — where they live
 
