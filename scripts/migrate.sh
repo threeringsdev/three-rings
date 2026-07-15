@@ -70,4 +70,11 @@ if [[ "$target" == "prod" && -z "$skip_confirm" ]]; then
   [[ "$reply" == "y" || "$reply" == "Y" ]] || { echo "aborted"; exit 1; }
 fi
 
+# Force the sqlx::migrate!("../migrations") macro (in app/src/db.rs) to re-embed
+# the migrations directory. cargo doesn't reliably detect a *newly added* .sql
+# file on its own, so without this a fresh migration can be silently skipped and
+# `--migrate` reports "up to date" without applying it (observed 2026-07-15 on the
+# devcontainer overlay fs). Touching the macro's source guarantees a re-embed.
+touch "$root/app/src/db.rs"
+
 MIGRATION_DATABASE_URL="$url" cargo run --quiet -p server -- --migrate
