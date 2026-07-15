@@ -1,7 +1,8 @@
+use leptos::children::ToChildren;
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
 use leptos_router::{
-    components::{Route, Router, Routes},
+    components::{Route, Router, Routes, RoutesProps},
     StaticSegment,
 };
 
@@ -31,6 +32,30 @@ pub fn App() -> impl IntoView {
     // Provides context that manages stylesheets, titles, meta tags, etc.
     provide_meta_context();
 
+    // Route definitions are composed as a plain tuple (what the view! macro
+    // builds from <Routes> children anyway) so the bench route can be
+    // feature-gated: cfg on a node inside view! has no way to express
+    // "no route here", and Routes is fed through its props builder because
+    // the macro only accepts literal <Route> nodes as its children.
+    let routes = view! {
+        <Route path=StaticSegment("") view=HomePage />
+        <Route path=StaticSegment("cards") view=CardsPage />
+        <Route path=StaticSegment("login") view=auth_pages::LoginPage />
+        <Route path=StaticSegment("signup") view=auth_pages::SignupPage />
+    }
+    .into_inner();
+    #[cfg(feature = "component-bench")]
+    let routes = (
+        routes,
+        view! {
+            <Route
+                path=(StaticSegment("dev"), StaticSegment("components"))
+                view=bench::BenchPage
+            />
+        }
+        .into_inner(),
+    );
+
     view! {
         <Stylesheet id="leptos" href="/pkg/app.css" />
 
@@ -40,12 +65,12 @@ pub fn App() -> impl IntoView {
         // content for this welcome page
         <Router>
             <main>
-                <Routes fallback=|| "Page not found.".into_view()>
-                    <Route path=StaticSegment("") view=HomePage />
-                    <Route path=StaticSegment("cards") view=CardsPage />
-                    <Route path=StaticSegment("login") view=auth_pages::LoginPage />
-                    <Route path=StaticSegment("signup") view=auth_pages::SignupPage />
-                </Routes>
+                {Routes(
+                    RoutesProps::builder()
+                        .fallback(|| "Page not found.".into_view())
+                        .children(ToChildren::to_children(move || routes))
+                        .build(),
+                )}
             </main>
         </Router>
     }
@@ -302,6 +327,8 @@ fn CardsPage() -> impl IntoView {
 
 pub mod account;
 pub mod auth_pages;
+#[cfg(feature = "component-bench")]
+pub mod bench;
 pub mod components;
 
 #[cfg(feature = "ssr")]

@@ -1,0 +1,182 @@
+//! `/dev/components` — the UI component bench (specs/ui-component-bench.md).
+//!
+//! One page rendering every vendored Rust/UI component
+//! (`app/src/components/ui/`) with representative variants, under a static
+//! panel of the current theme tokens. Compiled only with the
+//! `component-bench` cargo feature — dev entry points switch it on, release
+//! builds leave it off.
+//!
+//! Adoption convention ("complete by construction"): vendoring a new
+//! component includes, in the same commit, a demo fn in this module and one
+//! line in [`SECTIONS`]. The page and jump-nav iterate the registry, so the
+//! bench never lags the vendored set. Run the spec's per-adoption
+//! verification checklist (SSR, hydration, ID stability, vendored assets,
+//! native-webview positioning) against the new section before shipping it.
+
+mod table;
+
+use leptos::prelude::*;
+
+/// One bench section per vendored component.
+struct BenchSection {
+    /// Anchor id; the jump-nav links to `#<id>`.
+    id: &'static str,
+    title: &'static str,
+    demo: fn() -> AnyView,
+}
+
+/// The section registry — one line per vendored component, in page order.
+const SECTIONS: &[BenchSection] = &[BenchSection {
+    id: "table",
+    title: "Table",
+    demo: table::demo,
+}];
+
+/// The primary color tokens from `style/input.css`. `--radius` joins them in
+/// the panel with a rounded-box swatch instead of a color swatch.
+const COLOR_TOKENS: &[&str] = &[
+    "--background",
+    "--foreground",
+    "--card",
+    "--card-foreground",
+    "--muted",
+    "--muted-foreground",
+    "--border",
+    "--ring",
+];
+
+/// The bench page: jump-nav, theme panel, one section per registry entry.
+/// The light/dark toggle is the page's one dynamic control — it flips the
+/// `dark` class on the bench container only (app-wide theming is ui-design's
+/// open question), so the panel and every section re-resolve in that mode.
+#[component]
+pub fn BenchPage() -> impl IntoView {
+    let (dark, set_dark) = signal(false);
+
+    view! {
+        <div class=move || {
+            if dark.get() {
+                "dark min-h-screen bg-background text-foreground"
+            } else {
+                "min-h-screen bg-background text-foreground"
+            }
+        }>
+            <div class="flex gap-8 p-8">
+                <nav class="sticky top-8 hidden h-fit w-40 shrink-0 flex-col gap-1 text-sm sm:flex">
+                    <span class="text-muted-foreground mb-1 font-medium">"Sections"</span>
+                    <a class="hover:underline" href="#theme">
+                        "Theme"
+                    </a>
+                    {SECTIONS
+                        .iter()
+                        .map(|s| {
+                            view! {
+                                <a class="hover:underline" href=format!("#{}", s.id)>
+                                    {s.title}
+                                </a>
+                            }
+                        })
+                        .collect_view()}
+                </nav>
+                <main class="min-w-0 flex-1 space-y-12">
+                    <header class="flex items-start justify-between gap-4">
+                        <div>
+                            <h1 class="text-2xl font-bold">"Component bench"</h1>
+                            <p class="text-muted-foreground text-sm">
+                                "Every vendored Rust/UI component, with the current theme tokens above it. See specs/ui-component-bench.md."
+                            </p>
+                        </div>
+                        <button
+                            class="hover:bg-muted shrink-0 rounded-md border px-3 py-1.5 text-sm"
+                            on:click=move |_| set_dark.update(|d| *d = !*d)
+                        >
+                            {move || if dark.get() { "Light mode" } else { "Dark mode" }}
+                        </button>
+                    </header>
+                    <ThemePanel dark=dark />
+                    {SECTIONS
+                        .iter()
+                        .map(|s| {
+                            view! {
+                                <section id=s.id class="scroll-mt-8 space-y-4">
+                                    <h2 class="border-b pb-2 text-xl font-semibold">{s.title}</h2>
+                                    {(s.demo)()}
+                                </section>
+                            }
+                        })
+                        .collect_view()}
+                </main>
+            </div>
+        </div>
+    }
+}
+
+/// The static theme panel: one row per primary token, resolved in the active
+/// mode. Read-only by design — editing the theme means editing
+/// `style/input.css` and reloading; that is the styling workflow.
+#[component]
+fn ThemePanel(dark: ReadSignal<bool>) -> impl IntoView {
+    view! {
+        <section id="theme" class="scroll-mt-8 space-y-4">
+            <h2 class="border-b pb-2 text-xl font-semibold">"Theme"</h2>
+            <p class="text-muted-foreground text-sm">
+                "The tokens from style/input.css, resolved in the active mode. Read-only: edit the CSS and reload to change them."
+            </p>
+            <div class="rounded-md border">
+                {COLOR_TOKENS
+                    .iter()
+                    .map(|t| view! { <TokenRow name=*t dark=dark swatch=SwatchKind::Color /> })
+                    .collect_view()}
+                <TokenRow name="--radius" dark=dark swatch=SwatchKind::Radius />
+            </div>
+        </section>
+    }
+}
+
+/// How a token row previews its value.
+#[derive(Clone, Copy, PartialEq)]
+enum SwatchKind {
+    Color,
+    Radius,
+}
+
+/// One theme-panel row: swatch + token name + resolved value. The value is
+/// read from the row's live computed style — the CSS stays the single source
+/// of truth, so the panel can never drift from a Rust-side palette copy. SSR
+/// renders an ellipsis placeholder; hydration fills the value in and re-reads
+/// it whenever the mode toggles.
+#[component]
+fn TokenRow(name: &'static str, dark: ReadSignal<bool>, swatch: SwatchKind) -> impl IntoView {
+    let row = NodeRef::<leptos::html::Div>::new();
+    let (value, set_value) = signal(None::<String>);
+
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        dark.track();
+        let resolved = row.get().and_then(|el| {
+            let style = web_sys::window()?.get_computed_style(&el).ok()??;
+            style.get_property_value(name).ok()
+        });
+        set_value.set(resolved.map(|v| v.trim().to_owned()));
+    });
+    #[cfg(not(feature = "hydrate"))]
+    let _ = (dark, set_value);
+
+    let swatch_style = match swatch {
+        SwatchKind::Color => format!("background: var({name})"),
+        SwatchKind::Radius => format!("border-radius: var({name})"),
+    };
+
+    view! {
+        <div
+            node_ref=row
+            class="flex items-center gap-3 border-b px-3 py-2 text-sm last:border-b-0"
+        >
+            <span class="bg-muted h-6 w-6 shrink-0 rounded-sm border" style=swatch_style></span>
+            <code class="w-44 shrink-0">{name}</code>
+            <code class="text-muted-foreground">
+                {move || value.get().unwrap_or_else(|| "\u{2026}".to_owned())}
+            </code>
+        </div>
+    }
+}

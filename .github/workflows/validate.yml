@@ -84,6 +84,14 @@ jobs:
       - name: Clippy (frontend on wasm)
         run: cargo clippy -p frontend --target wasm32-unknown-unknown -- -D warnings
 
+      # The component bench (specs/ui-component-bench.md) is cfg'd out of every
+      # release artifact, so the lines above never compile it — lint both its
+      # halves (ssr native, hydrate wasm) explicitly or it rots ungated.
+      - name: Clippy (component bench)
+        run: |
+          cargo clippy -p app --features ssr,component-bench --all-targets -- -D warnings
+          cargo clippy -p app --features hydrate,component-bench --target wasm32-unknown-unknown -- -D warnings
+
       - name: Test (native workspace, excl. frontend)
         run: cargo test --workspace --exclude frontend
 

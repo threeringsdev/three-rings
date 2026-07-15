@@ -11,6 +11,13 @@ edition = "2021"
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Forward to the app crate's bench gate (specs/ui-component-bench.md). Only
+# matters for release builds (debug `cargo tauri dev` rides the watch server's
+# devUrl): `cargo tauri build --features component-bench` puts the bench in
+# the embedded-Axum router — pair it with a bench-enabled `frontendDist`.
+component-bench = ["app/component-bench"]
+
 [build-dependencies]
 tauri-build = { version = "2.2.0", features = [] }
 
