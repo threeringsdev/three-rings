@@ -87,21 +87,27 @@ CREATE TABLE sets (
 );
 
 CREATE TABLE cards (                        -- ORACLE identity (one row per distinct card)
-    oracle_id      uuid PRIMARY KEY,        -- Scryfall oracle_id
-    name           text NOT NULL,
-    mana_cost      text,
-    cmc            numeric,                 -- fractional for un-cards
-    type_line      text,
-    oracle_text    text,
-    colors         text[] NOT NULL DEFAULT '{}',
-    color_identity text[] NOT NULL DEFAULT '{}',
-    keywords       text[] NOT NULL DEFAULT '{}',
-    power          text,                    -- '*'/'1+*' → text, not int
-    toughness      text,
-    loyalty        text,
-    layout         text,                    -- 'normal','split','transform',…
-    reserved       boolean NOT NULL DEFAULT false,
-    edhrec_rank    integer
+    oracle_id       uuid PRIMARY KEY,       -- Scryfall oracle_id; for layout='reversible_card' read from card_faces[0].oracle_id
+    name            text NOT NULL,          -- combined "Front // Back" on multi-face layouts
+    mana_cost       text,                   -- single-face only; NULL on multi-face → see card_faces
+    cmc             numeric,                -- fractional for un-cards
+    type_line       text,                   -- combined on multi-face
+    oracle_text     text,                   -- single-face only; NULL on multi-face → see card_faces
+    colors          text[] NOT NULL DEFAULT '{}',   -- single-face; per-face colors live in card_faces
+    color_identity  text[] NOT NULL DEFAULT '{}',   -- whole-card (Scryfall aggregates across faces)
+    color_indicator text[],                 -- frame color pip (e.g. Ancestral Vision); per-face on DFCs
+    keywords        text[] NOT NULL DEFAULT '{}',
+    power           text,                   -- '*'/'1+*' → text, not int; single-face, NULL on multi-face
+    toughness       text,
+    loyalty         text,
+    produced_mana   text[],                 -- mainly catalog-search's `produces:` filter
+    layout          text,                   -- 'normal','split','transform','modal_dfc','adventure','flip','meld','reversible_card','token','double_faced_token',…
+    legalities      jsonb,                  -- flat {format: legal|not_legal|banned|restricted}; rendered on card page
+    card_faces      jsonb,                  -- NULL single-face; else ordered per-face oracle data → see "Multi-face cards & relations"
+    all_parts       jsonb,                  -- NULL unless related; token/meld/combo links → see "Multi-face cards & relations"
+    reserved        boolean NOT NULL DEFAULT false,
+    game_changer    boolean,                -- commander-bracket flag; renders near legalities
+    edhrec_rank     integer
 );
 
 CREATE TABLE printings (                    -- a specific physical object collections point at
@@ -109,14 +115,26 @@ CREATE TABLE printings (                    -- a specific physical object collec
     oracle_id        uuid NOT NULL REFERENCES cards(oracle_id),
     set_id           uuid NOT NULL REFERENCES sets(id),
     collector_number text NOT NULL,
-    rarity           text NOT NULL,         -- 'common','uncommon','rare','mythic','special','bonus'
+    rarity           text NOT NULL,         -- 'common','uncommon','rare','mythic','special','bonus' (tokens/checklist carry 'common')
     finishes         card_finish[] NOT NULL DEFAULT '{}',  -- which finishes this printing exists in
     lang             text NOT NULL DEFAULT 'en',
     frame            text,
+    frame_effects    text[] NOT NULL DEFAULT '{}',  -- 'showcase','extendedart','inverted',… distinguishes treatments within a set
     border_color     text,
+    full_art         boolean NOT NULL DEFAULT false,
+    textless         boolean NOT NULL DEFAULT false,
     promo            boolean NOT NULL DEFAULT false,
+    promo_types      text[] NOT NULL DEFAULT '{}',   -- 'boosterfun','godzillaseries','buyabox',…
+    flavor_name      text,                            -- displayed name for Godzilla/Dracula/etc. variants (name still holds the real card)
+    artist           text,                            -- single-face; per-face in faces jsonb on DFCs
+    flavor_text      text,                            -- printing-level; per-face on DFCs
+    watermark        text,                            -- guild/clan/set watermark, when present
+    security_stamp   text,                            -- 'oval','triangle','acorn',… anti-counterfeit stamp
+    games            text[] NOT NULL DEFAULT '{}',    -- 'paper','arena','mtgo' this printing exists in
+    digital          boolean NOT NULL DEFAULT false,  -- Arena/MTGO-only printing; label/filter in the printing picker
     released_at      date,
-    image_uris       jsonb,                 -- Scryfall image_uris; link-out (caching deferred → catalog-ingestion)
+    image_uris       jsonb,                 -- single-face images; NULL on multi-face → see faces. Link-out (caching deferred → catalog-ingestion)
+    faces            jsonb,                 -- NULL single-face; else per-printing per-face data → see "Multi-face cards & relations"
     UNIQUE (set_id, collector_number, lang)
 );
 
@@ -148,10 +166,62 @@ time-series is a deliberately deferred later table (see Open questions).
 
 **What we store vs. link out** (resolves the draft's oracle/rulings question):
 store every oracle/printing field the app renders — the card page SSRs from our
-DB and must not call Scryfall per request — including `rulings` (the card page
-shows them). We do **not** store fields we never render (Scryfall's legalities
-block, purchase URIs, multi-currency beyond usd/eur/tix, etc.). Images are
-linked, not cached (caching is catalog-ingestion's call).
+DB and must not call Scryfall per request — including `rulings`, `legalities`,
+the multi-face `card_faces`/`faces` arrays, and the `all_parts` relations (all
+rendered on the card page). We do **not** store fields we never render — purchase
+URIs, multi-currency beyond usd/eur/tix, `related_uris`, the rulings/prints/set
+search URIs, or Scryfall's id cross-reference block. Images are linked, not
+cached (caching is catalog-ingestion's call). *(Corrected 2026-07-14: `legalities`
+was previously on the "never store" list — it is rendered, so it is now stored.
+See the Scryfall shape review in Decisions.)*
+
+### Multi-face cards & relations
+
+Scryfall splits multi-face layouts (`transform`, `modal_dfc`, `split`,
+`adventure`, `flip`, `meld`, `reversible_card`, `double_faced_token`) into a
+`card_faces` array and **omits the per-face fields at top level** — a transform
+card has no top-level `mana_cost`, `oracle_text`, `colors`, `power`/`toughness`,
+or `image_uris` (verified against live objects, 2026-07-14). We mirror that split
+rather than fight it:
+
+- **Oracle-scoped face data → `cards.card_faces jsonb`**, an ordered array
+  `[{name, mana_cost, type_line, oracle_text, colors, color_indicator, power,
+  toughness, loyalty, defense}]`. `NULL` for single-face cards, whose data stays
+  in the top-level columns (kept there for name/text search + trgm).
+- **Per-printing per-face data → `printings.faces jsonb`**, an ordered array
+  `[{image_uris, artist, flavor_text}]` — these vary by printing. `NULL` for
+  single-face printings (top-level `image_uris`/`artist`/`flavor_text` used).
+- **`reversible_card` has no top-level `oracle_id`** — ingestion reads it from
+  `card_faces[0].oracle_id` (both faces share it). Every other layout keeps a
+  single top-level `oracle_id`, so `cards` keying holds.
+
+**Why jsonb, not a normalized `card_faces` table:** faces are never referenced by
+another row (`holdings`/`desires`/`moves` point at printings and oracle, never a
+face), are always read and written whole with their card, and the per-printing
+face data is jsonb regardless — so a table would add a join on every multi-face
+render and an oracle/printing asymmetry for no integrity gain. **Escape hatch:**
+if [catalog-search](catalog-search.md) later needs per-face attribute filtering it
+can't get from card-level aggregates, promote `card_faces` to a table then.
+
+**Related cards — `cards.all_parts jsonb`** stores Scryfall's related-card links
+`[{id, component, name, type_line}]` (`component` ∈ `token`/`meld_part`/
+`meld_result`/`combo_piece`), powering "makes a Squirrel token" / "melds into
+Brisela" on the card page. `NULL` for the majority of cards with no relations.
+Ingestion/render notes:
+
+- **`id` is a printing id, not an `oracle_id`** — resolve links via
+  `printings.id`, then hop to `oracle_id` for a stable click-through. The
+  referenced printing is whichever this card's ingested object named (e.g. that
+  set's token art).
+- **Each entry includes the card itself** (verified: Bruna lists Bruna) — filter
+  self out by id on render.
+- Tokens and checklist cards are opted **into** the catalog (maintainer decision
+  2026-07-14; they carry `rarity`/`collector_number`/`oracle_id`, verified, so the
+  `NOT NULL` columns hold), so these links resolve to real rows via a join; the
+  stored `name`/`type_line` is only a fallback for anything not yet ingested.
+- Bidirectional lookup ("what makes a Squirrel token?") is **not** modeled here —
+  an oracle-text search for "create a Squirrel token" serves it, so no jsonb GIN
+  index or `related_cards` table is warranted.
 
 ### Users & the auth boundary
 
@@ -423,6 +493,30 @@ recreating it; there is no real data to preserve.
 
 ## Decisions (this review)
 
+- **Scryfall shape review (2026-07-14) — fields, multi-face, relations.** Fetched
+  live objects across every tricky layout (normal, transform, modal_dfc, split,
+  adventure, flip, meld, battle, reversible_card, token, double_faced_token, plus
+  showcase/Godzilla printings) and corrected the accepted schema:
+  - Multi-face layouts carry **one** top-level `oracle_id` (so `cards` keying
+    holds) **except `reversible_card`**, which has it only per-face — but they
+    **omit per-face fields at top level**, so the accepted schema would have
+    ingested every DFC with null cost/text/colors/P-T and every DFC printing with
+    null images. Added `cards.card_faces` + `printings.faces` jsonb; chose jsonb
+    over a normalized table (faces are never FK targets, written whole, symmetric
+    with per-printing face data — see [Multi-face cards & relations](#multi-face-cards--relations)).
+  - Added rendered fields the accepted schema dropped: `color_indicator`,
+    `defense`, `legalities`, `produced_mana`, `game_changer` on `cards`;
+    `frame_effects`, `full_art`, `textless`, `promo_types`, `flavor_name`,
+    `artist`, `flavor_text`, `watermark`, `security_stamp`, `games`, `digital` on
+    `printings`. Treatment/variant identity (showcase vs. base, Godzilla names) is
+    core to a *collection* app. `prices` needed no change — its keys already match.
+  - Added `all_parts` jsonb and opted tokens + checklist cards into the catalog so
+    relations resolve. `legalities` moved from the "never store" list to stored.
+  - Cross-spec follow-ups filed: [catalog-ingestion](catalog-ingestion.md) (ingest
+    token/checklist/emblem/art-series layouts; populate the new jsonb columns;
+    source reversible `oracle_id` from `card_faces[0]`) and
+    [catalog-search](catalog-search.md) (multi-face `o:` must concatenate
+    `card_faces[].oracle_text`; new filter inputs available).
 - **Two holding tables** — `holdings` (present, printing grain) and `desires`
   (desired, oracle grain + optional pin). Separate grains/lifecycles beat one
   table with nullable columns and a split uniqueness constraint.
@@ -443,6 +537,12 @@ recreating it; there is no real data to preserve.
 
 Accepted with these deferred; none blocks acceptance — each notes where it resolves.
 
+- ~~Multi-face card representation~~ **Resolved 2026-07-14 (Scryfall shape
+  review):** `card_faces`/`faces` jsonb over a normalized table — see
+  [Multi-face cards & relations](#multi-face-cards--relations).
+- ~~`all_parts` / related cards~~ **Resolved 2026-07-14:** stored as `cards.all_parts
+  jsonb`; tokens + checklist cards opted into the catalog so links resolve; no
+  bidirectional index (oracle-text search covers it).
 - ~~Hard FK vs. soft reference to the users table~~ **Resolved by the live-DB
   finding (2026-07-11):** Better Auth's `neon_auth."user"` is a real in-database
   table with a `uuid` PK and hard deletes, so a hard FK with `ON DELETE CASCADE` is

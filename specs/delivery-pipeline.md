@@ -1,6 +1,6 @@
 # Delivery pipeline
 
-**Status:** accepted
+**Status:** implemented
 **Depends on:** [architecture-spike](architecture-spike.md), [dev-environment](dev-environment.md)
 
 ## Problem

@@ -41,16 +41,15 @@ Task state legend: `[ ]` available · `[~]` in progress · `[x]` done.
 
 | Spec | Status |
 |---|---|
-| [agent-harness](agent-harness.md) | draft |
 | [architecture-spike](architecture-spike.md) | implemented |
-| [auth](auth.md) | accepted |
+| [auth](auth.md) | implemented |
 | [catalog-ingestion](catalog-ingestion.md) | draft |
 | [catalog-search](catalog-search.md) | draft |
-| [collection-api](collection-api.md) | draft |
-| [data-access-backends](data-access-backends.md) | draft |
+| [collection-api](collection-api.md) | accepted |
+| [data-access-backends](data-access-backends.md) | accepted |
 | [data-model](data-model.md) | accepted |
-| [delivery-pipeline](delivery-pipeline.md) | accepted |
+| [delivery-pipeline](delivery-pipeline.md) | implemented |
 | [dev-environment](dev-environment.md) | implemented |
 | [ui-component-bench](ui-component-bench.md) | draft |
-| [ui-components](ui-components.md) | accepted |
-| [ui-design](ui-design.md) | accepted |
+| [ui-components](ui-components.md) | implemented |
+| [ui-design](ui-design.md) | implemented |
