@@ -1,6 +1,6 @@
 # Card tagging & deck boards
 
-**Status:** draft
+**Status:** accepted
 **Depends on:** [data-model](data-model.md) (owns the tables this extends),
 [collection-api](collection-api.md) (the endpoints that project the tag/board
 operations), [auth](auth.md) (the user id everything scopes to)
@@ -224,9 +224,10 @@ The operations are new `CollectionStore` methods projected to HTTP by
 
 ## Open questions
 
-- **Board default for binders.** `NOT NULL DEFAULT 'main'` (placeholder the API
-  ignores off-decks) vs. nullable. Leaning `NOT NULL DEFAULT 'main'` — keeps the
-  uniqueness keys simple. *(resolved during execution — the migration)*
+- ~~Board default for binders.~~ **Resolved 2026-07-16 (`0006`):** `board
+  card_board NOT NULL DEFAULT 'main'` on both `holdings` and `desires` — a
+  placeholder the API ignores for binders, keeping the uniqueness keys simple and
+  existing rows migrating without a rewrite.
 - **Commander's displayed printing** when the commander card is neither held nor
   desired in the deck (so no printing is pinned). Default to a canonical printing
   (e.g. most recent / a chosen "preferred" printing) — a render concern.
@@ -244,3 +245,35 @@ The operations are new `CollectionStore` methods projected to HTTP by
 - **Cross-deck "smart" tags** (a saved catalog-search materialized as a tag) —
   out of scope; derived groupings + [catalog-search](catalog-search.md) cover the
   live case. *(deferred — a future spec)*
+
+## Findings (schema migration — 2026-07-16)
+
+The schema half shipped as [`migrations/0006_card_tagging.sql`](../migrations/0006_card_tagging.sql),
+applied to the Neon **dev** branch via `scripts/migrate.sh dev`. The tag/board
+**API** half is a separate queued task; this spec stays `accepted` (not
+`implemented`) until that lands.
+
+- **Boards** — `card_board` enum; `board NOT NULL DEFAULT 'main'` added to
+  `holdings` and `desires`, each existing UNIQUE constraint swapped for one
+  including `board`. The old inline constraints had auto-generated (truncated)
+  names, so the migration drops them by lookup (`pg_constraint` where `contype='u'`,
+  one per table) rather than a guessed literal — verified the new keys are
+  `(collection_id, printing_id, finish, condition, language, board)` and
+  `(collection_id, oracle_id, printing_id, board)`.
+- **Tags** — `tags` + `card_tags` created; the two built-in system tags
+  (`commander`, `companion`) seeded **before** `FORCE ROW LEVEL SECURITY` (an
+  RLS-forced owner can't insert a `user_id IS NULL` row). RLS enabled + forced on
+  both; policies `tags_read` (SELECT: own + system), `tags_owner` (ALL: own only),
+  `card_tags_owner` (ALL: own).
+- **Grants** — `app_runtime` got `SELECT` on both tables **automatically from the
+  `0005` default-privilege flip** (confirmed: `has_table_privilege` SELECT = true
+  without an explicit grant); the migration adds only `INSERT/UPDATE/DELETE`, per
+  the convention `0005` established.
+- **`deck_commanders` dropped** (was empty).
+- **Verified end-to-end on dev** (rolled-back probe as `app_runtime`): system tags
+  are visible (2), a user can insert an **account** tag, and a write to a **system**
+  tag (`user_id NULL`) is blocked by `tags_owner`'s `WITH CHECK` — the dual-policy
+  behaves as designed. `card_tags` reuses the proven denormalized-`user_id` owner
+  policy.
+- **Prod** not migrated — rides the data-access-backends cutover with `0002`–`0005`
+  (same expand-first reasoning; see data-model Findings).
