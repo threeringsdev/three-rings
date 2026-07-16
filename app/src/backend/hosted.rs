@@ -5,12 +5,13 @@
 //! data-model's RLS policies scope the rows even beneath this terminus.
 
 use shared::{
-    AddHave, AddLine, AddWant, AllCardsRow, AllCardsView, ApiError, ApiResult, BatchMove, Board,
-    CardDetail, CardRow, CardSummary, CatalogCount, CollectionKind, CollectionSummary,
-    CollectionView, Condition, DesireLine, Finish, HoldingLine, Id, LineResult, MoveReceipt,
-    MoveRequest, NeedLocation, NeedRow, NeedsView, NewCollection, OwnershipEntry, Page,
-    PrintingSummary, Rename, Reorder, Reparent, Ruling, SearchQuery, SearchResults, SetQuantity,
-    ShoppingList, ShoppingRow, SuggestedDestination, Teardown, TeardownReceipt,
+    union_color_identity, AddHave, AddLine, AddWant, AllCardsRow, AllCardsView, ApiError,
+    ApiResult, BatchMove, Board, CardDetail, CardRow, CardSummary, CatalogCount, CollectionKind,
+    CollectionSummary, CollectionView, Condition, DeckCommanders, DesireLine, Finish, HoldingLine,
+    Id, LineResult, MoveReceipt, MoveRequest, NeedLocation, NeedRow, NeedsView, NewCollection,
+    NewTag, OwnershipEntry, Page, PrintingSummary, Rename, RenameTag, Reorder, Reparent, Ruling,
+    SearchQuery, SearchResults, SetBoard, SetQuantity, ShoppingList, ShoppingRow,
+    SuggestedDestination, Tag, TagAssignment, TagScope, TaggedCard, Teardown, TeardownReceipt,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -1061,6 +1062,422 @@ impl CollectionStore for HostedBackend {
             .collect();
         Ok(ShoppingList { rows: shop_rows })
     }
+
+    // --- Tags & boards (specs/card-tagging.md) ------------------------------
+
+    async fn create_tag(&self, req: NewTag) -> ApiResult<Tag> {
+        if req.name.trim().is_empty() {
+            return Err(ApiError::Validation("tag name must not be empty".into()));
+        }
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        if let Some(cid) = req.collection_id {
+            require_owned_collection(&mut tx, cid).await?;
+        }
+        // builtin stays NULL — the API never creates system tags. A duplicate
+        // name within the scope trips a partial unique index (23505 → Conflict).
+        let row: TagSql = sqlx::query_as(&format!(
+            "INSERT INTO tags (user_id, collection_id, name, color) \
+             VALUES ($1, $2, $3, $4) RETURNING {TAG_COLS}"
+        ))
+        .bind(user_id)
+        .bind(req.collection_id)
+        .bind(req.name.trim())
+        .bind(&req.color)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(upstream)?;
+        row.into_tag()
+    }
+
+    async fn rename_tag(&self, tag_id: Id, req: RenameTag) -> ApiResult<Tag> {
+        if req.name.trim().is_empty() {
+            return Err(ApiError::Validation("tag name must not be empty".into()));
+        }
+        let mut tx = self.scoped_tx().await?;
+        // `builtin IS NULL` bars renaming a system tag (RLS also hides it from
+        // writes — its `user_id` is NULL); either way a hit is `NotFound`.
+        let row: Option<TagSql> = sqlx::query_as(&format!(
+            "UPDATE tags SET name = $2 WHERE id = $1 AND builtin IS NULL RETURNING {TAG_COLS}"
+        ))
+        .bind(tag_id)
+        .bind(req.name.trim())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        match row {
+            Some(r) => {
+                tx.commit().await.map_err(upstream)?;
+                r.into_tag()
+            }
+            None => Err(ApiError::NotFound("tag".into())),
+        }
+    }
+
+    async fn delete_tag(&self, tag_id: Id) -> ApiResult<()> {
+        let mut tx = self.scoped_tx().await?;
+        // ON DELETE CASCADE on card_tags.tag_id drops this tag's assignments.
+        let affected = sqlx::query("DELETE FROM tags WHERE id = $1 AND builtin IS NULL")
+            .bind(tag_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(upstream)?
+            .rows_affected();
+        if affected == 0 {
+            return Err(ApiError::NotFound("tag".into()));
+        }
+        tx.commit().await.map_err(upstream)?;
+        Ok(())
+    }
+
+    async fn list_tags(&self, collection_id: Id) -> ApiResult<Vec<Tag>> {
+        let mut tx = self.scoped_tx().await?;
+        require_owned_collection(&mut tx, collection_id).await?;
+        // system (user_id NULL) + own account (collection_id NULL) + this deck's
+        // (collection_id = $1). RLS (`tags_read`) already limits the non-system
+        // rows to the caller's own, so a deck tag for another deck can't leak.
+        let rows: Vec<TagSql> = sqlx::query_as(&format!(
+            "SELECT {TAG_COLS} FROM tags \
+             WHERE user_id IS NULL OR collection_id IS NULL OR collection_id = $1 \
+             ORDER BY (builtin IS NULL), name"
+        ))
+        .bind(collection_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+        rows.into_iter().map(TagSql::into_tag).collect()
+    }
+
+    async fn assign_tag(&self, req: TagAssignment) -> ApiResult<()> {
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        require_owned_collection(&mut tx, req.collection_id).await?;
+
+        // The tag must be visible (system or own) — RLS hides others, so an
+        // unknown/foreign tag reads as absent.
+        let tag: TagScopeSql =
+            sqlx::query_as("SELECT collection_id, builtin FROM tags WHERE id = $1")
+                .bind(req.tag_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(upstream)?
+                .ok_or_else(|| ApiError::NotFound("tag".into()))?;
+
+        // Deck-tag containment: a deck-scoped tag applies only in its own deck.
+        if let Some(tag_cid) = tag.collection_id {
+            if tag_cid != req.collection_id {
+                return Err(ApiError::Conflict(
+                    "a deck tag applies only within its own collection".into(),
+                ));
+            }
+        }
+
+        // The card must actually be in the deck (held or desired).
+        let in_deck: Option<(i32,)> = sqlx::query_as(
+            "SELECT 1 WHERE EXISTS ( \
+               SELECT 1 FROM holdings h JOIN printings p ON p.id = h.printing_id \
+                WHERE h.collection_id = $1 AND p.oracle_id = $2 \
+               UNION ALL \
+               SELECT 1 FROM desires d WHERE d.collection_id = $1 AND d.oracle_id = $2 )",
+        )
+        .bind(req.collection_id)
+        .bind(req.oracle_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        if in_deck.is_none() {
+            return Err(ApiError::Validation(
+                "card is not in this collection".into(),
+            ));
+        }
+
+        // Built-in caps: ≤ 2 commanders, ≤ 1 companion per deck. Count distinct
+        // oracles already carrying the built-in, excluding the one being
+        // assigned (so re-assigning an existing commander stays idempotent).
+        if let Some(cap) = builtin_cap(tag.builtin.as_deref()) {
+            let (count,): (i64,) = sqlx::query_as(
+                "SELECT count(DISTINCT ct.oracle_id) FROM card_tags ct \
+                 JOIN tags t ON t.id = ct.tag_id \
+                 WHERE ct.collection_id = $1 AND t.builtin = $2 AND ct.oracle_id <> $3",
+            )
+            .bind(req.collection_id)
+            .bind(tag.builtin.as_deref())
+            .bind(req.oracle_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(upstream)?;
+            if count >= cap {
+                return Err(ApiError::Conflict(format!(
+                    "a deck may have at most {cap} {}(s)",
+                    tag.builtin.as_deref().unwrap_or("of this tag")
+                )));
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO card_tags (collection_id, oracle_id, tag_id, user_id) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (collection_id, oracle_id, tag_id) DO NOTHING",
+        )
+        .bind(req.collection_id)
+        .bind(req.oracle_id)
+        .bind(req.tag_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(upstream)?;
+        Ok(())
+    }
+
+    async fn unassign_tag(&self, req: TagAssignment) -> ApiResult<()> {
+        let mut tx = self.scoped_tx().await?;
+        require_owned_collection(&mut tx, req.collection_id).await?;
+        // Idempotent: removing an absent assignment is a no-op. RLS restricts the
+        // delete to the caller's own rows.
+        sqlx::query(
+            "DELETE FROM card_tags WHERE collection_id = $1 AND oracle_id = $2 AND tag_id = $3",
+        )
+        .bind(req.collection_id)
+        .bind(req.oracle_id)
+        .bind(req.tag_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+        Ok(())
+    }
+
+    async fn card_tags(&self, collection_id: Id, oracle_id: Id) -> ApiResult<Vec<Tag>> {
+        let mut tx = self.scoped_tx().await?;
+        require_owned_collection(&mut tx, collection_id).await?;
+        let rows: Vec<TagSql> = sqlx::query_as(
+            "SELECT t.id, t.user_id, t.collection_id, t.name, t.builtin, t.color \
+             FROM card_tags ct JOIN tags t ON t.id = ct.tag_id \
+             WHERE ct.collection_id = $1 AND ct.oracle_id = $2 \
+             ORDER BY (t.builtin IS NULL), t.name",
+        )
+        .bind(collection_id)
+        .bind(oracle_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+        rows.into_iter().map(TagSql::into_tag).collect()
+    }
+
+    async fn cards_with_tag(&self, collection_id: Id, tag_id: Id) -> ApiResult<Vec<TaggedCard>> {
+        let mut tx = self.scoped_tx().await?;
+        require_owned_collection(&mut tx, collection_id).await?;
+        let rows: Vec<TaggedCardSql> = sqlx::query_as(
+            "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, c.color_identity, \
+                    (SELECT image_uris->>'normal' FROM printings \
+                     WHERE oracle_id = c.oracle_id LIMIT 1) AS image_uri \
+             FROM card_tags ct JOIN cards c ON c.oracle_id = ct.oracle_id \
+             WHERE ct.collection_id = $1 AND ct.tag_id = $2 ORDER BY c.name",
+        )
+        .bind(collection_id)
+        .bind(tag_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+        Ok(rows.into_iter().map(TaggedCardSql::into_card).collect())
+    }
+
+    async fn deck_commanders(&self, collection_id: Id) -> ApiResult<DeckCommanders> {
+        let mut tx = self.scoped_tx().await?;
+        require_owned_collection(&mut tx, collection_id).await?;
+        let rows: Vec<TaggedCardSql> = sqlx::query_as(
+            "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, c.color_identity, \
+                    (SELECT image_uris->>'normal' FROM printings \
+                     WHERE oracle_id = c.oracle_id LIMIT 1) AS image_uri \
+             FROM card_tags ct JOIN tags t ON t.id = ct.tag_id \
+             JOIN cards c ON c.oracle_id = ct.oracle_id \
+             WHERE ct.collection_id = $1 AND t.builtin = 'commander' ORDER BY c.name",
+        )
+        .bind(collection_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+        let commanders: Vec<TaggedCard> = rows.into_iter().map(TaggedCardSql::into_card).collect();
+        // Color identity is derived, never stored — the WUBRG union of the
+        // commanders' identities, so it is always current after an assignment.
+        let color_identity =
+            union_color_identity(commanders.iter().map(|c| c.color_identity.as_slice()));
+        Ok(DeckCommanders {
+            commanders,
+            color_identity,
+        })
+    }
+
+    async fn set_holding_board(&self, holding_id: Id, req: SetBoard) -> ApiResult<()> {
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        let row: HoldingBoardSql = sqlx::query_as(
+            "SELECT h.collection_id, h.printing_id, h.finish::text AS finish, \
+                    h.condition::text AS condition, h.language, h.board::text AS board, \
+                    h.quantity, col.kind::text AS kind \
+             FROM holdings h JOIN collections col ON col.id = h.collection_id \
+             WHERE h.id = $1",
+        )
+        .bind(holding_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(upstream)?
+        .ok_or_else(|| ApiError::NotFound("holding".into()))?;
+
+        if row.kind != CollectionKind::Deck.to_pg() {
+            return Err(ApiError::Validation("boards apply to decks only".into()));
+        }
+        let to = req.board.to_pg();
+        if row.board == to {
+            return Ok(()); // no-op: already on the target board
+        }
+        let move_qty = req.quantity.unwrap_or(row.quantity);
+        if move_qty <= 0 || move_qty > row.quantity {
+            return Err(ApiError::Validation(
+                "board quantity must be > 0 and ≤ the row's quantity".into(),
+            ));
+        }
+
+        // Upsert into the destination board's row (merging if it exists), then
+        // decrement/delete the source — a quantity-preserving split.
+        sqlx::query(
+            "INSERT INTO holdings \
+               (user_id, collection_id, printing_id, finish, condition, language, board, quantity) \
+             VALUES ($1, $2, $3, $4::card_finish, $5::card_condition, $6, $7::card_board, $8) \
+             ON CONFLICT ON CONSTRAINT holdings_uniq \
+               DO UPDATE SET quantity = holdings.quantity + EXCLUDED.quantity",
+        )
+        .bind(user_id)
+        .bind(row.collection_id)
+        .bind(row.printing_id)
+        .bind(&row.finish)
+        .bind(&row.condition)
+        .bind(&row.language)
+        .bind(to)
+        .bind(move_qty)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        take_or_delete_holding(&mut tx, holding_id, row.quantity, move_qty).await?;
+        tx.commit().await.map_err(upstream)?;
+        Ok(())
+    }
+
+    async fn set_desire_board(&self, desire_id: Id, req: SetBoard) -> ApiResult<()> {
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        let row: DesireBoardSql = sqlx::query_as(
+            "SELECT d.collection_id, d.oracle_id, d.printing_id, d.board::text AS board, \
+                    d.quantity, col.kind::text AS kind \
+             FROM desires d JOIN collections col ON col.id = d.collection_id \
+             WHERE d.id = $1",
+        )
+        .bind(desire_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(upstream)?
+        .ok_or_else(|| ApiError::NotFound("desire".into()))?;
+
+        if row.kind != CollectionKind::Deck.to_pg() {
+            return Err(ApiError::Validation("boards apply to decks only".into()));
+        }
+        let to = req.board.to_pg();
+        if row.board == to {
+            return Ok(());
+        }
+        let move_qty = req.quantity.unwrap_or(row.quantity);
+        if move_qty <= 0 || move_qty > row.quantity {
+            return Err(ApiError::Validation(
+                "board quantity must be > 0 and ≤ the row's quantity".into(),
+            ));
+        }
+
+        sqlx::query(
+            "INSERT INTO desires (user_id, collection_id, oracle_id, printing_id, board, quantity) \
+             VALUES ($1, $2, $3, $4, $5::card_board, $6) \
+             ON CONFLICT ON CONSTRAINT desires_uniq \
+               DO UPDATE SET quantity = desires.quantity + EXCLUDED.quantity",
+        )
+        .bind(user_id)
+        .bind(row.collection_id)
+        .bind(row.oracle_id)
+        .bind(row.printing_id)
+        .bind(to)
+        .bind(move_qty)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        take_or_delete_desire(&mut tx, desire_id, row.quantity, move_qty).await?;
+        tx.commit().await.map_err(upstream)?;
+        Ok(())
+    }
+}
+
+/// The built-in-tag per-deck cap, if the tag is a capped built-in: `commander`
+/// ≤ 2 (partners / Background / Doctor's-companion), `companion` ≤ 1. `None`
+/// (uncapped) for user tags and any other built-in. Full legal-commander /
+/// companion-restriction validation is a rules-engine concern (card-tagging OQ).
+fn builtin_cap(builtin: Option<&str>) -> Option<i64> {
+    match builtin {
+        Some("commander") => Some(2),
+        Some("companion") => Some(1),
+        _ => None,
+    }
+}
+
+/// Decrement a holding row by `take`, deleting it when that empties it (the
+/// CHECK forbids quantity 0). Shared by the board split's source side.
+async fn take_or_delete_holding(
+    tx: &mut Transaction<'static, Postgres>,
+    holding_id: Id,
+    current: i32,
+    take: i32,
+) -> ApiResult<()> {
+    if take >= current {
+        sqlx::query("DELETE FROM holdings WHERE id = $1")
+            .bind(holding_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(upstream)?;
+    } else {
+        sqlx::query("UPDATE holdings SET quantity = quantity - $2 WHERE id = $1")
+            .bind(holding_id)
+            .bind(take)
+            .execute(&mut **tx)
+            .await
+            .map_err(upstream)?;
+    }
+    Ok(())
+}
+
+/// Desire counterpart of [`take_or_delete_holding`].
+async fn take_or_delete_desire(
+    tx: &mut Transaction<'static, Postgres>,
+    desire_id: Id,
+    current: i32,
+    take: i32,
+) -> ApiResult<()> {
+    if take >= current {
+        sqlx::query("DELETE FROM desires WHERE id = $1")
+            .bind(desire_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(upstream)?;
+    } else {
+        sqlx::query("UPDATE desires SET quantity = quantity - $2 WHERE id = $1")
+            .bind(desire_id)
+            .bind(take)
+            .execute(&mut **tx)
+            .await
+            .map_err(upstream)?;
+    }
+    Ok(())
 }
 
 /// A move's card grain: printing + finish/condition/language (Postgres enum
@@ -1551,6 +1968,86 @@ const HOLDING_COLS: &str = "id, collection_id, printing_id, finish::text AS fini
 /// The `desires` projection matching [`DesireRow`].
 const DESIRE_COLS: &str =
     "id, collection_id, oracle_id, printing_id, board::text AS board, quantity";
+
+/// The `tags` projection matching [`TagSql`].
+const TAG_COLS: &str = "id, user_id, collection_id, name, builtin, color";
+
+#[derive(sqlx::FromRow)]
+struct TagSql {
+    id: Uuid,
+    user_id: Option<Uuid>,
+    collection_id: Option<Uuid>,
+    name: String,
+    builtin: Option<String>,
+    color: Option<String>,
+}
+
+impl TagSql {
+    fn into_tag(self) -> ApiResult<Tag> {
+        Ok(Tag {
+            scope: TagScope::from_fks(self.user_id, self.collection_id),
+            id: self.id,
+            name: self.name,
+            builtin: self.builtin,
+            color: self.color,
+        })
+    }
+}
+
+/// The subset of a `tags` row the assignment path needs to enforce containment
+/// and the built-in caps.
+#[derive(sqlx::FromRow)]
+struct TagScopeSql {
+    collection_id: Option<Uuid>,
+    builtin: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct TaggedCardSql {
+    oracle_id: Uuid,
+    name: String,
+    mana_cost: Option<String>,
+    type_line: Option<String>,
+    color_identity: Vec<String>,
+    image_uri: Option<String>,
+}
+
+impl TaggedCardSql {
+    fn into_card(self) -> TaggedCard {
+        TaggedCard {
+            oracle_id: self.oracle_id,
+            name: self.name,
+            mana_cost: self.mana_cost,
+            type_line: self.type_line,
+            image_uri: self.image_uri,
+            color_identity: self.color_identity,
+        }
+    }
+}
+
+/// A `holdings` row plus its collection kind — the board re-label's read.
+#[derive(sqlx::FromRow)]
+struct HoldingBoardSql {
+    collection_id: Uuid,
+    printing_id: Uuid,
+    finish: String,
+    condition: String,
+    language: String,
+    board: String,
+    quantity: i32,
+    kind: String,
+}
+
+/// A `desires` row plus its collection kind — the board re-label's read.
+#[derive(sqlx::FromRow)]
+struct DesireBoardSql {
+    collection_id: Uuid,
+    oracle_id: Uuid,
+    printing_id: Option<Uuid>,
+    board: String,
+    quantity: i32,
+    kind: String,
+}
 
 #[derive(sqlx::FromRow)]
 struct HoldingRow {

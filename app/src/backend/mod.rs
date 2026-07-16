@@ -23,10 +23,10 @@
 
 use shared::{
     AddHave, AddLine, AddWant, AllCardsView, ApiResult, BatchMove, CardDetail, CardSummary,
-    CatalogCount, CollectionSummary, CollectionView, DesireLine, HoldingLine, Id, LineResult,
-    MoveReceipt, MoveRequest, NeedsView, NewCollection, Page, Rename, Reorder, Reparent,
-    SearchQuery, SearchResults, SetQuantity, ShoppingList, SuggestedDestination, Teardown,
-    TeardownReceipt,
+    CatalogCount, CollectionSummary, CollectionView, DeckCommanders, DesireLine, HoldingLine, Id,
+    LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection, NewTag, Page, Rename,
+    RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard, SetQuantity, ShoppingList,
+    SuggestedDestination, Tag, TagAssignment, TaggedCard, Teardown, TeardownReceipt,
 };
 
 #[cfg(feature = "hosted")]
@@ -86,6 +86,50 @@ pub mod paths {
         pub const VIEW: &str = "view";
         pub const TEARDOWN: &str = "teardown";
         pub const NEEDS: &str = "needs";
+        /// GET the tags in scope for a collection (system + account + this deck's).
+        pub const TAGS: &str = "tags";
+        /// GET a deck's commanders + derived color identity.
+        pub const COMMANDERS: &str = "commanders";
+    }
+
+    /// Tags & boards (specs/card-tagging.md, surface in collection-api §Tags &
+    /// boards). Tag CRUD is a top-level resource; assignment carries all three
+    /// ids in the body; per-card and per-tag reads and the board re-label hang
+    /// off their anchor.
+    pub const TAGS: &str = "/api/tags";
+    pub const TAGS_ASSIGN: &str = "/api/tags/assign";
+    pub const TAGS_UNASSIGN: &str = "/api/tags/unassign";
+
+    /// Tag-by-id op (`rename`/`delete`) — the router mounts `tag_op_route(op)`,
+    /// the client fills `tag_op(id, op)`, mirroring the per-collection ops.
+    pub fn tag_op_route(op: &str) -> String {
+        format!("/api/tags/{{id}}/{op}")
+    }
+    pub fn tag_op(id: Id, op: &str) -> String {
+        format!("/api/tags/{id}/{op}")
+    }
+
+    /// A card's tags within a collection (by collection + oracle id).
+    pub const CARD_TAGS_ROUTE: &str = "/api/collections/{id}/cards/{oracle}/tags";
+    pub fn card_tags(collection_id: Id, oracle_id: Id) -> String {
+        format!("/api/collections/{collection_id}/cards/{oracle_id}/tags")
+    }
+
+    /// A deck's cards carrying a given tag (by collection + tag id).
+    pub const TAG_CARDS_ROUTE: &str = "/api/collections/{id}/tags/{tag}/cards";
+    pub fn tag_cards(collection_id: Id, tag_id: Id) -> String {
+        format!("/api/collections/{collection_id}/tags/{tag_id}/cards")
+    }
+
+    /// Re-label a holding / desire stack onto another board. Route template
+    /// (`{id}` = holding / desire id) / client path.
+    pub const HOLDING_BOARD_ROUTE: &str = "/api/holdings/{id}/board";
+    pub fn holding_board(holding_id: Id) -> String {
+        format!("/api/holdings/{holding_id}/board")
+    }
+    pub const DESIRE_BOARD_ROUTE: &str = "/api/desires/{id}/board";
+    pub fn desire_board(desire_id: Id) -> String {
+        format!("/api/desires/{desire_id}/board")
     }
 
     /// Global read models.
@@ -249,4 +293,55 @@ pub trait CollectionStore {
     /// The global shopping list: cards short across the whole collection
     /// (total desired − owned > 0), with which collections want them.
     async fn shopping_list(&self) -> ApiResult<ShoppingList>;
+
+    // --- Tags & boards (specs/card-tagging.md) ------------------------------
+
+    /// Create an **account**- or **deck**-scoped tag (`req.collection_id`
+    /// distinguishes). System tags are seeded, never created here. A duplicate
+    /// name in the same scope is `Conflict`.
+    async fn create_tag(&self, req: NewTag) -> ApiResult<Tag>;
+
+    /// Rename one of the caller's tags. A built-in / not-owned tag is `NotFound`
+    /// (RLS hides system tags from writes); a name clash is `Conflict`.
+    async fn rename_tag(&self, tag_id: Id, req: RenameTag) -> ApiResult<Tag>;
+
+    /// Delete one of the caller's tags — cascades its `card_tags` assignments.
+    /// A built-in / not-owned tag is `NotFound`.
+    async fn delete_tag(&self, tag_id: Id) -> ApiResult<()>;
+
+    /// The tags in scope for a collection: the system built-ins + the caller's
+    /// account tags + that collection's deck tags.
+    async fn list_tags(&self, collection_id: Id) -> ApiResult<Vec<Tag>>;
+
+    /// Assign a tag to a card in a collection (anchored at `(collection,
+    /// oracle)`). Enforces: the card is in the deck (a holding or desire exists),
+    /// a deck-scoped tag is applied only within its own collection, and the
+    /// built-in caps — `commander` ≤ 2, `companion` ≤ 1 per deck. Idempotent.
+    async fn assign_tag(&self, req: TagAssignment) -> ApiResult<()>;
+
+    /// Remove a tag from a card in a collection. Idempotent (removing an absent
+    /// assignment is a no-op).
+    async fn unassign_tag(&self, req: TagAssignment) -> ApiResult<()>;
+
+    /// A card's tags within a collection.
+    async fn card_tags(&self, collection_id: Id, oracle_id: Id) -> ApiResult<Vec<Tag>>;
+
+    /// A collection's cards carrying a given tag (built-in or user) — the
+    /// "group a deck by a tag" read.
+    async fn cards_with_tag(&self, collection_id: Id, tag_id: Id) -> ApiResult<Vec<TaggedCard>>;
+
+    /// A deck's commanders (`commander` built-in tag) and the color identity
+    /// derived from them (the WUBRG union of their `color_identity`, computed on
+    /// read — never stored, so always current).
+    async fn deck_commanders(&self, collection_id: Id) -> ApiResult<DeckCommanders>;
+
+    /// Re-label part or all of a **holding** stack onto another board — a
+    /// quantity-preserving in-place update, splitting the row when only part
+    /// changes board and merging into the destination board's row if present.
+    /// Not a `moves` entry. Boards apply to decks only (`Validation` on a binder).
+    async fn set_holding_board(&self, holding_id: Id, req: SetBoard) -> ApiResult<()>;
+
+    /// Re-label part or all of a **desire** stack onto another board (as
+    /// [`set_holding_board`](Self::set_holding_board), for desired copies).
+    async fn set_desire_board(&self, desire_id: Id, req: SetBoard) -> ApiResult<()>;
 }

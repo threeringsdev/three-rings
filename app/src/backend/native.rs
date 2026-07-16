@@ -13,10 +13,11 @@
 
 use shared::{
     AddHave, AddLine, AddWant, AllCardsView, ApiError, ApiResult, BatchMove, CardDetail,
-    CardSummary, CatalogCount, CollectionSummary, CollectionView, DesireLine, ErrorEnvelope,
-    HoldingLine, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection, Page, Rename,
-    Reorder, Reparent, SearchQuery, SearchResults, SetQuantity, ShoppingList, SuggestedDestination,
-    Teardown, TeardownReceipt,
+    CardSummary, CatalogCount, CollectionSummary, CollectionView, DeckCommanders, DesireLine,
+    ErrorEnvelope, HoldingLine, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection,
+    NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard,
+    SetQuantity, ShoppingList, SuggestedDestination, Tag, TagAssignment, TaggedCard, Teardown,
+    TeardownReceipt,
 };
 use tokio::sync::OnceCell;
 
@@ -416,6 +417,80 @@ impl CollectionStore for NativeBackend {
     async fn shopping_list(&self) -> ApiResult<ShoppingList> {
         self.require_session()?;
         self.get(super::paths::SHOPPING_LIST).await
+    }
+
+    // --- Tags & boards (specs/card-tagging.md) ------------------------------
+
+    async fn create_tag(&self, req: NewTag) -> ApiResult<Tag> {
+        self.require_session()?;
+        self.post(super::paths::TAGS, &req).await
+    }
+
+    async fn rename_tag(&self, tag_id: Id, req: RenameTag) -> ApiResult<Tag> {
+        self.require_session()?;
+        self.post(
+            &super::paths::tag_op(tag_id, super::paths::op::RENAME),
+            &req,
+        )
+        .await
+    }
+
+    async fn delete_tag(&self, tag_id: Id) -> ApiResult<()> {
+        self.require_session()?;
+        self.post_unit(&super::paths::tag_op(tag_id, super::paths::op::DELETE), &())
+            .await
+    }
+
+    async fn list_tags(&self, collection_id: Id) -> ApiResult<Vec<Tag>> {
+        self.require_session()?;
+        self.get(&super::paths::collection_op(
+            collection_id,
+            super::paths::op::TAGS,
+        ))
+        .await
+    }
+
+    async fn assign_tag(&self, req: TagAssignment) -> ApiResult<()> {
+        self.require_session()?;
+        self.post_unit(super::paths::TAGS_ASSIGN, &req).await
+    }
+
+    async fn unassign_tag(&self, req: TagAssignment) -> ApiResult<()> {
+        self.require_session()?;
+        self.post_unit(super::paths::TAGS_UNASSIGN, &req).await
+    }
+
+    async fn card_tags(&self, collection_id: Id, oracle_id: Id) -> ApiResult<Vec<Tag>> {
+        self.require_session()?;
+        self.get(&super::paths::card_tags(collection_id, oracle_id))
+            .await
+    }
+
+    async fn cards_with_tag(&self, collection_id: Id, tag_id: Id) -> ApiResult<Vec<TaggedCard>> {
+        self.require_session()?;
+        self.get(&super::paths::tag_cards(collection_id, tag_id))
+            .await
+    }
+
+    async fn deck_commanders(&self, collection_id: Id) -> ApiResult<DeckCommanders> {
+        self.require_session()?;
+        self.get(&super::paths::collection_op(
+            collection_id,
+            super::paths::op::COMMANDERS,
+        ))
+        .await
+    }
+
+    async fn set_holding_board(&self, holding_id: Id, req: SetBoard) -> ApiResult<()> {
+        self.require_session()?;
+        self.post_unit(&super::paths::holding_board(holding_id), &req)
+            .await
+    }
+
+    async fn set_desire_board(&self, desire_id: Id, req: SetBoard) -> ApiResult<()> {
+        self.require_session()?;
+        self.post_unit(&super::paths::desire_board(desire_id), &req)
+            .await
     }
 }
 
