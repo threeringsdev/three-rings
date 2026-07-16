@@ -2,20 +2,21 @@ name: Artifacts
 
 # Artifacts tier of the two-tier CI (see specs/delivery-pipeline.md). Mints
 # checkable native builds and publishes them to a single rolling `latest`
-# prerelease. The Android APK builds on every non-docs merge to main (and on
-# demand); the macOS .dmg is dispatch-only because the Blacksmith macOS runner
-# costs ~20x the linux basis rate.
+# prerelease. Both targets are dispatch-only: early in dev most merges don't
+# need a fresh native build, and the Blacksmith macOS runner costs ~20x the
+# linux basis rate. The two `workflow_dispatch` inputs pick which artifact(s)
+# to build — Android on by default (cheap), macOS off (opt in per run).
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - 'specs/**'
-      - '**.md'
-      # Dev-environment / agent config — never affects the shipped artifacts.
-      - '.devcontainer/**'
-      - '.claude/**'
-      - '.mcp.json'
   workflow_dispatch:
+    inputs:
+      android:
+        description: 'Build the Android APK'
+        type: boolean
+        default: true
+      macos:
+        description: 'Build the macOS .dmg'
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,12 +24,13 @@ env:
 jobs:
   # -------------------------------------------------------------------------
   # Android APK -> signed, uploaded to the rolling `latest` prerelease.
-  # Runs on push-to-main (non-docs) and workflow_dispatch.
+  # workflow_dispatch only, gated on the `android` input (default true).
   # x86_64 linux runner ONLY: Blacksmith arm64 shapes reintroduce the
   # linux-arm64 NDK gap (Google ships no arm64 Linux NDK).
   # -------------------------------------------------------------------------
   android-apk:
     name: Android APK
+    if: ${{ inputs.android }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: write
@@ -222,12 +224,13 @@ jobs:
 
   # -------------------------------------------------------------------------
   # macOS .dmg -> unsigned/ad-hoc, uploaded to the SAME rolling `latest`
-  # prerelease. workflow_dispatch ONLY: the Apple Silicon runner is ~$0.08/min
-  # (~20x the linux basis rate), so it is human-triggered, never per-merge.
+  # prerelease. Gated on the `macos` input (default false): the Apple Silicon
+  # runner is ~$0.08/min (~20x the linux basis rate), so it is opt-in per run,
+  # never per-merge.
   # -------------------------------------------------------------------------
   macos-dmg:
     name: macOS .dmg
-    if: github.event_name == 'workflow_dispatch'
+    if: ${{ inputs.macos }}
     runs-on: blacksmith-6vcpu-macos-latest
     permissions:
       contents: write
@@ -317,7 +320,7 @@ jobs:
           apk = m.group(0) if m else (
               "<!-- BEGIN apk -->\n"
               "### Android APK\n"
-              "_None yet — merge a non-docs change to `main` to publish one._\n"
+              "_None yet — run this workflow via **Run workflow** to publish one._\n"
               "<!-- END apk -->"
           )
           dmg = (
