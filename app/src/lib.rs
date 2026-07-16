@@ -493,16 +493,20 @@ pub async fn list_collections() -> Result<Vec<shared::CollectionSummary>, Server
     }
     #[cfg(all(feature = "native", not(feature = "hosted")))]
     {
+        use crate::auth::cookies;
         use crate::backend::{CollectionStore, NativeBackend};
         let headers = leptos_axum::extract::<axum::http::HeaderMap>()
             .await
             .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
         // The native embedded server never verifies the JWT — it forwards it to
-        // the hosted terminus, which does. A missing cookie surfaces as the
-        // hosted 401 (mapped to Unauthorized) via the backend.
-        let token = crate::auth::cookies::cookie_value(&headers, crate::auth::cookies::JWT_COOKIE)
-            .unwrap_or_default();
-        NativeBackend::authed(token)
+        // the hosted terminus, which does. We hand the backend both the current
+        // `tr_jwt` (may be absent once the 15-min token expires) and the
+        // long-lived `tr_session` + our origin, so a hosted 401 triggers a
+        // silent re-mint + one retry rather than surfacing as Unauthorized.
+        let token = cookies::cookie_value(&headers, cookies::JWT_COOKIE);
+        let session = cookies::cookie_value(&headers, cookies::SESSION_COOKIE);
+        let origin = cookies::request_origin(&headers);
+        NativeBackend::authed(token, session, origin)
             .list_collections()
             .await
             .map_err(api_err)
