@@ -12,9 +12,10 @@
 //! running hosted deployment to talk to.
 
 use shared::{
-    AddHave, AddLine, AddWant, ApiError, ApiResult, CatalogCount, CollectionSummary,
-    CollectionView, DesireLine, ErrorEnvelope, HoldingLine, Id, LineResult, NewCollection, Page,
-    Rename, Reorder, Reparent, SetQuantity,
+    AddHave, AddLine, AddWant, ApiError, ApiResult, BatchMove, CatalogCount, CollectionSummary,
+    CollectionView, DesireLine, ErrorEnvelope, HoldingLine, Id, LineResult, MoveReceipt,
+    MoveRequest, NewCollection, Page, Rename, Reorder, Reparent, SetQuantity, SuggestedDestination,
+    Teardown, TeardownReceipt,
 };
 use tokio::sync::OnceCell;
 
@@ -247,6 +248,40 @@ impl CollectionStore for NativeBackend {
             path.push_str(&qs.join("&"));
         }
         self.get(&path).await
+    }
+
+    async fn move_cards(&self, req: MoveRequest) -> ApiResult<MoveReceipt> {
+        self.require_session()?;
+        self.post(super::paths::MOVES, &req).await
+    }
+
+    async fn move_batch(&self, req: BatchMove) -> ApiResult<Vec<MoveReceipt>> {
+        self.require_session()?;
+        self.post(super::paths::MOVES_BATCH, &req).await
+    }
+
+    async fn undo_move(&self, move_id: Id) -> ApiResult<()> {
+        self.require_session()?;
+        self.post_unit(&super::paths::move_undo(move_id), &()).await
+    }
+
+    async fn undo_last_move(&self) -> ApiResult<Option<MoveReceipt>> {
+        self.require_session()?;
+        self.post(super::paths::MOVES_UNDO_LAST, &()).await
+    }
+
+    async fn suggested_destinations(&self, oracle_id: Id) -> ApiResult<Vec<SuggestedDestination>> {
+        self.require_session()?;
+        self.get(&super::paths::card_destinations(oracle_id)).await
+    }
+
+    async fn teardown(&self, collection_id: Id, mode: Teardown) -> ApiResult<TeardownReceipt> {
+        self.require_session()?;
+        self.post(
+            &super::paths::collection_op(collection_id, super::paths::op::TEARDOWN),
+            &mode,
+        )
+        .await
     }
 }
 

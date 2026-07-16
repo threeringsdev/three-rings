@@ -282,3 +282,76 @@ impl Page {
         self.limit.unwrap_or(50).clamp(1, 200) as i64
     }
 }
+
+/// Move physical copies between collections (specs/collection-api.md → Move).
+/// `from = None` is an external intake, `to = None` a removal. Moves are
+/// board-agnostic (the ledger has no board) — they act on the mainboard;
+/// board re-labels are a separate card-tagging op, not a move.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MoveRequest {
+    pub from_collection_id: Option<Id>,
+    pub to_collection_id: Option<Id>,
+    pub printing_id: Id,
+    #[serde(default)]
+    pub finish: Finish,
+    #[serde(default)]
+    pub condition: Condition,
+    #[serde(default = "default_language")]
+    pub language: String,
+    pub quantity: i32,
+}
+
+/// The id of a created move — returned so the toast can offer Undo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MoveReceipt {
+    pub move_id: Id,
+}
+
+/// One line of a batch move — the persistent selection tray: N `(card, from)`
+/// pairs to one destination, applied in a single transaction (all-or-nothing).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MoveItem {
+    pub from_collection_id: Option<Id>,
+    pub printing_id: Id,
+    #[serde(default)]
+    pub finish: Finish,
+    #[serde(default)]
+    pub condition: Condition,
+    #[serde(default = "default_language")]
+    pub language: String,
+    pub quantity: i32,
+}
+
+/// Batch move: many items to one destination.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchMove {
+    pub to_collection_id: Option<Id>,
+    pub items: Vec<MoveItem>,
+}
+
+/// A collection that wants a card more than it currently has — the destination
+/// picker's ranking (specs/collection-api.md → suggested-destinations).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SuggestedDestination {
+    pub collection_id: Id,
+    pub collection_name: String,
+    pub desired: i32,
+    pub present: i32,
+    pub shortfall: i32,
+}
+
+/// Empty a collection: move everything to `EmptyTo` a chosen destination, or
+/// `ReturnToPrevious` — each card back to the most-recent collection it was
+/// moved *into* here from (falling back to Inbox where there is no history).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum Teardown {
+    EmptyTo { to_collection_id: Id },
+    ReturnToPrevious,
+}
+
+/// Result of a teardown — how many move rows it wrote.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TeardownReceipt {
+    pub moves: i64,
+}

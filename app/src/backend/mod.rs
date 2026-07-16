@@ -22,9 +22,10 @@
 //! collection-api extends these traits with the full method surface.
 
 use shared::{
-    AddHave, AddLine, AddWant, ApiResult, CatalogCount, CollectionSummary, CollectionView,
-    DesireLine, HoldingLine, Id, LineResult, NewCollection, Page, Rename, Reorder, Reparent,
-    SetQuantity,
+    AddHave, AddLine, AddWant, ApiResult, BatchMove, CatalogCount, CollectionSummary,
+    CollectionView, DesireLine, HoldingLine, Id, LineResult, MoveReceipt, MoveRequest,
+    NewCollection, Page, Rename, Reorder, Reparent, SetQuantity, SuggestedDestination, Teardown,
+    TeardownReceipt,
 };
 
 #[cfg(feature = "hosted")]
@@ -71,6 +72,22 @@ pub mod paths {
         pub const WANT: &str = "want";
         pub const BATCH: &str = "batch";
         pub const VIEW: &str = "view";
+        pub const TEARDOWN: &str = "teardown";
+    }
+
+    /// Move endpoints (not per-collection: a move spans two collections).
+    pub const MOVES: &str = "/api/moves";
+    pub const MOVES_BATCH: &str = "/api/moves/batch";
+    pub const MOVES_UNDO_LAST: &str = "/api/moves/undo-last";
+    pub const MOVE_UNDO_ROUTE: &str = "/api/moves/{id}/undo";
+    pub fn move_undo(move_id: Id) -> String {
+        format!("/api/moves/{move_id}/undo")
+    }
+
+    /// Suggested destinations for a card (by oracle id).
+    pub const CARD_DESTINATIONS_ROUTE: &str = "/api/cards/{id}/destinations";
+    pub fn card_destinations(oracle_id: Id) -> String {
+        format!("/api/cards/{oracle_id}/destinations")
     }
 
     /// The axum route template for a per-collection operation (`{id}` param).
@@ -162,4 +179,31 @@ pub trait CollectionStore {
     /// view bounded (specs/collection-api.md → Read models). Sorted by
     /// (name, printing, board); the cursor is opaque.
     async fn collection_view(&self, id: Id, page: Page) -> ApiResult<CollectionView>;
+
+    /// Move copies between collections in one transaction: decrement the source
+    /// holding, upsert the destination, append a `moves` row. `from = None` is an
+    /// intake, `to = None` a removal. Rejects insufficient source copies
+    /// (`Conflict`). Returns the move id (for Undo).
+    async fn move_cards(&self, req: MoveRequest) -> ApiResult<MoveReceipt>;
+
+    /// Batch move (the selection tray): many items to one destination, all in a
+    /// single transaction — all-or-nothing, so a bad item rolls the batch back.
+    async fn move_batch(&self, req: BatchMove) -> ApiResult<Vec<MoveReceipt>>;
+
+    /// Undo a move: reverse its holdings effect and stamp `undone_at`. Idempotent
+    /// (undoing an already-undone move is a no-op).
+    async fn undo_move(&self, move_id: Id) -> ApiResult<()>;
+
+    /// Undo the caller's most recent not-yet-undone move (⌘K "undo last move").
+    /// Returns the undone move id, or `None` if there is nothing to undo.
+    async fn undo_last_move(&self) -> ApiResult<Option<MoveReceipt>>;
+
+    /// Collections that desire a card more than they currently hold — the
+    /// move/pull destination ranking, shortfall-first.
+    async fn suggested_destinations(&self, oracle_id: Id) -> ApiResult<Vec<SuggestedDestination>>;
+
+    /// Empty a collection — move every holding to a chosen destination, or back
+    /// to each card's previous location (most-recent move *into* here, else
+    /// Inbox). One transaction; returns how many move rows it wrote.
+    async fn teardown(&self, collection_id: Id, mode: Teardown) -> ApiResult<TeardownReceipt>;
 }

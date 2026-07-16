@@ -5,9 +5,10 @@
 //! data-model's RLS policies scope the rows even beneath this terminus.
 
 use shared::{
-    AddHave, AddLine, AddWant, ApiError, ApiResult, Board, CardRow, CatalogCount, CollectionKind,
-    CollectionSummary, CollectionView, Condition, DesireLine, Finish, HoldingLine, Id, LineResult,
-    NewCollection, Page, Rename, Reorder, Reparent, SetQuantity,
+    AddHave, AddLine, AddWant, ApiError, ApiResult, BatchMove, Board, CardRow, CatalogCount,
+    CollectionKind, CollectionSummary, CollectionView, Condition, DesireLine, Finish, HoldingLine,
+    Id, LineResult, MoveReceipt, MoveRequest, NewCollection, Page, Rename, Reorder, Reparent,
+    SetQuantity, SuggestedDestination, Teardown, TeardownReceipt,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -508,6 +509,500 @@ impl CollectionStore for HostedBackend {
             next_cursor,
         })
     }
+
+    async fn move_cards(&self, req: MoveRequest) -> ApiResult<MoveReceipt> {
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        let move_id = apply_move(
+            &mut tx,
+            user_id,
+            req.from_collection_id,
+            req.to_collection_id,
+            &Grain::from(&req),
+            req.quantity,
+        )
+        .await?;
+        tx.commit().await.map_err(upstream)?;
+        Ok(MoveReceipt { move_id })
+    }
+
+    async fn move_batch(&self, req: BatchMove) -> ApiResult<Vec<MoveReceipt>> {
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        // All-or-nothing: a failing item aborts the whole transaction.
+        let mut receipts = Vec::with_capacity(req.items.len());
+        for item in &req.items {
+            let grain = Grain {
+                printing_id: item.printing_id,
+                finish: item.finish.to_pg().to_string(),
+                condition: item.condition.to_pg().to_string(),
+                language: item.language.clone(),
+            };
+            let move_id = apply_move(
+                &mut tx,
+                user_id,
+                item.from_collection_id,
+                req.to_collection_id,
+                &grain,
+                item.quantity,
+            )
+            .await?;
+            receipts.push(MoveReceipt { move_id });
+        }
+        tx.commit().await.map_err(upstream)?;
+        Ok(receipts)
+    }
+
+    async fn undo_move(&self, move_id: Id) -> ApiResult<()> {
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        undo_one(&mut tx, user_id, move_id).await?;
+        tx.commit().await.map_err(upstream)?;
+        Ok(())
+    }
+
+    async fn undo_last_move(&self) -> ApiResult<Option<MoveReceipt>> {
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        let last: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM moves WHERE undone_at IS NULL ORDER BY created_at DESC LIMIT 1",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        let receipt = match last {
+            Some((move_id,)) => {
+                undo_one(&mut tx, user_id, move_id).await?;
+                Some(MoveReceipt { move_id })
+            }
+            None => None,
+        };
+        tx.commit().await.map_err(upstream)?;
+        Ok(receipt)
+    }
+
+    async fn suggested_destinations(&self, oracle_id: Id) -> ApiResult<Vec<SuggestedDestination>> {
+        let mut tx = self.scoped_tx().await?;
+        let rows: Vec<SuggestedRow> = sqlx::query_as(
+            "WITH d AS ( \
+               SELECT collection_id, sum(quantity)::int AS desired \
+               FROM desires WHERE oracle_id = $1 GROUP BY collection_id \
+             ), \
+             p AS ( \
+               SELECT h.collection_id, sum(h.quantity)::int AS present \
+               FROM holdings h JOIN printings pr ON pr.id = h.printing_id \
+               WHERE pr.oracle_id = $1 GROUP BY h.collection_id \
+             ) \
+             SELECT c.id AS collection_id, c.name AS collection_name, d.desired, \
+                    COALESCE(p.present, 0) AS present \
+             FROM d JOIN collections c ON c.id = d.collection_id \
+             LEFT JOIN p ON p.collection_id = c.id \
+             WHERE d.desired > COALESCE(p.present, 0) \
+             ORDER BY (d.desired - COALESCE(p.present, 0)) DESC, c.name",
+        )
+        .bind(oracle_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| SuggestedDestination {
+                collection_id: r.collection_id,
+                collection_name: r.collection_name,
+                desired: r.desired,
+                present: r.present,
+                shortfall: r.desired - r.present,
+            })
+            .collect())
+    }
+
+    async fn teardown(&self, collection_id: Id, mode: Teardown) -> ApiResult<TeardownReceipt> {
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        require_owned_collection(&mut tx, collection_id).await?;
+        if let Teardown::EmptyTo { to_collection_id } = &mode {
+            require_owned_collection(&mut tx, *to_collection_id).await?;
+        }
+
+        // Snapshot every holding in the collection (summed across board — moves
+        // are board-agnostic), then relocate each and delete the source rows.
+        let holdings: Vec<MoveGrainRow> = sqlx::query_as(
+            "SELECT printing_id, finish::text AS finish, condition::text AS condition, \
+                    language, sum(quantity)::int AS quantity \
+             FROM holdings WHERE collection_id = $1 \
+             GROUP BY printing_id, finish, condition, language",
+        )
+        .bind(collection_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+
+        let inbox = match &mode {
+            Teardown::ReturnToPrevious => Some(inbox_id(&mut tx, user_id).await?),
+            Teardown::EmptyTo { .. } => None,
+        };
+
+        let mut moves = 0i64;
+        for h in &holdings {
+            let grain = Grain {
+                printing_id: h.printing_id,
+                finish: h.finish.clone(),
+                condition: h.condition.clone(),
+                language: h.language.clone(),
+            };
+            let dest = match &mode {
+                Teardown::EmptyTo { to_collection_id } => *to_collection_id,
+                Teardown::ReturnToPrevious => previous_location(&mut tx, collection_id, &grain)
+                    .await?
+                    .unwrap_or_else(|| inbox.expect("inbox resolved for ReturnToPrevious")),
+            };
+            // Teardown empties *all* boards for the grain (its snapshot summed
+            // across board), so remove every board row rather than main-only.
+            holding_delete_all_boards(&mut tx, collection_id, &grain).await?;
+            holding_add(&mut tx, user_id, dest, &grain, h.quantity).await?;
+            append_move(
+                &mut tx,
+                user_id,
+                Some(collection_id),
+                Some(dest),
+                &grain,
+                h.quantity,
+            )
+            .await?;
+            moves += 1;
+        }
+        tx.commit().await.map_err(upstream)?;
+        Ok(TeardownReceipt { moves })
+    }
+}
+
+/// A move's card grain: printing + finish/condition/language (Postgres enum
+/// labels as text, cast in SQL). Board is deliberately absent — moves act on the
+/// mainboard (the ledger has no board column).
+struct Grain {
+    printing_id: Uuid,
+    finish: String,
+    condition: String,
+    language: String,
+}
+
+impl From<&MoveRequest> for Grain {
+    fn from(r: &MoveRequest) -> Self {
+        Grain {
+            printing_id: r.printing_id,
+            finish: r.finish.to_pg().to_string(),
+            condition: r.condition.to_pg().to_string(),
+            language: r.language.clone(),
+        }
+    }
+}
+
+/// Perform one move within an open transaction: validate, decrement the source
+/// mainboard holding, upsert the destination, append the ledger row. Returns the
+/// new move id.
+async fn apply_move(
+    tx: &mut Transaction<'static, Postgres>,
+    user_id: Uuid,
+    from: Option<Id>,
+    to: Option<Id>,
+    grain: &Grain,
+    quantity: i32,
+) -> ApiResult<Uuid> {
+    if quantity <= 0 {
+        return Err(ApiError::Validation("quantity must be > 0".into()));
+    }
+    if from.is_none() && to.is_none() {
+        return Err(ApiError::Validation(
+            "a move needs a source or destination".into(),
+        ));
+    }
+    if from.is_some() && from == to {
+        return Err(ApiError::Validation(
+            "source and destination are the same".into(),
+        ));
+    }
+    if let Some(from) = from {
+        require_owned_collection(tx, from).await?;
+        holding_take(tx, from, grain, quantity).await?;
+    }
+    if let Some(to) = to {
+        require_owned_collection(tx, to).await?;
+        holding_add(tx, user_id, to, grain, quantity).await?;
+    }
+    append_move(tx, user_id, from, to, grain, quantity).await
+}
+
+/// Reverse a move and stamp `undone_at`. Idempotent: an already-undone or
+/// missing-but-owned move is handled without double-reversing.
+async fn undo_one(
+    tx: &mut Transaction<'static, Postgres>,
+    user_id: Uuid,
+    move_id: Id,
+) -> ApiResult<()> {
+    let m: Option<MoveRow> = sqlx::query_as(
+        "SELECT printing_id, finish::text AS finish, condition::text AS condition, language, \
+                from_collection_id, to_collection_id, quantity, (undone_at IS NOT NULL) AS undone \
+         FROM moves WHERE id = $1",
+    )
+    .bind(move_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(upstream)?;
+    let m = m.ok_or_else(|| ApiError::NotFound("move".into()))?;
+    if m.undone {
+        return Ok(()); // idempotent
+    }
+    let grain = Grain {
+        printing_id: m.printing_id,
+        finish: m.finish,
+        condition: m.condition,
+        language: m.language,
+    };
+    // Reverse: give the copies back to the source, take them from the dest.
+    if let Some(from) = m.from_collection_id {
+        holding_add(tx, user_id, from, &grain, m.quantity).await?;
+    }
+    if let Some(to) = m.to_collection_id {
+        holding_take_clamp(tx, to, &grain, m.quantity).await?;
+    }
+    sqlx::query("UPDATE moves SET undone_at = now() WHERE id = $1")
+        .bind(move_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(upstream)?;
+    Ok(())
+}
+
+/// Upsert `+delta` into a collection's **mainboard** holding for the grain.
+async fn holding_add(
+    tx: &mut Transaction<'static, Postgres>,
+    user_id: Uuid,
+    collection_id: Id,
+    grain: &Grain,
+    delta: i32,
+) -> ApiResult<()> {
+    sqlx::query(
+        "INSERT INTO holdings \
+           (user_id, collection_id, printing_id, finish, condition, language, board, quantity) \
+         VALUES ($1, $2, $3, $4::card_finish, $5::card_condition, $6, 'main', $7) \
+         ON CONFLICT ON CONSTRAINT holdings_uniq \
+           DO UPDATE SET quantity = holdings.quantity + EXCLUDED.quantity",
+    )
+    .bind(user_id)
+    .bind(collection_id)
+    .bind(grain.printing_id)
+    .bind(&grain.finish)
+    .bind(&grain.condition)
+    .bind(&grain.language)
+    .bind(delta)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
+/// Remove exactly `need` copies from a collection's mainboard holding; errors
+/// `Conflict` if fewer are present. Deletes the row at zero (the CHECK forbids 0).
+async fn holding_take(
+    tx: &mut Transaction<'static, Postgres>,
+    collection_id: Id,
+    grain: &Grain,
+    need: i32,
+) -> ApiResult<()> {
+    let cur: Option<(Uuid, i32)> = sqlx::query_as(
+        "SELECT id, quantity FROM holdings \
+         WHERE collection_id = $1 AND printing_id = $2 AND finish = $3::card_finish \
+           AND condition = $4::card_condition AND language = $5 AND board = 'main'",
+    )
+    .bind(collection_id)
+    .bind(grain.printing_id)
+    .bind(&grain.finish)
+    .bind(&grain.condition)
+    .bind(&grain.language)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(upstream)?;
+    let (id, qty) = cur.ok_or_else(|| ApiError::Conflict("no copies to move".into()))?;
+    if qty < need {
+        return Err(ApiError::Conflict("insufficient copies to move".into()));
+    }
+    if qty == need {
+        sqlx::query("DELETE FROM holdings WHERE id = $1")
+            .bind(id)
+            .execute(&mut **tx)
+            .await
+            .map_err(upstream)?;
+    } else {
+        sqlx::query("UPDATE holdings SET quantity = quantity - $2 WHERE id = $1")
+            .bind(id)
+            .bind(need)
+            .execute(&mut **tx)
+            .await
+            .map_err(upstream)?;
+    }
+    Ok(())
+}
+
+/// Best-effort removal for undo: take up to `want` from the mainboard holding,
+/// clamping to what's there (the dest may have changed since the move).
+async fn holding_take_clamp(
+    tx: &mut Transaction<'static, Postgres>,
+    collection_id: Id,
+    grain: &Grain,
+    want: i32,
+) -> ApiResult<()> {
+    let cur: Option<(Uuid, i32)> = sqlx::query_as(
+        "SELECT id, quantity FROM holdings \
+         WHERE collection_id = $1 AND printing_id = $2 AND finish = $3::card_finish \
+           AND condition = $4::card_condition AND language = $5 AND board = 'main'",
+    )
+    .bind(collection_id)
+    .bind(grain.printing_id)
+    .bind(&grain.finish)
+    .bind(&grain.condition)
+    .bind(&grain.language)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(upstream)?;
+    let Some((id, qty)) = cur else { return Ok(()) };
+    if qty <= want {
+        sqlx::query("DELETE FROM holdings WHERE id = $1")
+            .bind(id)
+            .execute(&mut **tx)
+            .await
+            .map_err(upstream)?;
+    } else {
+        sqlx::query("UPDATE holdings SET quantity = quantity - $2 WHERE id = $1")
+            .bind(id)
+            .bind(want)
+            .execute(&mut **tx)
+            .await
+            .map_err(upstream)?;
+    }
+    Ok(())
+}
+
+/// Delete all board rows for a grain from a collection (teardown empties every
+/// board; its snapshot already summed across board).
+async fn holding_delete_all_boards(
+    tx: &mut Transaction<'static, Postgres>,
+    collection_id: Id,
+    grain: &Grain,
+) -> ApiResult<()> {
+    sqlx::query(
+        "DELETE FROM holdings WHERE collection_id = $1 AND printing_id = $2 \
+           AND finish = $3::card_finish AND condition = $4::card_condition AND language = $5",
+    )
+    .bind(collection_id)
+    .bind(grain.printing_id)
+    .bind(&grain.finish)
+    .bind(&grain.condition)
+    .bind(&grain.language)
+    .execute(&mut **tx)
+    .await
+    .map_err(upstream)?;
+    Ok(())
+}
+
+/// Append a `moves` ledger row and return its id.
+async fn append_move(
+    tx: &mut Transaction<'static, Postgres>,
+    user_id: Uuid,
+    from: Option<Id>,
+    to: Option<Id>,
+    grain: &Grain,
+    quantity: i32,
+) -> ApiResult<Uuid> {
+    let (id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO moves \
+           (user_id, printing_id, finish, condition, language, \
+            from_collection_id, to_collection_id, quantity) \
+         VALUES ($1, $2, $3::card_finish, $4::card_condition, $5, $6, $7, $8) RETURNING id",
+    )
+    .bind(user_id)
+    .bind(grain.printing_id)
+    .bind(&grain.finish)
+    .bind(&grain.condition)
+    .bind(&grain.language)
+    .bind(from)
+    .bind(to)
+    .bind(quantity)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(id)
+}
+
+/// The most-recent collection this card was moved *into* the given collection
+/// from (for teardown "return to previous"), or `None` if there's no history.
+async fn previous_location(
+    tx: &mut Transaction<'static, Postgres>,
+    collection_id: Id,
+    grain: &Grain,
+) -> ApiResult<Option<Uuid>> {
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT from_collection_id FROM moves \
+         WHERE to_collection_id = $1 AND printing_id = $2 AND finish = $3::card_finish \
+           AND condition = $4::card_condition AND language = $5 AND from_collection_id IS NOT NULL \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(collection_id)
+    .bind(grain.printing_id)
+    .bind(&grain.finish)
+    .bind(&grain.condition)
+    .bind(&grain.language)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(upstream)?;
+    Ok(row.map(|(id,)| id))
+}
+
+/// The caller's Inbox id, provisioning it if missing (idempotent).
+async fn inbox_id(tx: &mut Transaction<'static, Postgres>, user_id: Uuid) -> ApiResult<Uuid> {
+    sqlx::query(
+        "INSERT INTO collections (user_id, kind, name, is_inbox) \
+         VALUES ($1, 'binder', 'Inbox', true) \
+         ON CONFLICT (user_id) WHERE is_inbox DO NOTHING",
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(upstream)?;
+    let (id,): (Uuid,) = sqlx::query_as("SELECT id FROM collections WHERE is_inbox")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(upstream)?;
+    Ok(id)
+}
+
+#[derive(sqlx::FromRow)]
+struct MoveRow {
+    printing_id: Uuid,
+    finish: String,
+    condition: String,
+    language: String,
+    from_collection_id: Option<Uuid>,
+    to_collection_id: Option<Uuid>,
+    quantity: i32,
+    undone: bool,
+}
+
+#[derive(sqlx::FromRow)]
+struct MoveGrainRow {
+    printing_id: Uuid,
+    finish: String,
+    condition: String,
+    language: String,
+    quantity: i32,
+}
+
+#[derive(sqlx::FromRow)]
+struct SuggestedRow {
+    collection_id: Uuid,
+    collection_name: String,
+    desired: i32,
+    present: i32,
 }
 
 impl HostedBackend {

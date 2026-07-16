@@ -14,8 +14,8 @@ use axum::routing::{get, post};
 use axum::Json;
 use http::StatusCode;
 use shared::{
-    AddHave, AddLine, AddWant, ApiResult, Id, NewCollection, Page, Rename, Reorder, Reparent,
-    SetQuantity,
+    AddHave, AddLine, AddWant, ApiResult, BatchMove, Id, MoveRequest, NewCollection, Page, Rename,
+    Reorder, Reparent, SetQuantity, Teardown,
 };
 
 use super::paths;
@@ -55,7 +55,13 @@ where
         .route(&paths::collection_op_route(op::WANT), post(add_desire))
         .route(&paths::collection_op_route(op::BATCH), post(batch_add))
         .route(&paths::collection_op_route(op::VIEW), get(collection_view))
+        .route(&paths::collection_op_route(op::TEARDOWN), post(teardown))
         .route(paths::HOLDING_QUANTITY_ROUTE, post(set_holding_quantity))
+        .route(paths::MOVES, post(move_cards))
+        .route(paths::MOVES_BATCH, post(move_batch))
+        .route(paths::MOVES_UNDO_LAST, post(undo_last_move))
+        .route(paths::MOVE_UNDO_ROUTE, post(undo_move))
+        .route(paths::CARD_DESTINATIONS_ROUTE, get(suggested_destinations))
 }
 
 /// `GET /api/catalog/count` — anonymous catalog size.
@@ -223,6 +229,84 @@ async fn collection_view(user: AuthUser, Path(id): Path<Id>, Query(page): Query<
             HostedBackend::for_user(user.user_id)
                 .await?
                 .collection_view(id, page)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/moves` — move copies between collections.
+async fn move_cards(user: AuthUser, Json(req): Json<MoveRequest>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .move_cards(req)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/moves/batch` — many items to one destination, one transaction.
+async fn move_batch(user: AuthUser, Json(req): Json<BatchMove>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .move_batch(req)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/moves/{id}/undo` — reverse a move (idempotent).
+async fn undo_move(user: AuthUser, Path(id): Path<Id>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .undo_move(id)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/moves/undo-last` — undo the caller's most recent move.
+async fn undo_last_move(user: AuthUser) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .undo_last_move()
+                .await
+        }
+        .await,
+    )
+}
+
+/// `GET /api/cards/{id}/destinations` — collections wanting this oracle card.
+async fn suggested_destinations(user: AuthUser, Path(id): Path<Id>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .suggested_destinations(id)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/collections/{id}/teardown` — empty a collection.
+async fn teardown(user: AuthUser, Path(id): Path<Id>, Json(mode): Json<Teardown>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .teardown(id, mode)
                 .await
         }
         .await,
