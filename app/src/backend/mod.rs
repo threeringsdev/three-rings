@@ -22,8 +22,9 @@
 //! collection-api extends these traits with the full method surface.
 
 use shared::{
-    AddHave, AddLine, AddWant, ApiResult, CatalogCount, CollectionSummary, DesireLine, HoldingLine,
-    Id, LineResult, NewCollection, Rename, Reorder, Reparent, SetQuantity,
+    AddHave, AddLine, AddWant, ApiResult, CatalogCount, CollectionSummary, CollectionView,
+    DesireLine, HoldingLine, Id, LineResult, NewCollection, Page, Rename, Reorder, Reparent,
+    SetQuantity,
 };
 
 #[cfg(feature = "hosted")]
@@ -69,6 +70,7 @@ pub mod paths {
         pub const HAVE: &str = "have";
         pub const WANT: &str = "want";
         pub const BATCH: &str = "batch";
+        pub const VIEW: &str = "view";
     }
 
     /// The axum route template for a per-collection operation (`{id}` param).
@@ -153,4 +155,11 @@ pub trait CollectionStore {
     /// vector is positional (`results[i]` is `lines[i]`'s outcome).
     async fn batch_add(&self, collection_id: Id, lines: Vec<AddLine>)
         -> ApiResult<Vec<LineResult>>;
+
+    /// One keyset page of a collection's card rows, with its metadata and
+    /// immediate children. Counts (present / desired / owned / rolled-up) are
+    /// computed for the visible page — the discipline that keeps a 100K-card
+    /// view bounded (specs/collection-api.md → Read models). Sorted by
+    /// (name, printing, board); the cursor is opaque.
+    async fn collection_view(&self, id: Id, page: Page) -> ApiResult<CollectionView>;
 }

@@ -12,9 +12,9 @@
 //! running hosted deployment to talk to.
 
 use shared::{
-    AddHave, AddLine, AddWant, ApiError, ApiResult, CatalogCount, CollectionSummary, DesireLine,
-    ErrorEnvelope, HoldingLine, Id, LineResult, NewCollection, Rename, Reorder, Reparent,
-    SetQuantity,
+    AddHave, AddLine, AddWant, ApiError, ApiResult, CatalogCount, CollectionSummary,
+    CollectionView, DesireLine, ErrorEnvelope, HoldingLine, Id, LineResult, NewCollection, Page,
+    Rename, Reorder, Reparent, SetQuantity,
 };
 use tokio::sync::OnceCell;
 
@@ -228,6 +228,25 @@ impl CollectionStore for NativeBackend {
             &lines,
         )
         .await
+    }
+
+    async fn collection_view(&self, id: Id, page: Page) -> ApiResult<CollectionView> {
+        self.require_session()?;
+        // A read: GET with the keyset params in the query string. The cursor is
+        // base64url (already URL-safe), so no escaping is needed.
+        let mut path = super::paths::collection_op(id, super::paths::op::VIEW);
+        let mut qs = Vec::new();
+        if let Some(cursor) = &page.cursor {
+            qs.push(format!("cursor={cursor}"));
+        }
+        if let Some(limit) = page.limit {
+            qs.push(format!("limit={limit}"));
+        }
+        if !qs.is_empty() {
+            path.push('?');
+            path.push_str(&qs.join("&"));
+        }
+        self.get(&path).await
     }
 }
 

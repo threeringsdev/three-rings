@@ -5,9 +5,9 @@
 //! data-model's RLS policies scope the rows even beneath this terminus.
 
 use shared::{
-    AddHave, AddLine, AddWant, ApiError, ApiResult, Board, CatalogCount, CollectionKind,
-    CollectionSummary, Condition, DesireLine, Finish, HoldingLine, Id, LineResult, NewCollection,
-    Rename, Reorder, Reparent, SetQuantity,
+    AddHave, AddLine, AddWant, ApiError, ApiResult, Board, CardRow, CatalogCount, CollectionKind,
+    CollectionSummary, CollectionView, Condition, DesireLine, Finish, HoldingLine, Id, LineResult,
+    NewCollection, Page, Rename, Reorder, Reparent, SetQuantity,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -404,6 +404,110 @@ impl CollectionStore for HostedBackend {
         }
         Ok(results)
     }
+
+    async fn collection_view(&self, id: Id, page: Page) -> ApiResult<CollectionView> {
+        let mut tx = self.scoped_tx().await?;
+
+        // Metadata (owned check via RLS) + immediate children.
+        let collection: CollectionRow = sqlx::query_as(&format!(
+            "SELECT {COLLECTION_COLS} FROM collections WHERE id = $1"
+        ))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(upstream)?
+        .ok_or_else(|| ApiError::NotFound("collection".into()))?;
+        let children: Vec<CollectionRow> = sqlx::query_as(&format!(
+            "SELECT {COLLECTION_COLS} FROM collections WHERE parent_id = $1 \
+             ORDER BY position, name"
+        ))
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+
+        // One keyset page of card rows. Aggregates are per (printing, board) in
+        // THIS collection; `owned` is the global per-oracle aggregate (the
+        // security-invoker `owned_by_card` view, RLS-scoped to the user);
+        // `present_rollup` sums holdings in the strict descendant collections.
+        let cursor = page.cursor.as_deref().map(decode_cursor).transpose()?;
+        let limit = page.limit();
+        let base = "WITH RECURSIVE descendants AS ( \
+               SELECT id FROM collections WHERE parent_id = $1 \
+               UNION ALL \
+               SELECT c.id FROM collections c JOIN descendants d ON c.parent_id = d.id \
+             ), \
+             present AS ( \
+               SELECT printing_id, board, sum(quantity)::int AS present \
+               FROM holdings WHERE collection_id = $1 GROUP BY printing_id, board \
+             ), \
+             want AS ( \
+               SELECT oracle_id, board, sum(quantity)::int AS desired \
+               FROM desires WHERE collection_id = $1 GROUP BY oracle_id, board \
+             ), \
+             rollup AS ( \
+               SELECT printing_id, sum(quantity)::int AS present_rollup \
+               FROM holdings WHERE collection_id IN (SELECT id FROM descendants) \
+               GROUP BY printing_id \
+             ) \
+             SELECT p.oracle_id, pr.printing_id, ca.name, s.code AS set_code, \
+                    p.collector_number, p.image_uris->>'normal' AS image_uri, \
+                    ca.mana_cost, ca.type_line, ca.colors, pr.present, \
+                    COALESCE(w.desired, 0) AS desired, COALESCE(o.owned, 0) AS owned, \
+                    COALESCE(ro.present_rollup, 0) AS present_rollup, \
+                    pr.board::text AS board \
+             FROM present pr \
+             JOIN printings p ON p.id = pr.printing_id \
+             JOIN cards ca ON ca.oracle_id = p.oracle_id \
+             LEFT JOIN sets s ON s.id = p.set_id \
+             LEFT JOIN owned_by_card o ON o.oracle_id = p.oracle_id \
+             LEFT JOIN want w ON w.oracle_id = p.oracle_id AND w.board = pr.board \
+             LEFT JOIN rollup ro ON ro.printing_id = pr.printing_id";
+        let keyset = if cursor.is_some() {
+            " WHERE (ca.name, pr.printing_id, pr.board) > ($2, $3, $4::card_board)"
+        } else {
+            ""
+        };
+        let order = if cursor.is_some() {
+            " ORDER BY ca.name, pr.printing_id, pr.board LIMIT $5"
+        } else {
+            " ORDER BY ca.name, pr.printing_id, pr.board LIMIT $2"
+        };
+        let sql = format!("{base}{keyset}{order}");
+
+        let mut q = sqlx::query_as::<_, CardRowSql>(&sql).bind(id);
+        if let Some(c) = &cursor {
+            q = q.bind(&c.name).bind(c.printing_id).bind(&c.board);
+        }
+        // Fetch one extra row to know whether a next page exists without a
+        // phantom empty final fetch.
+        let mut rows: Vec<CardRowSql> = q
+            .bind(limit + 1)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+
+        let has_more = rows.len() as i64 > limit;
+        rows.truncate(limit as usize);
+        let next_cursor = has_more
+            .then(|| rows.last().map(CardRowSql::cursor))
+            .flatten();
+        let cards = rows
+            .into_iter()
+            .map(CardRowSql::into_row)
+            .collect::<ApiResult<Vec<_>>>()?;
+
+        Ok(CollectionView {
+            collection: collection.into_summary()?,
+            children: children
+                .into_iter()
+                .map(CollectionRow::into_summary)
+                .collect::<ApiResult<Vec<_>>>()?,
+            cards,
+            next_cursor,
+        })
+    }
 }
 
 impl HostedBackend {
@@ -518,6 +622,78 @@ impl DesireRow {
             quantity: self.quantity,
         })
     }
+}
+
+#[derive(sqlx::FromRow)]
+struct CardRowSql {
+    oracle_id: Uuid,
+    printing_id: Uuid,
+    name: String,
+    set_code: Option<String>,
+    collector_number: String,
+    image_uri: Option<String>,
+    mana_cost: Option<String>,
+    type_line: Option<String>,
+    colors: Vec<String>,
+    present: i32,
+    desired: i32,
+    owned: i32,
+    present_rollup: i32,
+    board: String,
+}
+
+impl CardRowSql {
+    fn cursor(&self) -> String {
+        encode_cursor(&CardCursor {
+            name: self.name.clone(),
+            printing_id: self.printing_id,
+            board: self.board.clone(),
+        })
+    }
+
+    fn into_row(self) -> ApiResult<CardRow> {
+        Ok(CardRow {
+            oracle_id: self.oracle_id,
+            printing_id: self.printing_id,
+            name: self.name,
+            set_code: self.set_code,
+            collector_number: self.collector_number,
+            image_uri: self.image_uri,
+            mana_cost: self.mana_cost,
+            type_line: self.type_line,
+            colors: self.colors,
+            present: self.present,
+            desired: self.desired,
+            owned: self.owned,
+            present_rollup: self.present_rollup,
+            board: Board::from_pg(&self.board)
+                .ok_or_else(|| ApiError::Upstream(format!("bad board '{}'", self.board)))?,
+        })
+    }
+}
+
+/// The keyset sort key encoded in an opaque page cursor: the last row's
+/// (name, printing, board). Base64url of its JSON — opaque to clients, so the
+/// cursor stays shareable/restorable without exposing the sort internals.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CardCursor {
+    name: String,
+    printing_id: Uuid,
+    board: String,
+}
+
+fn encode_cursor(c: &CardCursor) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(c).expect("cursor serialization cannot fail"))
+}
+
+fn decode_cursor(s: &str) -> ApiResult<CardCursor> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(s)
+        .map_err(|_| ApiError::Validation("invalid cursor".into()))?;
+    serde_json::from_slice(&bytes).map_err(|_| ApiError::Validation("invalid cursor".into()))
 }
 
 /// Reject an operation targeting a collection the caller doesn't own — RLS makes

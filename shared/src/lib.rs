@@ -19,8 +19,9 @@ pub mod collection;
 
 pub use catalog::CatalogCount;
 pub use collection::{
-    AddHave, AddLine, AddWant, Board, CollectionKind, CollectionSummary, Condition, DesireLine,
-    Finish, HoldingLine, LineResult, NewCollection, Rename, Reorder, Reparent, SetQuantity,
+    AddHave, AddLine, AddWant, Board, CardRow, CollectionKind, CollectionSummary, CollectionView,
+    Condition, DesireLine, Finish, HoldingLine, LineResult, NewCollection, Page, Rename, Reorder,
+    Reparent, SetQuantity,
 };
 
 /// The one error type both backends converge on (specs/collection-api.md

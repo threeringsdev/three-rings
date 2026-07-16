@@ -8,13 +8,14 @@
 //! success and the shared error envelope (`{ "error": { code, message } }`) with
 //! the mapped status on failure — the exact shape the native client decodes.
 
-use axum::extract::Path;
+use axum::extract::{Path, Query};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use http::StatusCode;
 use shared::{
-    AddHave, AddLine, AddWant, ApiResult, Id, NewCollection, Rename, Reorder, Reparent, SetQuantity,
+    AddHave, AddLine, AddWant, ApiResult, Id, NewCollection, Page, Rename, Reorder, Reparent,
+    SetQuantity,
 };
 
 use super::paths;
@@ -53,6 +54,7 @@ where
         .route(&paths::collection_op_route(op::HAVE), post(add_holding))
         .route(&paths::collection_op_route(op::WANT), post(add_desire))
         .route(&paths::collection_op_route(op::BATCH), post(batch_add))
+        .route(&paths::collection_op_route(op::VIEW), get(collection_view))
         .route(paths::HOLDING_QUANTITY_ROUTE, post(set_holding_quantity))
 }
 
@@ -207,6 +209,20 @@ async fn set_holding_quantity(
             HostedBackend::for_user(user.user_id)
                 .await?
                 .set_holding_quantity(id, req)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `GET /api/collections/{id}/view?cursor=&limit=` — one keyset page of the
+/// collection's card rows plus metadata and children.
+async fn collection_view(user: AuthUser, Path(id): Path<Id>, Query(page): Query<Page>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .collection_view(id, page)
                 .await
         }
         .await,

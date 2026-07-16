@@ -221,3 +221,64 @@ pub enum LineResult {
     Ok,
     Error { error: ApiError },
 }
+
+/// A card entry in a collection view (specs/collection-api.md → Read models).
+/// Grain is `(printing, board)`: present sums a card's copies across
+/// finish/condition/language within this collection; the three counts are all
+/// *in this context* except `owned` (a global aggregate).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CardRow {
+    pub oracle_id: Id,
+    pub printing_id: Id,
+    pub name: String,
+    /// Set code (e.g. `mh3`), if the printing's set is known.
+    pub set_code: Option<String>,
+    pub collector_number: String,
+    /// A representative image (from `printings.image_uris.normal`), if present.
+    pub image_uri: Option<String>,
+    pub mana_cost: Option<String>,
+    pub type_line: Option<String>,
+    pub colors: Vec<String>,
+    /// Present here — copies of this printing/board in *this* collection.
+    pub present: i32,
+    /// Desired here — target count for this card/board in *this* collection.
+    pub desired: i32,
+    /// Owned — global aggregate of present across all the user's collections
+    /// (per oracle card).
+    pub owned: i32,
+    /// The portion of present rolled up from descendant collections (distinct so
+    /// the UI can mark it).
+    pub present_rollup: i32,
+    /// Deck board this row belongs to (`main` outside a deck).
+    pub board: Board,
+}
+
+/// One keyset page of a collection's card rows plus the collection's own
+/// metadata and its immediate children (specs/collection-api.md → CollectionView).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CollectionView {
+    pub collection: CollectionSummary,
+    /// Immediate child collections (the tree is rebuilt client-side from the
+    /// full `list_collections`; this is the one-level view for the header).
+    pub children: Vec<CollectionSummary>,
+    pub cards: Vec<CardRow>,
+    /// Opaque cursor for the next page, or `None` at the end.
+    pub next_cursor: Option<String>,
+}
+
+/// Keyset page request: an opaque `cursor` from a prior page (or `None` for the
+/// first) and a `limit`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Page {
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+impl Page {
+    /// The effective page size, clamped to a sane range (default 50, max 200).
+    pub fn limit(&self) -> i64 {
+        self.limit.unwrap_or(50).clamp(1, 200) as i64
+    }
+}
