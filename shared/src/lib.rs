@@ -17,7 +17,10 @@ use uuid::Uuid;
 pub mod catalog;
 pub mod collection;
 
-pub use catalog::CatalogCount;
+pub use catalog::{
+    CardDetail, CardSummary, CatalogCount, OwnershipEntry, PrintingSummary, Ruling, SearchQuery,
+    SearchResults,
+};
 pub use collection::{
     AddHave, AddLine, AddWant, AllCardsRow, AllCardsView, BatchMove, Board, CardRow,
     CollectionKind, CollectionSummary, CollectionView, Condition, DesireLine, Finish, HoldingLine,

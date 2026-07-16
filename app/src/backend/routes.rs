@@ -15,7 +15,7 @@ use axum::Json;
 use http::StatusCode;
 use shared::{
     AddHave, AddLine, AddWant, ApiResult, BatchMove, Id, MoveRequest, NewCollection, Page, Rename,
-    Reorder, Reparent, SetQuantity, Teardown,
+    Reorder, Reparent, SearchQuery, SetQuantity, Teardown,
 };
 
 use super::paths;
@@ -31,6 +31,9 @@ where
 {
     router
         .route(paths::CATALOG_COUNT, get(catalog_count))
+        .route(paths::CATALOG_SEARCH, get(search))
+        .route(paths::CARD_DETAIL_ROUTE, get(card_detail))
+        .route(paths::CARD_SUMMARY_ROUTE, get(card_summary))
         .route(
             paths::COLLECTIONS,
             get(list_collections).post(create_collection),
@@ -70,6 +73,44 @@ where
 /// `GET /api/catalog/count` — anonymous catalog size.
 async fn catalog_count() -> Response {
     json_result(async { HostedBackend::anonymous().await?.card_count().await }.await)
+}
+
+/// Catalog endpoints read the session **opportunistically**: a valid JWT (bearer
+/// or cookie) yields the ownership block / owned counts, otherwise the anonymous
+/// public data. An absent/invalid token simply degrades to anonymous.
+async fn catalog_backend(headers: &http::HeaderMap) -> ApiResult<HostedBackend> {
+    match crate::auth::user_id_from_headers(headers).await {
+        Ok(user_id) => HostedBackend::for_user(user_id).await,
+        Err(_) => HostedBackend::anonymous().await,
+    }
+}
+
+/// `GET /api/cards/{id}` — the full card page (ownership block when authed).
+async fn card_detail(headers: http::HeaderMap, Path(id): Path<Id>) -> Response {
+    json_result(async { catalog_backend(&headers).await?.card_detail(id).await }.await)
+}
+
+/// `GET /api/cards/{id}/summary` — the hover subset.
+async fn card_summary(headers: http::HeaderMap, Path(id): Path<Id>) -> Response {
+    json_result(async { catalog_backend(&headers).await?.card_summary(id).await }.await)
+}
+
+/// Combined query params for `GET /api/catalog/search`.
+#[derive(serde::Deserialize)]
+struct SearchParams {
+    q: Option<String>,
+    cursor: Option<String>,
+    limit: Option<u32>,
+}
+
+/// `GET /api/catalog/search?q=&cursor=&limit=` — one keyset page of results.
+async fn search(headers: http::HeaderMap, Query(p): Query<SearchParams>) -> Response {
+    let query = SearchQuery { q: p.q };
+    let page = Page {
+        cursor: p.cursor,
+        limit: p.limit,
+    };
+    json_result(async { catalog_backend(&headers).await?.search(query, page).await }.await)
 }
 
 /// `GET /api/collections` — the caller's collections (Inbox provisioned lazily).

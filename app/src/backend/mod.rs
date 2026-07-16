@@ -22,10 +22,11 @@
 //! collection-api extends these traits with the full method surface.
 
 use shared::{
-    AddHave, AddLine, AddWant, AllCardsView, ApiResult, BatchMove, CatalogCount, CollectionSummary,
-    CollectionView, DesireLine, HoldingLine, Id, LineResult, MoveReceipt, MoveRequest, NeedsView,
-    NewCollection, Page, Rename, Reorder, Reparent, SetQuantity, ShoppingList,
-    SuggestedDestination, Teardown, TeardownReceipt,
+    AddHave, AddLine, AddWant, AllCardsView, ApiResult, BatchMove, CardDetail, CardSummary,
+    CatalogCount, CollectionSummary, CollectionView, DesireLine, HoldingLine, Id, LineResult,
+    MoveReceipt, MoveRequest, NeedsView, NewCollection, Page, Rename, Reorder, Reparent,
+    SearchQuery, SearchResults, SetQuantity, ShoppingList, SuggestedDestination, Teardown,
+    TeardownReceipt,
 };
 
 #[cfg(feature = "hosted")]
@@ -58,8 +59,19 @@ pub mod paths {
     use shared::Id;
 
     pub const CATALOG_COUNT: &str = "/api/catalog/count";
+    pub const CATALOG_SEARCH: &str = "/api/catalog/search";
     /// GET = list the tree; POST = create.
     pub const COLLECTIONS: &str = "/api/collections";
+
+    /// Card detail / summary (by oracle id).
+    pub const CARD_DETAIL_ROUTE: &str = "/api/cards/{id}";
+    pub const CARD_SUMMARY_ROUTE: &str = "/api/cards/{id}/summary";
+    pub fn card_detail(oracle_id: Id) -> String {
+        format!("/api/cards/{oracle_id}")
+    }
+    pub fn card_summary(oracle_id: Id) -> String {
+        format!("/api/cards/{oracle_id}/summary")
+    }
 
     /// Per-collection operation names — the shared vocabulary the router mounts
     /// (as `/api/collections/{id}/<op>`) and the client fills, so they can't drift.
@@ -119,6 +131,19 @@ pub mod paths {
 pub trait CatalogStore {
     /// Number of distinct oracle cards in the catalog (0 until ingestion runs).
     async fn card_count(&self) -> ApiResult<CatalogCount>;
+
+    /// Full card page: oracle data + printings + rulings + related parts, and —
+    /// when the backend carries a session — the caller's copies & locations.
+    async fn card_detail(&self, oracle_id: Id) -> ApiResult<CardDetail>;
+
+    /// The hover / quick-preview subset for a card; `owned` filled when authed.
+    async fn card_summary(&self, oracle_id: Id) -> ApiResult<CardSummary>;
+
+    /// One keyset page of catalog search results. This is the endpoint *shell*
+    /// (specs/collection-api.md): the query→SQL translation is
+    /// [catalog-search](../../specs/catalog-search.md)'s — until it lands, `q`
+    /// does a fuzzy name match. Empty until catalog-ingestion populates the rows.
+    async fn search(&self, query: SearchQuery, page: Page) -> ApiResult<SearchResults>;
 }
 
 /// Collection reads/writes — session-scoped. The backend carries the caller's

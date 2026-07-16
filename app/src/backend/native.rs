@@ -12,10 +12,11 @@
 //! running hosted deployment to talk to.
 
 use shared::{
-    AddHave, AddLine, AddWant, AllCardsView, ApiError, ApiResult, BatchMove, CatalogCount,
-    CollectionSummary, CollectionView, DesireLine, ErrorEnvelope, HoldingLine, Id, LineResult,
-    MoveReceipt, MoveRequest, NeedsView, NewCollection, Page, Rename, Reorder, Reparent,
-    SetQuantity, ShoppingList, SuggestedDestination, Teardown, TeardownReceipt,
+    AddHave, AddLine, AddWant, AllCardsView, ApiError, ApiResult, BatchMove, CardDetail,
+    CardSummary, CatalogCount, CollectionSummary, CollectionView, DesireLine, ErrorEnvelope,
+    HoldingLine, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection, Page, Rename,
+    Reorder, Reparent, SearchQuery, SearchResults, SetQuantity, ShoppingList, SuggestedDestination,
+    Teardown, TeardownReceipt,
 };
 use tokio::sync::OnceCell;
 
@@ -141,6 +142,48 @@ impl CatalogStore for NativeBackend {
     async fn card_count(&self) -> ApiResult<CatalogCount> {
         self.get(super::paths::CATALOG_COUNT).await
     }
+
+    async fn card_detail(&self, oracle_id: Id) -> ApiResult<CardDetail> {
+        self.get(&super::paths::card_detail(oracle_id)).await
+    }
+
+    async fn card_summary(&self, oracle_id: Id) -> ApiResult<CardSummary> {
+        self.get(&super::paths::card_summary(oracle_id)).await
+    }
+
+    async fn search(&self, query: SearchQuery, page: Page) -> ApiResult<SearchResults> {
+        let mut path = super::paths::CATALOG_SEARCH.to_string();
+        let mut qs = Vec::new();
+        if let Some(q) = &query.q {
+            qs.push(format!("q={}", urlencode(q)));
+        }
+        if let Some(cursor) = &page.cursor {
+            qs.push(format!("cursor={cursor}"));
+        }
+        if let Some(limit) = page.limit {
+            qs.push(format!("limit={limit}"));
+        }
+        if !qs.is_empty() {
+            path.push('?');
+            path.push_str(&qs.join("&"));
+        }
+        self.get(&path).await
+    }
+}
+
+/// Minimal percent-encoding for a query-string value (the search term may carry
+/// spaces / punctuation). Only the native client needs it.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 impl CollectionStore for NativeBackend {
