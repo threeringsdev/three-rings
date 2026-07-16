@@ -52,7 +52,7 @@ shared = { path = "shared" }
 simple_logger = "5.0.0"
 # Spike-only direct DB access from the server path (architecture-spike task 5);
 # data-access-backends (Phase 2) puts a trait boundary in front of this.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "uuid"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "uuid", "json"] }
 thiserror = "2.0.12"
 tokio = { version = "1.45.0", features = ["full"] }
 tower = { version = "0.5.2", features = ["full"] }

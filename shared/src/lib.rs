@@ -17,8 +17,17 @@ use uuid::Uuid;
 pub mod catalog;
 pub mod collection;
 
-pub use catalog::CatalogCount;
-pub use collection::{CollectionKind, CollectionSummary};
+pub use catalog::{
+    CardDetail, CardSummary, CatalogCount, OwnershipEntry, PrintingSummary, Ruling, SearchQuery,
+    SearchResults,
+};
+pub use collection::{
+    AddHave, AddLine, AddWant, AllCardsRow, AllCardsView, BatchMove, Board, CardRow,
+    CollectionKind, CollectionSummary, CollectionView, Condition, DesireLine, Finish, HoldingLine,
+    LineResult, MoveItem, MoveReceipt, MoveRequest, NeedLocation, NeedRow, NeedsView,
+    NewCollection, Page, Rename, Reorder, Reparent, SetQuantity, ShoppingList, ShoppingRow,
+    SuggestedDestination, Teardown, TeardownReceipt,
+};
 
 /// The one error type both backends converge on (specs/collection-api.md
 /// §Error model). Business-level auth *outcomes* (wrong password, unknown OTP)

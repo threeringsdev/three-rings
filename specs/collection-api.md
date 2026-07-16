@@ -1,6 +1,6 @@
 # Collection API
 
-**Status:** accepted
+**Status:** implemented
 **Depends on:** [data-access-backends](data-access-backends.md), [data-model](data-model.md), [auth](auth.md)
 
 [data-access-backends](data-access-backends.md) owns the trait split and the
@@ -308,3 +308,54 @@ resolves.
   - Dependency direction made canonical: **collection-api `Depends on:`
     data-access-backends** (one-way, for the `shared/` types + trait seam); the
     reverse endpoint-client coupling stays prose in data-access. No gating cycle.
+
+- 2026-07-16 — **Implemented: the full endpoint surface, both backends, verified
+  on dev.** Built as six verified slices (each proven end-to-end against the Neon
+  dev branch, then the temp driver reverted): tree CRUD + lazy inbox; holdings/
+  desires writes + batch; CollectionView reads; moves + undo/teardown/suggest;
+  global reads (all-cards/needs/shopping); catalog (detail/summary/search shell).
+  Every operation is a `CatalogStore`/`CollectionStore` trait method with a
+  `shared/` DTO, implemented once by `HostedBackend` (sqlx) and once by
+  `NativeBackend` (the HTTP client of the hosted JSON routes). Design decisions
+  settled during implementation:
+  - **Endpoint surface = the explicit hosted JSON routes** (`/api/collections…`,
+    `/api/moves…`, `/api/cards/{id}…`, `/api/all-cards`, `/api/shopping-list`,
+    `/api/catalog/search`), operation-named/RPC-ish, mounted only in the hosted
+    deployment; the native client targets them. Route paths live in one shared
+    `paths` module so client and router can't drift. **No per-operation Leptos
+    server-fn wrappers were added** — those are a thin per-screen UI adapter over
+    the same trait and ride with each UI task; the machine API (routes + trait +
+    both backends + DTOs) is the deliverable here.
+  - **`CardRow` grain = `(printing, board)`.** Present sums a card's copies across
+    finish/condition/language within the collection; `owned` is the global
+    per-oracle aggregate (the `owned_by_card` view); `present_rollup` sums
+    holdings in the strict descendant collections (per printing, board-agnostic);
+    `desired` is the per-(oracle, board) target, so it repeats on each printing
+    row of that oracle (the UI shows it once). Keyset by (name, printing, board).
+  - **Moves are board-agnostic** — the `moves` ledger has no board column, so
+    `move_cards`/teardown act on the mainboard; board re-labels are
+    [card-tagging](card-tagging.md)'s separate quantity-preserving op, not a move.
+    `move_cards` decrements source / upserts dest / appends the ledger row in one
+    tx; `from`/`to = None` model intake/removal; undo reverses the effect and
+    stamps `undone_at` (idempotent); teardown snapshots then relocates all boards.
+  - **Keyset pagination** on the potentially-large reads (collection view,
+    all-cards, catalog search) via an opaque base64 (name, id[, board]) cursor
+    with a `limit+1` probe; **needs and shopping-list return full lists** — they
+    are derived and bounded in practice (keyset is a filed follow-up if profiling
+    says otherwise).
+  - **Catalog endpoints read the session opportunistically** (a valid bearer/
+    cookie JWT yields the ownership block / owned counts, else anonymous public
+    data) via a `HeaderMap`-based lookup — axum's `Option<AuthUser>` needs
+    `OptionalFromRequestParts`, which the extractor doesn't implement.
+  - **Ownership guard is load-bearing:** `holdings`/`desires` RLS gates only on
+    their own `user_id`, not the collection's, so every write validates that the
+    target collection is owned (RLS makes a non-owned one invisible → NotFound).
+  - **`shared::ApiError`** carries the errors (FK miss → NotFound, unique →
+    Conflict, CHECK → Validation, else Upstream); DB internals are logged, never
+    shipped. sqlx gained the `uuid` + `json` features (native id + jsonb decode).
+  - **Tags on `CardRow` deferred to card-tagging** — the `board` column is read
+    here; tag *assignment* stays that spec's task (collection-api §Tags & boards
+    was already gated to it).
+  - **Follow-ups filed in TODO:** keyset for needs/shopping if they grow; the
+    native `401` silent-refresh (data-access-backends' open item) now has real
+    session endpoints to exercise it against.
