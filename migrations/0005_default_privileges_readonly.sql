@@ -1,0 +1,23 @@
+-- Data-model migration — make app_runtime READ-ONLY BY DEFAULT on future tables.
+--
+-- Follow-up to 0004 (see specs/data-model.md → Findings). 0004 revoked write on
+-- the *existing* catalog tables, but the root cause is a Neon default-privilege:
+-- pg_default_acl has an entry (FOR ROLE neondb_owner, IN SCHEMA public, granted
+-- when app_runtime was provisioned 2026-07-12) that grants app_runtime CRUD
+-- (arwd) on *every* table neondb_owner creates. Left as-is, every future catalog
+-- table would land writable and need its own revoke — a standing footgun.
+--
+-- Fix it at the source: narrow the default to SELECT only. After this, any table
+-- neondb_owner creates grants app_runtime just SELECT by default —
+--   * catalog tables (read-only for the app): correct with zero extra DDL;
+--   * user tables (app needs CRUD): the creating migration GRANTs INSERT/UPDATE/
+--     DELETE explicitly (as 0003 already does). Forgetting that grant fails
+--     closed (app can't write → obvious dev-time permission error), which is the
+--     safe direction — the opposite of the silent over-permission this replaces.
+--
+-- Schema-scoped to public to modify the existing entry in place (verified it is
+-- IN SCHEMA public, not global). Sequences (objtype S, rU) are left alone: user
+-- tables use gen_random_uuid (no sequence) and app_runtime can't INSERT into the
+-- one identity table (rulings, catalog), so its sequence USAGE is inert.
+ALTER DEFAULT PRIVILEGES FOR ROLE neondb_owner IN SCHEMA public
+    REVOKE INSERT, UPDATE, DELETE ON TABLES FROM app_runtime;

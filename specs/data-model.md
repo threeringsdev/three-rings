@@ -1,6 +1,6 @@
 # Data model
 
-**Status:** accepted
+**Status:** implemented
 **Depends on:** [auth](auth.md) — Neon Auth (Better Auth) provides the `neon_auth."user"` table this schema references (see [Users & the auth boundary](#users--the-auth-boundary))
 
 Design inputs (not hard dependencies): the [architecture-spike](architecture-spike.md)
@@ -287,7 +287,7 @@ CREATE TABLE collections (
 CREATE UNIQUE INDEX collections_one_inbox ON collections (user_id) WHERE is_inbox;
 CREATE INDEX collections_user_parent_idx ON collections (user_id, parent_id);
 
-CREATE TABLE deck_commanders (                  -- 0..2 commanders (partners); decks only, enforced in app
+CREATE TABLE deck_commanders (                  -- SUPERSEDED (see card-tagging) — commander becomes a built-in tag
     collection_id uuid NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
     printing_id   uuid NOT NULL REFERENCES printings(id),
     PRIMARY KEY (collection_id, printing_id)
@@ -302,6 +302,11 @@ CREATE TABLE deck_commanders (                  -- 0..2 commanders (partners); d
   schema constraint.
 - `position` uses fractional indexing (LexoRank-style) so drag-to-reorder writes
   one row, not the whole sibling list.
+- **`deck_commanders` is superseded by [card-tagging](card-tagging.md)** (review
+  2026-07-15): commander is one case of a broader per-card annotation need (boards,
+  companion, user categories), so it becomes a built-in **tag**. That spec adds
+  `tags` + `card_tags` and drops this (empty) table in a follow-up migration.
+  Built + shipped in migrations `0002`–`0005` (this table exists on dev until then).
 
 ### The three counts — two holding tables
 
@@ -342,6 +347,12 @@ CREATE TABLE desires (
 - A pinned `printing_id` should share the row's `oracle_id`; cross-table CHECKs
   aren't possible, so the API enforces it (candidate for a trigger if it proves
   fragile).
+- **Deck boards (pending [card-tagging](card-tagging.md), review 2026-07-15):** a
+  `board card_board` column (`main`/`side`/`maybe`, default `main`) is added to
+  **both** tables and joined into their uniqueness keys, so a deck can hold
+  distinct per-board quantities of a card (2 main + 1 side). Quantity-bearing, so
+  it lives in this grain rather than as a tag; owned/present aggregates sum across
+  boards and are unaffected. Not yet migrated — `0002`–`0005` predate it.
 
 **Derived counts (views/queries, never stored):**
 
@@ -491,6 +502,72 @@ The spike's `cards(id serial, name)` is replaced (the new `cards` is oracle
 identity, unrelated) — the first catalog migration `DROP TABLE cards` before
 recreating it; there is no real data to preserve.
 
+## Findings (implementation — 2026-07-15)
+
+The initial schema shipped as three forward-only `sqlx` migrations, applied to the
+Neon **dev** branch via `scripts/migrate.sh dev`:
+
+- `0002_catalog.sql` — drops the spike `cards`, the `card_finish` enum, the five
+  catalog tables (`sets`, `cards`, `printings`, `prices`, `rulings`), `pg_trgm` +
+  the three base search indexes, and `app_runtime` read grants.
+- `0003_collections.sql` — the `collection_kind`/`card_condition` enums, the five
+  user tables, the `owned_by_card` view, RLS enable+force+policies, `app_runtime`
+  CRUD grants.
+- `0004_catalog_app_readonly.sql` — revokes app_runtime write on the existing
+  catalog tables (default-ACL finding below).
+- `0005_default_privileges_readonly.sql` — narrows the default privilege so all
+  *future* tables are app_runtime-read-only (default-ACL finding below).
+
+**RLS is real, verified end-to-end.** A rolled-back probe transaction as
+`app_runtime`: `SET LOCAL app.user_id = <a real neon_auth."user".id>`, insert a
+collection, see it (count 1); switch the GUC to a random uuid → the row vanishes
+(count 0). `relrowsecurity` + `relforcerowsecurity` confirmed on all five user
+tables and off on the catalog tables; the five owner policies present.
+
+**Neon default-ACL finding → `0004` + `0005`.** `app_runtime` was granted CRUD
+(`arwd`) on *every* table `neondb_owner` creates, via a pre-existing `pg_default_acl`
+entry (`FOR ROLE neondb_owner IN SCHEMA public`, set when the role was provisioned
+2026-07-12) — so `0002`'s catalog tables landed writable by the app role and its
+explicit `GRANT SELECT` was redundant. The spec requires catalog writes only through
+the owner/ingestion role. Fixed in two parts:
+- `0004` revokes `INSERT/UPDATE/DELETE/TRUNCATE` on the *existing* catalog tables
+  from `app_runtime`, leaving `SELECT`.
+- `0005` narrows the **default privilege at the source** — `ALTER DEFAULT
+  PRIVILEGES FOR ROLE neondb_owner IN SCHEMA public REVOKE INSERT, UPDATE, DELETE ON
+  TABLES FROM app_runtime` — so *future* owner-created tables grant `app_runtime`
+  only `SELECT` by default. This removes the standing footgun: future **catalog**
+  tables are auto read-only (no per-table revoke); future **user** tables get
+  read-by-default plus an explicit CRUD grant (as `0003` does), where a *forgotten*
+  grant fails closed (deny) rather than silently over-permitting.
+
+Verified against dev: the table default ACL is now `app_runtime=r`;
+`has_table_privilege('app_runtime','cards','INSERT')` is false / `SELECT` true; and a
+rolled-back `CREATE TABLE` probe shows a brand-new table grants `app_runtime`
+`SELECT` only (INSERT/UPDATE/DELETE false). Sequences (default `rU`) left alone —
+inert, since app_runtime can't INSERT into the one identity table (`rulings`).
+Convention going forward: **every user-table migration explicitly `GRANT`s CRUD to
+`app_runtime`; catalog tables need no grant** (SELECT is the default).
+
+**`owned_by_card` uses `security_invoker = true`** so it runs with the querying
+`app_runtime`'s RLS context (the `app.user_id` GUC), not the RLS-forced owner's —
+keeping the per-user scoping unambiguous.
+
+**`scripts/migrate.sh` hardened.** The `sqlx::migrate!` macro embeds the migrations
+dir at compile time, and cargo did not reliably rebuild `app` when a *new* `.sql`
+file was added — so `--migrate` silently reported "up to date" without applying
+`0004` until `app` was force-recompiled. `migrate.sh` now `touch`es
+`app/src/db.rs` before building to guarantee a re-embed.
+
+**Prod not yet migrated — deliberate (expand-first).** Dropping the spike `cards`
+and replacing it with the oracle-identity `cards` is a breaking change against the
+*currently deployed* spike code, whose `/cards` page reads `SELECT id, name FROM
+cards`. Migrating the Neon **production** branch now would break the live site, so
+prod migration is deferred to coordinate with the **data-access-backends** deploy
+(which removes the spike `app/src/db.rs` reads); run `scripts/migrate.sh prod` as
+part of that landing. Consequence for local dev: after this migration the dev-branch
+`/cards` spike page shows its graceful "Failed to load cards" error (the `id` column
+is gone) until data-access-backends replaces it — expected, non-fatal.
+
 ## Decisions (this review)
 
 - **Scryfall shape review (2026-07-14) — fields, multi-face, relations.** Fetched
@@ -553,20 +630,24 @@ Accepted with these deferred; none blocks acceptance — each notes where it res
   Better Auth post-signup webhook — `project_config.webhook_config` exists). No async
   race to worry about now. *(resolved during execution — the Neon Auth task /
   collection-api)*
-- **Denormalize `user_id` onto `holdings`/`desires`/`deck_commanders`** for direct
-  RLS policies (simpler/faster) vs. `EXISTS`-on-collection policies (no
-  duplication, must stay consistent)? Leaning denormalize. *(resolved during
-  execution — the initial migrations)*
-- **Condition/language granularity in v1.** The schema tracks `finish` +
-  `condition` + `language` on holdings, but the wireframes only surface finish so
-  far. Keep the columns (defaulted) and let the UI reveal them later, or trim v1 to
-  finish-only? Leaning keep — cheap, and hard to add retroactively to the uniqueness
-  constraint. *(resolved during execution — the initial migrations)*
+- ~~Denormalize `user_id` onto `holdings`/`desires`/`deck_commanders`~~ **Resolved
+  2026-07-15 (initial migrations — denormalize):** every user table carries
+  `user_id uuid NOT NULL REFERENCES neon_auth."user"(id) ON DELETE CASCADE`, so all
+  five RLS policies are one direct `user_id = current_setting('app.user_id',
+  true)::uuid` — no `EXISTS`-on-collection hop. The API keeps the denormalized
+  `user_id` consistent with the owning collection's (data-access-backends). See
+  Findings.
+- ~~Condition/language granularity in v1~~ **Resolved 2026-07-15 (initial
+  migrations — keep):** `holdings`/`moves` keep full `finish` + `condition` +
+  `language` (defaulted `nonfoil`/`nm`/`en`); the UI reveals them later. Cheap now,
+  hard to retrofit into the uniqueness constraint.
 - **Price time-series** — when (if) we want price charts, add an append-only
   `price_history(printing_id, finish, amount, observed_at)` with a retention/
   partition policy. Out of scope now; noted so the latest-only `prices` shape
   doesn't foreclose it. *(deferred — a future spec; not a v1 concern)*
-- **App role provisioning on Neon** — creating the non-owner application role and
-  wiring `DATABASE_URL` to it (vs. the migration owner) is an ops step that
-  touches Render/`.devcontainer` env. *(resolved during execution — the Neon Auth
-  task, shared with data-access-backends)*
+- ~~App role provisioning on Neon~~ **Resolved:** the non-owner `app_runtime` role
+  and its `DATABASE_URL` wiring landed in Phase 3 (role created 2026-07-12; local
+  `.env` `DATABASE_URL` = `app_runtime`). Table grants + a least-privilege
+  correction (a pre-existing Neon default-ACL over-granted catalog CRUD to
+  `app_runtime`; `0004` revokes it) landed with the initial migrations — see
+  Findings.
