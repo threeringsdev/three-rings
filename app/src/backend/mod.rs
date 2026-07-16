@@ -22,7 +22,8 @@
 //! collection-api extends these traits with the full method surface.
 
 use shared::{
-    ApiResult, CatalogCount, CollectionSummary, Id, NewCollection, Rename, Reorder, Reparent,
+    AddHave, AddLine, AddWant, ApiResult, CatalogCount, CollectionSummary, DesireLine, HoldingLine,
+    Id, LineResult, NewCollection, Rename, Reorder, Reparent, SetQuantity,
 };
 
 #[cfg(feature = "hosted")]
@@ -65,6 +66,9 @@ pub mod paths {
         pub const DELETE: &str = "delete";
         pub const REPARENT: &str = "reparent";
         pub const REORDER: &str = "reorder";
+        pub const HAVE: &str = "have";
+        pub const WANT: &str = "want";
+        pub const BATCH: &str = "batch";
     }
 
     /// The axum route template for a per-collection operation (`{id}` param).
@@ -75,6 +79,12 @@ pub mod paths {
     /// The client-side path for an operation on a specific collection.
     pub fn collection_op(id: Id, op: &str) -> String {
         format!("/api/collections/{id}/{op}")
+    }
+
+    /// Set a holding's quantity. Route template (`{id}` = holding id) / client path.
+    pub const HOLDING_QUANTITY_ROUTE: &str = "/api/holdings/{id}/quantity";
+    pub fn holding_quantity(holding_id: Id) -> String {
+        format!("/api/holdings/{holding_id}/quantity")
     }
 }
 
@@ -119,4 +129,28 @@ pub trait CollectionStore {
 
     /// Set a collection's fractional sort position among its siblings.
     async fn reorder_collection(&self, id: Id, req: Reorder) -> ApiResult<()>;
+
+    /// `+ Have` — add present copies to a collection (upsert the holding,
+    /// increment quantity, append an intake `moves` row). Returns the resulting
+    /// holding. Rejects a non-owned collection (`NotFound`) and quantity ≤ 0
+    /// (`Validation`).
+    async fn add_holding(&self, collection_id: Id, req: AddHave) -> ApiResult<HoldingLine>;
+
+    /// `+ Want` — add a desired count for a card in a collection (upsert the
+    /// desire, increment quantity). Returns the resulting desire.
+    async fn add_desire(&self, collection_id: Id, req: AddWant) -> ApiResult<DesireLine>;
+
+    /// Set a holding's absolute quantity (the stepper). `0` deletes the row and
+    /// returns `None`; otherwise the updated holding.
+    async fn set_holding_quantity(
+        &self,
+        holding_id: Id,
+        req: SetQuantity,
+    ) -> ApiResult<Option<HoldingLine>>;
+
+    /// Batch add (the enter-50-cards path): each line runs independently in its
+    /// own transaction, so one bad line doesn't sink the batch — the result
+    /// vector is positional (`results[i]` is `lines[i]`'s outcome).
+    async fn batch_add(&self, collection_id: Id, lines: Vec<AddLine>)
+        -> ApiResult<Vec<LineResult>>;
 }

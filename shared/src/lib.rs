@@ -18,7 +18,10 @@ pub mod catalog;
 pub mod collection;
 
 pub use catalog::CatalogCount;
-pub use collection::{CollectionKind, CollectionSummary, NewCollection, Rename, Reorder, Reparent};
+pub use collection::{
+    AddHave, AddLine, AddWant, Board, CollectionKind, CollectionSummary, Condition, DesireLine,
+    Finish, HoldingLine, LineResult, NewCollection, Rename, Reorder, Reparent, SetQuantity,
+};
 
 /// The one error type both backends converge on (specs/collection-api.md
 /// §Error model). Business-level auth *outcomes* (wrong password, unknown OTP)

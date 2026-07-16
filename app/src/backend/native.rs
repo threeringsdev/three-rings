@@ -12,8 +12,9 @@
 //! running hosted deployment to talk to.
 
 use shared::{
-    ApiError, ApiResult, CatalogCount, CollectionSummary, ErrorEnvelope, Id, NewCollection, Rename,
-    Reorder, Reparent,
+    AddHave, AddLine, AddWant, ApiError, ApiResult, CatalogCount, CollectionSummary, DesireLine,
+    ErrorEnvelope, HoldingLine, Id, LineResult, NewCollection, Rename, Reorder, Reparent,
+    SetQuantity,
 };
 use tokio::sync::OnceCell;
 
@@ -184,6 +185,47 @@ impl CollectionStore for NativeBackend {
         self.post_unit(
             &super::paths::collection_op(id, super::paths::op::REORDER),
             &req,
+        )
+        .await
+    }
+
+    async fn add_holding(&self, collection_id: Id, req: AddHave) -> ApiResult<HoldingLine> {
+        self.require_session()?;
+        self.post(
+            &super::paths::collection_op(collection_id, super::paths::op::HAVE),
+            &req,
+        )
+        .await
+    }
+
+    async fn add_desire(&self, collection_id: Id, req: AddWant) -> ApiResult<DesireLine> {
+        self.require_session()?;
+        self.post(
+            &super::paths::collection_op(collection_id, super::paths::op::WANT),
+            &req,
+        )
+        .await
+    }
+
+    async fn set_holding_quantity(
+        &self,
+        holding_id: Id,
+        req: SetQuantity,
+    ) -> ApiResult<Option<HoldingLine>> {
+        self.require_session()?;
+        self.post(&super::paths::holding_quantity(holding_id), &req)
+            .await
+    }
+
+    async fn batch_add(
+        &self,
+        collection_id: Id,
+        lines: Vec<AddLine>,
+    ) -> ApiResult<Vec<LineResult>> {
+        self.require_session()?;
+        self.post(
+            &super::paths::collection_op(collection_id, super::paths::op::BATCH),
+            &lines,
         )
         .await
     }

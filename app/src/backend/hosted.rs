@@ -5,8 +5,9 @@
 //! data-model's RLS policies scope the rows even beneath this terminus.
 
 use shared::{
-    ApiError, ApiResult, CatalogCount, CollectionKind, CollectionSummary, Id, NewCollection,
-    Rename, Reorder, Reparent,
+    AddHave, AddLine, AddWant, ApiError, ApiResult, Board, CatalogCount, CollectionKind,
+    CollectionSummary, Condition, DesireLine, Finish, HoldingLine, Id, LineResult, NewCollection,
+    Rename, Reorder, Reparent, SetQuantity,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -264,6 +265,145 @@ impl CollectionStore for HostedBackend {
         tx.commit().await.map_err(upstream)?;
         Ok(())
     }
+
+    async fn add_holding(&self, collection_id: Id, req: AddHave) -> ApiResult<HoldingLine> {
+        if req.quantity <= 0 {
+            return Err(ApiError::Validation("quantity must be > 0".into()));
+        }
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        require_owned_collection(&mut tx, collection_id).await?;
+
+        // Upsert the holding (increment on the unique grain), then append the
+        // intake move (`from = NULL`). RLS only checks holdings.user_id, so the
+        // owned-collection guard above is what stops writing into someone else's
+        // collection.
+        let row: HoldingRow = sqlx::query_as(&format!(
+            "INSERT INTO holdings \
+               (user_id, collection_id, printing_id, finish, condition, language, board, quantity) \
+             VALUES ($1, $2, $3, $4::card_finish, $5::card_condition, $6, $7::card_board, $8) \
+             ON CONFLICT ON CONSTRAINT holdings_uniq \
+               DO UPDATE SET quantity = holdings.quantity + EXCLUDED.quantity \
+             RETURNING {HOLDING_COLS}"
+        ))
+        .bind(user_id)
+        .bind(collection_id)
+        .bind(req.printing_id)
+        .bind(req.finish.to_pg())
+        .bind(req.condition.to_pg())
+        .bind(&req.language)
+        .bind(req.board.to_pg())
+        .bind(req.quantity)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            "INSERT INTO moves \
+               (user_id, printing_id, finish, condition, language, \
+                from_collection_id, to_collection_id, quantity) \
+             VALUES ($1, $2, $3::card_finish, $4::card_condition, $5, NULL, $6, $7)",
+        )
+        .bind(user_id)
+        .bind(req.printing_id)
+        .bind(req.finish.to_pg())
+        .bind(req.condition.to_pg())
+        .bind(&req.language)
+        .bind(collection_id)
+        .bind(req.quantity)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        tx.commit().await.map_err(upstream)?;
+        row.into_line()
+    }
+
+    async fn add_desire(&self, collection_id: Id, req: AddWant) -> ApiResult<DesireLine> {
+        if req.quantity <= 0 {
+            return Err(ApiError::Validation("quantity must be > 0".into()));
+        }
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        require_owned_collection(&mut tx, collection_id).await?;
+
+        let row: DesireRow = sqlx::query_as(&format!(
+            "INSERT INTO desires (user_id, collection_id, oracle_id, printing_id, board, quantity) \
+             VALUES ($1, $2, $3, $4, $5::card_board, $6) \
+             ON CONFLICT ON CONSTRAINT desires_uniq \
+               DO UPDATE SET quantity = desires.quantity + EXCLUDED.quantity \
+             RETURNING {DESIRE_COLS}"
+        ))
+        .bind(user_id)
+        .bind(collection_id)
+        .bind(req.oracle_id)
+        .bind(req.printing_id)
+        .bind(req.board.to_pg())
+        .bind(req.quantity)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        tx.commit().await.map_err(upstream)?;
+        row.into_line()
+    }
+
+    async fn set_holding_quantity(
+        &self,
+        holding_id: Id,
+        req: SetQuantity,
+    ) -> ApiResult<Option<HoldingLine>> {
+        let mut tx = self.scoped_tx().await?;
+        if req.quantity <= 0 {
+            let affected = sqlx::query("DELETE FROM holdings WHERE id = $1")
+                .bind(holding_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(upstream)?
+                .rows_affected();
+            if affected == 0 {
+                return Err(ApiError::NotFound("holding".into()));
+            }
+            tx.commit().await.map_err(upstream)?;
+            return Ok(None);
+        }
+        let row: Option<HoldingRow> = sqlx::query_as(&format!(
+            "UPDATE holdings SET quantity = $2 WHERE id = $1 RETURNING {HOLDING_COLS}"
+        ))
+        .bind(holding_id)
+        .bind(req.quantity)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        match row {
+            Some(r) => {
+                tx.commit().await.map_err(upstream)?;
+                Ok(Some(r.into_line()?))
+            }
+            None => Err(ApiError::NotFound("holding".into())),
+        }
+    }
+
+    async fn batch_add(
+        &self,
+        collection_id: Id,
+        lines: Vec<AddLine>,
+    ) -> ApiResult<Vec<LineResult>> {
+        // Each line runs in its own transaction (via add_holding/add_desire), so
+        // a failure isolates to that line — per-line results, not all-or-nothing.
+        let mut results = Vec::with_capacity(lines.len());
+        for line in lines {
+            let outcome = match line {
+                AddLine::Have(h) => self.add_holding(collection_id, h).await.map(|_| ()),
+                AddLine::Want(w) => self.add_desire(collection_id, w).await.map(|_| ()),
+            };
+            results.push(match outcome {
+                Ok(()) => LineResult::Ok,
+                Err(error) => LineResult::Error { error },
+            });
+        }
+        Ok(results)
+    }
 }
 
 impl HostedBackend {
@@ -318,6 +458,87 @@ impl CollectionRow {
     }
 }
 
+/// The `holdings` projection matching [`HoldingRow`] (enum columns cast to text).
+const HOLDING_COLS: &str = "id, collection_id, printing_id, finish::text AS finish, \
+     condition::text AS condition, language, board::text AS board, quantity";
+
+/// The `desires` projection matching [`DesireRow`].
+const DESIRE_COLS: &str =
+    "id, collection_id, oracle_id, printing_id, board::text AS board, quantity";
+
+#[derive(sqlx::FromRow)]
+struct HoldingRow {
+    id: Uuid,
+    collection_id: Uuid,
+    printing_id: Uuid,
+    finish: String,
+    condition: String,
+    language: String,
+    board: String,
+    quantity: i32,
+}
+
+impl HoldingRow {
+    fn into_line(self) -> ApiResult<HoldingLine> {
+        Ok(HoldingLine {
+            id: self.id,
+            collection_id: self.collection_id,
+            printing_id: self.printing_id,
+            finish: Finish::from_pg(&self.finish)
+                .ok_or_else(|| ApiError::Upstream(format!("bad finish '{}'", self.finish)))?,
+            condition: Condition::from_pg(&self.condition)
+                .ok_or_else(|| ApiError::Upstream(format!("bad condition '{}'", self.condition)))?,
+            language: self.language,
+            board: Board::from_pg(&self.board)
+                .ok_or_else(|| ApiError::Upstream(format!("bad board '{}'", self.board)))?,
+            quantity: self.quantity,
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct DesireRow {
+    id: Uuid,
+    collection_id: Uuid,
+    oracle_id: Uuid,
+    printing_id: Option<Uuid>,
+    board: String,
+    quantity: i32,
+}
+
+impl DesireRow {
+    fn into_line(self) -> ApiResult<DesireLine> {
+        Ok(DesireLine {
+            id: self.id,
+            collection_id: self.collection_id,
+            oracle_id: self.oracle_id,
+            printing_id: self.printing_id,
+            board: Board::from_pg(&self.board)
+                .ok_or_else(|| ApiError::Upstream(format!("bad board '{}'", self.board)))?,
+            quantity: self.quantity,
+        })
+    }
+}
+
+/// Reject an operation targeting a collection the caller doesn't own — RLS makes
+/// a non-owned collection invisible, so this EXISTS both checks ownership and
+/// rejects a bad id. (The `holdings`/`desires` RLS policies only gate on their
+/// own `user_id`, not the collection's, so this guard is load-bearing.)
+async fn require_owned_collection(
+    tx: &mut Transaction<'static, Postgres>,
+    collection_id: Id,
+) -> ApiResult<()> {
+    let found: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM collections WHERE id = $1")
+        .bind(collection_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(upstream)?;
+    if found.is_none() {
+        return Err(ApiError::NotFound("collection".into()));
+    }
+    Ok(())
+}
+
 /// The process-wide Neon pool (as `app_runtime`). Connects on first use; needs
 /// `DATABASE_URL`. Maps a connection failure onto `Upstream`.
 async fn pool() -> ApiResult<&'static PgPool> {
@@ -329,4 +550,19 @@ async fn pool() -> ApiResult<&'static PgPool> {
 fn upstream(e: sqlx::Error) -> ApiError {
     leptos::logging::error!("hosted backend db error: {e}");
     ApiError::Upstream("database error".into())
+}
+
+/// Like [`upstream`] but classifies common Postgres constraint violations into
+/// client-facing errors: a foreign-key miss (e.g. an unknown printing/oracle) is
+/// `NotFound`, a unique clash is `Conflict`, a CHECK failure is `Validation`.
+fn db_err(e: sqlx::Error) -> ApiError {
+    if let Some(dbe) = e.as_database_error() {
+        match dbe.code().as_deref() {
+            Some("23503") => return ApiError::NotFound("referenced card/printing".into()),
+            Some("23505") => return ApiError::Conflict("already exists".into()),
+            Some("23514") => return ApiError::Validation("violates a check constraint".into()),
+            _ => {}
+        }
+    }
+    upstream(e)
 }

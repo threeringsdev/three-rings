@@ -13,7 +13,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use http::StatusCode;
-use shared::{ApiResult, Id, NewCollection, Rename, Reorder, Reparent};
+use shared::{
+    AddHave, AddLine, AddWant, ApiResult, Id, NewCollection, Rename, Reorder, Reparent, SetQuantity,
+};
 
 use super::paths;
 use super::paths::op;
@@ -48,6 +50,10 @@ where
             &paths::collection_op_route(op::REORDER),
             post(reorder_collection),
         )
+        .route(&paths::collection_op_route(op::HAVE), post(add_holding))
+        .route(&paths::collection_op_route(op::WANT), post(add_desire))
+        .route(&paths::collection_op_route(op::BATCH), post(batch_add))
+        .route(paths::HOLDING_QUANTITY_ROUTE, post(set_holding_quantity))
 }
 
 /// `GET /api/catalog/count` — anonymous catalog size.
@@ -141,6 +147,66 @@ async fn reorder_collection(
             HostedBackend::for_user(user.user_id)
                 .await?
                 .reorder_collection(id, req)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/collections/{id}/have` — add present copies.
+async fn add_holding(user: AuthUser, Path(id): Path<Id>, Json(req): Json<AddHave>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .add_holding(id, req)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/collections/{id}/want` — add a desired count.
+async fn add_desire(user: AuthUser, Path(id): Path<Id>, Json(req): Json<AddWant>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .add_desire(id, req)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/collections/{id}/batch` — add many lines, per-line results.
+async fn batch_add(
+    user: AuthUser,
+    Path(id): Path<Id>,
+    Json(lines): Json<Vec<AddLine>>,
+) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .batch_add(id, lines)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/holdings/{id}/quantity` — set a holding's quantity (0 deletes).
+async fn set_holding_quantity(
+    user: AuthUser,
+    Path(id): Path<Id>,
+    Json(req): Json<SetQuantity>,
+) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .set_holding_quantity(id, req)
                 .await
         }
         .await,
