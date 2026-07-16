@@ -14,8 +14,9 @@ use axum::routing::{get, post};
 use axum::Json;
 use http::StatusCode;
 use shared::{
-    AddHave, AddLine, AddWant, ApiResult, BatchMove, Id, MoveRequest, NewCollection, Page, Rename,
-    Reorder, Reparent, SearchQuery, SetQuantity, Teardown,
+    AddHave, AddLine, AddWant, ApiResult, BatchMove, Id, MoveRequest, NewCollection, NewTag, Page,
+    Rename, RenameTag, Reorder, Reparent, SearchQuery, SetBoard, SetQuantity, TagAssignment,
+    Teardown,
 };
 
 use super::paths;
@@ -68,6 +69,21 @@ where
         .route(paths::ALL_CARDS, get(all_cards))
         .route(paths::SHOPPING_LIST, get(shopping_list))
         .route(&paths::collection_op_route(op::NEEDS), get(needs))
+        // Tags & boards (specs/card-tagging.md).
+        .route(paths::TAGS, post(create_tag))
+        .route(&paths::tag_op_route(op::RENAME), post(rename_tag))
+        .route(&paths::tag_op_route(op::DELETE), post(delete_tag))
+        .route(paths::TAGS_ASSIGN, post(assign_tag))
+        .route(paths::TAGS_UNASSIGN, post(unassign_tag))
+        .route(&paths::collection_op_route(op::TAGS), get(list_tags))
+        .route(
+            &paths::collection_op_route(op::COMMANDERS),
+            get(deck_commanders),
+        )
+        .route(paths::CARD_TAGS_ROUTE, get(card_tags))
+        .route(paths::TAG_CARDS_ROUTE, get(cards_with_tag))
+        .route(paths::HOLDING_BOARD_ROUTE, post(set_holding_board))
+        .route(paths::DESIRE_BOARD_ROUTE, post(set_desire_board))
 }
 
 /// `GET /api/catalog/count` — anonymous catalog size.
@@ -388,6 +404,159 @@ async fn shopping_list(user: AuthUser) -> Response {
     )
 }
 
+// --- Tags & boards (specs/card-tagging.md) ---------------------------------
+
+/// `POST /api/tags` — create an account- or deck-scoped tag.
+async fn create_tag(user: AuthUser, Json(req): Json<NewTag>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .create_tag(req)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/tags/{id}/rename`.
+async fn rename_tag(user: AuthUser, Path(id): Path<Id>, Json(req): Json<RenameTag>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .rename_tag(id, req)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/tags/{id}/delete` — cascades the tag's assignments.
+async fn delete_tag(user: AuthUser, Path(id): Path<Id>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .delete_tag(id)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/tags/assign` — add a tag to a card in a collection.
+async fn assign_tag(user: AuthUser, Json(req): Json<TagAssignment>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .assign_tag(req)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/tags/unassign` — remove a tag from a card in a collection.
+async fn unassign_tag(user: AuthUser, Json(req): Json<TagAssignment>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .unassign_tag(req)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `GET /api/collections/{id}/tags` — the tags in scope for a collection.
+async fn list_tags(user: AuthUser, Path(id): Path<Id>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .list_tags(id)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `GET /api/collections/{id}/commanders` — a deck's commanders + color identity.
+async fn deck_commanders(user: AuthUser, Path(id): Path<Id>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .deck_commanders(id)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `GET /api/collections/{id}/cards/{oracle}/tags` — a card's tags.
+async fn card_tags(user: AuthUser, Path((id, oracle)): Path<(Id, Id)>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .card_tags(id, oracle)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `GET /api/collections/{id}/tags/{tag}/cards` — cards carrying a tag.
+async fn cards_with_tag(user: AuthUser, Path((id, tag)): Path<(Id, Id)>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .cards_with_tag(id, tag)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/holdings/{id}/board` — re-label a holding stack onto another board.
+async fn set_holding_board(
+    user: AuthUser,
+    Path(id): Path<Id>,
+    Json(req): Json<SetBoard>,
+) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .set_holding_board(id, req)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/desires/{id}/board` — re-label a desire stack onto another board.
+async fn set_desire_board(
+    user: AuthUser,
+    Path(id): Path<Id>,
+    Json(req): Json<SetBoard>,
+) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .set_desire_board(id, req)
+                .await
+        }
+        .await,
+    )
+}
+
 /// Project an `ApiResult` onto an HTTP response: the DTO as JSON on success, the
 /// shared error envelope with the mapped status on failure.
 fn json_result<T: serde::Serialize>(result: ApiResult<T>) -> Response {
@@ -397,5 +566,18 @@ fn json_result<T: serde::Serialize>(result: ApiResult<T>) -> Response {
             let status = StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::BAD_GATEWAY);
             (status, Json(err.to_wire())).into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// `mount` builds the router without a matchit conflict — guards the mixed
+    /// static/param paths added for tags (`/api/tags/assign` alongside
+    /// `/api/tags/{id}/rename`, and the nested `/api/collections/{id}/tags…`
+    /// forms). matchit conflicts panic at mount time, so merely constructing the
+    /// router is the assertion.
+    #[test]
+    fn mount_has_no_route_conflicts() {
+        let _router = super::mount(axum::Router::<()>::new());
     }
 }

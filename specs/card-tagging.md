@@ -1,6 +1,6 @@
 # Card tagging & deck boards
 
-**Status:** accepted
+**Status:** implemented
 **Depends on:** [data-model](data-model.md) (owns the tables this extends),
 [collection-api](collection-api.md) (the endpoints that project the tag/board
 operations), [auth](auth.md) (the user id everything scopes to)
@@ -228,16 +228,21 @@ The operations are new `CollectionStore` methods projected to HTTP by
   card_board NOT NULL DEFAULT 'main'` on both `holdings` and `desires` — a
   placeholder the API ignores for binders, keeping the uniqueness keys simple and
   existing rows migrating without a rewrite.
-- **Commander's displayed printing** when the commander card is neither held nor
-  desired in the deck (so no printing is pinned). Default to a canonical printing
-  (e.g. most recent / a chosen "preferred" printing) — a render concern.
-  *(resolved during execution — collection-api)*
-- **Companion enforcement depth** — just the ≤1 cap + tag, or the full companion
-  deckbuilding-restriction validation? Leaning cap-only for v1; full validation is
-  a rules-engine concern. *(resolved during execution — collection-api)*
-- **Tag cosmetics & ordering** — `color` is included; a user-defined tag
-  **ordering** (a `position`) and per-tag icon are deferred unless the UI needs
-  them day one. *(resolved during execution — collection-api / ui-design)*
+- ~~**Commander's displayed printing** when the commander card is neither held
+  nor desired in the deck.~~ **Resolved (tag/board API):** the `deck_commanders`
+  read returns a representative image via `image_uris->>'normal'` from *any*
+  printing of the oracle (`LIMIT 1`) — the tag is oracle-grain, so the render
+  just needs a stable picture; picking a "preferred" printing is a later UI
+  refinement, not an API shape. *(resolved during execution — collection-api)*
+- ~~**Companion enforcement depth.**~~ **Resolved (tag/board API): cap-only for
+  v1.** `assign_tag` enforces the ≤ 1 companion (and ≤ 2 commander) caps; the full
+  companion deckbuilding-restriction validation — like full legal-commander
+  validation — is deferred to a rules-engine layer (`builtin_cap` is the
+  schema-adjacent part). *(resolved during execution — collection-api)*
+- ~~**Tag cosmetics & ordering.**~~ **Resolved (tag/board API):** `color` ships
+  on `NewTag`/`Tag`; a user-defined tag **ordering** (`position`) and per-tag icon
+  stay deferred until the UI needs them. List order is deterministic (built-ins
+  first, then by name). *(resolved during execution — collection-api / ui-design)*
 - **Typed / key-value fields.** The examples are all label-shaped (`Draw spells`),
   so tags are modeled as labels, not key-value fields. If a real need for typed
   per-card fields appears, it's a future extension, not a v1 shape change.
@@ -277,3 +282,62 @@ applied to the Neon **dev** branch via `scripts/migrate.sh dev`. The tag/board
   policy.
 - **Prod** not migrated — rides the data-access-backends cutover with `0002`–`0005`
   (same expand-first reasoning; see data-model Findings).
+
+## Findings (tag/board API — 2026-07-16)
+
+The API half shipped, completing the spec (`accepted` → `implemented`). Eleven
+new `CollectionStore` methods, each a `shared/` DTO implemented once by
+`HostedBackend` (sqlx) and mirrored by `NativeBackend` (the HTTP client of the
+hosted JSON routes), projected to the routes in collection-api §Tags & boards.
+The whole surface was proven end-to-end against the Neon **dev** branch (a temp
+driver seeded a set/three cards/printing, exercised every path, asserted, and
+cleaned up — reverted, not committed).
+
+- **New DTOs (`shared/tags.rs`):** `Tag` + `TagScope` (`System`/`Account`/`Deck`,
+  derived from the two nullable FKs via `TagScope::from_fks` — no scope enum to
+  keep in sync), `NewTag`/`RenameTag`, `TagAssignment` (carries collection +
+  oracle + tag, so assignment isn't a deeply-nested path), `TaggedCard`,
+  `DeckCommanders`, `SetBoard`, and `union_color_identity` (WUBRG-ordered,
+  de-duplicated; unit-tested).
+- **Tag CRUD.** `create_tag` inserts an **account** (`collection_id = None`) or
+  **deck** tag; `builtin` stays NULL (the API never mints system tags); a
+  scope-duplicate name trips a partial unique index → `Conflict`. `rename_tag`/
+  `delete_tag` carry `AND builtin IS NULL` and rely on `tags_owner` RLS, so a
+  built-in or another user's tag reads as `NotFound`; delete cascades `card_tags`.
+  `list_tags(collection)` returns system + own-account + this-deck's, built-ins
+  first then by name.
+- **Assignment enforcement** (`assign_tag`, all inside the `SET LOCAL app.user_id`
+  tx, order matters): owned-collection guard → tag visible (else `NotFound`) →
+  **deck-tag containment** (a deck-scoped tag only in its own collection, else
+  `Conflict`) → **card-in-deck** (a holding *or* desire exists, else `Validation`)
+  → **built-in caps** (`commander` ≤ 2, `companion` ≤ 1; counts *distinct* oracles
+  already carrying the built-in, **excluding the one being assigned**, so
+  re-assigning an existing commander stays idempotent) → upsert `ON CONFLICT DO
+  NOTHING`. `unassign_tag` is an idempotent delete. Full legal-commander /
+  companion-restriction validation is deferred (rules engine) — see OQs.
+- **Reads.** `card_tags(collection, oracle)`, `cards_with_tag(collection, tag)`
+  (the "group a deck by a tag" view), and `deck_commanders(collection)` — the
+  latter returns the commander-tagged cards **plus the color identity derived on
+  read** (the WUBRG union of their `color_identity`); nothing is stored, so it is
+  always current after an assignment change (this is what "recompute color
+  identity" means here — there is no color-identity column).
+- **Boards** (`set_holding_board` / `set_desire_board`, by row id like
+  `set_holding_quantity`): a quantity-preserving re-label, **not** a `moves`
+  entry. It upserts the destination-board row (`ON CONFLICT ON CONSTRAINT
+  holdings_uniq`/`desires_uniq` — the board is in each key, so source and dest are
+  distinct rows) then decrements/deletes the source (`take_or_delete_*`), splitting
+  a partial stack and merging into an existing destination row. `quantity = None`
+  moves the whole row. A **binder** holding/desire is rejected (`Validation`,
+  "boards apply to decks only") — the "meaningful only for decks" rule enforced at
+  the API, not just hidden in the UI.
+- **Orphan cleanup** (a card's `card_tags` removed when its last holding **and**
+  desire leave the deck) is carried by the schema's `ON DELETE CASCADE` on
+  `card_tags.collection_id` for whole-collection teardown; per-card orphan cleanup
+  on the *last line* leaving rides the holdings/desires write paths and is a thin
+  follow-up if a UI surfaces stale tags (filed).
+- **Native mirror + routes.** Routes are operation-named/RPC-ish, mounted only in
+  the hosted deployment; paths live in the shared `paths` module (`/api/tags`,
+  `/api/tags/assign`, `/api/tags/{id}/rename`, `/api/collections/{id}/tags`,
+  `/api/collections/{id}/cards/{oracle}/tags`, `/api/holdings/{id}/board`, …). A
+  `mount_has_no_route_conflicts` unit test guards the mixed static/param forms.
+  Full merge gate green in-container.
