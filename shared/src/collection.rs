@@ -28,6 +28,14 @@ impl CollectionKind {
             _ => None,
         }
     }
+
+    /// The Postgres `collection_kind` label (bound as text, cast in SQL).
+    pub fn to_pg(self) -> &'static str {
+        match self {
+            CollectionKind::Binder => "binder",
+            CollectionKind::Deck => "deck",
+        }
+    }
 }
 
 /// One row of a user's collection tree — the flat shape the list endpoint
@@ -45,4 +53,35 @@ pub struct CollectionSummary {
     pub position: f64,
     /// Set on decks only (e.g. `commander`, `modern`).
     pub format: Option<String>,
+}
+
+/// Create a binder or deck (specs/collection-api.md -> Tree CRUD). `format` is
+/// deck-only; the API rejects a format on a binder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewCollection {
+    /// `None` = top level.
+    pub parent_id: Option<Id>,
+    pub kind: CollectionKind,
+    pub name: String,
+    pub format: Option<String>,
+}
+
+/// Rename a collection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Rename {
+    pub name: String,
+}
+
+/// Reparent a collection. `new_parent_id = None` moves it to the top level. The
+/// API rejects a cycle (target is the node or one of its descendants).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Reparent {
+    pub new_parent_id: Option<Id>,
+}
+
+/// Reorder among siblings via a fractional index the client computed (midpoint
+/// of the two neighbors it dropped between) -- a one-row write.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Reorder {
+    pub position: f64,
 }

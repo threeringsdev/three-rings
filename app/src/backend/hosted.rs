@@ -4,7 +4,10 @@
 //! session-scoped query inside a transaction that first sets `app.user_id`, so
 //! data-model's RLS policies scope the rows even beneath this terminus.
 
-use shared::{ApiError, ApiResult, CatalogCount, CollectionKind, CollectionSummary};
+use shared::{
+    ApiError, ApiResult, CatalogCount, CollectionKind, CollectionSummary, Id, NewCollection,
+    Rename, Reorder, Reparent,
+};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -53,7 +56,19 @@ impl HostedBackend {
             .map_err(upstream)?;
         Ok(tx)
     }
+
+    /// The session user id, or `Unauthorized`. Used where a value (not just the
+    /// GUC) is needed — e.g. the `user_id` column on an INSERT.
+    fn session_id(&self) -> ApiResult<Uuid> {
+        self.session
+            .ok_or_else(|| ApiError::Unauthorized("no session".into()))
+    }
 }
+
+/// The `collections` projection matching [`CollectionRow`] — `kind`/`position`
+/// cast so sqlx (no decimal feature) decodes them.
+const COLLECTION_COLS: &str =
+    "id, parent_id, kind::text AS kind, name, is_inbox, position::float8 AS position, format";
 
 impl CatalogStore for HostedBackend {
     async fn card_count(&self) -> ApiResult<CatalogCount> {
@@ -68,18 +83,208 @@ impl CatalogStore for HostedBackend {
 
 impl CollectionStore for HostedBackend {
     async fn list_collections(&self) -> ApiResult<Vec<CollectionSummary>> {
+        let user_id = self.session_id()?;
         let mut tx = self.scoped_tx().await?;
-        let rows: Vec<CollectionRow> = sqlx::query_as(
-            "SELECT id, parent_id, kind::text AS kind, name, is_inbox, \
-                    position::float8 AS position, format \
-             FROM collections ORDER BY position, name",
+
+        // Lazily provision the one Inbox on first authed load (idempotent via the
+        // `collections_one_inbox` partial unique index).
+        sqlx::query(
+            "INSERT INTO collections (user_id, kind, name, is_inbox) \
+             VALUES ($1, 'binder', 'Inbox', true) \
+             ON CONFLICT (user_id) WHERE is_inbox DO NOTHING",
         )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(upstream)?;
+
+        let rows: Vec<CollectionRow> = sqlx::query_as(&format!(
+            "SELECT {COLLECTION_COLS} FROM collections ORDER BY position, name"
+        ))
         .fetch_all(&mut *tx)
         .await
         .map_err(upstream)?;
         tx.commit().await.map_err(upstream)?;
 
         rows.into_iter().map(CollectionRow::into_summary).collect()
+    }
+
+    async fn create_collection(&self, req: NewCollection) -> ApiResult<CollectionSummary> {
+        if req.format.is_some() && req.kind != CollectionKind::Deck {
+            return Err(ApiError::Validation("format is deck-only".into()));
+        }
+        if req.name.trim().is_empty() {
+            return Err(ApiError::Validation("name is required".into()));
+        }
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+
+        // Parent must exist and be owned — RLS makes a non-owned parent invisible,
+        // so this EXISTS both validates ownership and rejects a bad id.
+        if let Some(parent_id) = req.parent_id {
+            let exists: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM collections WHERE id = $1")
+                .bind(parent_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(upstream)?;
+            if exists.is_none() {
+                return Err(ApiError::NotFound("parent collection".into()));
+            }
+        }
+
+        // Append after the current siblings (max position + 1).
+        let row: CollectionRow = sqlx::query_as(&format!(
+            "INSERT INTO collections (user_id, parent_id, kind, name, format, position) \
+             VALUES ($1, $2, $3::collection_kind, $4, $5, \
+                     COALESCE((SELECT max(position) FROM collections \
+                               WHERE parent_id IS NOT DISTINCT FROM $2), 0) + 1) \
+             RETURNING {COLLECTION_COLS}"
+        ))
+        .bind(user_id)
+        .bind(req.parent_id)
+        .bind(req.kind.to_pg())
+        .bind(req.name.trim())
+        .bind(req.format)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+        row.into_summary()
+    }
+
+    async fn rename_collection(&self, id: Id, req: Rename) -> ApiResult<CollectionSummary> {
+        if req.name.trim().is_empty() {
+            return Err(ApiError::Validation("name is required".into()));
+        }
+        let mut tx = self.scoped_tx().await?;
+        let updated: Option<CollectionRow> = sqlx::query_as(&format!(
+            "UPDATE collections SET name = $2 WHERE id = $1 AND NOT is_inbox \
+             RETURNING {COLLECTION_COLS}"
+        ))
+        .bind(id)
+        .bind(req.name.trim())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        let summary = match updated {
+            Some(row) => row.into_summary()?,
+            None => return Err(self.absent_or_inbox(&mut tx, id, "rename").await),
+        };
+        tx.commit().await.map_err(upstream)?;
+        Ok(summary)
+    }
+
+    async fn delete_collection(&self, id: Id) -> ApiResult<()> {
+        let mut tx = self.scoped_tx().await?;
+        let affected = sqlx::query("DELETE FROM collections WHERE id = $1 AND NOT is_inbox")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(upstream)?
+            .rows_affected();
+        if affected == 0 {
+            return Err(self.absent_or_inbox(&mut tx, id, "delete").await);
+        }
+        tx.commit().await.map_err(upstream)?;
+        Ok(())
+    }
+
+    async fn reparent_collection(&self, id: Id, req: Reparent) -> ApiResult<()> {
+        let new_parent = req.new_parent_id;
+        if new_parent == Some(id) {
+            return Err(ApiError::Conflict(
+                "a collection cannot be its own parent".into(),
+            ));
+        }
+        let mut tx = self.scoped_tx().await?;
+
+        // Node must exist / be owned.
+        let node: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM collections WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(upstream)?;
+        if node.is_none() {
+            return Err(ApiError::NotFound("collection".into()));
+        }
+
+        if let Some(parent_id) = new_parent {
+            // Parent must exist / be owned.
+            let parent: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM collections WHERE id = $1")
+                .bind(parent_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(upstream)?;
+            if parent.is_none() {
+                return Err(ApiError::NotFound("parent collection".into()));
+            }
+            // Cycle check: walk the target parent's ancestors; if `id` is among
+            // them, moving `id` under it would create a cycle.
+            let cycle: Option<(i32,)> = sqlx::query_as(
+                "WITH RECURSIVE anc AS ( \
+                   SELECT id, parent_id FROM collections WHERE id = $1 \
+                   UNION ALL \
+                   SELECT c.id, c.parent_id FROM collections c JOIN anc ON c.id = anc.parent_id \
+                 ) SELECT 1 FROM anc WHERE id = $2 LIMIT 1",
+            )
+            .bind(parent_id)
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(upstream)?;
+            if cycle.is_some() {
+                return Err(ApiError::Conflict(
+                    "reparent would create a cycle (target is a descendant)".into(),
+                ));
+            }
+        }
+
+        sqlx::query("UPDATE collections SET parent_id = $2 WHERE id = $1")
+            .bind(id)
+            .bind(new_parent)
+            .execute(&mut *tx)
+            .await
+            .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+        Ok(())
+    }
+
+    async fn reorder_collection(&self, id: Id, req: Reorder) -> ApiResult<()> {
+        let mut tx = self.scoped_tx().await?;
+        let affected = sqlx::query("UPDATE collections SET position = $2 WHERE id = $1")
+            .bind(id)
+            .bind(req.position)
+            .execute(&mut *tx)
+            .await
+            .map_err(upstream)?
+            .rows_affected();
+        if affected == 0 {
+            return Err(ApiError::NotFound("collection".into()));
+        }
+        tx.commit().await.map_err(upstream)?;
+        Ok(())
+    }
+}
+
+impl HostedBackend {
+    /// Disambiguate a write that affected no rows: an existing-but-Inbox row is a
+    /// `Conflict` (Inbox is protected), an absent/not-owned row is `NotFound`.
+    async fn absent_or_inbox(
+        &self,
+        tx: &mut Transaction<'static, Postgres>,
+        id: Id,
+        op: &str,
+    ) -> ApiError {
+        match sqlx::query_as::<_, (bool,)>("SELECT is_inbox FROM collections WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await
+        {
+            Ok(Some((true,))) => ApiError::Conflict(format!("the Inbox cannot be {op}d")),
+            Ok(Some((false,))) => ApiError::NotFound("collection".into()),
+            Ok(None) => ApiError::NotFound("collection".into()),
+            Err(e) => upstream(e),
+        }
     }
 }
 

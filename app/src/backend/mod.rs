@@ -21,7 +21,9 @@
 //! `list_collections` (session-scoped, exercises the GUC transaction).
 //! collection-api extends these traits with the full method surface.
 
-use shared::{ApiResult, CatalogCount, CollectionSummary};
+use shared::{
+    ApiResult, CatalogCount, CollectionSummary, Id, NewCollection, Rename, Reorder, Reparent,
+};
 
 #[cfg(feature = "hosted")]
 pub mod hosted;
@@ -50,8 +52,30 @@ compile_error!(
 /// the URL. Operation-named / RPC-ish per specs/collection-api.md.
 #[cfg(feature = "ssr")]
 pub mod paths {
+    use shared::Id;
+
     pub const CATALOG_COUNT: &str = "/api/catalog/count";
+    /// GET = list the tree; POST = create.
     pub const COLLECTIONS: &str = "/api/collections";
+
+    /// Per-collection operation names — the shared vocabulary the router mounts
+    /// (as `/api/collections/{id}/<op>`) and the client fills, so they can't drift.
+    pub mod op {
+        pub const RENAME: &str = "rename";
+        pub const DELETE: &str = "delete";
+        pub const REPARENT: &str = "reparent";
+        pub const REORDER: &str = "reorder";
+    }
+
+    /// The axum route template for a per-collection operation (`{id}` param).
+    pub fn collection_op_route(op: &str) -> String {
+        format!("/api/collections/{{id}}/{op}")
+    }
+
+    /// The client-side path for an operation on a specific collection.
+    pub fn collection_op(id: Id, op: &str) -> String {
+        format!("/api/collections/{id}/{op}")
+    }
 }
 
 /// Catalog reads — anonymous-safe (the public IA routes). No session credential;
@@ -72,6 +96,27 @@ pub trait CatalogStore {
 pub trait CollectionStore {
     /// The caller's collections, flat (the client rebuilds the tree from
     /// `parent_id`). Runs inside the `SET LOCAL app.user_id` transaction on the
-    /// hosted side.
+    /// hosted side, and **lazily provisions the Inbox** on first authed load
+    /// (idempotent via the `collections_one_inbox` unique index).
     async fn list_collections(&self) -> ApiResult<Vec<CollectionSummary>>;
+
+    /// Create a binder or deck; returns the new node. Rejects a `format` on a
+    /// binder (`Validation`) and a non-existent / not-owned `parent_id`
+    /// (`NotFound`/`Forbidden`).
+    async fn create_collection(&self, req: NewCollection) -> ApiResult<CollectionSummary>;
+
+    /// Rename a collection; returns the updated node. The Inbox is unrenamable
+    /// (`Conflict`).
+    async fn rename_collection(&self, id: Id, req: Rename) -> ApiResult<CollectionSummary>;
+
+    /// Delete a collection (cascades to descendants + holdings/desires). The
+    /// Inbox is undeletable (`Conflict`).
+    async fn delete_collection(&self, id: Id) -> ApiResult<()>;
+
+    /// Move a collection under a new parent (or to top level). Rejects a cycle —
+    /// the target being the node itself or one of its descendants (`Conflict`).
+    async fn reparent_collection(&self, id: Id, req: Reparent) -> ApiResult<()>;
+
+    /// Set a collection's fractional sort position among its siblings.
+    async fn reorder_collection(&self, id: Id, req: Reorder) -> ApiResult<()>;
 }
