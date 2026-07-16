@@ -133,8 +133,8 @@ CI now owns the delivery artifacts; host builds are optional local development,
 | Edit, `cargo` build/test/clippy/fmt, `cargo leptos` | **container** (canonical) |
 | Web target run (SSR + hydration), Neon connectivity | **container** |
 | Validate suite (fmt, clippy ssr+wasm, test, `leptos build`) | **CI** every push/PR — the merge gate (reproducible in container) |
-| Android APK (delivery artifact, signed, rolling release) | **CI** — `main` merges + `workflow_dispatch` |
-| macOS `.dmg` (delivery artifact, rolling release) | **CI** — `workflow_dispatch` only |
+| Android APK (delivery artifact, signed, rolling release) | **CI** — `workflow_dispatch` only (`android` input, default on) |
+| macOS `.dmg` (delivery artifact, rolling release) | **CI** — `workflow_dispatch` only (`macos` input, default off) |
 | Android / macOS desktop **build** (local iteration) | host (optional) |
 | Android / macOS / iOS **run** (emulator, device, `.app`) | host |
 | Web deploy (`/` + `/cards` with Neon rows) | **Render** — builds the root `Dockerfile` on push to `main` (zero Actions minutes) |
@@ -192,10 +192,11 @@ defaults like `Docs/spec review data layer (#18)`; don't add more.)
 - **[`.github/workflows/validate.yml`](.github/workflows/validate.yml)** — the
   validate suite (above), every push + PR, linux only. The merge gate.
 - **[`.github/workflows/artifacts.yml`](.github/workflows/artifacts.yml)** — the
-  Android APK (`main` merges + `workflow_dispatch`, `paths-ignore` skips
-  docs-only pushes) and the macOS `.dmg` (`workflow_dispatch` only — macOS
-  minutes are ~20× costlier). Both publish to a single rolling **`latest`**
-  prerelease at stable URLs, reachable from a phone (public repo).
+  Android APK and the macOS `.dmg`, both **`workflow_dispatch` only**. One
+  dispatch carries two boolean inputs selecting the targets: `android` (default
+  on, cheap linux runner) and `macos` (default off — macOS minutes are ~20×
+  costlier). Both publish to a single rolling **`latest`** prerelease at stable
+  URLs, reachable from a phone (public repo).
 - **Secrets** (GitHub repo settings, `threeringsdev/three-rings`) — the four
   Android signing secrets, generated and explained by
   [`scripts/gen-android-keystore.sh`](scripts/gen-android-keystore.sh):
