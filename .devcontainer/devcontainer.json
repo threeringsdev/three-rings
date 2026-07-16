@@ -3,6 +3,8 @@
   "image": "dgoings/three-rings:latest",
   "initializeCommand": "test -f .devcontainer/.env || cp .devcontainer/.env.example .devcontainer/.env",
   "runArgs": ["--env-file", "${localWorkspaceFolder}/.devcontainer/.env"],
+  "//postStartCommand": "Repairs GitHub auth after VS Code copies the host gitconfig (which may carry a host-only gh credential-helper path). Points git at the container's gh when GH_TOKEN is set. See .devcontainer/setup-git-auth.sh.",
+  "postStartCommand": "bash .devcontainer/setup-git-auth.sh",
   "mounts": [
     "source=${localWorkspaceFolder}/.devcontainer/.zshrc,target=/home/vscode/.zshrc,type=bind,consistency=cached",
     "source=three-rings-claude,target=/home/vscode/.claude,type=volume"

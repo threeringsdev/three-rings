@@ -39,3 +39,21 @@ RUN curl -L --proto '=https' --tlsv1.2 -sSf \
 # servers come from the repo's .claude/settings.json + .mcp.json at run time.
 RUN curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH=/home/vscode/.local/bin:${PATH}
+
+# GitHub CLI (gh) — used for git-over-HTTPS auth (gh as the credential helper)
+# and for opening PRs from the container. Installed from GitHub's apt repo; needs
+# root, so switch user around it. Auth is runtime-only (GH_TOKEN in
+# .devcontainer/.env, never baked in). The devcontainer `postStartCommand` runs
+# .devcontainer/setup-git-auth.sh on each start to point git at this gh and strip
+# any host-copied credential helper (see that script for the why).
+USER root
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+ && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends gh \
+ && rm -rf /var/lib/apt/lists/*
+USER vscode

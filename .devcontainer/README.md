@@ -7,7 +7,8 @@ The image is **`dgoings/three-rings`**, defined by [`Dockerfile`](./Dockerfile) 
 ## What's inside
 - **Base** `dgoings/magic-assistant-dev` — Debian 13, Rust stable + `wasm32-unknown-unknown`,
   clippy/rustfmt, Node/Bun/pnpm, zsh, the `vscode` user.
-- **Added here (v1, web-dev):** `cargo-leptos`, `cargo-generate`, `cargo-tauri` (v2), `leptosfmt`.
+- **Added here (v1, web-dev):** `cargo-leptos`, `cargo-generate`, `cargo-tauri` (v2), `leptosfmt`,
+  the Claude Code CLI, and `gh` (GitHub CLI — for git-over-HTTPS auth and PRs).
 - **Deliberately excluded:** Android SDK/NDK — Google ships no linux-arm64 NDK, so Android
   builds run on the host instead (Android Studio toolchain + brew rustup; see the TODO
   Decisions log). macOS desktop + iOS builds also run on the host (or CI).
@@ -50,12 +51,20 @@ The image ships **no credentials** — never bake a token into it (it is public 
 Docker Hub) and never commit one. Supply auth to the container at runtime, two ways:
 
 - **Token via env (simplest).** Add a line to `.devcontainer/.env` (gitignored,
-  already `--env-file`'d in): `GH_TOKEN=ghp_xxx`. `gh` reads `GH_TOKEN`
-  automatically; run `gh auth setup-git` once so `git push` works over HTTPS.
+  already `--env-file`'d in): `GH_TOKEN=ghp_xxx`, then rebuild/restart the
+  container. `gh` (bundled in the image) reads `GH_TOKEN` automatically, and the
+  `postStartCommand` runs [`setup-git-auth.sh`](./setup-git-auth.sh) on each start
+  to point git at gh — so `git push` and `gh pr create` just work; no manual
+  `gh auth setup-git` needed. To confirm:
   ```bash
-  gh auth setup-git      # use gh as git's credential helper for github.com
   gh auth status         # confirm the token is picked up
   ```
+  **Why the auto-repair exists:** VS Code copies the *host's* `~/.gitconfig` into
+  the container at creation. If your host uses `gh` as its git credential helper,
+  that config carries a host-only path (e.g. macOS `!/opt/homebrew/bin/gh auth
+  git-credential`) that doesn't exist here and *overrides* the working helper for
+  github.com — breaking `git push`. `setup-git-auth.sh` strips those host-path
+  helpers and re-points git at the container's gh (see the script header).
 - **Mounted config (alternative).** Bind-mount the host's `gh`/git config
   read-only instead of putting a token in `.env`:
   ```jsonc
