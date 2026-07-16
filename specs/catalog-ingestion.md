@@ -125,9 +125,12 @@ POC loader, and stages 2–3 become configuration rather than new code.
   `app_runtime` stays read-only on catalog (migrations `0004`/`0005`).
   Stage 1–2 runs happen manually from the dev container with the
   `catalog_ingest` URL in `.devcontainer/.env`, same discipline as
-  [`scripts/migrate.sh`](../scripts/migrate.sh); the credential reaches a
-  scheduler only at stage 3 (below). Connect via the **direct** endpoint (not
-  the pooler), like migrations.
+  [`scripts/migrate.sh`](../scripts/migrate.sh); at stage 3 the hosted server
+  additionally holds it as a second Render env var (`INGEST_DATABASE_URL` or
+  similar — naming at execution), since the server process is what executes
+  scheduled runs (below). Still least-privilege: catalog CRUD only, no user
+  tables. Connect via the **direct** endpoint (not the pooler), like
+  migrations.
 
 ### Writing to Postgres (serverless-aware)
 
@@ -253,19 +256,37 @@ verified); wall-clock + row counts recorded in the spec's Findings.
 - **No prune-by-absence.** Scryfall's database is additive; removals arrive
   only via the migrations API. A printing absent from the bulk file without a
   migration is logged, never deleted.
-- **Scheduling (maintainer decision at acceptance).** Neon has no cron. The
-  standing rule *"no DB creds in GitHub — no CI job talks to Neon"* rules out
-  a GitHub Actions schedule as things stand. Proposal, cheapest-first:
-  1. **Manual-first:** stages 1–3 all run from the dev container
-     (`server --ingest` against dev/prod), migrate.sh discipline. Zero new
-     infra; freshness = whenever the maintainer runs it. Fine while the
-     maintainer is the only user.
-  2. **Render cron job** when freshness starts to matter: same Docker image,
-     command `server --ingest`, `catalog_ingest` URL in Render env (Render
-     already holds runtime DB creds — consistent trust model). Paid
-     per-runtime-second; verify current pricing when adopting.
-  3. GitHub Actions cron only if the maintainer explicitly reverses the
-     standing secrets rule (not recommended).
+- **Scheduling = `pg_cron` (maintainer decision, 2026-07-16), via a
+  due-marker.** Verified against the live project the same day: `pg_cron` 1.6
+  is available (enable = set `cron.database_name` via the Neon API + compute
+  restart, then `CREATE EXTENSION`), but **neither `http` nor `pg_net`
+  exists**, so a pg_cron job cannot call a webhook — its tick can only write
+  SQL state. And the ingester genuinely can't live in-database (a 560 MB
+  gzipped-JSONL stream is not a plpgsql job). So the shape is:
+  - **pg_cron = the clock.** A guarded job runs *hourly* (not once daily):
+    insert a `kind='update', status='due'` row into `ingestion_runs` iff no
+    run succeeded in the last ~20 h and none is already due/running. Hourly
+    guarded ticks matter because of the next caveat.
+  - **The hosted server = the worker.** While awake it polls cheaply (one
+    indexed SELECT on a several-minute interval, plus a check at startup) for
+    a due row, claims it (optimistic `UPDATE … WHERE status='due'`), and runs
+    the ingestion in a background task under the `catalog_ingest` credential.
+    No exposed trigger endpoint, no shared secret — the marker table is the
+    whole interface.
+  - **Verified caveat — ticks fire only while the Neon compute is active.**
+    Neon's docs are explicit: pg_cron jobs do not run (and are not caught up)
+    while an autosuspended compute is asleep. The Render free web service
+    spins down without traffic too. Net effect on today's free-tier setup:
+    **catalog freshness is proportional to app usage** — the first usage
+    window after staleness crosses an hourly tick, writes the marker, and the
+    awake server picks it up. Acceptable for a single-user app; an always-on
+    compute (paid) later makes ticks exact with no design change.
+  - The standing rule *"no DB creds in GitHub — no CI job talks to Neon"*
+    stands; GitHub Actions was considered and rejected. Render cron jobs
+    (paid) remain a fallback if pg_cron's awake-time semantics ever chafe.
+  - Execution notes: verify streaming memory fits Render's 512 MB free
+    instance; `cron.schedule_in_database()` is unsupported on Neon, so the
+    cron job must be created in the app database itself.
 
 ### Compliance obligations (Scryfall / WotC Fan Content Policy)
 
@@ -306,13 +327,15 @@ Binding on us (current policy text, 2026-07-16):
 - **Migrations reconciled catalog-side only; no prune-by-absence** — user-row
   repointing is a documented manual runbook (RLS-forced tables, no BYPASSRLS
   on Neon).
+- **Scheduling = pg_cron due-marker + server-side worker** (maintainer,
+  2026-07-16) — pg_cron writes a guarded hourly `due` row; the hosted server
+  claims and runs it while awake. No `http`/`pg_net` on Neon (verified live),
+  so no webhook path exists; freshness is usage-proportional on free-tier
+  autosuspend, exact on a future always-on compute. GitHub Actions rejected
+  (standing secrets rule); Render cron noted as fallback.
 
 ## Open questions
 
-- **Where does the scheduled job run?** (stage 3) — proposal above
-  (manual-first, promote to Render cron when freshness matters; Actions ruled
-  out by the standing secrets rule). Needs the maintainer's pick recorded
-  here before acceptance.
 - Does `default_cards` really include emblem/art-series/checklist layouts?
   Docs say "every card object"; asserted empirically by the POC. *(resolved
   during execution — stage 1 acceptance)*
@@ -322,3 +345,6 @@ Binding on us (current policy text, 2026-07-16):
   *(resolved during execution — stage 2, from measured timings)*
 - Exact POC set codes + menagerie card ids. *(resolved during execution —
   stage 1, checked into the filter file)*
+- pg_cron enablement mechanics (the `cron.database_name` API call + restart,
+  on both branches), the exact guarded-tick SQL, and the server poll
+  interval. *(resolved during execution — stage 3)*
