@@ -62,6 +62,9 @@ where
         .route(paths::MOVES_UNDO_LAST, post(undo_last_move))
         .route(paths::MOVE_UNDO_ROUTE, post(undo_move))
         .route(paths::CARD_DESTINATIONS_ROUTE, get(suggested_destinations))
+        .route(paths::ALL_CARDS, get(all_cards))
+        .route(paths::SHOPPING_LIST, get(shopping_list))
+        .route(&paths::collection_op_route(op::NEEDS), get(needs))
 }
 
 /// `GET /api/catalog/count` — anonymous catalog size.
@@ -307,6 +310,37 @@ async fn teardown(user: AuthUser, Path(id): Path<Id>, Json(mode): Json<Teardown>
             HostedBackend::for_user(user.user_id)
                 .await?
                 .teardown(id, mode)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `GET /api/all-cards?cursor=&limit=` — the virtual everything-view.
+async fn all_cards(user: AuthUser, Query(page): Query<Page>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .all_cards(page)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `GET /api/collections/{id}/needs` — a collection's needs.
+async fn needs(user: AuthUser, Path(id): Path<Id>) -> Response {
+    json_result(async { HostedBackend::for_user(user.user_id).await?.needs(id).await }.await)
+}
+
+/// `GET /api/shopping-list` — the global shopping list.
+async fn shopping_list(user: AuthUser) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .shopping_list()
                 .await
         }
         .await,

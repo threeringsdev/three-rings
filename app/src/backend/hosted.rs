@@ -5,10 +5,11 @@
 //! data-model's RLS policies scope the rows even beneath this terminus.
 
 use shared::{
-    AddHave, AddLine, AddWant, ApiError, ApiResult, BatchMove, Board, CardRow, CatalogCount,
-    CollectionKind, CollectionSummary, CollectionView, Condition, DesireLine, Finish, HoldingLine,
-    Id, LineResult, MoveReceipt, MoveRequest, NewCollection, Page, Rename, Reorder, Reparent,
-    SetQuantity, SuggestedDestination, Teardown, TeardownReceipt,
+    AddHave, AddLine, AddWant, AllCardsRow, AllCardsView, ApiError, ApiResult, BatchMove, Board,
+    CardRow, CatalogCount, CollectionKind, CollectionSummary, CollectionView, Condition,
+    DesireLine, Finish, HoldingLine, Id, LineResult, MoveReceipt, MoveRequest, NeedLocation,
+    NeedRow, NeedsView, NewCollection, Page, Rename, Reorder, Reparent, SetQuantity, ShoppingList,
+    ShoppingRow, SuggestedDestination, Teardown, TeardownReceipt,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -431,7 +432,7 @@ impl CollectionStore for HostedBackend {
         // THIS collection; `owned` is the global per-oracle aggregate (the
         // security-invoker `owned_by_card` view, RLS-scoped to the user);
         // `present_rollup` sums holdings in the strict descendant collections.
-        let cursor = page.cursor.as_deref().map(decode_cursor).transpose()?;
+        let cursor: Option<CardCursor> = page.cursor.as_deref().map(decode_cursor).transpose()?;
         let limit = page.limit();
         let base = "WITH RECURSIVE descendants AS ( \
                SELECT id FROM collections WHERE parent_id = $1 \
@@ -674,6 +675,191 @@ impl CollectionStore for HostedBackend {
         }
         tx.commit().await.map_err(upstream)?;
         Ok(TeardownReceipt { moves })
+    }
+
+    async fn all_cards(&self, page: Page) -> ApiResult<AllCardsView> {
+        let mut tx = self.scoped_tx().await?;
+        let cursor: Option<OracleCursor> = page.cursor.as_deref().map(decode_cursor).transpose()?;
+        let limit = page.limit();
+        let base = "WITH agg AS ( \
+               SELECT p.oracle_id, sum(h.quantity)::int AS owned, \
+                      count(DISTINCT h.collection_id)::int AS in_collections \
+               FROM holdings h JOIN printings p ON p.id = h.printing_id \
+               GROUP BY p.oracle_id \
+             ) \
+             SELECT a.oracle_id, c.name, a.owned, a.in_collections \
+             FROM agg a JOIN cards c ON c.oracle_id = a.oracle_id";
+        let keyset = if cursor.is_some() {
+            " WHERE (c.name, a.oracle_id) > ($1, $2) ORDER BY c.name, a.oracle_id LIMIT $3"
+        } else {
+            " ORDER BY c.name, a.oracle_id LIMIT $1"
+        };
+        let sql = format!("{base}{keyset}");
+        let mut q = sqlx::query_as::<_, AllCardsRowSql>(&sql);
+        if let Some(c) = &cursor {
+            q = q.bind(&c.name).bind(c.oracle_id);
+        }
+        let mut rows: Vec<AllCardsRowSql> = q
+            .bind(limit + 1)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+
+        let has_more = rows.len() as i64 > limit;
+        rows.truncate(limit as usize);
+        let next_cursor = has_more
+            .then(|| {
+                rows.last().map(|r| {
+                    encode_cursor(&OracleCursor {
+                        name: r.name.clone(),
+                        oracle_id: r.oracle_id,
+                    })
+                })
+            })
+            .flatten();
+        Ok(AllCardsView {
+            cards: rows
+                .into_iter()
+                .map(|r| AllCardsRow {
+                    oracle_id: r.oracle_id,
+                    name: r.name,
+                    owned: r.owned,
+                    in_collections: r.in_collections,
+                })
+                .collect(),
+            next_cursor,
+        })
+    }
+
+    async fn needs(&self, collection_id: Id) -> ApiResult<NeedsView> {
+        let mut tx = self.scoped_tx().await?;
+        require_owned_collection(&mut tx, collection_id).await?;
+        let rows: Vec<NeedSql> = sqlx::query_as(
+            "WITH d AS ( \
+               SELECT oracle_id, sum(quantity)::int AS desired \
+               FROM desires WHERE collection_id = $1 GROUP BY oracle_id \
+             ), \
+             ph AS ( \
+               SELECT p.oracle_id, sum(h.quantity)::int AS present_here \
+               FROM holdings h JOIN printings p ON p.id = h.printing_id \
+               WHERE h.collection_id = $1 GROUP BY p.oracle_id \
+             ), \
+             pe AS ( \
+               SELECT p.oracle_id, sum(h.quantity)::int AS elsewhere \
+               FROM holdings h JOIN printings p ON p.id = h.printing_id \
+               WHERE h.collection_id <> $1 GROUP BY p.oracle_id \
+             ) \
+             SELECT d.oracle_id, c.name, d.desired, COALESCE(ph.present_here, 0) AS present_here, \
+                    COALESCE(pe.elsewhere, 0) AS elsewhere \
+             FROM d JOIN cards c ON c.oracle_id = d.oracle_id \
+             LEFT JOIN ph ON ph.oracle_id = d.oracle_id \
+             LEFT JOIN pe ON pe.oracle_id = d.oracle_id \
+             WHERE d.desired > COALESCE(ph.present_here, 0) \
+             ORDER BY c.name",
+        )
+        .bind(collection_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+
+        // Per-location listing for the needed cards, in the user's OTHER
+        // collections — one query, grouped in Rust.
+        let oracles: Vec<Uuid> = rows.iter().map(|r| r.oracle_id).collect();
+        let locs: Vec<LocationSql> = sqlx::query_as(
+            "SELECT p.oracle_id, h.collection_id, c.name AS collection_name, \
+                    sum(h.quantity)::int AS quantity \
+             FROM holdings h JOIN printings p ON p.id = h.printing_id \
+             JOIN collections c ON c.id = h.collection_id \
+             WHERE h.collection_id <> $1 AND p.oracle_id = ANY($2) \
+             GROUP BY p.oracle_id, h.collection_id, c.name \
+             ORDER BY quantity DESC, c.name",
+        )
+        .bind(collection_id)
+        .bind(&oracles)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+
+        let need_rows = rows
+            .into_iter()
+            .map(|r| {
+                let gap = r.desired - r.present_here;
+                let owned_elsewhere = r.elsewhere.min(gap);
+                NeedRow {
+                    locations: locs
+                        .iter()
+                        .filter(|l| l.oracle_id == r.oracle_id)
+                        .map(|l| NeedLocation {
+                            collection_id: l.collection_id,
+                            collection_name: l.collection_name.clone(),
+                            quantity: l.quantity,
+                        })
+                        .collect(),
+                    oracle_id: r.oracle_id,
+                    name: r.name,
+                    desired: r.desired,
+                    present_here: r.present_here,
+                    owned_elsewhere,
+                    short: gap - owned_elsewhere,
+                }
+            })
+            .collect();
+        Ok(NeedsView {
+            collection_id,
+            rows: need_rows,
+        })
+    }
+
+    async fn shopping_list(&self) -> ApiResult<ShoppingList> {
+        let mut tx = self.scoped_tx().await?;
+        let rows: Vec<ShoppingSql> = sqlx::query_as(
+            "WITH d AS ( \
+               SELECT oracle_id, sum(quantity)::int AS desired_total FROM desires GROUP BY oracle_id \
+             ), \
+             o AS ( \
+               SELECT p.oracle_id, sum(h.quantity)::int AS owned \
+               FROM holdings h JOIN printings p ON p.id = h.printing_id GROUP BY p.oracle_id \
+             ) \
+             SELECT d.oracle_id, c.name, d.desired_total, COALESCE(o.owned, 0) AS owned \
+             FROM d JOIN cards c ON c.oracle_id = d.oracle_id \
+             LEFT JOIN o ON o.oracle_id = d.oracle_id \
+             WHERE d.desired_total > COALESCE(o.owned, 0) \
+             ORDER BY c.name",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+
+        let oracles: Vec<Uuid> = rows.iter().map(|r| r.oracle_id).collect();
+        let wants: Vec<WantedBySql> = sqlx::query_as(
+            "SELECT de.oracle_id, c.name AS collection_name \
+             FROM desires de JOIN collections c ON c.id = de.collection_id \
+             WHERE de.oracle_id = ANY($1) GROUP BY de.oracle_id, c.name ORDER BY c.name",
+        )
+        .bind(&oracles)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+
+        let shop_rows = rows
+            .into_iter()
+            .map(|r| ShoppingRow {
+                wanted_by: wants
+                    .iter()
+                    .filter(|w| w.oracle_id == r.oracle_id)
+                    .map(|w| w.collection_name.clone())
+                    .collect(),
+                shortfall: r.desired_total - r.owned,
+                oracle_id: r.oracle_id,
+                name: r.name,
+                desired_total: r.desired_total,
+                owned: r.owned,
+            })
+            .collect();
+        Ok(ShoppingList { rows: shop_rows })
     }
 }
 
@@ -1005,6 +1191,52 @@ struct SuggestedRow {
     present: i32,
 }
 
+#[derive(sqlx::FromRow)]
+struct AllCardsRowSql {
+    oracle_id: Uuid,
+    name: String,
+    owned: i32,
+    in_collections: i32,
+}
+
+/// Keyset key for the everything-view: (name, oracle).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OracleCursor {
+    name: String,
+    oracle_id: Uuid,
+}
+
+#[derive(sqlx::FromRow)]
+struct NeedSql {
+    oracle_id: Uuid,
+    name: String,
+    desired: i32,
+    present_here: i32,
+    elsewhere: i32,
+}
+
+#[derive(sqlx::FromRow)]
+struct LocationSql {
+    oracle_id: Uuid,
+    collection_id: Uuid,
+    collection_name: String,
+    quantity: i32,
+}
+
+#[derive(sqlx::FromRow)]
+struct ShoppingSql {
+    oracle_id: Uuid,
+    name: String,
+    desired_total: i32,
+    owned: i32,
+}
+
+#[derive(sqlx::FromRow)]
+struct WantedBySql {
+    oracle_id: Uuid,
+    collection_name: String,
+}
+
 impl HostedBackend {
     /// Disambiguate a write that affected no rows: an existing-but-Inbox row is a
     /// `Conflict` (Inbox is protected), an absent/not-owned row is `NotFound`.
@@ -1177,13 +1409,13 @@ struct CardCursor {
     board: String,
 }
 
-fn encode_cursor(c: &CardCursor) -> String {
+fn encode_cursor<T: serde::Serialize>(c: &T) -> String {
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(serde_json::to_vec(c).expect("cursor serialization cannot fail"))
 }
 
-fn decode_cursor(s: &str) -> ApiResult<CardCursor> {
+fn decode_cursor<T: serde::de::DeserializeOwned>(s: &str) -> ApiResult<T> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(s)

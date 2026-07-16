@@ -19,10 +19,11 @@ pub mod collection;
 
 pub use catalog::CatalogCount;
 pub use collection::{
-    AddHave, AddLine, AddWant, BatchMove, Board, CardRow, CollectionKind, CollectionSummary,
-    CollectionView, Condition, DesireLine, Finish, HoldingLine, LineResult, MoveItem, MoveReceipt,
-    MoveRequest, NewCollection, Page, Rename, Reorder, Reparent, SetQuantity, SuggestedDestination,
-    Teardown, TeardownReceipt,
+    AddHave, AddLine, AddWant, AllCardsRow, AllCardsView, BatchMove, Board, CardRow,
+    CollectionKind, CollectionSummary, CollectionView, Condition, DesireLine, Finish, HoldingLine,
+    LineResult, MoveItem, MoveReceipt, MoveRequest, NeedLocation, NeedRow, NeedsView,
+    NewCollection, Page, Rename, Reorder, Reparent, SetQuantity, ShoppingList, ShoppingRow,
+    SuggestedDestination, Teardown, TeardownReceipt,
 };
 
 /// The one error type both backends converge on (specs/collection-api.md

@@ -355,3 +355,68 @@ pub enum Teardown {
 pub struct TeardownReceipt {
     pub moves: i64,
 }
+
+/// A row of the virtual "All cards" view (specs/collection-api.md → AllCardsView):
+/// per oracle card, the global owned count and how many collections hold it (the
+/// `7 across 3 collections` summary replacing per-collection present).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AllCardsRow {
+    pub oracle_id: Id,
+    pub name: String,
+    pub owned: i32,
+    pub in_collections: i32,
+}
+
+/// One keyset page of the everything-view, sorted by (name, oracle).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AllCardsView {
+    pub cards: Vec<AllCardsRow>,
+    pub next_cursor: Option<String>,
+}
+
+/// Where a needed card sits in another of the user's collections.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NeedLocation {
+    pub collection_id: Id,
+    pub collection_name: String,
+    pub quantity: i32,
+}
+
+/// A needed card in a collection (desired > present here). The gap splits into
+/// `owned_elsewhere` (fillable from the user's other collections, with
+/// `locations`) and `short` (still to buy).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NeedRow {
+    pub oracle_id: Id,
+    pub name: String,
+    pub desired: i32,
+    pub present_here: i32,
+    pub owned_elsewhere: i32,
+    pub short: i32,
+    pub locations: Vec<NeedLocation>,
+}
+
+/// A collection's needs, split Owned-elsewhere vs Short (specs → NeedsView).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NeedsView {
+    pub collection_id: Id,
+    pub rows: Vec<NeedRow>,
+}
+
+/// One short card on the global shopping list: total desired across all
+/// collections minus owned, floored at 0, plus which collections want it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShoppingRow {
+    pub oracle_id: Id,
+    pub name: String,
+    pub desired_total: i32,
+    pub owned: i32,
+    pub shortfall: i32,
+    pub wanted_by: Vec<String>,
+}
+
+/// The global, text-exportable shopping list (specs → ShoppingList).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShoppingList {
+    pub rows: Vec<ShoppingRow>,
+}

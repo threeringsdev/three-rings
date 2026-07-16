@@ -12,10 +12,10 @@
 //! running hosted deployment to talk to.
 
 use shared::{
-    AddHave, AddLine, AddWant, ApiError, ApiResult, BatchMove, CatalogCount, CollectionSummary,
-    CollectionView, DesireLine, ErrorEnvelope, HoldingLine, Id, LineResult, MoveReceipt,
-    MoveRequest, NewCollection, Page, Rename, Reorder, Reparent, SetQuantity, SuggestedDestination,
-    Teardown, TeardownReceipt,
+    AddHave, AddLine, AddWant, AllCardsView, ApiError, ApiResult, BatchMove, CatalogCount,
+    CollectionSummary, CollectionView, DesireLine, ErrorEnvelope, HoldingLine, Id, LineResult,
+    MoveReceipt, MoveRequest, NeedsView, NewCollection, Page, Rename, Reorder, Reparent,
+    SetQuantity, ShoppingList, SuggestedDestination, Teardown, TeardownReceipt,
 };
 use tokio::sync::OnceCell;
 
@@ -282,6 +282,37 @@ impl CollectionStore for NativeBackend {
             &mode,
         )
         .await
+    }
+
+    async fn all_cards(&self, page: Page) -> ApiResult<AllCardsView> {
+        self.require_session()?;
+        let mut path = super::paths::ALL_CARDS.to_string();
+        let mut qs = Vec::new();
+        if let Some(cursor) = &page.cursor {
+            qs.push(format!("cursor={cursor}"));
+        }
+        if let Some(limit) = page.limit {
+            qs.push(format!("limit={limit}"));
+        }
+        if !qs.is_empty() {
+            path.push('?');
+            path.push_str(&qs.join("&"));
+        }
+        self.get(&path).await
+    }
+
+    async fn needs(&self, collection_id: Id) -> ApiResult<NeedsView> {
+        self.require_session()?;
+        self.get(&super::paths::collection_op(
+            collection_id,
+            super::paths::op::NEEDS,
+        ))
+        .await
+    }
+
+    async fn shopping_list(&self) -> ApiResult<ShoppingList> {
+        self.require_session()?;
+        self.get(super::paths::SHOPPING_LIST).await
     }
 }
 

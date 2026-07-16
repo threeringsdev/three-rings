@@ -22,10 +22,10 @@
 //! collection-api extends these traits with the full method surface.
 
 use shared::{
-    AddHave, AddLine, AddWant, ApiResult, BatchMove, CatalogCount, CollectionSummary,
-    CollectionView, DesireLine, HoldingLine, Id, LineResult, MoveReceipt, MoveRequest,
-    NewCollection, Page, Rename, Reorder, Reparent, SetQuantity, SuggestedDestination, Teardown,
-    TeardownReceipt,
+    AddHave, AddLine, AddWant, AllCardsView, ApiResult, BatchMove, CatalogCount, CollectionSummary,
+    CollectionView, DesireLine, HoldingLine, Id, LineResult, MoveReceipt, MoveRequest, NeedsView,
+    NewCollection, Page, Rename, Reorder, Reparent, SetQuantity, ShoppingList,
+    SuggestedDestination, Teardown, TeardownReceipt,
 };
 
 #[cfg(feature = "hosted")]
@@ -73,7 +73,12 @@ pub mod paths {
         pub const BATCH: &str = "batch";
         pub const VIEW: &str = "view";
         pub const TEARDOWN: &str = "teardown";
+        pub const NEEDS: &str = "needs";
     }
+
+    /// Global read models.
+    pub const ALL_CARDS: &str = "/api/all-cards";
+    pub const SHOPPING_LIST: &str = "/api/shopping-list";
 
     /// Move endpoints (not per-collection: a move spans two collections).
     pub const MOVES: &str = "/api/moves";
@@ -206,4 +211,17 @@ pub trait CollectionStore {
     /// to each card's previous location (most-recent move *into* here, else
     /// Inbox). One transaction; returns how many move rows it wrote.
     async fn teardown(&self, collection_id: Id, mode: Teardown) -> ApiResult<TeardownReceipt>;
+
+    /// The virtual everything-view: one keyset page of per-oracle rows
+    /// aggregated across all the caller's collections (owned total + how many
+    /// collections hold it). Sorted by (name, oracle).
+    async fn all_cards(&self, page: Page) -> ApiResult<AllCardsView>;
+
+    /// A collection's needs: cards it desires beyond what it holds, each split
+    /// into owned-elsewhere (with locations) and short-to-buy.
+    async fn needs(&self, collection_id: Id) -> ApiResult<NeedsView>;
+
+    /// The global shopping list: cards short across the whole collection
+    /// (total desired − owned > 0), with which collections want them.
+    async fn shopping_list(&self) -> ApiResult<ShoppingList>;
 }
