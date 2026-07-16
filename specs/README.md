@@ -43,7 +43,7 @@ Task state legend: `[ ]` available · `[~]` in progress · `[x]` done.
 |---|---|
 | [architecture-spike](architecture-spike.md) | implemented |
 | [auth](auth.md) | implemented |
-| [card-tagging](card-tagging.md) | accepted |
+| [card-tagging](card-tagging.md) | implemented |
 | [catalog-ingestion](catalog-ingestion.md) | accepted |
 | [catalog-search](catalog-search.md) | draft |
 | [collection-api](collection-api.md) | implemented |

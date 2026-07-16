@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 pub mod catalog;
 pub mod collection;
+pub mod tags;
 
 pub use catalog::{
     CardDetail, CardSummary, CatalogCount, OwnershipEntry, PrintingSummary, Ruling, SearchQuery,
@@ -27,6 +28,10 @@ pub use collection::{
     LineResult, MoveItem, MoveReceipt, MoveRequest, NeedLocation, NeedRow, NeedsView,
     NewCollection, Page, Rename, Reorder, Reparent, SetQuantity, ShoppingList, ShoppingRow,
     SuggestedDestination, Teardown, TeardownReceipt,
+};
+pub use tags::{
+    union_color_identity, DeckCommanders, NewTag, RenameTag, SetBoard, Tag, TagAssignment,
+    TagScope, TaggedCard,
 };
 
 /// The one error type both backends converge on (specs/collection-api.md

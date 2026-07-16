@@ -57,14 +57,18 @@ Selected at compile time via the cargo feature split, so the native binary conta
   [collection-api](collection-api.md) §Error model; the enum lives in the
   `shared/` crate. See Findings.
 - ~~Trait granularity: one big store trait vs. per-domain traits.~~ **Resolved (2026-07-14 review):** per-domain traits with one backend struct per target (see Key rules). The prior citation to "collection-api's per-domain stores" was circular — `*Store` is this spec's vocabulary; collection-api has a per-domain *endpoint* split (catalog vs. collection), which is the real 1:1 the traits mirror.
-- **Still open (deferred to the collection-api native-client work):** does
-  SSR-on-first-load in the native app degrade gracefully when the embedded
-  server is up but the hosted API is unreachable (rather than white-screen)? And
-  the native impl's `401`-refresh needs a defined behavior for *unreachable* vs.
-  *auth-error*. The trait layer maps a transport failure to `Upstream` and a
-  `401` to `Unauthorized` today; the **silent JWT re-mint from `tr_session` on
-  `401`** is stubbed (a `TODO` in `native.rs`) because the cookie-jar plumbing it
-  needs lands with the session-scoped endpoints — filed as a Phase 4 follow-up.
+- ~~**Native `401`-refresh + offline behavior** (deferred to the collection-api
+  native-client work): silent JWT re-mint on `401`; a defined behavior for
+  *unreachable* vs. *auth-error*; graceful SSR degradation when the hosted API is
+  down.~~ **Resolved (implemented 2026-07-16 — see Findings).** The `401` now
+  triggers a silent re-mint from `tr_session` (auth's `mint_jwt`) + one retry;
+  *unreachable* (transport failure) maps to `Upstream`, *auth-error* (`401` that
+  survives the re-mint, or no session to mint from) to `Unauthorized` — the two
+  are type-distinct so the UI can tell "can't reach the server" from "signed
+  out". Graceful SSR degradation is the same distinction surfaced: a native
+  first-load whose data call returns `Upstream` renders an error state, not a
+  white screen — the *rendering* rides the native UI screens (no native data UI
+  exists yet), but the error contract it needs is now in place.
 - ~~Session token storage in Tauri (keychain vs. encrypted file)~~ **Resolved by [auth](auth.md):** the session lives as httpOnly cookies (`tr_session`/`tr_jwt`) on the embedded `127.0.0.1` server — the webview carries them like a browser. No keychain/encrypted-file store; the native data-access impl reads `tr_jwt` from that same cookie jar.
 
 ## Findings
@@ -178,3 +182,44 @@ Selected at compile time via the cargo feature split, so the native binary conta
   plumbing that lands with collection-api's native client) and the
   offline-degradation behavior (OQ#3). sqlx gained the `uuid` feature so the
   hosted backend decodes ids natively.
+
+- 2026-07-16 — **Native `401` silent-refresh + offline behavior landed (OQ#3
+  closed).** The `TODO` in `native.rs` is now the real thing, and the transport
+  layer is the only place it lives (no server-fn or Leptos-response changes):
+  - **Silent re-mint + one retry.** `NativeBackend::send` splits into a `dispatch`
+    (build+send with an explicit token) and a retry wrapper. First attempt uses
+    the caller's current `tr_jwt`; on a `401` it re-mints a fresh JWT from
+    `tr_session` via auth's existing `upstream::mint_jwt` and retries the *same*
+    request exactly once. The retry bound is hard (one re-mint), so a genuinely
+    revoked session can't loop.
+  - **Refresh material on the struct.** `authed` now takes `(token: Option, session:
+    Option, origin)` instead of a bare `token` — the current JWT (absent once the
+    15-min cookie expires and the webview drops it), the long-lived `tr_session`
+    to mint from, and the caller's own origin (auth CSRF-checks it; `allow_localhost`
+    covers the embedded server). The `list_collections` native server-fn now passes
+    all three (was `unwrap_or_default()` on the JWT alone). `require_session`
+    accepts a **refresh-only** session (live `tr_session`, expired JWT) so that
+    common case doesn't short-circuit to `Unauthorized` before `send` can re-mint.
+  - **Unreachable vs. auth-error is type-distinct.** A transport failure (hosted
+    API down / offline) → `Upstream`; a `401` that survives the re-mint, or one
+    with no session to mint from → `Unauthorized`. The re-mint *itself* failing
+    (auth service unreachable, or session revoked) falls through to the original
+    `401` → `Unauthorized`, since the hosted API demonstrably answered, so it is
+    an auth problem, not an offline one. This is the defined OQ#3 behavior.
+  - **Cookie re-host stays the `current_user` poll's job.** The re-minted JWT is
+    used only for the one call; the webview's `tr_jwt` cookie is refreshed by
+    account.rs's `current_user` path on the next SSR/poll, so the backend never
+    reaches into Leptos response state — it stays pure transport. (Cost: an
+    expired-and-dropped cookie spends one extra round trip per call until the poll
+    re-hosts it — bounded and acceptable at the 15-min JWT cadence.)
+  - **Graceful SSR degradation** is that same `Upstream`-vs-`Unauthorized` split
+    surfaced to the UI: a native first-load whose data call returns `Upstream`
+    should render an error state rather than a white screen. No native data UI
+    exists yet (the screens ride later UI tasks), so the *rendering* is theirs;
+    the error contract they need is in place and unit-tested.
+  - **Verified** in-container: `cargo clippy -p app --features native` clean, the
+    full workspace gate green, and two new `native.rs` unit tests lock the
+    session classification (a refresh-only session is accepted; the fully-anonymous
+    case is a no-round-trip `Unauthorized`). The re-mint/retry network path can't
+    run in the web-dev container (it needs a live hosted + auth deployment); it is
+    exercised on-device with the native shells.

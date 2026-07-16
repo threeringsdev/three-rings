@@ -13,10 +13,11 @@
 
 use shared::{
     AddHave, AddLine, AddWant, AllCardsView, ApiError, ApiResult, BatchMove, CardDetail,
-    CardSummary, CatalogCount, CollectionSummary, CollectionView, DesireLine, ErrorEnvelope,
-    HoldingLine, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection, Page, Rename,
-    Reorder, Reparent, SearchQuery, SearchResults, SetQuantity, ShoppingList, SuggestedDestination,
-    Teardown, TeardownReceipt,
+    CardSummary, CatalogCount, CollectionSummary, CollectionView, DeckCommanders, DesireLine,
+    ErrorEnvelope, HoldingLine, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection,
+    NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard,
+    SetQuantity, ShoppingList, SuggestedDestination, Tag, TagAssignment, TaggedCard, Teardown,
+    TeardownReceipt,
 };
 use tokio::sync::OnceCell;
 
@@ -37,11 +38,23 @@ async fn client() -> &'static reqwest::Client {
         .await
 }
 
-/// A per-request client of the hosted API. `token` is the caller's `tr_jwt`,
-/// forwarded on session-scoped calls; `None` for anonymous catalog reads.
+/// Auth's path-B silent-refresh material (specs/auth.md): the long-lived
+/// upstream `tr_session` value plus the origin to mint against. Carried on
+/// session calls so an expired 15-min `tr_jwt` can re-mint a fresh JWT and
+/// retry once, transparently, instead of bouncing the user to sign-in.
+struct Refresh {
+    session: String,
+    origin: String,
+}
+
+/// A per-request client of the hosted API. `token` is the caller's current
+/// `tr_jwt` (forwarded on session-scoped calls; `None` for anonymous catalog
+/// reads *or* when the 15-min JWT has already expired and the webview dropped
+/// the cookie — in which case `refresh` re-mints one on demand).
 pub struct NativeBackend {
     base: String,
     token: Option<String>,
+    refresh: Option<Refresh>,
 }
 
 impl NativeBackend {
@@ -50,47 +63,93 @@ impl NativeBackend {
         Self {
             base: web_origin(),
             token: None,
+            refresh: None,
         }
     }
 
-    /// Session client forwarding `token` (the caller's `tr_jwt`).
-    pub fn authed(token: String) -> Self {
+    /// Session client. `token` is the caller's current `tr_jwt` cookie (`None`
+    /// once the 15-min JWT expires and the webview drops it); `session` is the
+    /// `tr_session` used to silently re-mint a fresh JWT on a `401`; `origin` is
+    /// the caller's own origin to mint against (auth CSRF-checks it against its
+    /// trusted origins, and `allow_localhost` covers the embedded server). With
+    /// `session = None` there is no refresh material, so an expired token is
+    /// terminal (`Unauthorized`).
+    pub fn authed(token: Option<String>, session: Option<String>, origin: String) -> Self {
         Self {
             base: web_origin(),
-            token: Some(token),
+            token,
+            refresh: session.map(|session| Refresh { session, origin }),
         }
+    }
+
+    /// Build + send one request to a hosted JSON route with an explicit bearer
+    /// token (so the caller can retry with a freshly-minted JWT). A transport
+    /// failure — the hosted API unreachable (offline) — maps to
+    /// [`ApiError::Upstream`], the defined offline behavior (OQ#3): distinct
+    /// from an auth error, so callers/UI can tell "can't reach the server" from
+    /// "signed out".
+    async fn dispatch<B: serde::Serialize>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&B>,
+        token: Option<&str>,
+    ) -> ApiResult<reqwest::Response> {
+        let url = format!("{}{path}", self.base);
+        let mut req = client().await.request(method, &url);
+        if let Some(token) = token {
+            req = req.bearer_auth(token);
+        }
+        if let Some(body) = body {
+            req = req.json(body);
+        }
+        req.send()
+            .await
+            .map_err(|e| ApiError::Upstream(format!("request to {path} failed: {e}")))
     }
 
     /// Send a request to a hosted JSON route, attaching the bearer token and an
     /// optional JSON body, and return the raw response on 2xx — mapping a non-2xx
     /// status onto the shared error via its wire envelope.
+    ///
+    /// On a `401` this performs auth's **path-B silent refresh**: re-mint the JWT
+    /// from `tr_session` (auth's `mint_jwt`) and retry the request exactly once.
+    /// The re-minted JWT is used only for this call — the webview's `tr_jwt`
+    /// cookie is re-hosted separately by the `current_user` poll (account.rs), so
+    /// this stays a pure transport concern and touches no Leptos response state.
     async fn send<B: serde::Serialize>(
         &self,
         method: reqwest::Method,
         path: &str,
         body: Option<&B>,
     ) -> ApiResult<reqwest::Response> {
-        let url = format!("{}{path}", self.base);
-        let mut req = client().await.request(method, &url);
-        if let Some(token) = &self.token {
-            req = req.bearer_auth(token);
+        let resp = self
+            .dispatch(method.clone(), path, body, self.token.as_deref())
+            .await?;
+        if resp.status().as_u16() != 401 {
+            return Self::into_result(resp).await;
         }
-        if let Some(body) = body {
-            req = req.json(body);
+        // 401 → silent re-mint + one retry. If there is no refresh material, or
+        // the re-mint fails (session revoked, or the *auth* service unreachable),
+        // fall through and surface the original 401 as `Unauthorized` — the
+        // hosted API answered, so this is an auth error, not an offline one.
+        if let Some(refresh) = &self.refresh {
+            if let Ok(fresh) =
+                crate::auth::upstream::mint_jwt(&refresh.origin, &refresh.session).await
+            {
+                let retry = self.dispatch(method, path, body, Some(&fresh)).await?;
+                return Self::into_result(retry).await;
+            }
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| ApiError::Upstream(format!("request to {path} failed: {e}")))?;
+        Self::into_result(resp).await
+    }
 
+    /// Map a response onto the shared result: the raw response on 2xx, else the
+    /// shared error reconstructed from status + the `{error:{…}}` wire envelope.
+    async fn into_result(resp: reqwest::Response) -> ApiResult<reqwest::Response> {
         if resp.status().is_success() {
             return Ok(resp);
         }
-        // Error path: reconstruct the shared error from status + wire body.
-        // TODO(collection-api native client): on 401, silently re-mint the JWT
-        // from `tr_session` via auth's refresh path and retry once, per
-        // data-access-backends.md. Until that cookie-jar plumbing lands with the
-        // session-scoped endpoints, a 401 surfaces as Unauthorized.
         let code = resp.status().as_u16();
         let body = resp.json::<ErrorEnvelope>().await.ok().map(|e| e.error);
         Err(ApiError::from_wire(code, body))
@@ -118,10 +177,12 @@ impl NativeBackend {
         Ok(())
     }
 
-    /// Require a session token before a session-scoped call; the hosted route
-    /// would 401 anyway, but this skips a round trip.
+    /// Require session credentials before a session-scoped call; the hosted route
+    /// would 401 anyway, but this skips a round trip. A live `tr_session` (in
+    /// `refresh`) is sufficient even when the `tr_jwt` has expired — `send`
+    /// re-mints from it — so only the fully-anonymous case short-circuits.
     fn require_session(&self) -> ApiResult<()> {
-        if self.token.is_none() {
+        if self.token.is_none() && self.refresh.is_none() {
             return Err(ApiError::Unauthorized("no session token".into()));
         }
         Ok(())
@@ -357,6 +418,80 @@ impl CollectionStore for NativeBackend {
         self.require_session()?;
         self.get(super::paths::SHOPPING_LIST).await
     }
+
+    // --- Tags & boards (specs/card-tagging.md) ------------------------------
+
+    async fn create_tag(&self, req: NewTag) -> ApiResult<Tag> {
+        self.require_session()?;
+        self.post(super::paths::TAGS, &req).await
+    }
+
+    async fn rename_tag(&self, tag_id: Id, req: RenameTag) -> ApiResult<Tag> {
+        self.require_session()?;
+        self.post(
+            &super::paths::tag_op(tag_id, super::paths::op::RENAME),
+            &req,
+        )
+        .await
+    }
+
+    async fn delete_tag(&self, tag_id: Id) -> ApiResult<()> {
+        self.require_session()?;
+        self.post_unit(&super::paths::tag_op(tag_id, super::paths::op::DELETE), &())
+            .await
+    }
+
+    async fn list_tags(&self, collection_id: Id) -> ApiResult<Vec<Tag>> {
+        self.require_session()?;
+        self.get(&super::paths::collection_op(
+            collection_id,
+            super::paths::op::TAGS,
+        ))
+        .await
+    }
+
+    async fn assign_tag(&self, req: TagAssignment) -> ApiResult<()> {
+        self.require_session()?;
+        self.post_unit(super::paths::TAGS_ASSIGN, &req).await
+    }
+
+    async fn unassign_tag(&self, req: TagAssignment) -> ApiResult<()> {
+        self.require_session()?;
+        self.post_unit(super::paths::TAGS_UNASSIGN, &req).await
+    }
+
+    async fn card_tags(&self, collection_id: Id, oracle_id: Id) -> ApiResult<Vec<Tag>> {
+        self.require_session()?;
+        self.get(&super::paths::card_tags(collection_id, oracle_id))
+            .await
+    }
+
+    async fn cards_with_tag(&self, collection_id: Id, tag_id: Id) -> ApiResult<Vec<TaggedCard>> {
+        self.require_session()?;
+        self.get(&super::paths::tag_cards(collection_id, tag_id))
+            .await
+    }
+
+    async fn deck_commanders(&self, collection_id: Id) -> ApiResult<DeckCommanders> {
+        self.require_session()?;
+        self.get(&super::paths::collection_op(
+            collection_id,
+            super::paths::op::COMMANDERS,
+        ))
+        .await
+    }
+
+    async fn set_holding_board(&self, holding_id: Id, req: SetBoard) -> ApiResult<()> {
+        self.require_session()?;
+        self.post_unit(&super::paths::holding_board(holding_id), &req)
+            .await
+    }
+
+    async fn set_desire_board(&self, desire_id: Id, req: SetBoard) -> ApiResult<()> {
+        self.require_session()?;
+        self.post_unit(&super::paths::desire_board(desire_id), &req)
+            .await
+    }
 }
 
 /// The hosted API origin: `TR_WEB_ORIGIN` if exported, else the baked default.
@@ -365,4 +500,41 @@ fn web_origin() -> String {
         .ok()
         .map(|s| s.trim_end_matches('/').to_string())
         .unwrap_or_else(|| DEFAULT_WEB_ORIGIN.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn require_session_accepts_a_live_session_even_without_a_jwt() {
+        // An expired 15-min JWT (dropped by the webview) with a live `tr_session`
+        // is still a session: `require_session` must not short-circuit — `send`
+        // re-mints from the session on the ensuing 401.
+        let refresh_only =
+            NativeBackend::authed(None, Some("sess".into()), "http://localhost:1420".into());
+        assert!(refresh_only.require_session().is_ok());
+
+        let with_jwt = NativeBackend::authed(
+            Some("jwt".into()),
+            Some("sess".into()),
+            "http://localhost:1420".into(),
+        );
+        assert!(with_jwt.require_session().is_ok());
+    }
+
+    #[test]
+    fn require_session_rejects_the_fully_anonymous_case() {
+        // No JWT and no session → nothing to mint from; terminal Unauthorized
+        // without a wasted round trip.
+        let none = NativeBackend::authed(None, None, "http://localhost:1420".into());
+        assert!(matches!(
+            none.require_session(),
+            Err(ApiError::Unauthorized(_))
+        ));
+        assert!(matches!(
+            NativeBackend::anonymous().require_session(),
+            Err(ApiError::Unauthorized(_))
+        ));
+    }
 }
