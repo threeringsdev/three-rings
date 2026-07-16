@@ -37,14 +37,6 @@ async fn main() {
 
     let app = app::build_router(leptos_options);
 
-    // Spike probe (architecture-spike task 5): prove Neon/sqlx connectivity
-    // from the server path at startup. Non-fatal so the web demo still runs
-    // without a DATABASE_URL.
-    match app::db::card_count().await {
-        Ok(n) => log!("neon: connected, cards table has {n} rows"),
-        Err(e) => log!("neon: connectivity probe FAILED: {e}"),
-    }
-
     // run our app with hyper
     // `axum::Server` is a re-export of `hyper::Server`
     log!("listening on http://{}", &addr);

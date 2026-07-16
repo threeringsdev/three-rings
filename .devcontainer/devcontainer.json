@@ -29,18 +29,18 @@
       "settings": {
         "editor.defaultFormatter": "esbenp.prettier-vscode",
         "[rust]": { "editor.defaultFormatter": "rust-lang.rust-analyzer" },
-        "rust-analyzer.cargo.features": ["ssr"],
+        "rust-analyzer.cargo.features": ["hosted"],
         "//": "src-tauri (three_rings) is the desktop target; it needs Tauri's Linux system libs (dbus/webkit2gtk) that this web-only container intentionally does not install (see specs/dev-environment.md). Excluding it keeps its unbuildable dep tree from crashing rust-analyzer's workspace check and flooding the Problems panel.",
         "rust-analyzer.cargo.buildScripts.overrideCommand": [
           "cargo", "check", "--quiet",
           "--workspace", "--exclude", "three_rings",
-          "--all-targets", "--features", "ssr",
+          "--all-targets", "--features", "hosted",
           "--message-format=json"
         ],
         "rust-analyzer.check.overrideCommand": [
           "cargo", "clippy",
           "--workspace", "--exclude", "three_rings",
-          "--all-targets", "--features", "ssr",
+          "--all-targets", "--features", "hosted",
           "--message-format=json"
         ]
       }

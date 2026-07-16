@@ -47,12 +47,7 @@ pub fn App() -> impl IntoView {
     #[cfg(feature = "component-bench")]
     let routes = (
         routes,
-        view! {
-            <Route
-                path=(StaticSegment("dev"), StaticSegment("components"))
-                view=bench::BenchPage
-            />
-        }
+        view! { <Route path=(StaticSegment("dev"), StaticSegment("components")) view=bench::BenchPage /> }
         .into_inner(),
     );
 
@@ -180,9 +175,7 @@ fn HomePage() -> impl IntoView {
                                 "Three Rings"
                             </h1>
                         </div>
-                        <p class="text-[#8b9cb8] text-sm">
-                            "Powered by Leptos + WASM"
-                        </p>
+                        <p class="text-[#8b9cb8] text-sm">"Powered by Leptos + WASM"</p>
                     </div>
 
                     // Counter Display
@@ -190,7 +183,8 @@ fn HomePage() -> impl IntoView {
                         <div class="bg-[#1a2332] rounded-lg p-8 border border-[#3a4a5c]">
                             <div class="text-5xl md:text-6xl font-light text-white tabular-nums">
                                 {move || {
-                                    optimistic_count.get()
+                                    optimistic_count
+                                        .get()
                                         .map(|c| c.to_string())
                                         .unwrap_or_else(|| "...".to_string())
                                 }}
@@ -214,16 +208,18 @@ fn HomePage() -> impl IntoView {
                         disabled=move || increment_action.pending().get()
                         class="w-full rounded-lg bg-[#00d4aa] px-6 py-3 text-[#1a2332] font-medium transition-all duration-200 hover:bg-[#00b894] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#00d4aa]"
                     >
-                        {move || if increment_action.pending().get() {
-                            "Updating..."
-                        } else {
-                            "Increment Counter"
+                        {move || {
+                            if increment_action.pending().get() {
+                                "Updating..."
+                            } else {
+                                "Increment Counter"
+                            }
                         }}
                     </button>
 
                     // Status indicators
                     <div class="flex items-center justify-center gap-2 text-xs">
-                        <div class={move || {
+                        <div class=move || {
                             if optimistic_count.get().is_none() {
                                 "w-2 h-2 rounded-full bg-yellow-500 animate-pulse"
                             } else if increment_action.pending().get() {
@@ -231,8 +227,7 @@ fn HomePage() -> impl IntoView {
                             } else {
                                 "w-2 h-2 rounded-full bg-[#00d4aa]"
                             }
-                        }}>
-                        </div>
+                        }></div>
                         <span class="text-[#8b9cb8] uppercase tracking-wider">
                             {move || {
                                 if optimistic_count.get().is_none() {
@@ -248,11 +243,9 @@ fn HomePage() -> impl IntoView {
 
                     // Footer info
                     <div class="pt-4 border-t border-[#3a4a5c] space-y-1">
-                        <p class="text-[#8b9cb8] text-xs">
-                            "Running in Tauri WebView"
-                        </p>
+                        <p class="text-[#8b9cb8] text-xs">"Running in Tauri WebView"</p>
                         <a class="text-[#8b9cb8] text-xs underline" href="/cards">
-                            "View the card table →"
+                            "View the catalog →"
                         </a>
                         <auth_pages::AuthStatus />
                     </div>
@@ -262,61 +255,40 @@ fn HomePage() -> impl IntoView {
     }
 }
 
-/// Spike page (architecture-spike task 6): rows live in Neon, arrive through
-/// a Leptos server fn, and render with the vendored Rust/UI table.
+/// Catalog status page: proves the data-access seam end to end — the browser
+/// calls the `catalog_count` server fn, which routes through the `CatalogStore`
+/// trait to Neon (hosted) or the hosted API (native), SSR then hydrated. Shows
+/// "0 cards" until catalog-ingestion populates the catalog.
 #[component]
 fn CardsPage() -> impl IntoView {
-    use crate::components::ui::table::*;
-
-    let cards = Resource::new(|| (), |_| get_cards());
+    let count = Resource::new(|| (), |_| catalog_count());
 
     view! {
         <div class="mx-auto max-w-md p-8">
-            <h1 class="mb-4 text-2xl font-bold">"Cards"</h1>
+            <h1 class="mb-4 text-2xl font-bold">"Catalog"</h1>
             <Suspense fallback=|| {
-                view! { <p class="text-muted-foreground text-sm">"Loading cards..."</p> }
+                view! { <p class="text-muted-foreground text-sm">"Loading catalog…"</p> }
             }>
-                <TableWrapper>
-                    <Table>
-                        <TableCaption>
-                            "Rows from Neon, via a server fn, in a Rust/UI table."
-                        </TableCaption>
-                        <TableHeader>
-                            <TableRow>
-                                <TableHead>"ID"</TableHead>
-                                <TableHead>"Name"</TableHead>
-                            </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                            {move || Suspend::new(async move {
-                                match cards.await {
-                                    Ok(cards) => {
-                                        cards
-                                            .into_iter()
-                                            .map(|card| {
-                                                view! {
-                                                    <TableRow>
-                                                        <TableCell>{card.id}</TableCell>
-                                                        <TableCell>{card.name}</TableCell>
-                                                    </TableRow>
-                                                }
-                                            })
-                                            .collect_view()
-                                            .into_any()
-                                    }
-                                    Err(e) => {
-                                        view! {
-                                            <TableRow>
-                                                <TableCell>{format!("Failed to load cards: {e}")}</TableCell>
-                                            </TableRow>
-                                        }
-                                            .into_any()
-                                    }
-                                }
-                            })}
-                        </TableBody>
-                    </Table>
-                </TableWrapper>
+                {move || Suspend::new(async move {
+                    match count.await {
+                        Ok(count) => {
+                            view! {
+                                <p class="text-sm">
+                                    {format!("{} cards in the catalog.", count.cards)}
+                                </p>
+                            }
+                                .into_any()
+                        }
+                        Err(e) => {
+                            view! {
+                                <p class="text-muted-foreground text-sm">
+                                    {format!("Failed to load catalog: {e}")}
+                                </p>
+                            }
+                                .into_any()
+                        }
+                    }
+                })}
             </Suspense>
             <a class="text-muted-foreground mt-4 inline-block text-sm underline" href="/">
                 "← Home"
@@ -334,7 +306,16 @@ pub mod components;
 #[cfg(feature = "ssr")]
 pub mod auth;
 
+/// The data-access trait seam (specs/data-access-backends.md). Present whenever
+/// the embedded server is built; the concrete backend is picked by the
+/// `hosted`/`native` feature inside.
 #[cfg(feature = "ssr")]
+pub mod backend;
+
+/// Direct Neon access — the pool + the migration runner. Behind `hosted`: only
+/// the web deployment (the authorization terminus) holds Postgres credentials;
+/// the native shell reaches data over HTTPS instead.
+#[cfg(feature = "hosted")]
 pub mod db;
 
 #[cfg(feature = "ssr")]
@@ -450,34 +431,85 @@ pub async fn increment_count() -> Result<(), ServerFnError<String>> {
     }
 }
 
-/// A card row from the spike `cards` table (architecture-spike task 6).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct Card {
-    pub id: i32,
-    pub name: String,
+/// Map a data-access [`shared::ApiError`] onto a server-fn error. The transport
+/// channel carries the message; richer status semantics are collection-api's.
+#[cfg(feature = "ssr")]
+fn api_err(e: shared::ApiError) -> ServerFnError<String> {
+    ServerFnError::ServerError(e.to_string())
 }
 
-#[server(prefix = "/api")]
-pub async fn get_cards() -> Result<Vec<Card>, ServerFnError<String>> {
-    #[cfg(feature = "ssr")]
+/// Anonymous catalog size — the seam-proving catalog read
+/// (specs/data-access-backends.md). Hosted: sqlx in-process. Native: HTTPS to
+/// the hosted API. Both go through the `CatalogStore` trait, never the DB/HTTP
+/// directly.
+#[server(prefix = "/api", endpoint = "catalog_count")]
+pub async fn catalog_count() -> Result<shared::CatalogCount, ServerFnError<String>> {
+    #[cfg(feature = "hosted")]
     {
-        let pool = crate::db::pool()
+        use crate::backend::{CatalogStore, HostedBackend};
+        HostedBackend::anonymous()
             .await
-            .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
-        let rows: Vec<(i32, String)> = sqlx::query_as("SELECT id, name FROM cards ORDER BY id")
-            .fetch_all(pool)
+            .map_err(api_err)?
+            .card_count()
             .await
-            .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
-        Ok(rows
-            .into_iter()
-            .map(|(id, name)| Card { id, name })
-            .collect())
+            .map_err(api_err)
+    }
+    #[cfg(all(feature = "native", not(feature = "hosted")))]
+    {
+        use crate::backend::{CatalogStore, NativeBackend};
+        NativeBackend::anonymous()
+            .card_count()
+            .await
+            .map_err(api_err)
     }
     #[cfg(not(feature = "ssr"))]
     {
-        Err(ServerFnError::ServerError(
-            "Server-only function".to_string(),
-        ))
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// The signed-in caller's collections — the seam-proving session-scoped read
+/// (specs/data-access-backends.md). Hosted: verifies the JWT here, then runs the
+/// read inside the `SET LOCAL app.user_id` transaction. Native: forwards the
+/// `tr_jwt` cookie as `Authorization: Bearer` to the hosted API, which is the
+/// authorization terminus. collection-api builds the UI that consumes this.
+#[server(prefix = "/api", endpoint = "list_collections")]
+pub async fn list_collections() -> Result<Vec<shared::CollectionSummary>, ServerFnError<String>> {
+    #[cfg(feature = "hosted")]
+    {
+        use crate::backend::{CollectionStore, HostedBackend};
+        let headers = leptos_axum::extract::<axum::http::HeaderMap>()
+            .await
+            .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+        let user_id = crate::auth::user_id_from_headers(&headers)
+            .await
+            .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+        HostedBackend::for_user(user_id)
+            .await
+            .map_err(api_err)?
+            .list_collections()
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(all(feature = "native", not(feature = "hosted")))]
+    {
+        use crate::backend::{CollectionStore, NativeBackend};
+        let headers = leptos_axum::extract::<axum::http::HeaderMap>()
+            .await
+            .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+        // The native embedded server never verifies the JWT — it forwards it to
+        // the hosted terminus, which does. A missing cookie surfaces as the
+        // hosted 401 (mapped to Unauthorized) via the backend.
+        let token = crate::auth::cookies::cookie_value(&headers, crate::auth::cookies::JWT_COOKIE)
+            .unwrap_or_default();
+        NativeBackend::authed(token)
+            .list_collections()
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        Err(ServerFnError::ServerError("server-only".into()))
     }
 }
 
@@ -645,10 +677,18 @@ pub fn build_router(leptos_options: LeptosOptions) -> axum::Router {
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
         .allow_headers([axum::http::header::CONTENT_TYPE]);
 
-    Router::new()
+    let router = Router::new()
         .route("/api/me", get(me))
         .route("/auth/callback", get(auth_callback))
-        .route("/auth/app-return", get(auth_app_return))
+        .route("/auth/app-return", get(auth_app_return));
+
+    // The hosted JSON API the native client calls (specs/data-access-backends.md).
+    // Only the web deployment (the authorization terminus) mounts these; the
+    // native embedded server has no `HostedBackend`, so it never serves them.
+    #[cfg(feature = "hosted")]
+    let router = crate::backend::routes::mount(router);
+
+    router
         .leptos_routes(&leptos_options, routes, {
             let leptos_options = leptos_options.clone();
             move || shell(leptos_options.clone())

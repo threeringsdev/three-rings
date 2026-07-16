@@ -77,6 +77,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       # Native workspace including src-tauri, excluding the wasm-only frontend.
+      # Feature unification here builds `app` with `hosted` (from `server`) +
+      # `native` (from `src-tauri`); `hosted` wins the backend cfg, so the
+      # `native`-only server-fn arms are NOT covered by this line — the dedicated
+      # native line below lints them (specs/data-access-backends.md).
       - name: Clippy (native workspace incl. src-tauri)
         run: cargo clippy --workspace --exclude frontend --all-targets -- -D warnings
 
@@ -84,12 +88,20 @@ jobs:
       - name: Clippy (frontend on wasm)
         run: cargo clippy -p frontend --target wasm32-unknown-unknown -- -D warnings
 
+      # The `native` backend (Tauri shell: HTTPS client, no sqlx) is masked in the
+      # workspace line above by `hosted` winning feature unification, so lint it
+      # standalone or its arms rot ungated (it ships in the APK/.dmg).
+      - name: Clippy (native backend)
+        run: cargo clippy -p app --features native --all-targets -- -D warnings
+
       # The component bench (specs/ui-component-bench.md) is cfg'd out of every
       # release artifact, so the lines above never compile it — lint both its
-      # halves (ssr native, hydrate wasm) explicitly or it rots ungated.
+      # halves (hosted server, hydrate wasm) explicitly or it rots ungated.
+      # `hosted` (not bare `ssr`): a server build always carries a backend
+      # (specs/data-access-backends.md), so that is the representative config.
       - name: Clippy (component bench)
         run: |
-          cargo clippy -p app --features ssr,component-bench --all-targets -- -D warnings
+          cargo clippy -p app --features hosted,component-bench --all-targets -- -D warnings
           cargo clippy -p app --features hydrate,component-bench --target wasm32-unknown-unknown -- -D warnings
 
       - name: Test (native workspace, excl. frontend)

@@ -36,3 +36,5 @@ playwright/.cache/
 
 # Claude Code — personal/local settings (shared config lives in .claude/settings.json)
 .claude/settings.local.json
+# Claude Code — local git worktrees for isolated agent runs (never committed)
+.claude/worktrees/

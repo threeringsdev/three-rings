@@ -13,7 +13,9 @@ license = "MIT"
 component-bench = ["app/component-bench"]
 
 [dependencies]
-app = { path = "../app", default-features = false, features = ["ssr"] }
+# The web server enables the `hosted` backend (sqlx against Neon); `hosted`
+# implies `ssr` (specs/data-access-backends.md).
+app = { path = "../app", default-features = false, features = ["hosted"] }
 leptos = { workspace = true, features = [ "ssr" ]}
 leptos_axum.workspace = true
 

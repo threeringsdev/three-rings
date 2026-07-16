@@ -29,7 +29,10 @@ tauri = { version = "2.5.0", features = [] }
 tauri-plugin-log = "2.4.0"
 tauri-plugin-shell = "2.2.1"
 tauri-plugin-process = "2.2.1"
-app = { path = "../app", default-features = false, features = ["ssr"] }
+# The Tauri shell enables the `native` backend (HTTPS client to the hosted
+# API); `native` implies `ssr` and pulls in NO sqlx/Postgres path
+# (specs/data-access-backends.md).
+app = { path = "../app", default-features = false, features = ["native"] }
 leptos = { workspace = true, features = ["ssr"] }
 axum = { workspace = true }
 tokio = { workspace = true }

@@ -220,20 +220,27 @@ where
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        // Native/API clients send `Authorization: Bearer`; browser and Tauri
-        // webview sessions carry the JWT in our httpOnly cookie (path B).
-        let token = bearer(parts)
-            .or_else(|| cookies::cookie_value(&parts.headers, cookies::JWT_COOKIE))
-            .ok_or(AuthError::MissingToken)?;
-        let claims = verifier().await?.verify(&token).await?;
-        let user_id = Uuid::parse_str(&claims.sub).map_err(|_| AuthError::InvalidToken)?;
+        let user_id = user_id_from_headers(&parts.headers).await?;
         Ok(AuthUser { user_id })
     }
 }
 
+/// Verify the request's session and return the caller's user id, from either an
+/// `Authorization: Bearer` header (native/API clients) or our httpOnly `tr_jwt`
+/// cookie (browser and Tauri webview, path B). This is the extractor's core,
+/// exposed so server functions (which get a `HeaderMap`, not `Parts`) share the
+/// exact same verification.
+pub async fn user_id_from_headers(headers: &axum::http::HeaderMap) -> Result<Uuid, AuthError> {
+    let token = bearer(headers)
+        .or_else(|| cookies::cookie_value(headers, cookies::JWT_COOKIE))
+        .ok_or(AuthError::MissingToken)?;
+    let claims = verifier().await?.verify(&token).await?;
+    Uuid::parse_str(&claims.sub).map_err(|_| AuthError::InvalidToken)
+}
+
 /// Pull the token out of an `Authorization: Bearer <token>` header.
-fn bearer(parts: &Parts) -> Option<String> {
-    let value = parts.headers.get(axum::http::header::AUTHORIZATION)?;
+fn bearer(headers: &axum::http::HeaderMap) -> Option<String> {
+    let value = headers.get(axum::http::header::AUTHORIZATION)?;
     let text = value.to_str().ok()?;
     text.strip_prefix("Bearer ")
         .map(|t| t.trim().to_string())
