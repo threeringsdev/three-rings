@@ -44,10 +44,16 @@ Cargo workspace, four members (see [`Cargo.toml`](Cargo.toml)):
 
 | Crate | Package | Role |
 |---|---|---|
-| `app/` | `app` | the product — Leptos UI + server fns + Axum router (shared lib) |
+| `app/` | `app` | the product — Leptos UI + server fns + Axum router + the data-access trait seam (shared lib) |
 | `frontend/` | `frontend` | wasm hydrate lib (cargo-leptos **lib-package**, target `wasm32-unknown-unknown`) |
-| `server/` | `server` | thin SSR web binary (cargo-leptos **bin-package**) |
-| `src-tauri/` | `three_rings` | Tauri v2 desktop/mobile shell embedding the same router |
+| `server/` | `server` | thin SSR web binary (cargo-leptos **bin-package**); builds `app` with the `hosted` backend |
+| `shared/` | `shared` | cross-backend contract crate — DTOs + the one `ApiError` enum both backends map into (specs/data-access-backends.md); wasm-safe, no sqlx/axum |
+| `src-tauri/` | `three_rings` | Tauri v2 desktop/mobile shell embedding the same router; builds `app` with the `native` backend |
+
+**`app` feature split** (specs/data-access-backends.md): `ssr` is the
+embedded-server substrate (router + auth core); a server build layers on exactly
+one backend — `hosted` (sqlx against Neon, the authorization terminus) or
+`native` (HTTPS client to the hosted API, no sqlx). `hydrate` is the wasm client.
 
 cargo-leptos config lives in `Cargo.toml` (`[[workspace.metadata.leptos]]`):
 name `app`, `site-root = target/site`, `site-pkg-dir = pkg`,
@@ -110,18 +116,27 @@ mkdir -p target/site/pkg                                                # Tauri 
 cargo fmt --all -- --check
 cargo clippy --workspace --exclude frontend --all-targets -- -D warnings   # native workspace incl. src-tauri
 cargo clippy -p frontend --target wasm32-unknown-unknown -- -D warnings     # wasm hydrate crate
-cargo clippy -p app --features ssr,component-bench --all-targets -- -D warnings          # bench code, ssr half
+cargo clippy -p app --features native --all-targets -- -D warnings          # native backend (masked by hosted in the workspace line)
+cargo clippy -p app --features hosted,component-bench --all-targets -- -D warnings          # bench code, hosted server half
 cargo clippy -p app --features hydrate,component-bench --target wasm32-unknown-unknown -- -D warnings  # bench code, wasm half
 cargo test --workspace --exclude frontend
 cargo leptos build --release                                            # full Tailwind + wasm pipeline
 ```
 
-The two `component-bench` clippy lines are part of the gate: the bench is
-cfg'd out of every release build, so nothing else compiles that code.
+The `app` crate has a three-way feature split (specs/data-access-backends.md):
+`ssr` is the embedded-server substrate; a complete server build must also enable
+exactly one **backend** — `hosted` (web: sqlx against Neon; what `server` builds)
+or `native` (Tauri shell: HTTPS client, no sqlx; what `src-tauri` builds). Two
+gate lines exist because of it: the **native backend** line lints the
+`native`-only code that the workspace line masks (feature unification there makes
+`hosted` win the backend cfg), and the **component-bench** line uses `hosted`
+(not bare `ssr`) since a real server always carries a backend.
 
-**In the web-dev container**, add `--exclude three_rings` to the native clippy
-and test commands — the container omits Tauri's Linux libs, so the Tauri shell
-is lint-checked in CI, not locally. Everything else runs in-container as written.
+**In the web-dev container**, add `--exclude three_rings` to the native workspace
+clippy and test commands — the container omits Tauri's Linux libs, so the Tauri
+shell is lint-checked in CI, not locally. The `-p app --features native` line
+*does* run in-container (it's the `app` crate, no Tauri libs) and is how you lint
+the native backend locally. Everything else runs in-container as written.
 
 ## What runs where
 
@@ -137,7 +152,7 @@ CI now owns the delivery artifacts; host builds are optional local development,
 | macOS `.dmg` (delivery artifact, rolling release) | **CI** — `workflow_dispatch` only (`macos` input, default off) |
 | Android / macOS desktop **build** (local iteration) | host (optional) |
 | Android / macOS / iOS **run** (emulator, device, `.app`) | host |
-| Web deploy (`/` + `/cards` with Neon rows) | **Render** — builds the root `Dockerfile` on push to `main` (zero Actions minutes) |
+| Web deploy (`/` + `/cards` catalog count via Neon) | **Render** — builds the root `Dockerfile` on push to `main` (zero Actions minutes) |
 
 ## Working the queue
 

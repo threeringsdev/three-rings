@@ -1,6 +1,8 @@
-//! Spike-only direct Neon access from the server path (architecture-spike
-//! task 5): one shared runtime pool. The Phase 3 data-access-backends spec
-//! replaces this direct access with a trait boundary before any real user data.
+//! Direct Neon access for the **hosted** backend: the shared runtime pool and
+//! the migration runner. Behind the `hosted` feature — only the web deployment
+//! (the authorization terminus) holds Postgres credentials. The hosted
+//! `*Store` impls ([`crate::backend::hosted`]) run all queries through this
+//! pool; the native shell reaches data over HTTPS and never links this module.
 //!
 //! Migrations do **not** run here. They run as a separate deploy step
 //! (`server --migrate`, e.g. a Render pre-deploy command) under the
@@ -51,12 +53,4 @@ pub async fn migrate() -> Result<(), sqlx::Error> {
     MIGRATOR.run(&pool).await?;
     pool.close().await;
     Ok(())
-}
-
-/// Connectivity probe: row count of the spike `cards` table.
-pub async fn card_count() -> Result<i64, sqlx::Error> {
-    let (count,): (i64,) = sqlx::query_as("SELECT count(*) FROM cards")
-        .fetch_one(pool().await?)
-        .await?;
-    Ok(count)
 }

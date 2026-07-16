@@ -29,19 +29,25 @@ wasm-bindgen = { workspace = true, optional = true }
 http.workspace = true
 cfg-if.workspace = true
 serde.workspace = true
+shared.workspace = true
 thiserror.workspace = true
 tw_merge.workspace = true
 
 [features]
 default = []
 hydrate = ["leptos/hydrate", "dep:web-sys", "dep:js-sys", "dep:wasm-bindgen"]
+# `ssr` is the embedded-server SUBSTRATE — the router, leptos_axum, Axum, the
+# auth core (JWKS verify + the Better Auth cookie proxy), and serde. It carries
+# NO data-access backend on its own: a complete server build must also enable
+# exactly one of `hosted` or `native` (enforced by a compile_error in
+# app/src/backend.rs). This decomposition (specs/data-access-backends.md) is what
+# lets the native binary contain no sqlx/Postgres code path at all.
 ssr = [
     "leptos/ssr",
     "leptos_meta/ssr",
     "leptos_router/ssr",
     "dep:leptos_axum",
     "dep:axum",
-    "dep:sqlx",
     "dep:tokio",
     "dep:tower-http",
     "dep:jsonwebtoken",
@@ -50,6 +56,14 @@ ssr = [
     "dep:base64",
     "dep:uuid",
 ]
+# Hosted (web) backend: in-process sqlx against Neon. The `server` binary enables
+# this. Implies `ssr`. This is the only place `dep:sqlx` and `app/src/db.rs` are
+# pulled in, so `native` builds never see Postgres.
+hosted = ["ssr", "dep:sqlx"]
+# Native (Tauri desktop/mobile) backend: HTTPS client to the hosted API,
+# forwarding the Better Auth JWT. `src-tauri` enables this. Implies `ssr`; adds
+# no new deps (reqwest already rides `ssr` for the auth core).
+native = ["ssr"]
 spin = ["dep:spin-sdk"]
 # The /dev/components bench route (specs/ui-component-bench.md): on for dev
 # workflows, off in release builds. frontend/server/src-tauri forward it here.

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["app", "frontend", "server", "src-tauri"]
+members = ["app", "frontend", "server", "shared", "src-tauri"]
 
 [workspace.package]
 license = "MIT"
@@ -45,10 +45,14 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 base64 = "0.22"
 uuid = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The cross-backend contract crate (specs/data-access-backends.md): DTOs + the
+# one error enum both backends map into. Path dep — internal, versionless.
+shared = { path = "shared" }
 simple_logger = "5.0.0"
 # Spike-only direct DB access from the server path (architecture-spike task 5);
 # data-access-backends (Phase 2) puts a trait boundary in front of this.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "uuid"] }
 thiserror = "2.0.12"
 tokio = { version = "1.45.0", features = ["full"] }
 tower = { version = "0.5.2", features = ["full"] }

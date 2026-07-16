@@ -1,6 +1,6 @@
 # Data-access backends (hosted vs. native)
 
-**Status:** accepted
+**Status:** implemented
 **Depends on:** [data-model](data-model.md), [auth](auth.md)
 
 ## Problem
@@ -48,9 +48,23 @@ Selected at compile time via the cargo feature split, so the native binary conta
 
 ## Open questions
 
-- Error-type unification: one error enum both impls map into. **Shape proposed by [collection-api](collection-api.md) §Error model** (`NotFound`/`Unauthorized`/`Forbidden`/`Conflict`/`Validation`/`Upstream` → HTTP status; `{error:{code,message,details?}}` wire shape); the enum lives in this spec's `shared/` crate. *(resolved during execution — collection-api + the trait-split task)*
+- ~~Error-type unification: one error enum both impls map into.~~ **Resolved
+  (implemented 2026-07-16):** `shared::ApiError` (`NotFound`/`Unauthorized`/
+  `Forbidden`/`Conflict`/`Validation`/`Upstream`), each variant carrying a
+  message, with `http_status()`/`code()` and a `{error:{code,message,details?}}`
+  wire envelope (`to_wire`/`from_wire`). The hosted routes serialize it; the
+  native client reconstructs it from status + body. Shape per
+  [collection-api](collection-api.md) §Error model; the enum lives in the
+  `shared/` crate. See Findings.
 - ~~Trait granularity: one big store trait vs. per-domain traits.~~ **Resolved (2026-07-14 review):** per-domain traits with one backend struct per target (see Key rules). The prior citation to "collection-api's per-domain stores" was circular — `*Store` is this spec's vocabulary; collection-api has a per-domain *endpoint* split (catalog vs. collection), which is the real 1:1 the traits mirror.
-- Does SSR-on-first-load in the native app work offline-tolerantly enough (embedded server up, but API unreachable) to degrade gracefully rather than white-screen? (The native impl's `401`-refresh path also needs a defined behavior when the hosted API is simply *unreachable* vs. returning an auth error.)
+- **Still open (deferred to the collection-api native-client work):** does
+  SSR-on-first-load in the native app degrade gracefully when the embedded
+  server is up but the hosted API is unreachable (rather than white-screen)? And
+  the native impl's `401`-refresh needs a defined behavior for *unreachable* vs.
+  *auth-error*. The trait layer maps a transport failure to `Upstream` and a
+  `401` to `Unauthorized` today; the **silent JWT re-mint from `tr_session` on
+  `401`** is stubbed (a `TODO` in `native.rs`) because the cookie-jar plumbing it
+  needs lands with the session-scoped endpoints — filed as a Phase 4 follow-up.
 - ~~Session token storage in Tauri (keychain vs. encrypted file)~~ **Resolved by [auth](auth.md):** the session lives as httpOnly cookies (`tr_session`/`tr_jwt`) on the embedded `127.0.0.1` server — the webview carries them like a browser. No keychain/encrypted-file store; the native data-access impl reads `tr_jwt` from that same cookie jar.
 
 ## Findings
@@ -96,3 +110,71 @@ Selected at compile time via the cargo feature split, so the native binary conta
     seam); the reverse coupling (this spec's native impl is a client of
     collection-api's endpoints) stays prose here, not a `Depends on:`, so there
     is no mutual dependency to deadlock queue gating.
+
+- 2026-07-16 — **Trait layer implemented; the seam is real and proven.**
+  Built the whole seam and retired the spike DB access. What shipped:
+  - **`shared/` crate** (new workspace member, package `shared`) — the DTOs
+    (`CatalogCount`, `CollectionSummary`/`CollectionKind`) and `ApiError` (+ the
+    `{error:{code,message,details?}}` wire envelope). Deliberately platform-neutral
+    (serde/uuid/serde_json/thiserror only): it compiles for the wasm hydrate
+    frontend *and* both server backends, so it carries no sqlx/axum — the hosted
+    side maps `ApiError::http_status()` (a plain `u16`) onto its status type.
+  - **`ssr` decomposed into a substrate + two backends.** `ssr` now = the router,
+    `leptos_axum`, Axum, the auth core (JWKS verify + the Better Auth cookie
+    proxy), serde. `dep:sqlx` + `db.rs` moved behind a new **`hosted`** feature;
+    the HTTPS client is behind **`native`**; both imply `ssr`. `server` builds
+    `app` with `hosted`, `src-tauri` with `native` — so **the Tauri binary no
+    longer links sqlx at all** (the spike debt this task retired). A
+    `compile_error!` makes `ssr` without a backend fail loud.
+  - **Per-domain traits** `CatalogStore` (anonymous) / `CollectionStore`
+    (session-scoped), each implemented by **one** `HostedBackend` and **one**
+    `NativeBackend`. The backend struct carries the per-request session credential
+    (hosted: the verified `user_id`; native: the forwarded `tr_jwt`), so trait
+    methods take no credential argument.
+  - **Per-request `SET LOCAL app.user_id` transaction** on the hosted side:
+    `scoped_tx` opens a tx and runs `set_config('app.user_id', $1, true)` (the
+    bound, injection-safe `SET LOCAL` form) before every session-scoped query, so
+    data-model's RLS policies scope the rows beneath the API terminus. An
+    anonymous handle answers a `CollectionStore` call with `Unauthorized`.
+  - **Endpoints are trait methods projected to HTTP.** The web UI calls Leptos
+    server fns (`catalog_count`, `list_collections`) that dispatch to the backend
+    **in-process** (honoring "one terminus"); the native client is the HTTP client
+    of explicit hosted JSON routes (`GET /api/catalog/count`, `GET /api/collections`)
+    mounted only in the hosted deployment. Route paths live in one `paths` module
+    both sides share, so they can't drift.
+  - **Config baking:** the native client's hosted-API origin is `TR_WEB_ORIGIN`
+    (exported env wins) falling back to the baked production origin — mirroring
+    auth's release defaults.
+  - **Spike removed:** `app/src/db.rs`'s `card_count` probe, the `Card`/`get_cards`
+    server fn, and the server-startup Neon probe are gone; the `/cards` page now
+    renders the catalog count through the seam.
+
+  **Verified.** Full merge gate reproduced in-container (fmt, all clippy lines
+  incl. the two new ones — see below — test, `cargo leptos build --release`).
+  Live against the Neon **dev** branch: `GET /api/catalog/count` → `{"cards":0}`
+  (hosted `CatalogStore` → Neon); `GET /api/collections` with no token → `401`;
+  the UI server fn `POST /api/catalog_count` → `{"cards":0}`; and a temporary
+  in-process probe ran `HostedBackend::for_user(<real user>).list_collections()`
+  end to end (begin → `set_config` → RLS SELECT → commit → `Ok`), then reverted.
+  (Row-level correctness of the RLS scoping was already proven at the SQL level in
+  the data-model migration task.)
+
+  **CI note — the `native` arms need their own lint line.** `cargo clippy
+  --workspace` unifies `app`'s features to `hosted + native`, and the backend
+  selection resolves `#[cfg(all(native, not(hosted)))]` in favor of `hosted` — so
+  the workspace line never compiles the native-only server-fn arms (they ship in
+  the APK/`.dmg`). Added a dedicated `cargo clippy -p app --features native
+  --all-targets` gate line; the bench line moved from bare `ssr` to `hosted`
+  since a real server always carries a backend. Both are in `validate.yml` +
+  `CLAUDE.md`.
+
+  **Neon production migrated** (2026-07-16): `scripts/migrate.sh prod` applied
+  `0002`–`0006` to the production branch — verified identical to dev (migrations
+  1–6, the seven real tables, spike `cards.id` gone). Done before this PR merged
+  (maintainer's call), so the still-deployed spike `/cards` degrades to its
+  graceful error until Render redeploys this code — expected, home page
+  unaffected. **Deferred (follow-up filed in TODO):** the native `401`
+  silent-refresh from `tr_session` (stubbed — needs the session cookie-jar
+  plumbing that lands with collection-api's native client) and the
+  offline-degradation behavior (OQ#3). sqlx gained the `uuid` feature so the
+  hosted backend decodes ids natively.
