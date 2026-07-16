@@ -1,6 +1,6 @@
 # Catalog ingestion
 
-**Status:** draft
+**Status:** accepted
 **Depends on:** [data-model](data-model.md)
 
 ## Problem
@@ -69,14 +69,15 @@ not remembered. Re-verify at implementation if months have passed.
   (default) or `order=imageupdated`, both descending. The **no-`lang`**
   listing (115,955 entries today) matches the `default_cards` universe;
   `lang=en` (113,315) drops foreign-only printings — sweep without `lang`.
-  - **Observed limitation (2026-07-16):** across 30,000 sampled entries
-    (pages 1 and 4), `data_updated_at`, `created_at`, and `oracle_id` were
-    **all NULL** — the endpoint is new and only `image_updated_at` is
-    populated so far. Today the manifest reliably signals *new printings*
-    (unknown ids), *image updates*, and *disappearances* (missing ids) — not
-    data-only edits (errata, legality flips, prices). The diff below reads
-    `data_updated_at` whenever Scryfall backfills it; until then the bulk
-    true-up covers data-only drift.
+  - **Observation (2026-07-16):** across 30,000 sampled entries (pages 1
+    and 4), `data_updated_at`, `created_at`, and `oracle_id` were **all
+    NULL**; only `image_updated_at` carried values. Whether that's pending
+    population on a new endpoint or simply that cards rarely change once
+    they exist (the maintainer's read — NULL as the steady state), the
+    handling is the same: the manifest reliably signals *new printings*
+    (unknown ids), *image updates*, and *disappearances* (missing ids); the
+    diff reads `data_updated_at` whenever present, and the bulk true-up
+    covers any data-only drift it doesn't signal.
 - **`POST /cards/collection`** hydrates up to **75 cards per request** by
   `id` (2 req/s), returning full card objects (prices included); unresolved
   ids come back in a `not_found` array. Typical daily change volumes (tens
@@ -358,8 +359,8 @@ Binding on us (current policy text, 2026-07-16):
   cards). `/cards/manifest` is 15,000 entries/page (~8 pages, ~1 min sweep)
   and is Scryfall's documented sync surface; hydration via
   `/cards/collection` (75 ids/req). Observed 2026-07-16: only
-  `image_updated_at` is populated so far — new-card detection works today
-  via unknown ids; the diff reads `data_updated_at` when backfilled.
+  `image_updated_at` carries values — new-card detection works via unknown
+  ids; the diff reads `data_updated_at` whenever present.
 - **Bulk path = bootstrap, rebuild, and true-up** — kept for the POC,
   testing, first load, and occasional manual re-runs that refresh all prices
   and catch data-only drift.
@@ -400,7 +401,7 @@ Binding on us (current policy text, 2026-07-16):
   *(resolved during execution — stage 2, from measured timings)*
 - Exact POC set codes + menagerie card ids. *(resolved during execution —
   stage 1, checked into the filter file)*
-- Manifest `data_updated_at`/`created_at`/`oracle_id` backfill status — NULL
+- Manifest `data_updated_at`/`created_at`/`oracle_id` population — NULL
   across all sampled entries today; re-observe when building the diff and
   handle populated values from day one. *(resolved during execution —
   stage 3)*
