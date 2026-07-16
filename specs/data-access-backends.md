@@ -168,9 +168,13 @@ Selected at compile time via the cargo feature split, so the native binary conta
   since a real server always carries a backend. Both are in `validate.yml` +
   `CLAUDE.md`.
 
-  **Deferred (follow-ups filed in TODO):** the native `401` silent-refresh from
-  `tr_session` (stubbed — needs the session cookie-jar plumbing that lands with
-  collection-api's native client) and the offline-degradation behavior (OQ#3);
-  the **Neon production migration** (`scripts/migrate.sh prod` for `0002`–`0006`)
-  runs as this change deploys — see the TODO task note. sqlx gained the `uuid`
-  feature so the hosted backend decodes ids natively.
+  **Neon production migrated** (2026-07-16): `scripts/migrate.sh prod` applied
+  `0002`–`0006` to the production branch — verified identical to dev (migrations
+  1–6, the seven real tables, spike `cards.id` gone). Done before this PR merged
+  (maintainer's call), so the still-deployed spike `/cards` degrades to its
+  graceful error until Render redeploys this code — expected, home page
+  unaffected. **Deferred (follow-up filed in TODO):** the native `401`
+  silent-refresh from `tr_session` (stubbed — needs the session cookie-jar
+  plumbing that lands with collection-api's native client) and the
+  offline-degradation behavior (OQ#3). sqlx gained the `uuid` feature so the
+  hosted backend decodes ids natively.

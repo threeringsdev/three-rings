@@ -558,7 +558,12 @@ file was added — so `--migrate` silently reported "up to date" without applyin
 `0004` until `app` was force-recompiled. `migrate.sh` now `touch`es
 `app/src/db.rs` before building to guarantee a re-embed.
 
-**Prod not yet migrated — deliberate (expand-first).** Dropping the spike `cards`
+**Prod migrated 2026-07-16** with the data-access-backends landing —
+`scripts/migrate.sh prod` applied `0002`–`0006` to the Neon production branch
+(verified identical to dev). The note below records the original expand-first
+deferral rationale.
+
+**Prod (was) not yet migrated — deliberate (expand-first).** Dropping the spike `cards`
 and replacing it with the oracle-identity `cards` is a breaking change against the
 *currently deployed* spike code, whose `/cards` page reads `SELECT id, name FROM
 cards`. Migrating the Neon **production** branch now would break the live site, so
