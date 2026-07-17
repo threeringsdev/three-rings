@@ -16,6 +16,8 @@ spin-sdk = { version = "6.0.0", optional = true }
 axum = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
+async-compression = { workspace = true, optional = true }
+xxhash-rust = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
@@ -58,8 +60,10 @@ ssr = [
 ]
 # Hosted (web) backend: in-process sqlx against Neon. The `server` binary enables
 # this. Implies `ssr`. This is the only place `dep:sqlx` and `app/src/db.rs` are
-# pulled in, so `native` builds never see Postgres.
-hosted = ["ssr", "dep:sqlx"]
+# pulled in, so `native` builds never see Postgres. Also carries the catalog
+# ingestion pipeline (`server --ingest`, specs/catalog-ingestion.md) — its gzip/
+# stream/hash deps ride here so native builds never link them.
+hosted = ["ssr", "dep:sqlx", "dep:async-compression", "dep:xxhash-rust"]
 # Native (Tauri desktop/mobile) backend: HTTPS client to the hosted API,
 # forwarding the Better Auth JWT. `src-tauri` enables this. Implies `ssr`; adds
 # no new deps (reqwest already rides `ssr` for the auth core).

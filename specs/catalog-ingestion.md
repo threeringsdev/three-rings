@@ -348,6 +348,66 @@ Binding on us (current policy text, 2026-07-16):
   not endorsed") belongs in the app — rides the card-page/UI work, noted here
   so it isn't lost.
 
+## Findings (stage 1 — POC subset, 2026-07-16)
+
+The bulk path shipped as `server --ingest <poc|bulk>` (app crate,
+`app/src/ingest/`, `hosted`-gated like `db`) + [`scripts/ingest.sh`](../scripts/ingest.sh)
+(migrate.sh discipline); migration `0007` (hashes, manifest columns,
+`ingestion_runs`, grants) applied to **dev** — prod is additive-safe and rides
+the next prod touch. The `catalog_ingest` role exists on both branches
+(passwords only in `.devcontainer/.env`; `INGEST_DATABASE_URL` /
+`PROD_INGEST_DATABASE_URL`, documented in `.env.example`).
+
+**POC numbers (Neon dev):** 1,045 sets; 115,955 lines scanned; **1,333
+matched** (mh3 / tmh3 / amh3 / m3c / lea + the 15-card menagerie); **1,643
+relation targets** pulled by the closure pass; **2,976 printings / 2,665
+cards / 9,654 rulings** written. Streaming pass over the 531 MB file is ~1–2
+min; whole run a few minutes, memory flat.
+
+**Acceptance — all pass:** every opted-in layout present (token 73 — the
+checklist card among them, art_series 54, transform 32, modal_dfc 21, emblem
+7, split 7, meld 3 — the full Bruna/Gisela/Brisela triple, reversible_card 3,
+double_faced_token 2, flip, mutate; the full sets brought bonus layouts —
+saga, planar, scheme, class, case, prototype, prepare — extracted without any
+NOT NULL assertion firing); zero multi-face rows missing `card_faces`;
+transform rows have NULL top-level cost/text with populated faces; the
+reversible printing's `oracle_id` came from `card_faces[0]`; **zero unresolved
+`all_parts` links** among subset cards; trgm search finds "Lightning Bolt"
+from "lightnig bolt"; run rows recorded (including an honest `failed` row from
+the gzip surprise below). **Idempotency verified live:** an immediate re-run
+writes **0 cards / 0 printings** (hash gate); prices (2,976) and rulings
+(9,654) rewrite by design.
+
+**Source-truth surprises (all handled in code):**
+
+- **The live `/bulk-data` download URIs still serve the legacy one-object-
+  per-line JSON *array*** (`[` / `{…},` / `]`) — not the documented pure
+  JSONL — and Scryfall's CDN serves the **identity (uncompressed) body** to
+  clients that don't advertise gzip. The pipeline sends
+  `Accept-Encoding: gzip`, sniffs the gzip magic bytes on disk, and
+  normalizes both line layouts, so either representation works.
+- **Oracle-scoped content varies across printings of one oracle** (e.g.
+  Zndrsplt is a `normal` printing in one set and a `reversible_card` in SLD —
+  different `card_faces`, different combined name). One deterministic winner
+  per run (**first-seen**) is required, or re-runs rewrite those rows forever
+  (observed: 54 of 2,665 before the fix; 0 after).
+- **Battles carry layout `transform`** now (Invasion of Zendikar), and
+  **checklist cards are layout `token`** named "… Checklist" — neither is a
+  distinct layout; the menagerie covers both under their real layouts.
+- `mana_cost` can be `""` with `oracle_text` NULL on tokens; split cards keep
+  a shared top-level image with **per-face artists**; transform keeps
+  top-level `cmc`/`artist` while omitting cost/text/colors.
+
+**Execution decisions:** batches are one jsonb bind through
+`jsonb_to_recordset` (server-side typing: uuid/numeric/date/enum-array/jsonb
+— no extra sqlx type features); prices pass through as Scryfall's decimal
+strings, cast text → numeric exactly; the POC filter is compiled in
+(`include_str!`); downloads cache 12 h in the OS temp dir with a `.part`
+rename guarding partial files; the snapshot gate applies to `bulk` runs only
+(POC re-runs are always live — the filter, not the snapshot, changes between
+them); rulings swap runs even on the POC (filtered to ingested oracles) so
+the pipeline is complete.
+
 ## Decisions (this review)
 
 - **Source = `default_cards` + `rulings` bulk files + `/sets` API** —
@@ -392,15 +452,21 @@ Binding on us (current policy text, 2026-07-16):
 
 ## Open questions
 
-- Does `default_cards` really include emblem/art-series/checklist layouts?
-  Docs say "every card object"; asserted empirically by the POC. *(resolved
-  during execution — stage 1 acceptance)*
-- `server --ingest` subcommand vs. separate workspace bin, and exact env-var
-  naming for the `catalog_ingest` URL. *(resolved during execution — stage 1)*
+- ~~Does `default_cards` really include emblem/art-series/checklist layouts?~~
+  **Resolved 2026-07-16 (stage 1):** yes, empirically — emblems (7),
+  art_series (54), and checklist cards (layout `token`) all ingested from the
+  POC subset. See Findings.
+- ~~`server --ingest` subcommand vs. separate workspace bin, and env-var
+  naming.~~ **Resolved 2026-07-16 (stage 1):** `server --ingest <poc|bulk>`
+  subcommand (the `--migrate` precedent held; no measurable server-build
+  bloat), `INGEST_DATABASE_URL` / `PROD_INGEST_DATABASE_URL`.
 - Batched multi-row upserts vs. `COPY` + staging merge for the full load.
-  *(resolved during execution — stage 2, from measured timings)*
-- Exact POC set codes + menagerie card ids. *(resolved during execution —
-  stage 1, checked into the filter file)*
+  *(resolved during execution — stage 2, from measured timings; the POC's
+  jsonb_to_recordset batches took low single-digit minutes for 3K rows
+  including two full file scans, so batches look sufficient)*
+- ~~Exact POC set codes + menagerie card ids.~~ **Resolved 2026-07-16
+  (stage 1):** checked into
+  [`app/src/ingest/poc_filter.json`](../app/src/ingest/poc_filter.json).
 - Manifest `data_updated_at`/`created_at`/`oracle_id` population — NULL
   across all sampled entries today; re-observe when building the diff and
   handle populated values from day one. *(resolved during execution —

@@ -1,0 +1,21 @@
+{
+  "comment": "POC representative subset (specs/catalog-ingestion.md → Stage 1). Deterministic and checked in so the POC is reproducible: a few full sets for realistic search spread plus a layout menagerie by explicit printing id. all_parts relation targets are pulled automatically by the pipeline's closure pass.",
+  "sets": ["mh3", "tmh3", "amh3", "m3c", "lea"],
+  "cards": [
+    { "id": "7673784e-db4b-43a1-8d55-1bb9fc1e284f", "note": "normal + all_parts combo links — Lightning Bolt (msc 806)" },
+    { "id": "11bf83bb-c95b-4b4f-9a56-ce7a1816307a", "note": "transform — Delver of Secrets (isd 51)" },
+    { "id": "67f4c93b-080c-4196-b095-6a120a221988", "note": "modal_dfc — Agadeem's Awakening (znr 90)" },
+    { "id": "18303862-4726-4136-814f-157aa7006579", "note": "split — Fire // Ice (dmr 215)" },
+    { "id": "c2089ec9-0665-448f-bfe9-d181de127814", "note": "adventure — Brazen Borrower (eld 39)" },
+    { "id": "864ad989-19a6-4930-8efc-bbc077a18c32", "note": "flip — Bushi Tenderfoot (chk 2)" },
+    { "id": "6fccdb60-5fce-4a6e-a709-b986f9a4b653", "note": "meld — Bruna, the Fading Light (inr 14); closure pulls Gisela + Brisela" },
+    { "id": "8fed056f-a8f5-41ec-a7d2-a80a238872d1", "note": "battle (Scryfall now types these transform) — Invasion of Zendikar (mom 194)" },
+    { "id": "d5dfd236-b1da-4552-b94f-ebf6bb9dafdf", "note": "reversible_card, oracle_id only per-face — Zndrsplt (sld 379)" },
+    { "id": "b82ac152-5df1-46c9-98e9-ad5585f7e799", "note": "emblem — Teferi, Hero of Dominaria Emblem (tdom 16)" },
+    { "id": "cca1decc-90fd-4df8-997e-52f8789032f8", "note": "double_faced_token — Incubator // Phyrexian (tmom 16)" },
+    { "id": "c5f741e3-82d8-4842-8054-25e20a10dddd", "note": "mutate + Godzilla flavor_name — Huntmaster Liger (iko 370)" },
+    { "id": "52ce85a5-1a3e-41a6-8a2c-ac9f78286af3", "note": "digital-only printing — Plains (ana 1a)" },
+    { "id": "68d08909-a214-433b-a3b7-4baf916cd458", "note": "checklist card (layout token, collector CH1) — Core Set 2019 Checklist (tm19 CH1)" },
+    { "id": "90f17b85-a866-48e8-aae0-55330109550e", "note": "fractional cmc 0.5 un-card — Little Girl (unh 16)" }
+  ]
+}
