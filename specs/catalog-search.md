@@ -1,6 +1,6 @@
 # Catalog search
 
-**Status:** accepted
+**Status:** implemented
 **Depends on:** [ui-design](ui-design.md), [data-model](data-model.md)
 
 The queryable field vocabulary and the base search indexes come from
@@ -149,6 +149,38 @@ debounce** after the last keystroke, one in-flight request with stale-response
 discard (monotonic request ids), first page SSR-rendered when the URL carries
 `q`. Numbers tunable at execution; the contract is "no stale results ever
 render over newer input".
+
+## Findings (implementation — 2026-07-16)
+
+Shipped as `app/src/search/` — `parse.rs` (the pure grammar, dependency-free)
++ `sql.rs` (QueryBuilder emission, binds only) — wired into
+`HostedBackend::search` replacing the shell's WHERE; parse errors surface as
+`ApiError::Validation` (422) carrying the term-naming message. 25 unit tests
+(TDD) plus an `#[ignore]`d end-to-end test against the live dev POC catalog
+(`DATABASE_URL=… cargo test -p app --features hosted -- --ignored
+query_engine`), which verified: keyset browse-all paging; name substring;
+**back-face oracle text** (a phrase existing only on Ral, Leyline Prodigy — a
+transform back face — found via the generated column); combined card-scoped
+terms; printing-scoped comma-OR under one EXISTS; colorless + identity on
+Alpha artifacts; negation; and the 422 naming `pow>3`.
+
+- **Migration `0008` applied to dev:** the `oracle_search_text` generated
+  column (`jsonb_path_query_array` over `card_faces` — confirmed IMMUTABLE
+  live, so the generated column is legal) + trgm GINs on it and `type_line`.
+  Additive; prod rides the same `migrate.sh prod` as `0007` at merge.
+- **Bug caught by the live test, not the unit tests:** `card_faces IS NULL`
+  on single-face cards made the color-probe predicate evaluate to SQL NULL,
+  and `NOT (false OR NULL)` is NULL — so negated color terms silently dropped
+  every single-face row. Fixed with `coalesce(card_faces,'[]')`; a unit test
+  now locks the coalesce in place. (Positive terms had worked only because
+  NULL is falsy in WHERE.)
+- Grain note: the run-stat "2,665 cards" in catalog-ingestion counts *writes*
+  (including pre-first-seen-fix flips); the table holds **2,637 distinct
+  oracles**.
+- **Rail sync + URL serialization ship as contract, not code**: the query
+  string is the canonical state and the endpoint consumes it; the rail's
+  term↔widget mapping is implemented by the UI-phase catalog screen tasks
+  against this spec's contract.
 
 ## Decisions (this review)
 

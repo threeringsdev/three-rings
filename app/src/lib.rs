@@ -325,6 +325,12 @@ pub mod db;
 #[cfg(feature = "hosted")]
 pub mod ingest;
 
+/// Catalog search — the query grammar + its SQL emission
+/// (specs/catalog-search.md). Behind `hosted`: only the backend that owns
+/// the sqlx search query needs it.
+#[cfg(feature = "hosted")]
+pub mod search;
+
 #[cfg(feature = "ssr")]
 mod storage {
     #[cfg(feature = "spin")]

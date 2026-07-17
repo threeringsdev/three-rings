@@ -45,7 +45,7 @@ Task state legend: `[ ]` available · `[~]` in progress · `[x]` done.
 | [auth](auth.md) | implemented |
 | [card-tagging](card-tagging.md) | implemented |
 | [catalog-ingestion](catalog-ingestion.md) | accepted |
-| [catalog-search](catalog-search.md) | accepted |
+| [catalog-search](catalog-search.md) | implemented |
 | [collection-api](collection-api.md) | implemented |
 | [data-access-backends](data-access-backends.md) | implemented |
 | [data-model](data-model.md) | implemented |

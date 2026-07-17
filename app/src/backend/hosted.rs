@@ -228,30 +228,32 @@ impl CatalogStore for HostedBackend {
     }
 
     async fn search(&self, query: SearchQuery, page: Page) -> ApiResult<SearchResults> {
-        // Shell: fuzzy name match (trgm-indexed) until catalog-search owns the
-        // query grammar. Keyset by (name, oracle).
-        let needle = format!("%{}%", query.q.unwrap_or_default());
+        // The catalog-search query engine: parse the v1 grammar (a parse error
+        // is a 422 naming the offending term — never silently-wrong results),
+        // emit the WHERE clause, keyset by (name, oracle) — Scryfall's own
+        // default sort. Empty query = browse-all.
+        let terms = crate::search::parse::parse(query.q.as_deref().unwrap_or(""))
+            .map_err(|e| ApiError::Validation(e.to_string()))?;
         let cursor: Option<OracleCursor> = page.cursor.as_deref().map(decode_cursor).transpose()?;
         let limit = page.limit();
-        let base = "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, \
-                    (SELECT image_uris->>'normal' FROM printings \
-                     WHERE oracle_id = c.oracle_id LIMIT 1) AS image_uri \
-             FROM cards c WHERE c.name ILIKE $1";
-        let (keyset, order) = if cursor.is_some() {
-            (
-                " AND (c.name, c.oracle_id) > ($2, $3)",
-                " ORDER BY c.name, c.oracle_id LIMIT $4",
-            )
-        } else {
-            ("", " ORDER BY c.name, c.oracle_id LIMIT $2")
-        };
-        let sql = format!("{base}{keyset}{order}");
-        let mut q = sqlx::query_as::<_, SearchRowSql>(&sql).bind(&needle);
+        let mut qb: sqlx::QueryBuilder<'_, sqlx::Postgres> = sqlx::QueryBuilder::new(
+            "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, \
+             (SELECT image_uris->>'normal' FROM printings \
+              WHERE oracle_id = c.oracle_id LIMIT 1) AS image_uri \
+             FROM cards c WHERE true",
+        );
+        crate::search::sql::apply(&mut qb, &terms);
         if let Some(c) = &cursor {
-            q = q.bind(&c.name).bind(c.oracle_id);
+            qb.push(" AND (c.name, c.oracle_id) > (");
+            qb.push_bind(c.name.clone());
+            qb.push(", ");
+            qb.push_bind(c.oracle_id);
+            qb.push(")");
         }
-        let mut rows: Vec<SearchRowSql> = q
-            .bind(limit + 1)
+        qb.push(" ORDER BY c.name, c.oracle_id LIMIT ");
+        qb.push_bind(limit + 1);
+        let mut rows: Vec<SearchRowSql> = qb
+            .build_query_as()
             .fetch_all(self.pool)
             .await
             .map_err(upstream)?;
@@ -2220,4 +2222,111 @@ fn db_err(e: sqlx::Error) -> ApiError {
         }
     }
     upstream(e)
+}
+
+#[cfg(test)]
+mod search_live {
+    use super::*;
+
+    /// End-to-end checks of the catalog-search query engine against the live
+    /// dev-branch POC catalog (specs/catalog-search.md). Deliberately
+    /// #[ignore]d — needs `DATABASE_URL` (the app_runtime read credential):
+    ///
+    ///   DATABASE_URL=… cargo test -p app --features hosted -- --ignored
+    #[tokio::test]
+    #[ignore = "hits the live dev catalog (DATABASE_URL required)"]
+    async fn query_engine_against_dev_poc_data() {
+        let b = HostedBackend::anonymous().await.expect("pool");
+        let q = |s: &str| SearchQuery { q: Some(s.into()) };
+        let page = Page {
+            cursor: None,
+            limit: Some(10),
+        };
+        let search =
+            |query: SearchQuery, page: Page| async { CatalogStore::search(&b, query, page).await };
+
+        // browse-all pages by (name, oracle) with a live cursor
+        let p1 = search(SearchQuery::default(), page.clone()).await.unwrap();
+        assert_eq!(p1.cards.len(), 10);
+        let cur = p1.next_cursor.clone().expect("more than one page");
+        let p2 = search(
+            SearchQuery::default(),
+            Page {
+                cursor: Some(cur),
+                limit: Some(10),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            p2.cards[0].name >= p1.cards[9].name,
+            "page 2 continues past page 1"
+        );
+        assert_ne!(p1.cards[0].oracle_id, p2.cards[0].oracle_id);
+
+        // name substring
+        let r = search(q("lightning bolt"), page.clone()).await.unwrap();
+        assert!(
+            r.cards.iter().any(|c| c.name == "Lightning Bolt"),
+            "{:?}",
+            r.cards
+        );
+
+        // o: reaches BACK-face text through oracle_search_text (this phrase
+        // exists only on Ral, Leyline Prodigy — a transform back face)
+        let r = search(q("o:\"an additional loyalty counter\""), page.clone())
+            .await
+            .unwrap();
+        assert!(
+            r.cards
+                .iter()
+                .any(|c| c.name.starts_with("Ral, Monsoon Mage")),
+            "{:?}",
+            r.cards
+        );
+
+        // combined card-scoped terms
+        let r = search(q("t:instant c:r mv<=1"), page.clone())
+            .await
+            .unwrap();
+        assert!(
+            r.cards.iter().any(|c| c.name == "Lightning Bolt"),
+            "{:?}",
+            r.cards
+        );
+
+        // printing-scoped comma-OR + one-EXISTS semantics
+        let r = search(q("s:lea r:rare,mythic"), page.clone())
+            .await
+            .unwrap();
+        assert!(!r.cards.is_empty(), "Alpha rares exist in the subset");
+
+        // colorless + identity on artifacts
+        let r = search(q("c:colorless t:artifact s:lea"), page.clone())
+            .await
+            .unwrap();
+        assert!(!r.cards.is_empty(), "Alpha artifacts are colorless");
+
+        // negation excludes (a slice small enough to dodge the 200-row cap)
+        let big = Page {
+            cursor: None,
+            limit: Some(200),
+        };
+        let creatures = search(q("t:creature s:lea"), big.clone()).await.unwrap();
+        assert!(
+            !creatures.cards.is_empty() && creatures.cards.len() < 200,
+            "sanity: fits one page ({})",
+            creatures.cards.len()
+        );
+        let non_white = search(q("t:creature s:lea -c:w"), big).await.unwrap();
+        assert!(!non_white.cards.is_empty());
+        assert!(non_white.cards.len() < creatures.cards.len());
+
+        // unknown syntax is a 422 naming the term
+        let err = search(q("pow>3"), page.clone()).await.unwrap_err();
+        match err {
+            ApiError::Validation(msg) => assert!(msg.contains("pow>3"), "{msg}"),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
 }
