@@ -1,6 +1,6 @@
 # Catalog search
 
-**Status:** draft
+**Status:** accepted
 **Depends on:** [ui-design](ui-design.md), [data-model](data-model.md)
 
 The queryable field vocabulary and the base search indexes come from

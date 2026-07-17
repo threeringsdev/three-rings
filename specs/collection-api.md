@@ -95,7 +95,10 @@ cards, needs, shopping list). Collection reads are **not** assumed small: a
 serious collection can approach catalog scale (~100K rows), so it paginates like
 the catalog. Per-endpoint sort keys are fixed so the cursor is well-defined:
 
-- catalog `search` — relevance, then name;
+- catalog `search` — name, then oracle id *(corrected 2026-07-16 at
+  catalog-search acceptance: was "relevance, then name" — relevance ranking is
+  keyset-hostile and Scryfall's own default sort is name; relevance is
+  deferred to an `order:` extension, see [catalog-search](catalog-search.md))*;
 - collection view — name (or set), then id;
 - shopping list — shortfall desc, then name.
 
