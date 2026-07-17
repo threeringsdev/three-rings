@@ -1,0 +1,9 @@
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.set]
+ENABLE_LSP_TOOL = "1"
+
+[mcp_servers.render]
+url = "https://mcp.render.com/mcp"
+bearer_token_env_var = "RENDER_API_KEY"
