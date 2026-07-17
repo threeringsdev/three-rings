@@ -193,16 +193,21 @@ at this scale); no image pipeline this phase.
 
 ## Open questions
 
-- **Theme persistence model** — system preference only, explicit toggle only,
-  or system default + explicit override persisted (recommended)? Decides the
-  dark-palette task's wiring.
-- **Sonner engine** — vendor upstream's JS toast engine vs. a small native
-  Leptos toaster (recommended: native; upstream's own `_sonner_leptos_only_later/`
-  points that way, and undo-on-toast wants first-class Leptos state). Deviates
-  from the vendor-as-is convention, so called out here.
-- **POC catalog limitation** — accepted: quick-add disambiguation realism and
-  list performance can't be judged against ~3K printings; findings recorded as
-  deferred, revisited with the parked full ingest.
+None — all resolved at spec review (maintainer, 2026-07-17):
+
+- **Theme persistence** — **dark mode is the default**; an explicit toggle
+  override is persisted as a saved user preference. The dark-palette task wires
+  accordingly (default `dark` class on `<html>`, override stored and re-applied
+  SSR-safely).
+- **Sonner engine** — **small native Leptos toaster**, not upstream's vendored
+  JS engine (undo-on-toast wants first-class Leptos state; upstream's own
+  `_sonner_leptos_only_later/` points the same way). Accepted deviation from the
+  vendor-as-is convention.
+- **POC catalog** — **deferred, confirmed**. Quick-add disambiguation realism
+  and list performance are explicitly not goals of this phase; the phase's goal
+  is validating the infrastructure already built (API, ingestion, design system,
+  auth, search). Data-scale issues are addressed after the full ingest (parked
+  task + Later/parked note in TODO.md).
 
 ## Findings
 
