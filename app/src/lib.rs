@@ -318,6 +318,13 @@ pub mod backend;
 #[cfg(feature = "hosted")]
 pub mod db;
 
+/// Catalog ingestion — the Scryfall bulk pipeline (`server --ingest`,
+/// specs/catalog-ingestion.md). Behind `hosted` like `db`: it writes the
+/// catalog tables directly (as the `catalog_ingest` role), which only the
+/// hosted deployment ever does.
+#[cfg(feature = "hosted")]
+pub mod ingest;
+
 #[cfg(feature = "ssr")]
 mod storage {
     #[cfg(feature = "spin")]

@@ -31,6 +31,33 @@ async fn main() {
         }
     }
 
+    // Catalog ingestion step (specs/catalog-ingestion.md): `server --ingest
+    // <poc|bulk>` runs the Scryfall bulk pipeline as the least-privilege
+    // `catalog_ingest` role (INGEST_DATABASE_URL) and exits. Invoked via
+    // scripts/ingest.sh today; the stage-3 Render cron job reuses this same
+    // binary with the `update` mode when the incremental path lands.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|arg| arg == "--ingest") {
+        let mode = match args.get(i + 1).map(String::as_str) {
+            Some("poc") => app::ingest::Mode::Poc,
+            Some("bulk") => app::ingest::Mode::Bulk,
+            other => {
+                log!("usage: server --ingest <poc|bulk> (got {other:?})");
+                std::process::exit(2);
+            }
+        };
+        match app::ingest::run(mode).await {
+            Ok(stats) => {
+                log!("ingest succeeded: {stats:?}");
+                return;
+            }
+            Err(e) => {
+                log!("ingest FAILED: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let conf = get_configuration(None).unwrap();
     let addr = conf.leptos_options.site_addr;
     let leptos_options = conf.leptos_options;

@@ -43,6 +43,10 @@ log = "0.4.27"
 jsonwebtoken = "9"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 base64 = "0.22"
+# Catalog ingestion (specs/catalog-ingestion.md): stream Scryfall's gzipped-JSONL
+# bulk files line-by-line (flat memory) and hash extracted rows for change-gating.
+async-compression = { version = "0.4", default-features = false, features = ["tokio", "gzip"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 uuid = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
