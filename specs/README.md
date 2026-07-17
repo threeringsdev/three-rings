@@ -41,7 +41,7 @@ Task state legend: `[ ]` available · `[~]` in progress · `[x]` done.
 
 | Spec | Status |
 |---|---|
-| [app-ui](app-ui.md) | draft |
+| [app-ui](app-ui.md) | accepted |
 | [architecture-spike](architecture-spike.md) | implemented |
 | [auth](auth.md) | implemented |
 | [card-tagging](card-tagging.md) | implemented |
@@ -55,4 +55,4 @@ Task state legend: `[ ]` available · `[~]` in progress · `[x]` done.
 | [ui-component-bench](ui-component-bench.md) | implemented |
 | [ui-components](ui-components.md) | implemented |
 | [ui-design](ui-design.md) | implemented |
-| [ui-work-loop](ui-work-loop.md) | draft |
+| [ui-work-loop](ui-work-loop.md) | accepted |

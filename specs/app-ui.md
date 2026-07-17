@@ -1,6 +1,6 @@
 # App UI — the real pages
 
-**Status:** draft
+**Status:** accepted
 **Depends on:** [ui-design](ui-design.md), [ui-components](ui-components.md), [ui-component-bench](ui-component-bench.md), [collection-api](collection-api.md), [catalog-search](catalog-search.md), [auth](auth.md), [ui-work-loop](ui-work-loop.md)
 
 ## Problem

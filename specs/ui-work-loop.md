@@ -1,6 +1,6 @@
 # UI work loop — the per-task agent loop for Phase 5
 
-**Status:** draft
+**Status:** accepted
 **Depends on:** [app-ui](app-ui.md), [delivery-pipeline](delivery-pipeline.md)
 
 ## Problem
