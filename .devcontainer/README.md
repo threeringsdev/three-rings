@@ -140,6 +140,19 @@ docker run --rm -it -v "$PWD":/workspaces/three-rings -w /workspaces/three-rings
 
 ## Rebuild / push the image
 ```bash
-.devcontainer/build.sh          # build + tag dgoings/three-rings:latest
-.devcontainer/build.sh --push   # also push to Docker Hub (after `docker login`)
+.devcontainer/build.sh              # build + tag dgoings/three-rings:latest (this host's arch)
+.devcontainer/build.sh --push       # also push to Docker Hub (after `docker login`)
+.devcontainer/build.sh --multiarch  # build linux/amd64 + linux/arm64 and push
 ```
+
+`--multiarch` exists for hosts that aren't your Mac — a cloud devcontainer or any
+amd64 machine can't run an arm64-only image. It **always pushes**: a multi-platform
+build produces a manifest list, which the local Docker image store can't hold, so
+buildx can only export it to a registry. (Plain `--push` stays single-arch, and
+still lands in the local daemon for `devcontainer.json` to pick up.)
+
+The first `--multiarch` run creates a `three-rings-builder` buildx builder
+(`docker-container` driver — the default `docker` driver can't do multi-platform)
+and reuses it thereafter. The non-native half builds under QEMU emulation, so
+expect it to be noticeably slower than a native build. Override the target list
+with `PLATFORMS=...` or the tag with `IMAGE=...`; `--help` lists both.
