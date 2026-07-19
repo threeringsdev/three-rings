@@ -196,3 +196,30 @@ Operational constraints for the skills (to be baked into `e2e-suite` /
 
 Probe layer: `end2end/android-cdp-check.mjs` (attach + page inventory +
 evaluate) joins the `.mjs` probes.
+
+### Work-loop skills + permissions (2026-07-19)
+
+The three skills landed shaped by the spike's path-1 outcome:
+
+- `ui-task-loop` — the six-step loop with the matrix baked in (web + Android
+  webview e2e every task; full three-browser tier at stage boundaries; one
+  Android **release** smoke at phase end, riding the polish task). Codex
+  command names verified against the installed plugin
+  (`/codex:adversarial-review [--wait|--background] [--base] [--scope] [focus]`,
+  `/codex:status`, `/codex:result`).
+- `e2e-suite` — login-fixture trap (verification ON → never sign up in a
+  test; storageState off the real `/login` form), tier tags, webkit-as-
+  WKWebView rationale, Android single-worker/shared-page constraints.
+- `android-smoke` — emulator boot, dev CDP attach recipe, and
+  `scripts/smoke-android.sh` for the phase-end release smoke (debug builds
+  skip embedded Axum entirely — only release proves that path).
+
+All mirrored into `.agents/skills/` (byte-identical copies — the established
+mirror mechanism). Permission allowlist added to `.claude/settings.json`
+exactly as specced. **Maintainer attention: that settings diff ships in this
+PR** — revert the `permissions.allow` block if any entry is unwanted.
+
+Drive-by fix, same commit: the `validate` skill's clippy lines had drifted
+from validate.yml (missing the dedicated `--features native` backend line;
+bench line still said `ssr` where the gate uses `hosted`) — realigned, and
+the report template gained the native-backend row.
