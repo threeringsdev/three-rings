@@ -46,6 +46,20 @@ Screen legend: DCol/DCat/DSig = desktop collection/catalog/sign-in · OvHP = hov
 
 Feature-side composites (not registry gaps, live with their features per ui-components scope): card row + three-counts columns (on `table` parts, already vendored), card tile + results grid (`card`/`aspect_ratio`/`image`), hover-preview and card-sheet content, drill-down screens.
 
+**V1 adoption notes (2026-07-19, vendored from the 43e1e32 pin):** button,
+badge, input, input_group, kbd, separator, checkbox, label, toggle_group,
+breadcrumb, skeleton, and card are in `app/src/components/ui/`. Batch-wide
+deviations (full list per file header): `variants!` hand-expanded to enums +
+match (no `leptos_ui`/`paste`); button `Warning`/`Success`/`Bordered` and
+badge `Success`/`Warning`/`Info` variants dropped — they reference tokens
+`style/input.css` doesn't define, so Tailwind would silently emit no CSS
+(re-add variant + token together); icons inlined (Lucide paths) instead of
+the registry icons crate; label's runtime-named peer classes replaced with
+the static `peer-disabled:` pair (Tailwind can't generate CSS for
+runtime-built class names — upstream bug for any Tailwind build);
+`InputGroupTextarea` dropped with textarea unvendored; input's `strum` enum
+hand-written.
+
 ## Gaps
 
 **Collection tree.** The registry has no tree view. Ours needs: arbitrary nesting with per-node collapse, drag to reparent AND reorder, pinned system rows (All cards, Inbox, shopping list), selection state, per-node rolled-up count badges, and context-menu tree management. Nearest parts to build on: `collapsible` (per-node expand), `button`/`item` (row chrome), `badge` (counts), `context_menu` (management), and the registry's `drag_and_drop` primitive — worth evaluating as the drag layer before reaching for a custom one, same maturity caveat as everything else. The tree is the app's central navigation surface; expect it to be the largest custom component.
