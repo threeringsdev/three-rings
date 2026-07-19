@@ -3,6 +3,17 @@
   "env": {
     "ENABLE_LSP_TOOL": "1"
   },
+  "permissions": {
+    "allow": [
+      "Bash(cargo leptos *)",
+      "Bash(cargo tauri *)",
+      "Bash(cargo test *)",
+      "Bash(adb *)",
+      "Bash(emulator *)",
+      "Bash(npx playwright *)",
+      "Bash(node end2end/*)"
+    ]
+  },
   "enableAllProjectMcpServers": true,
   "hooks": {
     "SessionStart": [

@@ -34,7 +34,8 @@ mkdir -p target/site/pkg
 cargo fmt --all -- --check
 cargo clippy --workspace --exclude frontend --all-targets -- -D warnings   # add --exclude three_rings in-container
 cargo clippy -p frontend --target wasm32-unknown-unknown -- -D warnings
-cargo clippy -p app --features ssr,component-bench --all-targets -- -D warnings
+cargo clippy -p app --features native --all-targets -- -D warnings         # native backend: masked by hosted in the workspace line
+cargo clippy -p app --features hosted,component-bench --all-targets -- -D warnings
 cargo clippy -p app --features hydrate,component-bench --target wasm32-unknown-unknown -- -D warnings
 cargo test --workspace --exclude frontend                                  # add --exclude three_rings in-container
 cargo leptos build --release
@@ -63,7 +64,8 @@ End with a per-step verdict the user can trust at a glance:
 fmt                       pass
 clippy native workspace   pass
 clippy frontend wasm      pass
-clippy bench (ssr)        pass
+clippy native backend     pass
+clippy bench (hosted)     pass
 clippy bench (wasm)       pass
 test workspace            pass
 leptos release build      pass
