@@ -10,9 +10,16 @@ use leptos_router::{
 use web_sys::window;
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
+    // Dark is the default theme (specs/app-ui.md, maintainer 2026-07-17); an
+    // explicit toggle override is persisted in the `tr_theme` cookie and
+    // re-applied here on every server render, so the class is right before
+    // any wasm runs (no flash, no hydration mismatch). The <html> attributes
+    // are outside the hydrated root, so the client toggle owns them after
+    // hydration (components/ui/theme_toggle.rs).
+    let dark = initial_theme_is_dark();
     view! {
         <!DOCTYPE html>
-        <html lang="en">
+        <html lang="en" class=if dark { "dark" } else { "" }>
             <head>
                 <meta charset="utf-8" />
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -25,6 +32,12 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
             </body>
         </html>
     }
+}
+
+/// The `tr_theme` cookie override, else the dark default — shared with the
+/// toggle so the shell and the component can never disagree.
+fn initial_theme_is_dark() -> bool {
+    components::ui::theme_toggle::cookie_theme_is_dark()
 }
 
 #[component]
@@ -161,27 +174,27 @@ fn HomePage() -> impl IntoView {
     };
 
     view! {
-        <div class="min-h-screen bg-[#1a2332] flex items-center justify-center p-4">
-            <div class="bg-[#263343] rounded-xl shadow-2xl p-8 md:p-12 max-w-md w-full border border-[#3a4a5c]">
+        <div class="min-h-screen bg-background flex items-center justify-center p-4">
+            <div class="bg-card text-card-foreground rounded-xl shadow-2xl p-8 md:p-12 max-w-md w-full border">
                 <div class="text-center space-y-8">
                     // Header
                     <div class="space-y-2">
                         <div class="flex items-center justify-center gap-3 mb-4">
                             // Fermyon-style logo placeholder
-                            <div class="w-10 h-10 bg-[#00d4aa] rounded-lg flex items-center justify-center">
-                                <span class="text-[#1a2332] font-bold text-xl">C</span>
+                            <div class="w-10 h-10 bg-primary rounded-lg flex items-center justify-center">
+                                <span class="text-primary-foreground font-bold text-xl">C</span>
                             </div>
-                            <h1 class="text-3xl md:text-4xl font-medium text-white">
+                            <h1 class="text-3xl md:text-4xl font-medium">
                                 "Three Rings"
                             </h1>
                         </div>
-                        <p class="text-[#8b9cb8] text-sm">"Powered by Leptos + WASM"</p>
+                        <p class="text-muted-foreground text-sm">"Powered by Leptos + WASM"</p>
                     </div>
 
                     // Counter Display
                     <div class="relative">
-                        <div class="bg-[#1a2332] rounded-lg p-8 border border-[#3a4a5c]">
-                            <div class="text-5xl md:text-6xl font-light text-white tabular-nums">
+                        <div class="bg-background rounded-lg p-8 border">
+                            <div class="text-5xl md:text-6xl font-light tabular-nums">
                                 {move || {
                                     optimistic_count
                                         .get()
@@ -189,15 +202,15 @@ fn HomePage() -> impl IntoView {
                                         .unwrap_or_else(|| "...".to_string())
                                 }}
                             </div>
-                            <div class="text-[#8b9cb8] text-sm mt-2 uppercase tracking-wider">
+                            <div class="text-muted-foreground text-sm mt-2 uppercase tracking-wider">
                                 "Count Value"
                             </div>
                         </div>
 
                         // Loading indicator overlay
                         <Show when=move || increment_action.pending().get()>
-                            <div class="absolute inset-0 flex items-center justify-center bg-[#1a2332]/50 rounded-lg">
-                                <div class="animate-spin rounded-full h-8 w-8 border-2 border-transparent border-t-[#00d4aa]"></div>
+                            <div class="absolute inset-0 flex items-center justify-center bg-background/50 rounded-lg">
+                                <div class="animate-spin rounded-full h-8 w-8 border-2 border-transparent border-t-primary"></div>
                             </div>
                         </Show>
                     </div>
@@ -206,7 +219,7 @@ fn HomePage() -> impl IntoView {
                     <button
                         on:click=on_click
                         disabled=move || increment_action.pending().get()
-                        class="w-full rounded-lg bg-[#00d4aa] px-6 py-3 text-[#1a2332] font-medium transition-all duration-200 hover:bg-[#00b894] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#00d4aa]"
+                        class="w-full rounded-lg bg-primary px-6 py-3 text-primary-foreground font-medium transition-all duration-200 hover:bg-primary/90 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-primary"
                     >
                         {move || {
                             if increment_action.pending().get() {
@@ -223,12 +236,12 @@ fn HomePage() -> impl IntoView {
                             if optimistic_count.get().is_none() {
                                 "w-2 h-2 rounded-full bg-yellow-500 animate-pulse"
                             } else if increment_action.pending().get() {
-                                "w-2 h-2 rounded-full bg-[#00d4aa] animate-pulse"
+                                "w-2 h-2 rounded-full bg-primary animate-pulse"
                             } else {
-                                "w-2 h-2 rounded-full bg-[#00d4aa]"
+                                "w-2 h-2 rounded-full bg-primary"
                             }
                         }></div>
-                        <span class="text-[#8b9cb8] uppercase tracking-wider">
+                        <span class="text-muted-foreground uppercase tracking-wider">
                             {move || {
                                 if optimistic_count.get().is_none() {
                                     "Loading"
@@ -242,9 +255,16 @@ fn HomePage() -> impl IntoView {
                     </div>
 
                     // Footer info
-                    <div class="pt-4 border-t border-[#3a4a5c] space-y-1">
-                        <p class="text-[#8b9cb8] text-xs">"Running in Tauri WebView"</p>
-                        <a class="text-[#8b9cb8] text-xs underline" href="/cards">
+                    <div class="pt-4 border-t space-y-1">
+                        // Interim toggle mount so the persisted override is
+                        // reachable in production before the app shell lands
+                        // (the shell task owns the permanent placement and
+                        // deletes this page).
+                        <div class="flex justify-center">
+                            <components::ui::theme_toggle::ThemeToggle />
+                        </div>
+                        <p class="text-muted-foreground text-xs">"Running in Tauri WebView"</p>
+                        <a class="text-muted-foreground text-xs underline" href="/cards">
                             "View the catalog →"
                         </a>
                         <auth_pages::AuthStatus />
