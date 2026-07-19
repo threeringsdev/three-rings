@@ -221,7 +221,7 @@ fn ModeSwitch(my_mode: Memo<bool>) -> impl IntoView {
 }
 
 /// Desktop sidebar rail — frame only. Catalog mode gets the filter rail with
-/// the `/catalog` task; My cards mode gets the collection tree with its task.
+/// the filter-rail task; My cards mode gets the collection tree with its task.
 #[component]
 fn SidebarRail(my_mode: Memo<bool>) -> impl IntoView {
     view! {
@@ -370,46 +370,6 @@ fn UserMenu() -> impl IntoView {
 }
 
 // ---- Route skeletons — each replaced by its own Stage 2/3 task. ----
-
-/// `/catalog` — carries the seam-proving anonymous `catalog_count` read
-/// (folded in from the old `/cards` placeholder); the search bar, grid, and
-/// rail content land with the `/catalog` task.
-#[component]
-pub fn CatalogPage() -> impl IntoView {
-    let count = Resource::new(|| (), |_| crate::catalog_count());
-    view! {
-        <div class="space-y-6 p-6">
-            <h1 class="text-2xl font-bold">"Catalog"</h1>
-            <Suspense fallback=|| {
-                view! { <p class="text-muted-foreground text-sm">"Loading catalog…"</p> }
-            }>
-                {move || Suspend::new(async move {
-                    match count.await {
-                        Ok(count) => {
-                            view! {
-                                <p class="text-muted-foreground text-sm">
-                                    {format!("{} cards in the catalog.", count.cards)}
-                                </p>
-                            }
-                                .into_any()
-                        }
-                        Err(e) => {
-                            view! {
-                                <p class="text-muted-foreground text-sm">
-                                    {format!("Failed to load catalog: {e}")}
-                                </p>
-                            }
-                                .into_any()
-                        }
-                    }
-                })}
-            </Suspense>
-            <div class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-                {(0..8).map(|_| view! { <Skeleton class="aspect-[5/7] w-full" /> }).collect_view()}
-            </div>
-        </div>
-    }
-}
 
 /// `/cards/:id` — full detail (printings, rulings, your-copies) lands with
 /// the card-detail task.

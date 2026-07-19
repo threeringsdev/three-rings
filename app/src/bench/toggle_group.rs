@@ -9,10 +9,15 @@ pub fn demo() -> AnyView {
 
     view! {
         <div class="space-y-3">
+            // `tabindex` drives roving focus: the group is one tab stop, and
+            // the selected item is the one that stops there. The arrow-key
+            // handling that moves the selection is feature-side — catalog.rs's
+            // ViewSwitch is the reference wiring.
             <ToggleGroup variant=ToggleGroupVariant::Outline spacing=0>
                 <ToggleGroupItem
                     title="Grid view"
                     pressed=Signal::derive(move || mode.get() == "grid")
+                    tabindex=Signal::derive(move || if mode.get() == "grid" { 0 } else { -1 })
                     {..}
                     on:click=move |_| set_mode.set("grid")
                 >
@@ -21,6 +26,7 @@ pub fn demo() -> AnyView {
                 <ToggleGroupItem
                     title="List view"
                     pressed=Signal::derive(move || mode.get() == "list")
+                    tabindex=Signal::derive(move || if mode.get() == "list" { 0 } else { -1 })
                     {..}
                     on:click=move |_| set_mode.set("list")
                 >

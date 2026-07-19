@@ -81,6 +81,10 @@ pub fn ToggleGroupItem(
     #[prop(optional, into)] class: String,
     #[prop(into)] title: String,
     #[prop(optional, into)] pressed: Signal<bool>,
+    /// Roving-focus tab stop. A `radiogroup` is one tab stop: the selected item
+    /// carries `0`, the rest `-1` (the upstream default, kept when unset).
+    #[prop(into, default = Signal::from(-1))]
+    tabindex: Signal<i32>,
 ) -> impl IntoView {
     let ctx = use_context::<ToggleGroupCtx>().unwrap_or_default();
 
@@ -117,16 +121,17 @@ pub fn ToggleGroupItem(
     );
 
     view! {
-        // Deviation from upstream: aria-checked added (upstream ships
-        // role="radio" with no checked state exposed). Roving focus /
-        // keyboard selection is feature-side behavior — it lands with the
-        // catalog view-switch wiring, not the vendored markup.
+        // Deviations from upstream: `aria-checked` added (upstream ships
+        // role="radio" with no checked state exposed), and `tabindex` opened
+        // as a prop so callers can drive roving focus. The arrow-key handling
+        // itself stays feature-side (the group owns which item is selected) —
+        // see catalog.rs's view switch for the reference wiring.
         <button
             type="button"
             data-name="ToggleGroupItem"
             class=merged_class
             role="radio"
-            tabindex="-1"
+            tabindex=move || tabindex.get()
             title=title
             data-state=move || if pressed.get() { "on" } else { "off" }
             aria-checked=move || pressed.get().to_string()

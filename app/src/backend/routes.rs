@@ -94,7 +94,11 @@ async fn catalog_count() -> Response {
 /// Catalog endpoints read the session **opportunistically**: a valid JWT (bearer
 /// or cookie) yields the ownership block / owned counts, otherwise the anonymous
 /// public data. An absent/invalid token simply degrades to anonymous.
-async fn catalog_backend(headers: &http::HeaderMap) -> ApiResult<HostedBackend> {
+///
+/// `pub(crate)` because the web UI's catalog server fns want the same rule and
+/// must not re-derive it — the two callers disagreeing about when a catalog read
+/// is session-scoped is exactly the drift this seam exists to prevent.
+pub(crate) async fn catalog_backend(headers: &http::HeaderMap) -> ApiResult<HostedBackend> {
     match crate::auth::user_id_from_headers(headers).await {
         Ok(user_id) => HostedBackend::for_user(user_id).await,
         Err(_) => HostedBackend::anonymous().await,

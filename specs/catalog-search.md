@@ -212,8 +212,13 @@ Alpha artifacts; negation; and the 422 naming `pow>3`.
 - ~~Server-side: SQL against the ingested catalog, or a Scryfall proxy?~~
   **Resolved by collection-api (accepted 2026-07-14): SQL against our
   catalog.**
-- Debounce/latency budget for live results — proposed 250 ms + stale-discard;
-  exact numbers tuned against the real UI. *(resolved during execution — the
-  UI-phase search task)*
+- ~~Debounce/latency budget for live results~~ — **closed at 250 ms** by the
+  `/catalog` task (2026-07-19), as proposed. The number turned out to be the
+  comfort/request-volume knob only: the "no stale results ever render over
+  newer input" guarantee is provided by Leptos's `Resource` regardless of the
+  delay (reactive_graph's `ArcAsyncDerived` stamps each run with a monotonic
+  version and drops a resolved future whose version is no longer latest), so
+  tuning the delay cannot break correctness. Caveat recorded there: overtaken
+  requests are discarded on arrival, not aborted in flight.
 - Whether `colors`/`card_faces` need their own GIN indexes at full catalog
   scale. *(resolved during execution — profile after the stage-2 full load)*
