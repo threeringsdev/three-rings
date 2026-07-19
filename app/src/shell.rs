@@ -19,9 +19,7 @@ use crate::components::ui::theme_toggle::ThemeToggle;
 /// the `/my/*` guard, and the user menu — one `fetch_current_user` per load,
 /// never one per consumer.
 #[derive(Clone, Copy)]
-pub struct CurrentUserResource(
-    pub Resource<Result<Option<CurrentUser>, ServerFnError<String>>>,
-);
+pub struct CurrentUserResource(pub Resource<Result<Option<CurrentUser>, ServerFnError<String>>>);
 
 pub fn provide_current_user() {
     provide_context(CurrentUserResource(Resource::new(

@@ -11,7 +11,7 @@ test("catalog SSRs rendered markup @fast", async ({ request }) => {
   // proving SSR rather than client-side rendering into an empty shell.
   const res = await request.get("/catalog");
   expect(res.status()).toBe(200);
-  expect(await res.text()).toMatch(/<h1[^>]*>Catalog/);
+  expect(await res.text()).toMatch(/<h1[^>]*>Catalog<\/h1>/);
 });
 
 test("anonymous / is a server-side redirect to /catalog @fast", async ({
@@ -49,6 +49,10 @@ test("anonymous SPA nav to My cards bounces once to login @fast", async ({
       url.pathname === "/login" && url.searchParams.get("next") === "/my",
   );
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+  // Stability: the URL must not compound after settling (the regression
+  // produced next=/login%3Fnext%3D… a beat later).
+  await page.waitForTimeout(300);
+  expect(new URL(page.url()).searchParams.get("next")).toBe("/my");
 });
 
 test("login honors next after sign-in @fast", async ({ page }) => {
@@ -83,9 +87,17 @@ test.describe("authed", () => {
   }) => {
     await page.goto("/my");
     const modeSwitch = page.getByRole("navigation", { name: "Mode" });
+    await expect(modeSwitch.getByText("My cards")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
     await modeSwitch.getByText("Catalog").click();
     await page.waitForURL("/catalog");
     await expect(page.locator("h1")).toHaveText("Catalog");
+    await expect(modeSwitch.getByText("Catalog")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
     await modeSwitch.getByText("My cards").click();
     await page.waitForURL("/my");
     await expect(page.locator("h1")).toHaveText("All cards");
@@ -109,6 +121,8 @@ test.describe("authed", () => {
   test("user menu shows the signed-in account @fast", async ({ page }) => {
     await page.goto("/catalog");
     await page.getByRole("button", { name: "Account menu" }).click();
-    await expect(page.getByText(/Signed in as/)).toBeVisible();
+    await expect(
+      page.getByText(`Signed in as ${process.env.E2E_EMAIL}`),
+    ).toBeVisible();
   });
 });

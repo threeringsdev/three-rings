@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { expect, test as setup } from "@playwright/test";
 import { AUTH_STATE } from "./helpers";
 
@@ -27,4 +29,10 @@ setup("authenticate as the e2e user @fast", async ({ page }) => {
     timeout: 10000,
   });
   await page.context().storageState({ path: AUTH_STATE });
+  // The fixture's whole point is capturing the httpOnly session cookies —
+  // fail loudly here rather than mysteriously in every authed test.
+  const { cookies } = JSON.parse(readFileSync(AUTH_STATE, "utf8"));
+  const names = cookies.map((c: { name: string }) => c.name);
+  expect(names).toContain("tr_session");
+  expect(names).toContain("tr_jwt");
 });

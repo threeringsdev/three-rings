@@ -253,6 +253,17 @@ into `/catalog` (keeps the seam-proving `catalog_count` read).
   correctly via the `/` redirect, just not on the guarded page; 6 explicit
   clean confirmations (route map, mode-switch/tabs breakpoints, counter
   deletion, stale-resource paths, hydration-safety conventions).
+- **Codex e2e mutation pass**: 5 assertion strengthenings applied (exact
+  `<h1>Catalog</h1>` SSR regex, post-settle `?next` stability re-assert on
+  the SPA-bounce test, `aria-current` asserts on the mode switch, exact
+  email in the user-menu assert, cookie-presence check on the saved
+  storageState). All 10 tests then demonstrated kills in three transient
+  mutation rounds: A (catalog h1, guard next-path) killed the SSR, guard
+  and SPA-bounce tests; B (root-redirect target, mode-switch link,
+  login-redirect hardcode, bottom-tab link) killed the 302, mode-switch,
+  next-honoring and tabs tests; C (authed target, user-menu text, post-auth
+  default) fails the login fixture itself, blocking the suite — no
+  decorative tests. All mutations reverted; suite green after.
 - **Android dev-proxy strips POST bodies and Cookie headers** (verified
   directly: argless server-fn POST → 200, form POST arrives with empty body →
   "missing field email", valid injected session cookies → `/api/me` 401).

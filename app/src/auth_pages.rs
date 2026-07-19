@@ -48,9 +48,7 @@ fn redirect_browser(url: &str) {
 fn post_auth_destination(query: &leptos_router::params::ParamsMap) -> String {
     match query.get("next") {
         Some(next)
-            if next.starts_with('/')
-                && !next.starts_with("//")
-                && !next.starts_with("/\\") =>
+            if next.starts_with('/') && !next.starts_with("//") && !next.starts_with("/\\") =>
         {
             next
         }
