@@ -16,6 +16,14 @@ component-bench` server (repo root; reads `.env` → Neon **dev** branch).
 Check `lsof -i :3000` before starting another; the bind happens *after* the
 first build, so a fresh start takes minutes. Never point tests at prod.
 
+**Release-build clobber trap:** the validate gate's `cargo leptos build
+--release` overwrites `target/site/pkg` while the debug watch server keeps
+serving — debug SSR HTML + release wasm = a tachys "unreachable" hydration
+panic on every page, and forms silently fall back to native POSTs (302s).
+Touching a source file does NOT reliably restore the frontend half
+(observed: server rebuilt, stale wasm still served). **Restart the watch
+after any release build** before trusting any browser-driven result.
+
 ## The auth fixture trap (the one that hangs)
 
 Email verification is **ON** (`require_email_verification`, OTP method): a

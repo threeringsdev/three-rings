@@ -21,12 +21,15 @@ one Android release smoke at phase end** (the polish task).
    `cargo leptos watch --features component-bench` alive in the background
    (repo root; it binds :3000 after the first build — check `lsof -i :3000`
    before assuming it's down).
-2. **Codex adversarial review** — `/codex:adversarial-review --background`
-   with the task's acceptance criteria as focus. Poll `/codex:status`, read
-   `/codex:result`. **Verify every finding before acting** — never
-   blind-apply; record disputed findings + rationale in app-ui Findings.
-   Heavy mechanical fixes may go to the `codex-rescue` agent. Repeat until
-   clean or all-disputed.
+2. **Codex adversarial review** — the review slash commands
+   (`/codex:adversarial-review`, `/codex:status`, `/codex:result`) are
+   **human-only** (`disable-model-invocation: true`); in an autonomous run,
+   launch the `codex-rescue` agent instead with a review-only prompt: the
+   task's acceptance criteria as focus, "return numbered findings
+   (file:line, what breaks, severity), no fixes applied". **Verify every
+   finding before acting** — never blind-apply; record disputed findings +
+   rationale in app-ui Findings. Heavy mechanical fixes may go to a second
+   `codex-rescue` dispatch. Repeat until clean or all-disputed.
 3. **Platform verification** — web: `node end2end/hydration-check.mjs` + a
    page-specific SSR curl against :3000 (view-source markup present).
    Android: the **android-smoke** skill's dev-attach recipe →
