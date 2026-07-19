@@ -213,3 +213,39 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
+
+### Dev seed data (2026-07-19)
+
+`app/src/seed.rs` (hosted-only) + the `server --seed-dev <uuid>` CLI arm
+(mirroring `--ingest`) + `scripts/seed-dev-data.sh` (resolves the e2e user's
+uuid owner-side, then runs the seed as `app_runtime`). Decisions:
+
+- **Real methods only** — every write goes through `CollectionStore` /
+  `CatalogStore` (search → card_detail → first printing), so the seed
+  exercises the same paths the `/my/*` screens read back, including the lazy
+  Inbox provision, RLS under `scoped_tx`, and intake `moves` rows.
+- **Shape**: Inbox (4 arrivals) · Trade Binder (6 cards, one foil playset) ·
+  Shoebox ▸ Rares (nested) · "Commander Deck" (format=commander; commander
+  system-tagged; 7 mainboard + 1 sideboard; 2 wants held in Trade Binder →
+  the owned-elsewhere needs bucket, 2 wants held nowhere → short/shopping) ·
+  1 explicit move (Trade→Shoebox) for undo/pull history.
+- **Idempotency = sentinel** ("Trade Binder" exists → no-op). Chosen over
+  delete-and-rebuild: re-seeding from scratch is `end2end/seed-e2e-user.sh`
+  with a fresh `.env` (recreates the user; collections cascade). Verified:
+  first run wrote {4 collections, 20 holdings, 4 desires, 1 move}; re-run
+  no-oped; dev-branch SQL shows 5 collections / 29 copies / 4 desires /
+  21 moves / 1 commander tag.
+- Seed queries fail loudly (`found x/n — is the POC catalog ingested?`)
+  rather than building a partial tree.
+- **Codex review** (7 findings): partial-tree-behind-sentinel + non-atomicity
+  → **fixed** with cleanup-on-error (created roots deleted best-effort; a
+  wrapping tx is impossible through the store methods, deliberately);
+  `--seed-dev` shipping in the release binary (unlike `--ingest`, no
+  dedicated credential) → **fixed** with `#[cfg(debug_assertions)]` — release
+  binaries don't carry the arm at all; owner-credential SQL interpolation +
+  PG env inheritance in the scripts → **fixed** (psql `:'email'` variable via
+  stdin — note `-c` never interpolates variables — and per-invocation PG*
+  env), same hardening retrofitted to `seed-e2e-user.sh`; name-based
+  sentinel spoofable → **disputed**: the e2e account is purpose-built and
+  script-owned by contract. All fixes re-verified live (idempotent no-op
+  path + fresh-user path).
