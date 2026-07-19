@@ -12,18 +12,18 @@ use crate::account::{
 };
 
 const CARD: &str =
-    "bg-[#263343] rounded-xl shadow-2xl p-8 max-w-md w-full border border-[#3a4a5c] space-y-6";
-const SCREEN: &str = "min-h-screen bg-[#1a2332] flex items-center justify-center p-4";
-const INPUT: &str = "w-full rounded-lg bg-[#1a2332] border border-[#3a4a5c] px-4 py-3 text-white \
-                     placeholder-[#8b9cb8] focus:outline-none focus:border-[#00d4aa]";
-const BUTTON: &str = "w-full rounded-lg bg-[#00d4aa] px-6 py-3 text-[#1a2332] font-medium \
-                      transition-all duration-200 hover:bg-[#00b894] active:scale-[0.98] \
+    "bg-card text-card-foreground rounded-xl shadow-2xl p-8 max-w-md w-full border space-y-6";
+const SCREEN: &str = "min-h-screen bg-background flex items-center justify-center p-4";
+const INPUT: &str = "w-full rounded-lg bg-background border border-input px-4 py-3 \
+                     placeholder-muted-foreground focus:outline-none focus:border-ring";
+const BUTTON: &str = "w-full rounded-lg bg-primary px-6 py-3 text-primary-foreground font-medium \
+                      transition-all duration-200 hover:bg-primary/90 active:scale-[0.98] \
                       disabled:opacity-50 disabled:cursor-not-allowed";
-const BUTTON_GHOST: &str = "w-full rounded-lg border border-[#3a4a5c] px-6 py-3 text-white \
-                            font-medium transition-all duration-200 hover:border-[#00d4aa] \
+const BUTTON_GHOST: &str = "w-full rounded-lg border px-6 py-3 \
+                            font-medium transition-all duration-200 hover:border-ring \
                             disabled:opacity-50";
-const ERROR_TEXT: &str = "text-sm text-red-400";
-const MUTED_TEXT: &str = "text-[#8b9cb8] text-sm";
+const ERROR_TEXT: &str = "text-sm text-destructive";
+const MUTED_TEXT: &str = "text-muted-foreground text-sm";
 
 /// Navigate the browser itself (full page load) — used to hand the window to
 /// the Google flow, which leaves our origin.
@@ -261,7 +261,7 @@ pub fn LoginPage() -> impl IntoView {
                     fallback=move || view! { <ResetCard set_reset_mode=set_reset_mode /> }
                 >
                     <div class=CARD>
-                        <h1 class="text-2xl font-medium text-white">"Sign in"</h1>
+                        <h1 class="text-2xl font-medium">"Sign in"</h1>
                         <ActionForm action=sign_in attr:class="space-y-4">
                             <input
                                 class=INPUT
@@ -303,7 +303,7 @@ pub fn LoginPage() -> impl IntoView {
                         </p>
                         <p class=MUTED_TEXT>
                             "No account? "
-                            <a class="underline text-white" href="/signup">"Sign up"</a>
+                            <a class="underline" href="/signup">"Sign up"</a>
                         </p>
                         <BackHome />
                     </div>
@@ -341,7 +341,7 @@ pub fn SignupPage() -> impl IntoView {
                 }
             >
                 <div class=CARD>
-                    <h1 class="text-2xl font-medium text-white">"Create account"</h1>
+                    <h1 class="text-2xl font-medium">"Create account"</h1>
                     <ActionForm action=sign_up attr:class="space-y-4">
                         <input class=INPUT type="text" name="name" placeholder="Name" required />
                         <input
@@ -371,7 +371,7 @@ pub fn SignupPage() -> impl IntoView {
                     </Show>
                     <p class=MUTED_TEXT>
                         "Already have an account? "
-                        <a class="underline text-white" href="/login">"Sign in"</a>
+                        <a class="underline" href="/login">"Sign in"</a>
                     </p>
                     <BackHome />
                 </div>
@@ -420,7 +420,7 @@ fn ResetCard(set_reset_mode: WriteSignal<bool>) -> impl IntoView {
 
     view! {
         <div class=CARD>
-            <h1 class="text-2xl font-medium text-white">"Reset password"</h1>
+            <h1 class="text-2xl font-medium">"Reset password"</h1>
             <Show
                 when=move || sent_to.get().is_none()
                 fallback=move || {
@@ -431,7 +431,7 @@ fn ResetCard(set_reset_mode: WriteSignal<bool>) -> impl IntoView {
                     view! {
                         <p class=MUTED_TEXT>
                             "We sent a reset code to "
-                            <span class="text-white">{email_display}</span>
+                            <span class="text-foreground">{email_display}</span>
                         </p>
                         <ActionForm action=reset attr:class="space-y-4">
                             <input type="hidden" name="email" value=email_field />
@@ -530,9 +530,9 @@ fn OtpCard(email: String) -> impl IntoView {
 
     view! {
         <div class=CARD>
-            <h1 class="text-2xl font-medium text-white">"Check your email"</h1>
+            <h1 class="text-2xl font-medium">"Check your email"</h1>
             <p class=MUTED_TEXT>
-                "We sent a verification code to " <span class="text-white">{email_display}</span>
+                "We sent a verification code to " <span class="text-foreground">{email_display}</span>
             </p>
             <ActionForm action=verify attr:class="space-y-4">
                 <input type="hidden" name="email" value=email_field />
@@ -583,7 +583,7 @@ pub fn AuthStatus() -> impl IntoView {
     });
 
     view! {
-        <div class="text-[#8b9cb8] text-xs">
+        <div class="text-muted-foreground text-xs">
             // NB: never a unit fallback — `|| ()` desyncs hydration app-wide
             // (specs/auth.md Findings, 2026-07-13).
             <Suspense fallback=|| view! { <span>"…"</span> }>
@@ -593,7 +593,7 @@ pub fn AuthStatus() -> impl IntoView {
                             let who = email.or(name).unwrap_or_else(|| "you".into());
                             view! {
                                 <span>
-                                    "Signed in as " <span class="text-white">{who}</span> " · "
+                                    "Signed in as " <span class="text-foreground">{who}</span> " · "
                                     <button
                                         class="underline"
                                         on:click=move |_| {

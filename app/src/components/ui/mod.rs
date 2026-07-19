@@ -3,3 +3,4 @@
 
 mod clx;
 pub mod table;
+pub mod theme_toggle;

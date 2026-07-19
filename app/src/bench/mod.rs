@@ -14,6 +14,7 @@
 //! native-webview positioning) against the new section before shipping it.
 
 mod table;
+mod theme_toggle;
 
 use leptos::prelude::*;
 
@@ -26,11 +27,18 @@ struct BenchSection {
 }
 
 /// The section registry — one line per vendored component, in page order.
-const SECTIONS: &[BenchSection] = &[BenchSection {
-    id: "table",
-    title: "Table",
-    demo: table::demo,
-}];
+const SECTIONS: &[BenchSection] = &[
+    BenchSection {
+        id: "table",
+        title: "Table",
+        demo: table::demo,
+    },
+    BenchSection {
+        id: "theme-toggle",
+        title: "Theme toggle",
+        demo: theme_toggle::demo,
+    },
+];
 
 /// The primary color tokens from `style/input.css`. `--radius` joins them in
 /// the panel with a rounded-box swatch instead of a color swatch.
@@ -39,28 +47,47 @@ const COLOR_TOKENS: &[&str] = &[
     "--foreground",
     "--card",
     "--card-foreground",
+    "--popover",
+    "--popover-foreground",
+    "--primary",
+    "--primary-foreground",
+    "--secondary",
+    "--secondary-foreground",
     "--muted",
     "--muted-foreground",
+    "--accent",
+    "--accent-foreground",
+    "--destructive",
+    "--destructive-foreground",
     "--border",
+    "--input",
     "--ring",
 ];
 
 /// The bench page: jump-nav, theme panel, one section per registry entry.
-/// The light/dark toggle is the page's one dynamic control — it flips the
-/// `dark` class on the bench container only (app-wide theming is ui-design's
-/// open question), so the panel and every section re-resolve in that mode.
+/// The light/dark toggle flips the `dark` class on `<html>` (session-only —
+/// no cookie, unlike the vendored ThemeToggle): now that the app themes
+/// globally with dark as the default, a container-scoped class can't
+/// override the ancestor's variables, so the bench control drives the real
+/// root and the panel + every section re-resolve in that mode.
 #[component]
 pub fn BenchPage() -> impl IntoView {
-    let (dark, set_dark) = signal(false);
+    let (dark, set_dark) = signal(crate::components::ui::theme_toggle::cookie_theme_is_dark());
+    let flip = move |_| {
+        let now = !dark.get_untracked();
+        set_dark.set(now);
+        #[cfg(feature = "hydrate")]
+        if let Some(root) = leptos::tachys::dom::document().document_element() {
+            let _ = if now {
+                root.class_list().add_1("dark")
+            } else {
+                root.class_list().remove_1("dark")
+            };
+        }
+    };
 
     view! {
-        <div class=move || {
-            if dark.get() {
-                "dark min-h-screen bg-background text-foreground"
-            } else {
-                "min-h-screen bg-background text-foreground"
-            }
-        }>
+        <div class="min-h-screen bg-background text-foreground">
             <div class="flex gap-8 p-8">
                 <nav class="sticky top-8 hidden h-fit w-40 shrink-0 flex-col gap-1 text-sm sm:flex">
                     <span class="text-muted-foreground mb-1 font-medium">"Sections"</span>
@@ -88,7 +115,7 @@ pub fn BenchPage() -> impl IntoView {
                         </div>
                         <button
                             class="hover:bg-muted shrink-0 rounded-md border px-3 py-1.5 text-sm"
-                            on:click=move |_| set_dark.update(|d| *d = !*d)
+                            on:click=flip
                         >
                             {move || if dark.get() { "Light mode" } else { "Dark mode" }}
                         </button>

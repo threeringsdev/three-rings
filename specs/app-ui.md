@@ -214,6 +214,45 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Dark palette + token migration (2026-07-19)
+
+- **Token set**: `style/input.css` now carries the full Rust/UI standard set
+  (background/foreground, card, popover, primary, secondary, muted, accent,
+  destructive + foregrounds, border, input, ring) in `:root` *and* `.dark`
+  (upstream OKLCH values, charts/sidenav trimmed), plus
+  `@custom-variant dark` and a base `body { bg-background text-foreground }`.
+  Full set added now so Stage 1 components land without token churn.
+- **Dark is the default**: `shell()` reads the `tr_theme` cookie from the
+  request `Parts` in context and stamps `class="dark"` (absence of cookie or
+  any non-`light` value = dark) on `<html>` during SSR — right before any
+  wasm runs, no flash. `<html>` attrs live outside the hydrated root, so the
+  client toggle owns them post-hydration; no mismatch by construction.
+- **theme_toggle vendored** (deviations in its header): upstream's `icons`
+  crate inlined as two SVG paths; `use_theme_mode` hook replaced with
+  app-owned state — toggle flips the class and persists
+  `tr_theme=light|dark` (1 year, SameSite=Lax). Bench section is live
+  against the real page theme (unlike the bench-local toggle).
+- **Hex migration**: HomePage + auth_pages fully on tokens (auth_pages was
+  conveniently constant-driven). The scaffold teal CTA became `bg-primary`
+  (the wireframes are grayscale; a brand accent is a later design decision).
+  Deliberately NOT migrated: the two standalone bounce/callback HTML strings
+  in lib.rs (raw documents served without the stylesheet — tokens can't
+  reach them).
+- Verified live: 6/6 theme-probe checks (dark default SSR, toggle flips
+  class+cookie, both overrides survive reload SSR-side, raw no-JS SSR honors
+  the cookie), hydration clean on 4 routes, fast tier 4/4, **and the Android
+  webview** (dark default + toggle flip on-device over CDP — matrix path 1).
+- **Codex review** (3 findings, all accepted + fixed): production had no
+  toggle mount until the shell lands → interim footer mount on HomePage (two
+  lines the shell task deletes); light-override icon flash → the signal now
+  initializes from the cookie on BOTH sides (`cookie_theme_is_dark()`: Parts
+  SSR-side, `document.cookie` client-side — the cookie is deliberately not
+  httpOnly), removing the corrective Effect entirely; the bench-local toggle
+  couldn't show light under the dark `<html>` default (container-scoped
+  class can't override ancestor variables) → the bench control now drives
+  the `<html>` class directly, session-only, no cookie. All re-verified
+  (6/6 probe, hydration clean, fast tier 4/4).
+
 ### Dev seed data (2026-07-19)
 
 `app/src/seed.rs` (hosted-only) + the `server --seed-dev <uuid>` CLI arm
