@@ -148,3 +148,51 @@ stay as the probe layer beneath the suite.
 ## Findings
 
 (appended per task — spike outcome, skill-building surprises, loop adjustments)
+
+### Android e2e spike — PASS, decision-tree path 1 (2026-07-19)
+
+Automated Playwright e2e against the Tauri debug webview on the Android
+emulator **works end-to-end**. Evidence (Samsung_Flip_7 AVD, Android 17 arm64,
+app `com.three_rings.dev`):
+
+- **Attach**: debug builds ship a debuggable webview; the devtools socket
+  appears as `@webview_devtools_remote_<pid>` in `/proc/net/unix` on app
+  launch. `adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>`,
+  then Playwright `chromium.connectOverCDP('http://127.0.0.1:9222')` attaches
+  (webview = Chrome 145, CDP 1.3). Playwright's experimental `_android` API
+  was not needed.
+- **Drive**: locators, clicks, `page.evaluate`, `page.goto`, and screenshots
+  all work. Asserted: the scaffold counter incremented 20 → 21 through a real
+  click (wasm hydration + server-fn round trip on device), and the bench
+  dark-mode toggle flipped the `.dark` class (pure client-side wasm state).
+- **Live dev-server content**: `cargo tauri android dev` runs
+  `adb reverse tcp:3000 tcp:3000` itself and proxies the devUrl behind the
+  stable origin `http://tauri.localhost` — the page URL never shows `:3000`.
+  Proof the content is live rather than stale bundled assets: `/dev/components`
+  (component-bench-gated, dev-server-only) renders on the device.
+
+**Platform matrix fixed: path 1 — web + Android webview e2e every task; no
+per-stage Android smoke tier; desktop ignored in-loop.** Embedded-Axum
+coverage (release APK) still needs one release smoke before phase end — it
+rides the phase-final polish task, which already carries "Android release
+smoke".
+
+Operational constraints for the skills (to be baked into `e2e-suite` /
+`android-smoke` by the skills task):
+
+- The socket name embeds the app pid — re-discover and re-forward on every app
+  launch; never persist the port mapping.
+- One webview page, one context: Android runs serialize (single worker) and
+  share page state across tests; each spec must `goto` its own start URL.
+- Navigate with `page.goto('http://tauri.localhost/<path>')` — same-page JS
+  `location.href` races the CDP session (execution context destroyed).
+- Emulator boot: `adb devices` shows a device, else
+  `emulator -avd Samsung_Flip_7` + `adb wait-for-device` + poll
+  `getprop sys.boot_completed` until `1`.
+- `cargo tauri android dev` must run from the **repo root** — its
+  `beforeDevCommand` (`cd .. && cargo leptos watch …`) resolves against the
+  invocation directory; from `src-tauri/` it lands outside the workspace and
+  dies with "manifest path `Cargo.toml` does not exist".
+
+Probe layer: `end2end/android-cdp-check.mjs` (attach + page inventory +
+evaluate) joins the `.mjs` probes.
