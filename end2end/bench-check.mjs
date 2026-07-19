@@ -38,6 +38,9 @@ for (const marker of [
   'data-name="BreadcrumbList"',
   'data-name="Skeleton"',
   'data-name="Card"',
+  'data-name="DialogContent"',
+  'data-name="PopoverContent"',
+  'data-name="SheetContent"',
 ]) {
   if (!raw.includes(marker)) failures.push(`SSR body missing: ${marker}`);
 }
@@ -91,6 +94,114 @@ await page.locator('label[for="bench-rare-checkbox"]').click();
 await page.waitForTimeout(200);
 if ((await cb.getAttribute('data-state')) === cbState) {
   failures.push('label click did not toggle its checkbox (for/id association)');
+}
+
+// dialog: trigger opens (Leptos state), ESC closes (listener + cleanup path)
+const dialogContent = page.locator('#bench-dialog');
+await page.locator('#trigger_bench-dialog').click();
+await page.waitForTimeout(250);
+if ((await dialogContent.getAttribute('data-state')) !== 'open') {
+  failures.push('dialog trigger did not open (data-state)');
+}
+await page.keyboard.press('Escape');
+await page.waitForTimeout(250);
+if ((await dialogContent.getAttribute('data-state')) !== 'closed') {
+  failures.push('ESC did not close the dialog');
+}
+// programmatic open via the shared signal (the m-key path)
+await page.locator('#bench-dialog-programmatic').click();
+await page.waitForTimeout(250);
+if ((await dialogContent.getAttribute('data-state')) !== 'open') {
+  failures.push('programmatic dialog open (shared signal) failed');
+}
+await page.keyboard.press('Escape');
+await page.waitForTimeout(250);
+
+// popover: native Popover API opens on trigger; anchor positioning puts the
+// panel adjacent to (not detached from) its trigger.
+const popTrigger = page.locator('[popovertarget="popover-bench-popover"]');
+await popTrigger.scrollIntoViewIfNeeded();
+await popTrigger.click();
+await page.waitForTimeout(300);
+const popOpen = await page.evaluate(() =>
+  document.getElementById('popover-bench-popover')?.matches(':popover-open'));
+if (!popOpen) failures.push('popover did not reach :popover-open');
+const [tb, pb] = await page.evaluate(() => {
+  const t = document.querySelector('[popovertarget="popover-bench-popover"]').getBoundingClientRect();
+  const p = document.getElementById('popover-bench-popover').getBoundingClientRect();
+  return [
+    { x: t.x, y: t.y, w: t.width, h: t.height },
+    { x: p.x, y: p.y, w: p.width, h: p.height },
+  ];
+});
+const gap = Math.min(Math.abs(tb.y - (pb.y + pb.h)), Math.abs(pb.y - (tb.y + tb.h)));
+if (pb.w === 0 || gap > 60) {
+  failures.push(`popover not anchor-positioned near trigger (gap ${Math.round(gap)}px)`);
+}
+// horizontal too: the panel must overlap or abut the trigger's x-range,
+// not sit across the viewport.
+const xOverlap = Math.min(tb.x + tb.w, pb.x + pb.w) - Math.max(tb.x, pb.x);
+if (xOverlap < -40) {
+  failures.push(`popover horizontally detached from trigger (overlap ${Math.round(xOverlap)}px)`);
+}
+await page.keyboard.press('Escape');
+await page.waitForTimeout(200);
+
+// sheet: opens from trigger, scroll lock engages, backdrop closes + unlocks
+const sheetContent = page.locator('#bench-sheet-right');
+await page.locator('#trigger_bench-sheet-right').click();
+await page.waitForTimeout(350);
+if ((await sheetContent.getAttribute('data-state')) !== 'open') {
+  failures.push('sheet trigger did not open');
+}
+if ((await page.evaluate(() => document.body.style.overflow)) !== 'hidden') {
+  failures.push('scroll lock did not engage while sheet open');
+}
+await page.locator('#bench-sheet-right_backdrop').click({ position: { x: 10, y: 10 } });
+await page.waitForTimeout(700); // 300ms exit + unlock delay
+if ((await sheetContent.getAttribute('data-state')) !== 'closed') {
+  failures.push('sheet backdrop click did not close');
+}
+if ((await page.evaluate(() => document.body.style.overflow)) === 'hidden') {
+  failures.push('scroll lock did not release after sheet closed');
+}
+
+// overlay stack: with sheet AND dialog open, one ESC closes only the topmost
+// (the dialog, opened second); the sheet survives; a second ESC closes it.
+// The dialog is opened programmatically — clicking behind the sheet's
+// backdrop is (correctly) impossible, which mirrors the real stacked flow:
+// a dialog launched from within an open sheet.
+await page.locator('#trigger_bench-sheet-right').click();
+await page.waitForTimeout(300);
+await page.evaluate(() => document.getElementById('bench-dialog-programmatic').click());
+await page.waitForTimeout(300);
+await page.keyboard.press('Escape');
+await page.waitForTimeout(300);
+const dlgState = await page.locator('#bench-dialog').getAttribute('data-state');
+const shtState = await sheetContent.getAttribute('data-state');
+if (dlgState !== 'closed' || shtState !== 'open') {
+  failures.push(`overlay stack broken: after 1 ESC dialog=${dlgState} sheet=${shtState} (want closed/open)`);
+}
+if ((await page.evaluate(() => document.body.style.overflow)) !== 'hidden') {
+  failures.push('refcounted scroll lock released early (sheet still open)');
+}
+await page.keyboard.press('Escape');
+await page.waitForTimeout(700);
+if ((await sheetContent.getAttribute('data-state')) !== 'closed') {
+  failures.push('second ESC did not close the remaining sheet');
+}
+if ((await page.evaluate(() => document.body.style.overflow)) === 'hidden') {
+  failures.push('scroll lock stuck after all overlays closed');
+}
+
+// ID stability: two fresh SSR renders must serve identical overlay id wiring
+// (deterministic caller IDs — the use_random_id class of bug).
+const raw2 = await (await page.request.get(url)).text();
+const idPattern = /(?:id|popovertarget)="(?:popover-)?bench-[a-z-]+"/g;
+const ids1 = (raw.match(idPattern) ?? []).sort().join(',');
+const ids2 = (raw2.match(idPattern) ?? []).sort().join(',');
+if (!ids1 || ids1 !== ids2) {
+  failures.push('overlay ids differ across SSR renders (ID stability)');
 }
 
 if (consoleIssues.length) failures.push(...consoleIssues);

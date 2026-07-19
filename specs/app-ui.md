@@ -214,6 +214,66 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Vendor batch V2 — overlay foundations (2026-07-19)
+
+`scroll_lock` + `dialog` + `popover` + `sheet`, markup/CSS vendored from
+rust-ui@43e1e32, behavior rewired to Leptos (the gap analysis's
+"vendor markup + CSS, rewire behavior" plan):
+
+- **scroll_lock is the pure-Rust registry hook** (not the JS asset):
+  hydrate-gated implementation + no-op SSR stubs, and the `window.ScrollLock`
+  JS-interop registration dropped — no inline scripts remain to need the
+  global. Let-chains rewritten for the 2021 edition.
+- **Deterministic caller-supplied `id`s everywhere** (the `use_random_id`
+  SSR-counter hydration bug from the gap analysis is structurally gone).
+- **One `RwSignal<bool>` owns each overlay**: trigger/close/backdrop/ESC all
+  drive it; callers can pass their own signal for programmatic open (the
+  `m`-key move flow) — proven in the bench via a programmatic-open button.
+  ESC listeners are `window_event_listener` handles removed on cleanup
+  (upstream leaked per-instance `document` listeners). Closed panels get
+  `inert` (upstream's closed overlays stayed keyboard-focusable —
+  `pointer-events-none` only blocks the mouse).
+- **Popover keeps the native Popover API + CSS anchor positioning** and
+  gains two-way sync: signal→`showPopover`/`hidePopover` in an Effect,
+  native `toggle` events→signal via `:popover-open` (DOM types through
+  leptos's own web_sys re-export — compiles in every build). The
+  close-on-CommandItem inline script is gone; compositions use
+  `use_popover_open`.
+- Sheet's open/closed transform is a reactive class (upstream mutated
+  classList from its script); direction enum hand-written (no strum).
+- **Anchor positioning verified on the Android webview on-device** (Chrome
+  145, `CSS.supports` true, panel 9 px off the trigger). A **JS positioning
+  fallback** lands anyway (spec requirement): `web_sys::css::supports` gates
+  it; when anchors are absent the panel is fixed-positioned under the trigger
+  (flipping above on viewport overflow). The installed WebKit build also
+  reports support, so the fallback is defensive — exercised by construction,
+  not observed firing.
+
+**Codex review (9 findings + 1 extra) — a genuinely valuable pass, 8 fixed:**
+- **Stacked-overlay ESC closing everything** (#1) + **ESC via
+  stop_immediate_propagation**: new `overlay_stack` module (client-only,
+  ssr-stub); each overlay pushes its id on open, and the ESC handler acts
+  only when it's the topmost — *and* calls `stop_immediate_propagation` so a
+  synchronous signal-flush of the stack can't let the next overlay's window
+  listener fire on the same keypress. Proven: sheet+dialog open, one ESC
+  closes only the dialog, a second closes the sheet.
+- **Scroll lock not reference-counted** (#2) + **unlock-delay reopen race**
+  (#3): `scroll_lock` gained an owner count + a generation counter. Stacked
+  overlays share one lock (last-out unlocks); a delayed restore no-ops if the
+  generation moved (close-then-reopen keeps the DOM locked) or an owner
+  remains. Bench asserts body `overflow:hidden` engages on open, survives
+  while a second overlay is open, and releases only when the last closes.
+- **Popover JS fallback absent** (#4): added (above); `show_popover` failure
+  now re-syncs the signal from the DOM instead of silently drifting.
+- **Closed overlays keyboard-focusable** (folded into #8/aria): `inert` on
+  closed dialog/sheet panels; `aria-label` prop added (Titles alone gave the
+  overlays no accessible name — the extra finding).
+- Bench (#5–#7, #9) strengthened: horizontal popover overlap check, the
+  stacked-ESC scenario, scroll-lock body-style assertions, and a two-render
+  ID-stability diff. **Disputed**: #8's "children always instantiated" is
+  inherent to this always-mounted overlay pattern (upstream's too); revisited
+  only if a specific overlay's content proves expensive — noted, not changed.
+
 ### Vendor batch V1 — static primitives (2026-07-19)
 
 Eleven components vendored from rust-ui@43e1e32 (button, badge, input,
