@@ -223,3 +223,51 @@ Drive-by fix, same commit: the `validate` skill's clippy lines had drifted
 from validate.yml (missing the dedicated `--features native` backend line;
 bench line still said `ssr` where the gate uses `hosted`) — realigned, and
 the report template gained the native-backend row.
+
+### E2E baseline reset (2026-07-19)
+
+Counter suite deleted; tiered config + login fixture + baseline smoke landed;
+fast tier 3/3 and full three-browser tier 7/7 green against the dev server.
+
+- **Test user**: `three-rings-e2e@example.com`, seeded on the Neon **dev**
+  branch by `end2end/seed-e2e-user.sh` (idempotent): signup through the real
+  `/signup` form, then `emailVerified` flipped via the owner credential
+  (`MIGRATION_DATABASE_URL`, the migrate.sh convention). Two findings baked
+  into the script: the OTP send to a non-deliverable address can error
+  UI-side *after* the account exists (so the DB row, not the screen, is the
+  success criterion), and sign-in-gating reads the same `neon_auth."user"`
+  row the app joins on — the mirror flip is sufficient.
+- **Fixture**: `tests/auth.setup.ts` drives `/login` once, saves
+  `storageState` (`tr_session`/`tr_jwt` ride along); authed tests opt in via
+  `test.use({ storageState: AUTH_STATE })` from `tests/helpers.ts`
+  (Playwright forbids importing one test file from another). The setup test
+  carries `@fast` in its title or `--grep @fast` filters the dependency away
+  and every authed test fails on a missing state file.
+- **Release-build clobber trap (major)**: the validate gate's
+  `cargo leptos build --release` overwrites `target/site/pkg` under the
+  running debug watch — every page then hydration-panics
+  (tachys `hydration.rs:163 unreachable`) and forms fall back to native
+  POSTs. A source-file `touch` did *not* reliably rebuild the frontend half;
+  **restart the watch after any release build**. Recorded in the e2e-suite
+  skill; this cost ~30 min of diagnosis and will bite every loop iteration
+  that verifies after gating.
+- **Codex invocation path**: the review slash commands are human-only
+  (`disable-model-invocation: true` in the plugin), so autonomous loop runs
+  route reviews through the `codex-rescue` agent with a review-only prompt —
+  ui-task-loop skill updated accordingly; mechanism proven on this task's
+  own diff. Wrinkle: the rescue subagent is a fire-and-forget forwarder (it
+  refuses to poll), so the main session polls the companion runtime itself
+  (`codex-companion.mjs status/result <task-id>`).
+- **Codex review of this task** (4 findings): (1) owner credential in psql
+  argv → **fixed**, URL parsed into `PG*` env vars, secret never in the
+  process table; (2) fresh-checkout password drift (lost `.env` + existing
+  user = unknowable password, fixture permanently broken with a misleading
+  "seed complete") → **fixed**, freshly generated creds delete + recreate
+  the purpose-built e2e user, script idempotent from any state (verified by
+  running exactly that scenario); (3) browser h1-check doesn't prove SSR →
+  **fixed**, request-level assertion on the raw HTML (no JS) added;
+  (4) fixed :3000 could hit a stale/foreign server → **disputed**: the loop
+  deliberately owns the watch-server lifecycle (a Playwright `webServer`
+  block would fight the long-lived watch and its minutes-long builds);
+  single-developer risk accepted, a build-stamp `/health` route noted as a
+  possible future hardening.
