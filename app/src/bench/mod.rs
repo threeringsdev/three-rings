@@ -18,10 +18,13 @@ mod breadcrumb;
 mod button;
 mod card;
 mod checkbox;
+mod dialog;
 mod input;
 mod input_group;
 mod kbd;
+mod popover;
 mod separator;
+mod sheet;
 mod skeleton;
 mod table;
 mod theme_toggle;
@@ -93,6 +96,21 @@ const SECTIONS: &[BenchSection] = &[
         id: "card",
         title: "Card",
         demo: card::demo,
+    },
+    BenchSection {
+        id: "dialog",
+        title: "Dialog",
+        demo: dialog::demo,
+    },
+    BenchSection {
+        id: "popover",
+        title: "Popover",
+        demo: popover::demo,
+    },
+    BenchSection {
+        id: "sheet",
+        title: "Sheet",
+        demo: sheet::demo,
     },
     BenchSection {
         id: "table",

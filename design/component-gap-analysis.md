@@ -60,6 +60,19 @@ runtime-built class names — upstream bug for any Tailwind build);
 `InputGroupTextarea` dropped with textarea unvendored; input's `strum` enum
 hand-written.
 
+**V2 adoption notes (2026-07-19, overlay foundations):** `scroll_lock` (the
+pure-Rust registry hook, not the JS asset), `dialog`, `popover`, `sheet` are
+in `app/src/components/ui/`, plus a new `overlay_stack` (ours). "Vendor
+markup + CSS, rewire behavior" per the review above: caller-supplied
+deterministic IDs, one `RwSignal<bool>` per overlay driving trigger/close/
+backdrop/ESC, no inline scripts. Beyond the six cross-cutting findings, the
+Codex review of the rewrite surfaced real multi-overlay bugs now fixed:
+reference-counted + generation-guarded scroll lock (stacked overlays / close-
+reopen races), a topmost-only ESC stack (one press closes one overlay),
+`inert` + `aria-label` on closed panels. Popover keeps the native API + CSS
+anchor positioning (confirmed on Android Chrome 145) with a
+`css::supports`-gated JS positioning fallback for engines without anchors.
+
 ## Gaps
 
 **Collection tree.** The registry has no tree view. Ours needs: arbitrary nesting with per-node collapse, drag to reparent AND reorder, pinned system rows (All cards, Inbox, shopping list), selection state, per-node rolled-up count badges, and context-menu tree management. Nearest parts to build on: `collapsible` (per-node expand), `button`/`item` (row chrome), `badge` (counts), `context_menu` (management), and the registry's `drag_and_drop` primitive — worth evaluating as the drag layer before reaching for a custom one, same maturity caveat as everything else. The tree is the app's central navigation surface; expect it to be the largest custom component.
