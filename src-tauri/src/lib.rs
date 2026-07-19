@@ -51,8 +51,6 @@ pub fn run() {
                     ))
                 })?;
             }
-            std::env::set_var("STORAGE_PATH", app_data_dir.to_string_lossy().to_string());
-
             #[cfg(not(debug_assertions))]
             {
                 use leptos::prelude::get_configuration;

@@ -214,6 +214,65 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### App shell + routing (2026-07-19)
+
+The shell (`app/src/shell.rs`): top bar (brand, desktop mode switch, theme
+toggle, user menu popover), sidebar rail frame, mobile bottom tabs, route
+skeletons for the full map, `/` redirect, `/my/*` guard. Counter +
+`get_count`/`increment_count`/`storage` deleted; `/cards` placeholder folded
+into `/catalog` (keeps the seam-proving `catalog_count` read).
+
+- **Server-side redirects are real 302s.** `/` and the `/my/*` leaves run
+  `SsrMode::Async` so `leptos_axum::redirect` can still set status before
+  streaming; `<Redirect/>` covers SPA navigation. Gotcha: leptos_axum only
+  emits 302 when the request's `Accept` contains `text/html` — curl's default
+  `*/*` gets 200 + `Location` + `serverfnredirect` headers instead. Probe with
+  `-H "Accept: text/html"`.
+- **Webview redirect-swallowing shim.** The Tauri Android webview fetches
+  documents through an in-process proxy that follows 302s internally, so the
+  webview receives the redirect *target's* HTML at the *original* URL —
+  hydrating panics (router renders the URL's route against the target's DOM;
+  reproduced on-device at `/` and `/my`). `shell()` stamps
+  `data-ssr-path` on `<html>` (outside the hydrated root, like the theme
+  class); `shell::hydrate_entry` compares pathnames before hydrating and
+  `location.replace`s to the stamp on mismatch. Real browsers never mismatch.
+- **One shared current-user resource** (`CurrentUserResource` in context) for
+  redirect + guard + user menu. Consequence: auth transitions must be
+  **full-page loads** (`redirect_browser`/`hard_navigate`), not SPA
+  navigation — the login fixture caught sign-in dispatching on the stale
+  anonymous resource and landing on /catalog. All five success paths
+  (password, signup, reset, OTP, Google-Tauri poll) and sign-out do document
+  loads now.
+- **Guard reads location untracked.** A tracked read re-ran the guard's
+  Suspend mid-redirect and compounded `next=/login%3Fnext%3D…` (found
+  on-device, applies to web SPA nav too). E2E now pins the single bounce.
+- **Codex review** (commit 4fb0241): 1 high — `next=/\evil.com` open
+  redirect (browsers normalize `\`→`/`) — fixed by also rejecting `/\`;
+  1 medium — Google sign-in loses `?next` (web OAuth callback 303s to `/`,
+  Tauri poll hard-loads `/`) — deferred as a queue task, sign-in still lands
+  correctly via the `/` redirect, just not on the guarded page; 6 explicit
+  clean confirmations (route map, mode-switch/tabs breakpoints, counter
+  deletion, stale-resource paths, hydration-safety conventions).
+- **Codex e2e mutation pass**: 5 assertion strengthenings applied (exact
+  `<h1>Catalog</h1>` SSR regex, post-settle `?next` stability re-assert on
+  the SPA-bounce test, `aria-current` asserts on the mode switch, exact
+  email in the user-menu assert, cookie-presence check on the saved
+  storageState). All 10 tests then demonstrated kills in three transient
+  mutation rounds: A (catalog h1, guard next-path) killed the SSR, guard
+  and SPA-bounce tests; B (root-redirect target, mode-switch link,
+  login-redirect hardcode, bottom-tab link) killed the 302, mode-switch,
+  next-honoring and tabs tests; C (authed target, user-menu text, post-auth
+  default) fails the login fixture itself, blocking the suite — no
+  decorative tests. All mutations reverted; suite green after.
+- **Android dev-proxy strips POST bodies and Cookie headers** (verified
+  directly: argless server-fn POST → 200, form POST arrives with empty body →
+  "missing field email", valid injected session cookies → `/api/me` 401).
+  Authed flows are unverifiable over the dev-attach webview; on-device
+  verification covered the anon surface (redirect, tabs, guard bounce, shim
+  recovery — 5/5 PASS) and the authed surface is covered by the web tiers.
+  Release-path auth is unproven → queue task before the phase-end smoke.
+  Details in ui-work-loop Findings.
+
 ### Vendor batch V3 — command / hover_card / sonner (2026-07-19)
 
 The interactive core of the app's central surfaces. All three carry

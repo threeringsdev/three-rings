@@ -4,11 +4,11 @@
 
 use leptos::form::ActionForm;
 use leptos::prelude::*;
-use leptos_router::hooks::{use_navigate, use_query_map};
+use leptos_router::hooks::use_query_map;
 
 use crate::account::{
-    AuthOutcome, CurrentUser, GoogleSignIn, RequestPasswordReset, ResendVerification,
-    ResetPassword, SignIn, SignUp, VerifyEmail,
+    AuthOutcome, GoogleSignIn, RequestPasswordReset, ResendVerification, ResetPassword, SignIn,
+    SignUp, VerifyEmail,
 };
 
 const CARD: &str =
@@ -37,6 +37,22 @@ fn redirect_browser(url: &str) {
     #[cfg(not(feature = "hydrate"))]
     {
         let _ = url;
+    }
+}
+
+/// Where to land after a successful sign-in: the `next` query param when it
+/// is a same-origin path (the `/my/*` auth guard appends it), else `/` —
+/// whose redirect sends authed users on to `/my`. Anything not starting with
+/// a single `/` is ignored (open-redirect guard) — including `/\`, which
+/// browsers normalize to the protocol-relative `//`.
+fn post_auth_destination(query: &leptos_router::params::ParamsMap) -> String {
+    match query.get("next") {
+        Some(next)
+            if next.starts_with('/') && !next.starts_with("//") && !next.starts_with("/\\") =>
+        {
+            next
+        }
+        _ => "/".into(),
     }
 }
 
@@ -137,7 +153,6 @@ fn clear_poll_interval(id: i32) {
 fn GoogleButton(set_error: WriteSignal<Option<String>>) -> impl IntoView {
     let google = ServerAction::<GoogleSignIn>::new();
     let poll = Action::new(|_: &()| crate::account::fetch_current_user());
-    let navigate = use_navigate();
     let (waiting, set_waiting) = signal(false);
     let interval_id: StoredValue<Option<i32>> = StoredValue::new(None);
     let attempts: StoredValue<i32> = StoredValue::new(0);
@@ -186,7 +201,9 @@ fn GoogleButton(set_error: WriteSignal<Option<String>>) -> impl IntoView {
     Effect::new(move |_| {
         if let Some(Ok(Some(_user))) = poll.value().get() {
             stop_polling();
-            navigate("/", Default::default());
+            // Full-page load for the same reason as the password flows: SSR
+            // re-dispatches the now-authed session (302 → /my).
+            redirect_browser("/");
         }
     });
 
@@ -223,7 +240,6 @@ fn BackHome() -> impl IntoView {
 #[component]
 pub fn LoginPage() -> impl IntoView {
     let sign_in = ServerAction::<SignIn>::new();
-    let navigate = use_navigate();
     let query = use_query_map();
 
     // None → credentials form; Some(email) → the OTP verification step.
@@ -233,7 +249,13 @@ pub fn LoginPage() -> impl IntoView {
     let (error, set_error) = signal(None::<String>);
 
     Effect::new(move |_| match sign_in.value().get() {
-        Some(Ok(AuthOutcome::SignedIn(_))) => navigate("/", Default::default()),
+        // Full-page load, not SPA navigation: the shell's shared current-user
+        // resource was fetched while anonymous, so client-side routing would
+        // dispatch on the stale session. A document load re-runs SSR with the
+        // fresh cookies and the server 302s to the right mode.
+        Some(Ok(AuthOutcome::SignedIn(_))) => {
+            redirect_browser(&post_auth_destination(&query.get_untracked()))
+        }
         Some(Ok(AuthOutcome::VerificationRequired { email })) => {
             set_error.set(None);
             set_otp_email.set(Some(email));
@@ -316,13 +338,19 @@ pub fn LoginPage() -> impl IntoView {
 #[component]
 pub fn SignupPage() -> impl IntoView {
     let sign_up = ServerAction::<SignUp>::new();
-    let navigate = use_navigate();
+    let query = use_query_map();
 
     let (otp_email, set_otp_email) = signal(None::<String>);
     let (error, set_error) = signal(None::<String>);
 
     Effect::new(move |_| match sign_up.value().get() {
-        Some(Ok(AuthOutcome::SignedIn(_))) => navigate("/", Default::default()),
+        // Full-page load, not SPA navigation: the shell's shared current-user
+        // resource was fetched while anonymous, so client-side routing would
+        // dispatch on the stale session. A document load re-runs SSR with the
+        // fresh cookies and the server 302s to the right mode.
+        Some(Ok(AuthOutcome::SignedIn(_))) => {
+            redirect_browser(&post_auth_destination(&query.get_untracked()))
+        }
         Some(Ok(AuthOutcome::VerificationRequired { email })) => {
             set_error.set(None);
             set_otp_email.set(Some(email));
@@ -389,7 +417,7 @@ pub fn SignupPage() -> impl IntoView {
 fn ResetCard(set_reset_mode: WriteSignal<bool>) -> impl IntoView {
     let request = ServerAction::<RequestPasswordReset>::new();
     let reset = ServerAction::<ResetPassword>::new();
-    let navigate = use_navigate();
+    let query = use_query_map();
 
     // Mirrors the email input so the OTP step knows the address once the
     // request action resolves (the form itself posts via ActionForm).
@@ -407,7 +435,13 @@ fn ResetCard(set_reset_mode: WriteSignal<bool>) -> impl IntoView {
     });
 
     Effect::new(move |_| match reset.value().get() {
-        Some(Ok(AuthOutcome::SignedIn(_))) => navigate("/", Default::default()),
+        // Full-page load, not SPA navigation: the shell's shared current-user
+        // resource was fetched while anonymous, so client-side routing would
+        // dispatch on the stale session. A document load re-runs SSR with the
+        // fresh cookies and the server 302s to the right mode.
+        Some(Ok(AuthOutcome::SignedIn(_))) => {
+            redirect_browser(&post_auth_destination(&query.get_untracked()))
+        }
         Some(Ok(AuthOutcome::Failed { message })) => set_error.set(Some(message)),
         // Reset marks the email verified upstream, so this shouldn't fire;
         // keep the arm honest in case that behavior shifts.
@@ -514,11 +548,17 @@ fn ResetCard(set_reset_mode: WriteSignal<bool>) -> impl IntoView {
 fn OtpCard(email: String) -> impl IntoView {
     let verify = ServerAction::<VerifyEmail>::new();
     let resend = ServerAction::<ResendVerification>::new();
-    let navigate = use_navigate();
+    let query = use_query_map();
     let (error, set_error) = signal(None::<String>);
 
     Effect::new(move |_| match verify.value().get() {
-        Some(Ok(AuthOutcome::SignedIn(_))) => navigate("/", Default::default()),
+        // Full-page load, not SPA navigation: the shell's shared current-user
+        // resource was fetched while anonymous, so client-side routing would
+        // dispatch on the stale session. A document load re-runs SSR with the
+        // fresh cookies and the server 302s to the right mode.
+        Some(Ok(AuthOutcome::SignedIn(_))) => {
+            redirect_browser(&post_auth_destination(&query.get_untracked()))
+        }
         Some(Ok(AuthOutcome::Failed { message })) => set_error.set(Some(message)),
         Some(Ok(AuthOutcome::VerificationRequired { .. })) | None => {}
         Some(Err(_)) => set_error.set(Some("Something went wrong — try again.".into())),
@@ -565,57 +605,6 @@ fn OtpCard(email: String) -> impl IntoView {
                 <p class=ERROR_TEXT>{move || error.get()}</p>
             </Show>
             <BackHome />
-        </div>
-    }
-}
-
-/// Compact signed-in indicator for the home page footer: the current user's
-/// email with sign-out, or sign-in/sign-up links.
-#[component]
-pub fn AuthStatus() -> impl IntoView {
-    let user = Resource::new(|| (), |_| crate::account::fetch_current_user());
-    let sign_out = ServerAction::<crate::account::SignOut>::new();
-
-    Effect::new(move |_| {
-        if matches!(sign_out.value().get(), Some(Ok(()))) {
-            user.refetch();
-        }
-    });
-
-    view! {
-        <div class="text-muted-foreground text-xs">
-            // NB: never a unit fallback — `|| ()` desyncs hydration app-wide
-            // (specs/auth.md Findings, 2026-07-13).
-            <Suspense fallback=|| view! { <span>"…"</span> }>
-                {move || Suspend::new(async move {
-                    match user.await {
-                        Ok(Some(CurrentUser { email, name, .. })) => {
-                            let who = email.or(name).unwrap_or_else(|| "you".into());
-                            view! {
-                                <span>
-                                    "Signed in as " <span class="text-foreground">{who}</span> " · "
-                                    <button
-                                        class="underline"
-                                        on:click=move |_| {
-                                            sign_out.dispatch(crate::account::SignOut {});
-                                        }
-                                    >
-                                        "Sign out"
-                                    </button>
-                                </span>
-                            }
-                                .into_any()
-                        }
-                        _ => view! {
-                            <span>
-                                <a class="underline" href="/login">"Sign in"</a> " · "
-                                <a class="underline" href="/signup">"Sign up"</a>
-                            </span>
-                        }
-                            .into_any(),
-                    }
-                })}
-            </Suspense>
         </div>
     }
 }
