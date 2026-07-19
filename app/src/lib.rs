@@ -14,9 +14,19 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
     // are outside the hydrated root, so the client toggle owns them after
     // hydration (components/ui/theme_toggle.rs).
     let dark = initial_theme_is_dark();
+    // data-ssr-path records which URL this document was actually rendered
+    // for. The Tauri Android webview reaches the server through an
+    // in-process proxy that follows server-side redirects internally, so the
+    // webview can receive the redirect *target's* HTML while its address bar
+    // still shows the original URL — hydrating would panic (the router
+    // renders the URL's route against the target's DOM). The hydrate entry
+    // (shell::hydrate_entry) compares this stamp against location.pathname
+    // and hard-replaces instead of hydrating on mismatch. Like the theme
+    // class, <html> attributes live outside the hydrated root.
+    let ssr_path = ssr_path_and_query();
     view! {
         <!DOCTYPE html>
-        <html lang="en" class=if dark { "dark" } else { "" }>
+        <html lang="en" class=if dark { "dark" } else { "" } data-ssr-path=ssr_path>
             <head>
                 <meta charset="utf-8" />
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -35,6 +45,22 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 /// toggle so the shell and the component can never disagree.
 fn initial_theme_is_dark() -> bool {
     components::ui::theme_toggle::cookie_theme_is_dark()
+}
+
+/// The request's path + query during SSR (from the axum `Parts` in context),
+/// `""` outside a request. Feeds the `data-ssr-path` stamp on `<html>`.
+fn ssr_path_and_query() -> String {
+    #[cfg(feature = "ssr")]
+    {
+        if let Some(parts) = use_context::<http::request::Parts>() {
+            return parts
+                .uri
+                .path_and_query()
+                .map(|pq| pq.to_string())
+                .unwrap_or_else(|| parts.uri.path().to_string());
+        }
+    }
+    String::new()
 }
 
 #[component]

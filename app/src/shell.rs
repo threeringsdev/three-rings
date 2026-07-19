@@ -30,6 +30,33 @@ pub fn provide_current_user() {
     )));
 }
 
+/// Entry point for the wasm hydrate build (called from the `frontend` crate).
+///
+/// Before hydrating, recover from proxy-swallowed redirects: the Tauri
+/// Android webview fetches documents through an in-process proxy that
+/// follows server-side 302s internally, so this document can be the redirect
+/// target's HTML while `location` still shows the original URL. Hydrating
+/// then panics — the router renders the URL's route against the target's
+/// DOM. `shell()` stamps the actually-rendered path on `<html
+/// data-ssr-path>`; on a pathname mismatch, hard-replace to the stamped
+/// path (one clean extra load) instead of hydrating. Real browsers follow
+/// the 302 themselves, so the stamp always matches and this is a no-op.
+#[cfg(feature = "hydrate")]
+pub fn hydrate_entry() {
+    if let Some(w) = web_sys::window() {
+        let doc_el = w.document().and_then(|d| d.document_element());
+        let loc_path = w.location().pathname().unwrap_or_default();
+        if let Some(stamp) = doc_el.and_then(|el| el.get_attribute("data-ssr-path")) {
+            let stamp_path = stamp.split('?').next().unwrap_or("");
+            if stamp.starts_with('/') && stamp_path != loc_path {
+                let _ = w.location().replace(&stamp);
+                return;
+            }
+        }
+    }
+    leptos::mount::hydrate_body(crate::App);
+}
+
 /// Navigate the browser itself (full page load). Client-only: effects never
 /// run during SSR, so the non-hydrate arm is just a cfg stub.
 fn hard_navigate(path: &str) {
@@ -97,8 +124,12 @@ pub fn RequireAuth() -> impl IntoView {
             view! { <p class="text-muted-foreground p-8 text-sm">"Loading…"</p> }
         }>
             {move || {
-                let pathname = location.pathname.get();
-                let search = location.search.get();
+                // Untracked: the guard re-evaluates on session changes (the
+                // resource is tracked), never on URL changes — a tracked read
+                // re-runs this closure mid-redirect and compounds
+                // `next=/login?next=…` while the old route unmounts.
+                let pathname = location.pathname.get_untracked();
+                let search = location.search.get_untracked();
                 Suspend::new(async move {
                     match user.await {
                         Ok(Some(_)) => view! { <Outlet /> }.into_any(),

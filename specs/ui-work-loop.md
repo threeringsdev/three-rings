@@ -149,6 +149,34 @@ stay as the probe layer beneath the suite.
 
 (appended per task — spike outcome, skill-building surprises, loop adjustments)
 
+### Android dev-proxy limits: no authed flows over dev attach (2026-07-19)
+
+Discovered during the app-shell task; constrains every future task's
+on-device verification scope. The Tauri Android **dev** proxy (webview →
+`http://tauri.localhost` → devUrl) mangles three things, verified directly
+against the attached webview:
+
+1. **Follows server 302s internally** — the webview gets the redirect
+   target's HTML at the original URL. The app now self-recovers (the
+   `data-ssr-path` stamp + `shell::hydrate_entry` replace shim, app-ui
+   Findings), so this one is handled.
+2. **Strips POST request bodies** — an argless server-fn POST returns 200,
+   but a form-encoded POST reaches the server with an empty body ("missing
+   field `email`"). The spike's counter-increment POST was argless, which is
+   why this never showed before.
+3. **Strips Cookie headers** — with valid `tr_session`/`tr_jwt` injected
+   into the webview jar, `GET /api/me` → 401. (The dark-palette on-device
+   theme check didn't catch this: the toggle also initializes client-side,
+   masking the SSR miss.)
+
+Loop consequence: **on-device dev-attach verification covers the anonymous
+surface only** (navigation, layout, overlays, SSR/hydration, guard bounces).
+Authed interactions stay on the web tiers (webkit = WKWebView proxy).
+Whether the **release** protocol handler shares these behaviors is unproven —
+a queue task before the phase-end release smoke must verify sign-in works in
+the release APK at all. Hot-reload websockets also die through the proxy
+("Live-reload stopped" immediately) — expected noise, not a failure.
+
 ### Android e2e spike — PASS, decision-tree path 1 (2026-07-19)
 
 Automated Playwright e2e against the Tauri debug webview on the Android

@@ -43,10 +43,17 @@ fn redirect_browser(url: &str) {
 /// Where to land after a successful sign-in: the `next` query param when it
 /// is a same-origin path (the `/my/*` auth guard appends it), else `/` —
 /// whose redirect sends authed users on to `/my`. Anything not starting with
-/// a single `/` is ignored (open-redirect guard).
+/// a single `/` is ignored (open-redirect guard) — including `/\`, which
+/// browsers normalize to the protocol-relative `//`.
 fn post_auth_destination(query: &leptos_router::params::ParamsMap) -> String {
     match query.get("next") {
-        Some(next) if next.starts_with('/') && !next.starts_with("//") => next,
+        Some(next)
+            if next.starts_with('/')
+                && !next.starts_with("//")
+                && !next.starts_with("/\\") =>
+        {
+            next
+        }
         _ => "/".into(),
     }
 }

@@ -125,6 +125,8 @@ spike. UI work stays on the ~3K-printing POC catalog (maintainer decision
 - [ ] Selection tray + move flows: custom docked tray, cross-view selection, batch move with suggested destinations, teardown flow, mobile docking above the tab bar — **stage boundary** (specs: [app-ui](app-ui.md))
 - [ ] Needs view + pick list + `/my/shopping`: owned-elsewhere vs short buckets, Pull / Pull-all → pick list grouped by source (client-composed from `move_cards` + `suggested_destinations`), shopping list page with text export (specs: [app-ui](app-ui.md))
 - [ ] ⌘K command palette: `command`+`dialog`, desktop logged-in only, Places + fixed 3-command registry per design/command-palette.md (specs: [app-ui](app-ui.md))
+- [ ] Google sign-in honors `?next`: carry the post-auth destination through the web OAuth callback (state param) and the Tauri poll path — Codex review medium on the shell task, deferred (specs: [app-ui](app-ui.md))
+- [ ] Android release auth check: verify sign-in + an authed page work in the release APK — the dev proxy strips POST bodies and Cookie headers, so the release protocol handler's behavior is unproven (specs: [ui-work-loop](ui-work-loop.md))
 - [ ] Polish + full pass: empty/error/loading states everywhere, responsive audit against all 9 wireframe screens, full e2e tier + Android release smoke, resolve any `@flaky` quarantine; mark app-ui and ui-work-loop implemented — **stage boundary** (specs: [app-ui](app-ui.md), [ui-work-loop](ui-work-loop.md))
 
 ## Later / parked (not in the queue — promote to a phase before working)

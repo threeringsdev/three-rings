@@ -36,6 +36,21 @@ test("anonymous /my bounces to login with a return path @fast", async ({
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
 });
 
+test("anonymous SPA nav to My cards bounces once to login @fast", async ({
+  page,
+}) => {
+  // Client-side guard path (no server 302 involved): the redirect must fire
+  // exactly once — a tracked location read used to compound ?next while the
+  // route unmounted (next=/login%3Fnext%3D…).
+  await page.goto("/catalog");
+  await page.getByRole("navigation", { name: "Mode" }).getByText("My cards").click();
+  await page.waitForURL(
+    (url) =>
+      url.pathname === "/login" && url.searchParams.get("next") === "/my",
+  );
+  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+});
+
 test("login honors next after sign-in @fast", async ({ page }) => {
   // Deliberately anonymous (no storageState): drive the real login form so
   // the guard's ?next round-trip is exercised end to end.
