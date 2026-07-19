@@ -41,6 +41,10 @@ for (const marker of [
   'data-name="DialogContent"',
   'data-name="PopoverContent"',
   'data-name="SheetContent"',
+  'data-name="CommandInput"',
+  'data-name="CommandItem"',
+  'data-name="HoverCardTrigger"',
+  'data-name="Toaster"',
 ]) {
   if (!raw.includes(marker)) failures.push(`SSR body missing: ${marker}`);
 }
@@ -193,6 +197,57 @@ if ((await sheetContent.getAttribute('data-state')) !== 'closed') {
 if ((await page.evaluate(() => document.body.style.overflow)) === 'hidden') {
   failures.push('scroll lock stuck after all overlays closed');
 }
+
+// command: type-to-filter is reactive, ↑↓ moves the highlight, ⏎ activates.
+const cmdInput = page.locator('[data-name="CommandInput"]').first();
+await cmdInput.scrollIntoViewIfNeeded();
+await cmdInput.fill('bind'); // matches "Trade Binder" only
+await page.waitForTimeout(200);
+const visibleItems = await page.locator('[data-name="CommandItem"]:visible').allTextContents();
+if (!(visibleItems.length === 1 && /Binder/.test(visibleItems[0]))) {
+  failures.push(`command filter wrong: visible=${JSON.stringify(visibleItems)}`);
+}
+await cmdInput.fill('');
+await page.waitForTimeout(150);
+await cmdInput.press('ArrowDown'); // highlight 2nd item
+await cmdInput.press('Enter');
+await page.waitForTimeout(150);
+if (!(await page.textContent('body')).includes('picked: Trade Binder')) {
+  failures.push('command ↑↓/⏎ keyboard selection did not pick the 2nd item');
+}
+
+// sonner: firing a toast with an undo action appears, undo dismisses it.
+await page.getByRole('button', { name: 'With undo action' }).click();
+await page.waitForTimeout(150);
+if ((await page.locator('[data-name="Toast"]').count()) === 0) {
+  failures.push('sonner toast did not appear');
+}
+if ((await page.locator('[data-name="Toast"] button', { hasText: 'Undo' }).count()) === 0) {
+  failures.push('sonner toast missing undo action');
+}
+await page.locator('[data-name="Toast"] button', { hasText: 'Undo' }).click();
+await page.waitForTimeout(150);
+if ((await page.locator('[data-name="Toast"]').count()) !== 0) {
+  failures.push('sonner undo did not dismiss the toast');
+}
+
+// hover_card: hover opens after the intent delay.
+const hcTrigger = page.locator('[data-name="HoverCardTrigger"]').first();
+const hcOpenNow = () => page.evaluate(() =>
+  document.getElementById('hc-content-bench-hovercard')?.matches(':popover-open') ?? false);
+await hcTrigger.scrollIntoViewIfNeeded();
+await hcTrigger.hover();
+await page.waitForTimeout(400); // > 150ms intent
+if (!(await hcOpenNow())) failures.push('hover_card did not open on hover');
+// trigger→content handoff: moving onto the card must NOT close it (the
+// shared-timer fix — separate timers closed it ~150ms after entering content).
+await page.locator('[data-name="HoverCardContent"]').hover();
+await page.waitForTimeout(400);
+if (!(await hcOpenNow())) failures.push('hover_card closed on trigger→content handoff');
+// leaving the content closes it.
+await page.mouse.move(0, 0);
+await page.waitForTimeout(400);
+if (await hcOpenNow()) failures.push('hover_card did not close on mouse-out');
 
 // ID stability: two fresh SSR renders must serve identical overlay id wiring
 // (deterministic caller IDs — the use_random_id class of bug).
