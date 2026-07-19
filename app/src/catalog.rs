@@ -23,6 +23,8 @@
 //! adapter reads the session opportunistically, and the quick actions prompt
 //! sign-in rather than disappearing.
 
+pub mod rail;
+
 use leptos::prelude::*;
 use leptos_router::hooks::{use_navigate, use_query_map};
 use leptos_router::NavigateOptions;
@@ -324,6 +326,14 @@ fn QueryBar(
                     placeholder="Search the catalog — t:instant c:ur cmc<=2"
                     {..}
                     aria-label="Search the catalog"
+                    // `bind:value` is a client-side binding only — it renders
+                    // no `value` attribute — so a shared `?q=` link used to
+                    // SSR with an empty box that filled in only once wasm
+                    // landed. Found while building the rail, which has three
+                    // more fields with the same shape. Set once, not
+                    // reactively: after hydration the property is what shows,
+                    // and a reactive attribute would race the binding.
+                    value=url_q.get_untracked()
                     on:input=on_input
                     on:keydown=on_key
                 />
@@ -352,8 +362,16 @@ fn ResultsToolbar(
     results: Resource<Result<shared::SearchResults, ServerFnError<String>>>,
     list_view: Memo<bool>,
 ) -> impl IntoView {
+    // The mobile sheet's "Show N results" footer. Read off the resource
+    // directly rather than awaited: the sheet is open while a search is in
+    // flight, and a `None` there reads as "Show results" instead of blocking
+    // the button behind a suspense boundary.
+    let result_count =
+        Signal::derive(move || results.get().and_then(|r| r.ok()).map(|r| r.cards.len()));
+
     view! {
         <div class="flex flex-wrap items-center gap-3">
+            <rail::FilterSheet result_count />
             <p class="text-muted-foreground text-sm" data-testid="result-count">
                 <Transition fallback=|| {
                     view! { <span>"Searching…"</span> }

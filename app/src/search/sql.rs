@@ -6,7 +6,7 @@
 
 use sqlx::{Postgres, QueryBuilder};
 
-use super::parse::{Cmp, Pred, Term};
+use shared::search::{Cmp, Pred, Term};
 
 /// Append `AND (…)` predicates for every term to `qb` (which must already
 /// hold a complete `WHERE`-bearing prefix, e.g. `… WHERE true`).
@@ -71,9 +71,17 @@ fn push_card_pred(qb: &mut QueryBuilder<'_, Postgres>, term: &Term) {
             qb.push("c.oracle_search_text LIKE ");
             qb.push_bind(pattern(&v.to_lowercase()));
         }
-        Pred::TypeLine(v) => {
-            qb.push("c.type_line ILIKE ");
-            qb.push_bind(pattern(v));
+        Pred::TypeLine(vals) => {
+            // Comma-OR (the rail's Type facet): `t:instant,sorcery` is one
+            // term matching either. `ILIKE ANY` keeps it to a single bind
+            // instead of an OR chain, and the parens are load-bearing —
+            // `apply` splices this in after a bare `AND`, so an unparenthesized
+            // disjunction would bind looser than the surrounding AND and
+            // quietly widen the whole query.
+            let pats: Vec<String> = vals.iter().map(|v| pattern(v)).collect();
+            qb.push("(c.type_line ILIKE ANY(");
+            qb.push_bind(pats);
+            qb.push("))");
         }
         Pred::Colors(colors) => {
             // Top-level colors is empty on multi-face layouts by design; the
@@ -136,8 +144,8 @@ fn escape_like(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::parse::parse;
     use super::*;
+    use shared::search::parse;
 
     fn sql_for(q: &str) -> String {
         let mut qb: QueryBuilder<'_, Postgres> = QueryBuilder::new("WHERE true");
@@ -160,7 +168,18 @@ mod tests {
     #[test]
     fn type_line_uses_ilike() {
         let sql = sql_for("t:instant");
-        assert!(sql.contains("c.type_line ILIKE"), "got: {sql}");
+        assert!(sql.contains("c.type_line ILIKE ANY("), "got: {sql}");
+    }
+
+    #[test]
+    fn multi_valued_type_is_parenthesized_or() {
+        // One bind carrying both patterns, wrapped: `apply` splices this after
+        // a bare `AND`, so an unparenthesized disjunction would out-scope the
+        // surrounding ANDs and match far more than asked.
+        let sql = sql_for("bolt t:instant,sorcery");
+        assert!(sql.contains("(c.type_line ILIKE ANY("), "got: {sql}");
+        assert!(sql.contains("))"), "got: {sql}");
+        assert_eq!(sql.matches("c.type_line").count(), 1, "got: {sql}");
     }
 
     #[test]
@@ -222,7 +241,7 @@ mod tests {
     #[test]
     fn negation_wraps_not() {
         let sql = sql_for("-t:instant");
-        assert!(sql.contains("NOT (c.type_line ILIKE"), "got: {sql}");
+        assert!(sql.contains("NOT ((c.type_line ILIKE ANY("), "got: {sql}");
     }
 
     #[test]

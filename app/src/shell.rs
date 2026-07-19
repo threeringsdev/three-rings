@@ -220,21 +220,32 @@ fn ModeSwitch(my_mode: Memo<bool>) -> impl IntoView {
     }
 }
 
-/// Desktop sidebar rail — frame only. Catalog mode gets the filter rail with
-/// the filter-rail task; My cards mode gets the collection tree with its task.
+/// Desktop sidebar rail — mode-filled (specs/app-ui.md): Catalog mode gets the
+/// filter rail, My cards mode gets the collection tree (still its own task, so
+/// still a placeholder).
+///
+/// The rail is rendered for the whole Catalog mode rather than only on
+/// `/catalog`, which is what "mode-filled" means: it reads and writes the same
+/// `?q=` the catalog page does, so touching a filter from `/cards/:id` lands
+/// you back on the catalog carrying that filter.
 #[component]
 fn SidebarRail(my_mode: Memo<bool>) -> impl IntoView {
     view! {
         <aside aria-label="Sidebar" class="hidden w-60 shrink-0 border-r md:block">
             <div class="sticky top-14 space-y-4 p-4">
-                <p class="text-muted-foreground text-xs font-medium uppercase tracking-wide">
-                    {move || if my_mode.get() { "Collections" } else { "Filters" }}
-                </p>
-                <div class="space-y-2">
-                    <div class="bg-muted/50 h-4 w-3/4 rounded-md"></div>
-                    <div class="bg-muted/50 h-4 w-1/2 rounded-md"></div>
-                    <div class="bg-muted/50 h-4 w-2/3 rounded-md"></div>
-                </div>
+                <Show
+                    when=move || my_mode.get()
+                    fallback=|| view! { <crate::catalog::rail::FilterRail /> }
+                >
+                    <p class="text-muted-foreground text-xs font-medium uppercase tracking-wide">
+                        "Collections"
+                    </p>
+                    <div class="space-y-2">
+                        <div class="bg-muted/50 h-4 w-3/4 rounded-md"></div>
+                        <div class="bg-muted/50 h-4 w-1/2 rounded-md"></div>
+                        <div class="bg-muted/50 h-4 w-2/3 rounded-md"></div>
+                    </div>
+                </Show>
             </div>
         </aside>
     }

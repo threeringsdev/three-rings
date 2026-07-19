@@ -232,7 +232,7 @@ impl CatalogStore for HostedBackend {
         // is a 422 naming the offending term — never silently-wrong results),
         // emit the WHERE clause, keyset by (name, oracle) — Scryfall's own
         // default sort. Empty query = browse-all.
-        let terms = crate::search::parse::parse(query.q.as_deref().unwrap_or(""))
+        let terms = shared::search::parse(query.q.as_deref().unwrap_or(""))
             .map_err(|e| ApiError::Validation(e.to_string()))?;
         let cursor: Option<OracleCursor> = page.cursor.as_deref().map(decode_cursor).transpose()?;
         let limit = page.limit();
