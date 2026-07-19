@@ -1,5 +1,5 @@
 // Ad-hoc auth UI drive (not a test): sign in through the real /login form,
-// assert the footer status, then sign out. Debugging aid; safe to delete.
+// assert the shell user menu, then sign out. Debugging aid; safe to delete.
 import { chromium } from 'playwright';
 
 const [base, email, password] = process.argv.slice(2);
@@ -12,15 +12,18 @@ await page.goto(`${base}/login`, { waitUntil: 'networkidle' });
 await page.fill('input[name=email]', email);
 await page.fill('input[name=password]', password);
 await page.click('button[type=submit]');
-await page.waitForURL(`${base}/`, { timeout: 10000 });
+// Sign-in lands on / whose redirect sends authed sessions to /my.
+await page.waitForURL(`${base}/my`, { timeout: 10000 });
+await page.click('button[aria-label="Account menu"]');
 await page.waitForSelector(`text=Signed in as`, { timeout: 10000 });
-const footer = await page.textContent('body');
-const signedIn = footer.includes(`Signed in as ${email}`);
-console.log('signed-in footer:', signedIn ? 'YES' : `NO — footer: ${footer.slice(-200)}`);
+const body = await page.textContent('body');
+const signedIn = body.includes(`Signed in as ${email}`);
+console.log('signed-in user menu:', signedIn ? 'YES' : `NO — body: ${body.slice(-200)}`);
 
 await page.click('text=Sign out');
-await page.waitForTimeout(1500);
-const after = await page.textContent('body');
-console.log('after sign-out shows links:', after.includes('Sign in') && after.includes('Sign up') ? 'YES' : 'NO');
+// Sign-out navigates to /catalog; the top bar then offers the sign-in link.
+await page.waitForURL(`${base}/catalog`, { timeout: 10000 });
+const after = await page.textContent('header');
+console.log('after sign-out shows sign-in link:', after.includes('Sign in') ? 'YES' : 'NO');
 console.log('console errors:', errors.length ? errors.join(' | ') : 'none');
 await browser.close();

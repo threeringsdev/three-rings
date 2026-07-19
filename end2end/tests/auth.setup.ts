@@ -20,7 +20,9 @@ setup("authenticate as the e2e user @fast", async ({ page }) => {
   await page.fill("input[name=email]", email);
   await page.fill("input[name=password]", password);
   await page.click("button[type=submit]");
-  await page.waitForURL("/", { timeout: 15000 });
+  // Sign-in navigates to / whose redirect sends authed sessions to /my.
+  await page.waitForURL("/my", { timeout: 15000 });
+  await page.click('button[aria-label="Account menu"]');
   await expect(page.getByText(`Signed in as ${email}`)).toBeVisible({
     timeout: 10000,
   });

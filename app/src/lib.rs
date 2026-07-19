@@ -2,12 +2,9 @@ use leptos::children::ToChildren;
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
 use leptos_router::{
-    components::{Route, Router, Routes, RoutesProps},
-    StaticSegment,
+    components::{ParentRoute, Route, Router, Routes, RoutesProps},
+    ParamSegment, SsrMode, StaticSegment,
 };
-
-#[cfg(feature = "hydrate")]
-use web_sys::window;
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     // Dark is the default theme (specs/app-ui.md, maintainer 2026-07-17); an
@@ -44,15 +41,42 @@ fn initial_theme_is_dark() -> bool {
 pub fn App() -> impl IntoView {
     // Provides context that manages stylesheets, titles, meta tags, etc.
     provide_meta_context();
+    shell::provide_current_user();
 
     // Route definitions are composed as a plain tuple (what the view! macro
     // builds from <Routes> children anyway) so the bench route can be
     // feature-gated: cfg on a node inside view! has no way to express
     // "no route here", and Routes is fed through its props builder because
     // the macro only accepts literal <Route> nodes as its children.
+    //
+    // Route map per specs/app-ui.md. `/` and the `/my/*` pages are
+    // SsrMode::Async so their auth redirects can still set a real 302 —
+    // out-of-order streaming would have sent headers before the user
+    // resource resolves. Auth pages and the bench live outside the shell.
     let routes = view! {
-        <Route path=StaticSegment("") view=HomePage />
-        <Route path=StaticSegment("cards") view=CardsPage />
+        <Route path=StaticSegment("") view=shell::RootRedirect ssr=SsrMode::Async />
+        <ParentRoute path=StaticSegment("") view=shell::AppShell>
+            <Route path=StaticSegment("catalog") view=shell::CatalogPage />
+            <Route path=(StaticSegment("cards"), ParamSegment("id")) view=shell::CardDetailPage />
+            <ParentRoute path=StaticSegment("my") view=shell::RequireAuth>
+                <Route path=StaticSegment("") view=shell::MyCardsPage ssr=SsrMode::Async />
+                <Route
+                    path=(StaticSegment("collections"), ParamSegment("id"))
+                    view=shell::CollectionPage
+                    ssr=SsrMode::Async
+                />
+                <Route
+                    path=(StaticSegment("collections"), ParamSegment("id"), StaticSegment("needs"))
+                    view=shell::NeedsPage
+                    ssr=SsrMode::Async
+                />
+                <Route
+                    path=StaticSegment("shopping")
+                    view=shell::ShoppingPage
+                    ssr=SsrMode::Async
+                />
+            </ParentRoute>
+        </ParentRoute>
         <Route path=StaticSegment("login") view=auth_pages::LoginPage />
         <Route path=StaticSegment("signup") view=auth_pages::SignupPage />
     }
@@ -67,253 +91,16 @@ pub fn App() -> impl IntoView {
     view! {
         <Stylesheet id="leptos" href="/pkg/app.css" />
 
-        // sets the document title
-        <Title text="Welcome to Three Rings" />
+        <Title text="Three Rings" />
 
-        // content for this welcome page
         <Router>
-            <main>
-                {Routes(
-                    RoutesProps::builder()
-                        .fallback(|| "Page not found.".into_view())
-                        .children(ToChildren::to_children(move || routes))
-                        .build(),
-                )}
-            </main>
+            {Routes(
+                RoutesProps::builder()
+                    .fallback(|| "Page not found.".into_view())
+                    .children(ToChildren::to_children(move || routes))
+                    .build(),
+            )}
         </Router>
-    }
-}
-
-/// Renders the home page of your application.
-#[component]
-fn HomePage() -> impl IntoView {
-    let increment_action = ServerAction::<IncrementCount>::new();
-
-    // Local optimistic count state
-    let (optimistic_count, set_optimistic_count) = signal(None::<u32>);
-
-    // Server count resource
-    let count = Resource::new(move || increment_action.version().get(), |_| get_count());
-
-    // Initialize from localStorage or server
-    Effect::new(move |_| {
-        if optimistic_count.get().is_none() {
-            // Try to get from localStorage first
-            #[cfg(feature = "hydrate")]
-            {
-                if let Some(window) = window() {
-                    if let Ok(Some(storage)) = window.local_storage() {
-                        if let Ok(Some(cached_count_str)) = storage.get_item("spin_counter_count") {
-                            if let Ok(cached_count) = cached_count_str.parse::<u32>() {
-                                set_optimistic_count.set(Some(cached_count));
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Fallback to server count
-            if let Some(Ok(server_count)) = count.get() {
-                set_optimistic_count.set(Some(server_count));
-
-                // Cache in localStorage
-                #[cfg(feature = "hydrate")]
-                {
-                    if let Some(window) = window() {
-                        if let Ok(Some(storage)) = window.local_storage() {
-                            let _ =
-                                storage.set_item("spin_counter_count", &server_count.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    // Sync server updates to localStorage
-    Effect::new(move |_| {
-        if let Some(Ok(server_count)) = count.get() {
-            // Only update if we have a successful server response and it's different
-            if let Some(current_optimistic) = optimistic_count.get() {
-                if server_count != current_optimistic {
-                    set_optimistic_count.set(Some(server_count));
-                }
-            }
-
-            // Always update localStorage with server value
-            #[cfg(feature = "hydrate")]
-            {
-                if let Some(window) = window() {
-                    if let Ok(Some(storage)) = window.local_storage() {
-                        let _ = storage.set_item("spin_counter_count", &server_count.to_string());
-                    }
-                }
-            }
-        }
-    });
-
-    // Optimistic increment
-    let on_click = move |_| {
-        // Immediately update UI
-        let new_count = optimistic_count.get().unwrap_or(0) + 1;
-        set_optimistic_count.set(Some(new_count));
-
-        // Update localStorage immediately
-        #[cfg(feature = "hydrate")]
-        {
-            if let Some(window) = window() {
-                if let Ok(Some(storage)) = window.local_storage() {
-                    let _ = storage.set_item("spin_counter_count", &new_count.to_string());
-                }
-            }
-        }
-
-        // Trigger server action
-        increment_action.dispatch(IncrementCount {});
-    };
-
-    view! {
-        <div class="min-h-screen bg-background flex items-center justify-center p-4">
-            <div class="bg-card text-card-foreground rounded-xl shadow-2xl p-8 md:p-12 max-w-md w-full border">
-                <div class="text-center space-y-8">
-                    // Header
-                    <div class="space-y-2">
-                        <div class="flex items-center justify-center gap-3 mb-4">
-                            // Fermyon-style logo placeholder
-                            <div class="w-10 h-10 bg-primary rounded-lg flex items-center justify-center">
-                                <span class="text-primary-foreground font-bold text-xl">C</span>
-                            </div>
-                            <h1 class="text-3xl md:text-4xl font-medium">
-                                "Three Rings"
-                            </h1>
-                        </div>
-                        <p class="text-muted-foreground text-sm">"Powered by Leptos + WASM"</p>
-                    </div>
-
-                    // Counter Display
-                    <div class="relative">
-                        <div class="bg-background rounded-lg p-8 border">
-                            <div class="text-5xl md:text-6xl font-light tabular-nums">
-                                {move || {
-                                    optimistic_count
-                                        .get()
-                                        .map(|c| c.to_string())
-                                        .unwrap_or_else(|| "...".to_string())
-                                }}
-                            </div>
-                            <div class="text-muted-foreground text-sm mt-2 uppercase tracking-wider">
-                                "Count Value"
-                            </div>
-                        </div>
-
-                        // Loading indicator overlay
-                        <Show when=move || increment_action.pending().get()>
-                            <div class="absolute inset-0 flex items-center justify-center bg-background/50 rounded-lg">
-                                <div class="animate-spin rounded-full h-8 w-8 border-2 border-transparent border-t-primary"></div>
-                            </div>
-                        </Show>
-                    </div>
-
-                    // Button
-                    <button
-                        on:click=on_click
-                        disabled=move || increment_action.pending().get()
-                        class="w-full rounded-lg bg-primary px-6 py-3 text-primary-foreground font-medium transition-all duration-200 hover:bg-primary/90 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-primary"
-                    >
-                        {move || {
-                            if increment_action.pending().get() {
-                                "Updating..."
-                            } else {
-                                "Increment Counter"
-                            }
-                        }}
-                    </button>
-
-                    // Status indicators
-                    <div class="flex items-center justify-center gap-2 text-xs">
-                        <div class=move || {
-                            if optimistic_count.get().is_none() {
-                                "w-2 h-2 rounded-full bg-yellow-500 animate-pulse"
-                            } else if increment_action.pending().get() {
-                                "w-2 h-2 rounded-full bg-primary animate-pulse"
-                            } else {
-                                "w-2 h-2 rounded-full bg-primary"
-                            }
-                        }></div>
-                        <span class="text-muted-foreground uppercase tracking-wider">
-                            {move || {
-                                if optimistic_count.get().is_none() {
-                                    "Loading"
-                                } else if increment_action.pending().get() {
-                                    "Syncing"
-                                } else {
-                                    "Ready"
-                                }
-                            }}
-                        </span>
-                    </div>
-
-                    // Footer info
-                    <div class="pt-4 border-t space-y-1">
-                        // Interim toggle mount so the persisted override is
-                        // reachable in production before the app shell lands
-                        // (the shell task owns the permanent placement and
-                        // deletes this page).
-                        <div class="flex justify-center">
-                            <components::ui::theme_toggle::ThemeToggle />
-                        </div>
-                        <p class="text-muted-foreground text-xs">"Running in Tauri WebView"</p>
-                        <a class="text-muted-foreground text-xs underline" href="/cards">
-                            "View the catalog →"
-                        </a>
-                        <auth_pages::AuthStatus />
-                    </div>
-                </div>
-            </div>
-        </div>
-    }
-}
-
-/// Catalog status page: proves the data-access seam end to end — the browser
-/// calls the `catalog_count` server fn, which routes through the `CatalogStore`
-/// trait to Neon (hosted) or the hosted API (native), SSR then hydrated. Shows
-/// "0 cards" until catalog-ingestion populates the catalog.
-#[component]
-fn CardsPage() -> impl IntoView {
-    let count = Resource::new(|| (), |_| catalog_count());
-
-    view! {
-        <div class="mx-auto max-w-md p-8">
-            <h1 class="mb-4 text-2xl font-bold">"Catalog"</h1>
-            <Suspense fallback=|| {
-                view! { <p class="text-muted-foreground text-sm">"Loading catalog…"</p> }
-            }>
-                {move || Suspend::new(async move {
-                    match count.await {
-                        Ok(count) => {
-                            view! {
-                                <p class="text-sm">
-                                    {format!("{} cards in the catalog.", count.cards)}
-                                </p>
-                            }
-                                .into_any()
-                        }
-                        Err(e) => {
-                            view! {
-                                <p class="text-muted-foreground text-sm">
-                                    {format!("Failed to load catalog: {e}")}
-                                </p>
-                            }
-                                .into_any()
-                        }
-                    }
-                })}
-            </Suspense>
-            <a class="text-muted-foreground mt-4 inline-block text-sm underline" href="/">
-                "← Home"
-            </a>
-        </div>
     }
 }
 
@@ -322,6 +109,7 @@ pub mod auth_pages;
 #[cfg(feature = "component-bench")]
 pub mod bench;
 pub mod components;
+pub mod shell;
 
 #[cfg(feature = "ssr")]
 pub mod auth;
@@ -358,119 +146,6 @@ pub mod search;
 /// production deployment from ever carrying a data-mutating CLI arm.
 #[cfg(all(feature = "hosted", debug_assertions))]
 pub mod seed;
-
-#[cfg(feature = "ssr")]
-mod storage {
-    #[cfg(feature = "spin")]
-    pub async fn get(key: &str) -> Result<Option<Vec<u8>>, String> {
-        use spin_sdk::key_value::Store;
-        let store = Store::open_default()
-            .await
-            .map_err(|e| format!("Failed to open Spin KV store: {}", e))?;
-        store
-            .get(key)
-            .await
-            .map_err(|e| format!("Failed to get from Spin KV: {}", e))
-    }
-
-    #[cfg(feature = "spin")]
-    pub async fn set(key: &str, value: &[u8]) -> Result<(), String> {
-        use spin_sdk::key_value::Store;
-        let store = Store::open_default()
-            .await
-            .map_err(|e| format!("Failed to open Spin KV store: {}", e))?;
-        store
-            .set(key, value)
-            .await
-            .map_err(|e| format!("Failed to set in Spin KV: {}", e))
-    }
-
-    #[cfg(not(feature = "spin"))]
-    pub async fn get(key: &str) -> Result<Option<Vec<u8>>, String> {
-        use std::fs;
-        use std::path::Path;
-
-        let base_path = std::env::var("STORAGE_PATH").unwrap_or_else(|_| "./data".to_string());
-        let file_path = format!("{}/{}.txt", base_path, key);
-        let path = Path::new(&file_path);
-
-        if !path.exists() {
-            return Ok(None);
-        }
-
-        fs::read(&file_path)
-            .map(Some)
-            .map_err(|e| format!("Failed to read file: {}", e))
-    }
-
-    #[cfg(not(feature = "spin"))]
-    pub async fn set(key: &str, value: &[u8]) -> Result<(), String> {
-        use std::fs;
-        use std::path::Path;
-
-        let base_path = std::env::var("STORAGE_PATH").unwrap_or_else(|_| "./data".to_string());
-        let dir_path = Path::new(&base_path);
-        if !dir_path.exists() {
-            fs::create_dir_all(dir_path)
-                .map_err(|e| format!("Failed to create directory: {}", e))?;
-        }
-
-        let file_path = format!("{}/{}.txt", base_path, key);
-        fs::write(&file_path, value).map_err(|e| format!("Failed to write file: {}", e))
-    }
-}
-
-#[server(prefix = "/api")]
-pub async fn get_count() -> Result<u32, ServerFnError<String>> {
-    #[cfg(feature = "ssr")]
-    {
-        match storage::get("counter").await {
-            Ok(Some(value)) => {
-                let count_str = String::from_utf8(value)
-                    .map_err(|e| ServerFnError::ServerError(format!("Invalid UTF-8: {}", e)))?;
-                let count = count_str.parse::<u32>().unwrap_or(0);
-                println!("Retrieved count: {count}");
-                Ok(count)
-            }
-            Ok(None) => {
-                println!("No count found, returning 0");
-                Ok(0)
-            }
-            Err(e) => {
-                eprintln!("Error reading counter: {}", e);
-                Ok(0)
-            }
-        }
-    }
-    #[cfg(not(feature = "ssr"))]
-    {
-        Err(ServerFnError::ServerError(
-            "Server-only function".to_string(),
-        ))
-    }
-}
-
-#[server(prefix = "/api")]
-pub async fn increment_count() -> Result<(), ServerFnError<String>> {
-    #[cfg(feature = "ssr")]
-    {
-        let current_count = get_count().await?;
-        let new_count = current_count + 1;
-        println!("Incrementing count from {current_count} to {new_count}");
-
-        storage::set("counter", new_count.to_string().as_bytes())
-            .await
-            .map_err(ServerFnError::ServerError)?;
-
-        Ok(())
-    }
-    #[cfg(not(feature = "ssr"))]
-    {
-        Err(ServerFnError::ServerError(
-            "Server-only function".to_string(),
-        ))
-    }
-}
 
 /// Map a data-access [`shared::ApiError`] onto a server-fn error. The transport
 /// channel carries the message; richer status semantics are collection-api's.
