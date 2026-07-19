@@ -331,6 +331,14 @@ pub mod ingest;
 #[cfg(feature = "hosted")]
 pub mod search;
 
+/// Dev seed data for the test user (specs/app-ui.md) — `server --seed-dev`.
+/// Debug builds only: unlike `--ingest` (which requires the dedicated
+/// `INGEST_DATABASE_URL` credential), the seed writes through the runtime
+/// `DATABASE_URL`, so compiling it out of release binaries is what keeps the
+/// production deployment from ever carrying a data-mutating CLI arm.
+#[cfg(all(feature = "hosted", debug_assertions))]
+pub mod seed;
+
 #[cfg(feature = "ssr")]
 mod storage {
     #[cfg(feature = "spin")]

@@ -58,6 +58,32 @@ async fn main() {
         }
     }
 
+    // Dev seed data (specs/app-ui.md): `server --seed-dev <user-uuid>` builds
+    // the test user's collection tree through the real CollectionStore methods
+    // against DATABASE_URL (the dev branch) and exits. Invoked via
+    // scripts/seed-dev-data.sh, which resolves the e2e user's uuid. Debug
+    // builds only — release binaries (Render, artifacts) don't carry this arm.
+    #[cfg(debug_assertions)]
+    if let Some(i) = args.iter().position(|arg| arg == "--seed-dev") {
+        let user_id = match args.get(i + 1).map(|s| s.parse::<uuid::Uuid>()) {
+            Some(Ok(id)) => id,
+            other => {
+                log!("usage: server --seed-dev <user-uuid> (got {other:?})");
+                std::process::exit(2);
+            }
+        };
+        match app::seed::run(user_id).await {
+            Ok(stats) => {
+                log!("seed succeeded: {stats:?}");
+                return;
+            }
+            Err(e) => {
+                log!("seed FAILED: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let conf = get_configuration(None).unwrap();
     let addr = conf.leptos_options.site_addr;
     let leptos_options = conf.leptos_options;
