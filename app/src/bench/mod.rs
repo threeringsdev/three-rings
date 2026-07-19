@@ -18,7 +18,9 @@ mod breadcrumb;
 mod button;
 mod card;
 mod checkbox;
+mod command;
 mod dialog;
+mod hover_card;
 mod input;
 mod input_group;
 mod kbd;
@@ -26,6 +28,7 @@ mod popover;
 mod separator;
 mod sheet;
 mod skeleton;
+mod sonner;
 mod table;
 mod theme_toggle;
 mod toggle_group;
@@ -111,6 +114,21 @@ const SECTIONS: &[BenchSection] = &[
         id: "sheet",
         title: "Sheet",
         demo: sheet::demo,
+    },
+    BenchSection {
+        id: "command",
+        title: "Command",
+        demo: command::demo,
+    },
+    BenchSection {
+        id: "hover-card",
+        title: "Hover card",
+        demo: hover_card::demo,
+    },
+    BenchSection {
+        id: "sonner",
+        title: "Sonner (toaster)",
+        demo: sonner::demo,
     },
     BenchSection {
         id: "table",

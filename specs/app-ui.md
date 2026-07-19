@@ -214,6 +214,61 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Vendor batch V3 — command / hover_card / sonner (2026-07-19)
+
+The interactive core of the app's central surfaces. All three carry
+data-name markers and their bench sections in the same commit.
+
+- **`command` fully reactive** (the gap analysis's headline rewrite): the
+  parallel vanilla-JS keyboard+filter script — which fought the reactive path
+  by *also* writing item visibility — is deleted. Filter is a per-item
+  `Memo`; ↑↓/⏎ navigation is a Leptos **item registry** (each `CommandItem`
+  registers on mount into a shared `RwSignal<Vec<ItemReg>>`, deregisters on
+  cleanup), and `CommandInput` drives a `highlight` index over the *visible*
+  subset. `CommandEmpty` reacts to "no item visible". This is the shape
+  features extend with ⇧⏎/⌥⏎/count-entry by reading modifiers in their own
+  handlers. `CommandDialog` wraps it in the vendored `dialog` (deterministic
+  caller id, Leptos open state) — no inline script.
+- **`hover_card`**: native Popover API + CSS anchor positioning kept;
+  hover-intent is a cancelable Leptos `TimeoutHandle` (150 ms open on
+  enter/focus, 150 ms close on leave/blur, cancel-close while over the
+  content) — upstream's inline `<script>` gone. No JS position fallback (a
+  hover preview is never the sole affordance; cosmetic if mispositioned).
+- **`sonner` is a native Leptos toaster, not a vendored copy** (maintainer
+  decision, Open questions): upstream's Rust side is markup that triggers a
+  separate `sonner.js` engine we don't ship. Ours: a `Toaster` mounted once
+  provides a `ToastHandle` via context; `handle.show(ToastOptions…)` fires
+  programmatically with an optional **action button** (the undo-on-toast the
+  move flow needs) and auto-dismiss. API shape follows the registry so
+  callers read familiarly.
+- Bench-check extended: command reactive filter + ↑↓/⏎ selection, toast fire
+  + undo-dismiss, hover-intent open/close. Snag caught in-loop: the bench
+  first rendered `CommandInput` without a `<Command>` ancestor →
+  `expect_context` panicked in SSR and killed the server thread; wrapping in
+  `<Command>` fixed it (a good reminder the context is mandatory).
+- **Codex review** (9 findings) — sonner cleared entirely (native design
+  accepted; auto-dismiss/keys/id-allocation all verified correct):
+  - **hover_card trigger→content handoff broken** (#3, high) — trigger and
+    content held *separate* `HoverTimer`s, so moving onto the card didn't
+    cancel the trigger's pending close and it shut ~150 ms later. **Fixed**:
+    one timer shared through the context; both endpoints cancel/reschedule
+    the same handle. The bench now moves onto the content and asserts it
+    stays open (was untested — finding #6), plus `on_cleanup` cancels a
+    pending timer on unmount (#4).
+  - **command highlight not clamped on shrink** (#2, medium) — a stale
+    highlight above a shrunk visible set rendered no selection. **Fixed**:
+    the highlight memo and Enter both clamp to the last visible row.
+  - **command registry vs DOM order after in-place keyed reorder** (#1) —
+    **documented as a bounded limitation** (module doc + here): all three
+    consumers are append-only (static client-filtered lists; full remounts
+    on new server results), none reorder persistent items in place, so the
+    `compareDocumentPosition` sort is deferred until one does. Not a live
+    bug for any current consumer.
+  - Remaining bench-depth findings (#5, #7–#9) acknowledged; the `.mjs`
+    probe stays diagnostic-grade (behavioral depth is the per-feature e2e's
+    job) — the two that pointed at real defects (#6 handoff) are now
+    covered.
+
 ### Vendor batch V2 — overlay foundations (2026-07-19)
 
 `scroll_lock` + `dialog` + `popover` + `sheet`, markup/CSS vendored from

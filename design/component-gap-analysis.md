@@ -73,6 +73,17 @@ reopen races), a topmost-only ESC stack (one press closes one overlay),
 anchor positioning (confirmed on Android Chrome 145) with a
 `css::supports`-gated JS positioning fallback for engines without anchors.
 
+**V3 adoption notes (2026-07-19, interactive core):** `command`,
+`hover_card`, `sonner`. `command` is the headline rewrite — the vanilla-JS
+keyboard/filter script is replaced by a reactive Leptos item registry
+(mount/cleanup registration; ↑↓/⏎ over the visible subset), the shared core
+of quick-add / destination picker / ⌘K. `hover_card` keeps the
+anchor-positioned native popover with Leptos hover-intent timers. `sonner` is
+a **native Leptos toaster written fresh** (not the vendored registry markup)
+per the maintainer's engine decision — programmatic `ToastHandle::show` with
+an optional action button for undo, so toast state is first-class Leptos
+rather than a separate JS engine.
+
 ## Gaps
 
 **Collection tree.** The registry has no tree view. Ours needs: arbitrary nesting with per-node collapse, drag to reparent AND reorder, pinned system rows (All cards, Inbox, shopping list), selection state, per-node rolled-up count badges, and context-menu tree management. Nearest parts to build on: `collapsible` (per-node expand), `button`/`item` (row chrome), `badge` (counts), `context_menu` (management), and the registry's `drag_and_drop` primitive — worth evaluating as the drag layer before reaching for a custom one, same maturity caveat as everything else. The tree is the app's central navigation surface; expect it to be the largest custom component.
