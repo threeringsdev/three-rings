@@ -102,7 +102,7 @@ spike. UI work stays on the ~3K-printing POC catalog (maintainer decision
 
 ### Stage 1 — component vendoring (vendor-component skill; bench section same commit)
 
-- [ ] Vendor batch V1 — static primitives: `button`, `input`/`input_group`, `badge`, `kbd`, `separator`, `checkbox`+`label`, `toggle_group`, `breadcrumb`, `skeleton`, `card` (specs: [app-ui](app-ui.md), [ui-components](ui-components.md))
+- [x] Vendor batch V1 — static primitives: `button`, `input`/`input_group`, `badge`, `kbd`, `separator`, `checkbox`+`label`, `toggle_group`, `breadcrumb`, `skeleton`, `card` (specs: [app-ui](app-ui.md), [ui-components](ui-components.md)) — **done**: 11 components + bench sections in one commit; `variants!` hand-expanded (no leptos_ui/paste), undefined-token variants dropped, icons inlined, label peer-class upstream bug fixed as deviation; verified web (bench-check CLEAN incl. new interaction asserts, fast tier 4/4) + Android on-device; Codex review: 4 refuted with SSR evidence, 3 fixed, 2 disputed (app-ui Findings + gap-analysis adoption notes)
 - [ ] Vendor batch V2 — overlay foundations: `use_scroll_lock` asset, `dialog`, `popover`, `sheet`; deterministic caller-supplied IDs (no `use_random_id`), Leptos-owned open state, ESC-listener cleanup; verify CSS anchor positioning on the Android webview, JS fallback if unsupported (specs: [app-ui](app-ui.md), [ui-components](ui-components.md))
 - [ ] Vendor batch V3 — `command` (rewired fully reactive — the shared core of quick-add / destination picker / ⌘K), `hover_card` (hover-intent timers in Leptos), sonner per the engine decision (specs: [app-ui](app-ui.md), [ui-components](ui-components.md))
 

@@ -29,4 +29,25 @@ macro_rules! clx {
     };
 }
 
+/// `void!` — the self-closing-element sibling of [`clx!`], vendored from the
+/// same `leptos_ui` source: identical class merging, no children.
+macro_rules! void {
+    ($name:ident, $element:ident, $($base_class:expr),+ $(,)?) => {
+        #[component]
+        pub fn $name(
+            #[prop(into, optional)] class: String,
+        ) -> impl IntoView {
+            let merged_classes = tw_merge::tw_merge!(tw_merge::tw_join!($($base_class),+), class);
+
+            view! {
+                <$element
+                    class=merged_classes
+                    data-name=stringify!($name)
+                />
+            }
+        }
+    };
+}
+
 pub(crate) use clx;
+pub(crate) use void;

@@ -214,6 +214,52 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Vendor batch V1 — static primitives (2026-07-19)
+
+Eleven components vendored from rust-ui@43e1e32 (button, badge, input,
+input_group, kbd, separator, checkbox, label, toggle_group, breadcrumb,
+skeleton, card), each with a bench section in the same commit. Batch-wide
+decisions (per-file details in each header):
+
+- **`variants!` hand-expanded.** Upstream's 457-line `leptos_ui::variants!`
+  macro (plus its `paste` dep and `TwClass`/`TwVariant` derives) is replaced
+  with plain enums + `match` arms carrying identical class strings — zero new
+  dependencies, and the token trap surfaces at review time instead of
+  silently emitting no CSS.
+- **Undefined-token variants dropped**: button `Warning`/`Success`/
+  `Bordered`, badge `Success`/`Warning`/`Info` (they reference `warning`/
+  `success`/`info`/`*-light`/`*-dark` tokens style/input.css doesn't define).
+  Re-add variants together with their tokens if a screen needs them.
+- **`void!` joined `clx!`** in the vendored clx.rs (same leptos_ui source).
+- **Icons inlined** (checkbox check, breadcrumb chevron/ellipsis — Lucide
+  paths, ISC) rather than adopting the registry's icons crate.
+- **Upstream bug fixed as deviation**: label's runtime-formatted named-peer
+  classes (`peer-disabled/{for}:…`) can never have CSS generated for them —
+  replaced with the static `peer-disabled:` pair.
+- **`strum` avoided** (input's type enum → hand-written `as_str`);
+  **`InputGroupTextarea` dropped** (no textarea vendored, no wireframe use).
+- Component attr pass-through convention: `attr:aria-label=…` etc. on the
+  component tag (the `{..}` spread form mis-parses hyphenated attrs in this
+  leptos version).
+- Verified: bench-check extended (SSR marker per family + checkbox/
+  toggle-group interaction + the html-level bench toggle) — CLEAN; fast tier
+  4/4; **Android webview on-device** (all families render, checkbox
+  interacts). ID stability N/A (no generated IDs); assets N/A (none
+  referenced).
+- **Codex review** (9 findings): 1–4 ("`attr:` on components can't compile /
+  won't forward") **disputed with hard evidence** — both clippy halves green
+  and all five spot-checked attributes (`href`, `data-slot`, `aria-label`,
+  `role`, `aria-current`) present in the served SSR HTML; `attr:` on a
+  component is Leptos 0.8's documented root-attribute pass-through, and
+  upstream's own breadcrumb uses it on clx components. 5 **accepted**:
+  `aria-checked` added to ToggleGroupItem (deviation noted in-file); roving
+  focus/keyboard is feature-side, lands with the catalog switch. 6–7
+  **accepted**: bench demo now exercises the label↔checkbox `for`/`id`
+  association and the probe asserts it plus the toggle item's `data-state`.
+  8–9 (probe depth) **disputed**: the `.mjs` probe layer is cheap
+  diagnostics by design; behavioral depth belongs to the per-task e2e specs
+  (ui-work-loop's tier contract).
+
 ### Dark palette + token migration (2026-07-19)
 
 - **Token set**: `style/input.css` now carries the full Rust/UI standard set

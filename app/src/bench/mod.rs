@@ -13,8 +13,19 @@
 //! verification checklist (SSR, hydration, ID stability, vendored assets,
 //! native-webview positioning) against the new section before shipping it.
 
+mod badge;
+mod breadcrumb;
+mod button;
+mod card;
+mod checkbox;
+mod input;
+mod input_group;
+mod kbd;
+mod separator;
+mod skeleton;
 mod table;
 mod theme_toggle;
+mod toggle_group;
 
 use leptos::prelude::*;
 
@@ -28,6 +39,61 @@ struct BenchSection {
 
 /// The section registry — one line per vendored component, in page order.
 const SECTIONS: &[BenchSection] = &[
+    BenchSection {
+        id: "button",
+        title: "Button",
+        demo: button::demo,
+    },
+    BenchSection {
+        id: "input",
+        title: "Input",
+        demo: input::demo,
+    },
+    BenchSection {
+        id: "input-group",
+        title: "Input group",
+        demo: input_group::demo,
+    },
+    BenchSection {
+        id: "badge",
+        title: "Badge",
+        demo: badge::demo,
+    },
+    BenchSection {
+        id: "kbd",
+        title: "Kbd",
+        demo: kbd::demo,
+    },
+    BenchSection {
+        id: "separator",
+        title: "Separator",
+        demo: separator::demo,
+    },
+    BenchSection {
+        id: "checkbox",
+        title: "Checkbox + Label",
+        demo: checkbox::demo,
+    },
+    BenchSection {
+        id: "toggle-group",
+        title: "Toggle group",
+        demo: toggle_group::demo,
+    },
+    BenchSection {
+        id: "breadcrumb",
+        title: "Breadcrumb",
+        demo: breadcrumb::demo,
+    },
+    BenchSection {
+        id: "skeleton",
+        title: "Skeleton",
+        demo: skeleton::demo,
+    },
+    BenchSection {
+        id: "card",
+        title: "Card",
+        demo: card::demo,
+    },
     BenchSection {
         id: "table",
         title: "Table",
