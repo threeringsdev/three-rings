@@ -351,11 +351,26 @@ test.describe("mobile", () => {
     await expect(page.getByTestId("filter-badge")).toContainText("4");
 
     await page.getByRole("button", { name: /Filters/ }).click();
+    // Two locators on purpose: `panel` is the SheetContent (which carries the
+    // open/closed state), `sheet` is the rail body nested inside it.
+    // `data-state`, not toBeVisible — SheetContent slides in via a transform
+    // and keeps its box when closed, so a closed sheet and everything in it is
+    // "visible" to Playwright. Proved by mutation on the card-detail task
+    // (app-ui Findings).
+    const panel = page.locator('[data-name=SheetContent][aria-label="Filters"]');
+    await expect(panel).toHaveAttribute("data-state", "open");
     const sheet = page.locator("[data-testid=filter-sheet]");
-    await expect(sheet).toBeVisible();
     await expect(
       sheet.getByRole("checkbox", { name: "Instant" }),
     ).toHaveAttribute("aria-checked", "true");
+
+    // The footer count comes from an Effect-written signal, not a resource read
+    // in render. Reading the resource in render made SSR emit "Show results"
+    // and hydration claim that text node without rewriting it, so the label
+    // stayed countless until the next query change (app-ui Findings).
+    // On the panel, not a button locator: SheetContent renders its own X close
+    // button with the same aria-label as the footer's SheetClose.
+    await expect(panel).toContainText(/Show \d+ results/);
 
     // The sheet edits the same query text the rail does.
     await sheet.getByRole("checkbox", { name: "Sorcery" }).click();

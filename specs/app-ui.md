@@ -793,11 +793,66 @@ page, the multi-face page, and the malformed-id page. Merge gate green, 8/8.
   a catalog page) for what is a global fact. No correctness impact short of a
   convertible flipping pointer modes mid-session; a shared context is the right
   shape and is deferred rather than bolted on here.
-- **Codex adversarial review did not run.** The loop's step-2 Codex pass is
-  driven by slash commands marked `disable-model-invocation`, and the
-  `codex-rescue` subagent is a one-shot forwarder that returns before its Codex
-  job finishes — so an autonomous run cannot retrieve the result. The job was
-  dispatched (`task-mrt56mi7-6w478m`) and is retrievable by a human via
-  `/codex:status`. An independent adversarial review was run in its place and
-  its findings are what this section records. **The loop's step 2 does not work
-  unattended as written** — filed against ui-work-loop.
+- **Codex review: retrieval, and a correction.** The first pass through this
+  task recorded that the Codex step "cannot run unattended". **That was wrong.**
+  The `/codex:*` slash commands are indeed `disable-model-invocation: true`, and
+  the `codex-rescue` subagent is a one-shot forwarder that returns before its
+  job finishes — but both commands are thin wrappers over
+  `scripts/codex-companion.mjs`, which is callable directly:
+
+  ```
+  node "$CLAUDE_PLUGIN_ROOT/scripts/codex-companion.mjs" status
+  node "$CLAUDE_PLUGIN_ROOT/scripts/codex-companion.mjs" result <job-id>
+  ```
+
+  Job `task-mrt56mi7-6w478m` was retrieved that way and its six findings are
+  folded in above. Convergence with the independent reviewer was high: Codex
+  independently flagged the `disabled` timer race, the `first()` hero art, and
+  — notably — **both** of the vacuous assertions the mutation pass had already
+  caught. It found two things the substitute missed: the hybrid-pointer gap and
+  the unasserted per-row quantities, both fixed here.
+
+  Lesson for the loop, and the reason ui-task-loop now says this: **the
+  autonomous path is the runtime script, not the subagent.** `codex-rescue`
+  dispatches and returns; polling it for the result gets a refusal, because its
+  own instructions forbid follow-up work. Do not read that refusal as "Codex is
+  unavailable".
+
+### Cross-task audit (2026-07-20, during the card-detail task)
+
+A sweep of every prior Phase 5 task's deferred/disputed items, looking for debt
+that was recorded in Findings but tracked nowhere. Nine items were filed as
+TODO tasks; three things are worth stating here.
+
+**The `/catalog` hydration warning was not benign, and its comment said it
+was.** `ResultsToolbar` derived the mobile sheet's "Show N results" footer by
+reading the results `Resource` in render, with a comment justifying it as a
+deliberate escape from the suspense boundary. The goal was right; the mechanism
+was not. SSR ran the closure before the resource resolved and emitted "Show
+results"; hydration *claimed* that text node without rewriting it; the label
+then stayed countless until the next query change. Reproduced on
+`/catalog?q=bolt` — two results, label reading "Show results". Fixed by moving
+the derivation into an Effect-written signal, which keeps the non-blocking
+property (Effects don't run in SSR, so SSR still renders the `None` branch
+deterministically) while making the post-hydration update a real signal change.
+`/catalog` is hydration-CLEAN again, and a regression assertion in
+`filter-rail.spec.ts` fails against the old shape. This was the only
+read-in-render of a resource in the codebase; the other four all go through
+`Suspend`.
+
+**How it survived two tasks is the more useful finding.** `git blame` puts the
+line on the filter-rail commit, and that task's Verification block lists unit
+tests, e2e, Android CDP and a mutation pass — **but no hydration probe**, which
+step 3 of the loop requires. The card-detail task then probed the detail pages
+it had touched, not `/catalog`. So a required step was omitted once, silently,
+and nothing in the loop's failure policy catches an omitted verification step.
+The ui-task-loop skill now names the probe's scope explicitly (the pages you
+touched **and** the pages that render components you touched).
+
+**Two vacuous assertions of the same shape as the card-detail ones were still
+live in `filter-rail.spec.ts`.** `await expect(sheet).toBeVisible()` on a
+closed `SheetContent` passes, for the reason recorded above — and the locator
+was pointed at the rail body nested *inside* the panel rather than the panel
+itself, so it could not have read the open state either way. Retargeted to
+`[data-name=SheetContent]` + `data-state`. Worth generalizing: **`toBeVisible()`
+is never the right assertion for this Sheet**, on any surface.

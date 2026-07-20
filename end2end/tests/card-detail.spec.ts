@@ -154,11 +154,20 @@ test.describe("authed", () => {
       const text = (await section.textContent()) ?? "";
       const match = /Your copies · (\d+)/.exec(text);
       expect(match, "your-copies rendered without a total").not.toBeNull();
-      if (Number(match![1]) > 0) {
-        // Every copy is somewhere: the collections are named and linked.
-        await expect(
-          section.locator("a[href^='/my/collections/']").first(),
-        ).toBeVisible();
+      const total = Number(match![1]);
+      if (total > 0) {
+        // Every copy is somewhere: the collections are named and linked...
+        const rows = section.locator("li");
+        await expect(rows.first().locator("a[href^='/my/collections/']")).toBeVisible();
+        // ...and each row carries its own quantity. Asserting only the header
+        // total would pass with every per-location count missing or wrong
+        // (Codex review, low) — so check the rows sum to the header.
+        const counts = await rows.evaluateAll((els) =>
+          els.map((el) => Number(el.lastElementChild?.textContent?.trim())),
+        );
+        expect(counts.length).toBeGreaterThan(0);
+        expect(counts.every((n) => Number.isInteger(n) && n > 0)).toBe(true);
+        expect(counts.reduce((a, b) => a + b, 0)).toBe(total);
         found = true;
         break;
       }
@@ -202,6 +211,41 @@ test("a grid tile offers no hover preview — it is already the art @fast", asyn
   await page.getByTestId("card-preview-trigger").first().hover();
   await page.waitForTimeout(400); // well past the 150 ms intent delay
   await expect(page.locator("[data-testid=card-preview-hover]")).toHaveCount(0);
+});
+
+test("a touch tap on a fine-pointer device still opens the sheet @fast", async ({
+  page,
+}) => {
+  // Hybrid devices (touchscreen laptops) report `(pointer: coarse) === false`
+  // while still taking finger taps, and Playwright cannot emulate that combo —
+  // `hasTouch` flips the media query in all three engines. So drive the code
+  // path directly: a real pointerdown carrying pointerType "touch" in an
+  // otherwise fine-pointer context. Before the fix this followed the link
+  // (Codex review, medium).
+  await page.goto(`/catalog?q=${encodeURIComponent(SINGLE_FACE_QUERY)}&view=list`);
+  await hydrated(page);
+  expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(
+    false,
+  );
+
+  // Both events synthetically: Playwright's own .click() emits a real *mouse*
+  // pointerdown first, which would reset the touch intent before the click
+  // lands. A synthetic click on an anchor still navigates if nothing calls
+  // preventDefault, so the URL assertion below stays meaningful.
+  const trigger = page.getByTestId("card-preview-trigger").first();
+  await trigger.evaluate((el) => {
+    el.dispatchEvent(
+      new PointerEvent("pointerdown", { pointerType: "touch", bubbles: true }),
+    );
+    (el.querySelector("a") ?? el).dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
+  });
+
+  await expect(
+    page.locator("[data-testid=card-preview-sheet][role=dialog]").first(),
+  ).toHaveAttribute("data-state", "open");
+  expect(new URL(page.url()).pathname).toBe("/catalog");
 });
 
 test.describe("touch", () => {

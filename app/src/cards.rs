@@ -167,6 +167,16 @@ pub fn CardPreview(
     let hovered = RwSignal::new(false);
     let sheet_seen = RwSignal::new(false);
 
+    // What the *last pointer event* actually was, as opposed to what the device
+    // says its primary pointer is. A hybrid laptop reports `(pointer: fine)`
+    // while still taking touch taps, so keying only off the media query made a
+    // real finger-tap follow the link instead of opening the sheet (Codex
+    // review, medium). `pointerdown` always precedes `click`, so this is
+    // settled by the time the click handler reads it, and it flips back on the
+    // next mouse click — the same device gets both behaviors, correctly.
+    let touch_intent = RwSignal::new(false);
+    let wants_sheet = Signal::derive(move || coarse.get() || touch_intent.get());
+
     let on_click = move |ev: leptos::ev::MouseEvent| {
         // A modified click is a navigation instruction, not a preview request
         // — swallowing it would break "open in a new tab" for anyone with a
@@ -174,7 +184,7 @@ pub fn CardPreview(
         if ev.meta_key() || ev.ctrl_key() || ev.shift_key() || ev.alt_key() {
             return;
         }
-        if coarse.get() {
+        if wants_sheet.get() {
             ev.prevent_default();
             sheet_seen.set(true);
             sheet_open.set(true);
@@ -187,6 +197,9 @@ pub fn CardPreview(
         <span
             class="block"
             on:click=on_click
+            on:pointerdown=move |ev: leptos::ev::PointerEvent| {
+                touch_intent.set(ev.pointer_type() == "touch")
+            }
             on:mouseenter=move |_| hovered.set(true)
             on:focusin=move |_| hovered.set(true)
             data-testid="card-preview-trigger"
@@ -197,7 +210,10 @@ pub fn CardPreview(
 
     let trigger = if hover {
         view! {
-            <HoverCard id=format!("card-preview-{oracle_id}") disabled=coarse>
+            // Disabled on the same signal that routes clicks to the sheet, so a
+            // hybrid device's touch tap suppresses the hover card too rather
+            // than raising one behind the sheet.
+            <HoverCard id=format!("card-preview-{oracle_id}") disabled=wants_sheet>
                 <HoverCardTrigger class="block w-full">{trigger}</HoverCardTrigger>
                 <HoverCardContent class="w-72" {..} data-testid="card-preview-hover">
                     <Show when=move || hovered.get()>

@@ -21,17 +21,34 @@ one Android release smoke at phase end** (the polish task).
    `cargo leptos watch --features component-bench` alive in the background
    (repo root; it binds :3000 after the first build — check `lsof -i :3000`
    before assuming it's down).
-2. **Codex adversarial review** — the review slash commands
-   (`/codex:adversarial-review`, `/codex:status`, `/codex:result`) are
-   **human-only** (`disable-model-invocation: true`); in an autonomous run,
-   launch the `codex-rescue` agent instead with a review-only prompt: the
-   task's acceptance criteria as focus, "return numbered findings
-   (file:line, what breaks, severity), no fixes applied". **Verify every
-   finding before acting** — never blind-apply; record disputed findings +
-   rationale in app-ui Findings. Heavy mechanical fixes may go to a second
-   `codex-rescue` dispatch. Repeat until clean or all-disputed.
-3. **Platform verification** — web: `node end2end/hydration-check.mjs` + a
-   page-specific SSR curl against :3000 (view-source markup present).
+2. **Codex adversarial review** — the `/codex:*` slash commands are human-only
+   (`disable-model-invocation: true`), so an autonomous run drives the
+   **runtime script directly**. That is the whole trick, and it is not
+   optional: `codex-rescue` dispatches a job and returns *before it finishes*,
+   and messaging it for the result gets a refusal (its own instructions forbid
+   follow-up work). **A refusal from `codex-rescue` does not mean Codex is
+   unavailable.** Dispatch via the agent, then collect via:
+
+   ```bash
+   R="$HOME/.claude/plugins/cache/openai-codex/codex/<ver>/scripts/codex-companion.mjs"
+   node "$R" status                 # job id + completion state
+   node "$R" result <job-id>        # the findings
+   ```
+
+   Poll `status` until the job leaves `running`. Prompt it review-only: the
+   task's acceptance criteria as focus, "return numbered findings (file:line,
+   what breaks, severity), no fixes applied". **Verify every finding before
+   acting** — never blind-apply; record disputed findings + rationale in
+   app-ui Findings. Repeat until clean or all-disputed.
+3. **Platform verification** — web: `node end2end/hydration-check.mjs <urls…>`
+   + a page-specific SSR curl against :3000 (view-source markup present).
+   **The probe takes URLs as arguments — running it bare exits 0 having checked
+   nothing.** Probe the pages you touched *and* every page that renders a
+   component you touched; a shared component means a page you didn't open can
+   regress. (The filter-rail task skipped this step entirely and a real
+   `/catalog` hydration bug went undetected for two tasks — app-ui Findings,
+   "Cross-task audit".) A warning here is a finding, not noise: chase it to
+   either a fix or a written reason it is safe.
    Android: the **android-smoke** skill's dev-attach recipe →
    `node end2end/android-cdp-check.mjs`, then run the task's e2e spec against
    the webview if it touches layout/input (overlay/positioning code always).
@@ -40,10 +57,13 @@ one Android release smoke at phase end** (the polish task).
    --project=chromium`), then run the **full tier at the end of the task**:
    `npx playwright test` (chromium+firefox+webkit — webkit is the WKWebView
    proxy). Full-tier green is a precondition for `[x]`, every task.
-5. **Codex e2e pass** — `/codex:adversarial-review` focused on the new test
-   files: "which assertions still pass if the feature is broken; propose one
-   mutation per test." Apply accepted mutations transiently, confirm the test
-   fails, revert; note evidence in Findings.
+5. **Codex e2e pass** — same dispatch/collect mechanics as step 2, focused on
+   the new test files: "which assertions still pass if the feature is broken;
+   propose one mutation per test." Apply accepted mutations transiently,
+   confirm the test fails, revert; note evidence in Findings. **Wait for the
+   watch server to actually rebuild before judging a mutation** — poll the
+   served wasm hash (`curl -s :3000/pkg/app_bg.wasm | md5`) until it changes,
+   or you will test the old binary and record a false survival.
 6. **Gate + land** — the **validate** skill. Final commit flips `[~]`→`[x]`
    **and** records Findings in the same commit. Conventional-commit PR title
    (it becomes the squash commit on main); enable auto-merge; confirm green.

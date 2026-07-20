@@ -55,6 +55,22 @@ The login fixture drives the real `/login` form once per worker and reuses
   start URL (`http://tauri.localhost/<path>`, never JS `location.href` — it
   races the CDP session).
 
+## Assertions that lie
+
+- **`toBeVisible()` on a `Sheet` is always wrong.** `SheetContent` slides via a
+  transform and keeps its box when closed, so a *closed* sheet — and everything
+  nested in it — is "visible" to Playwright. Assert
+  `toHaveAttribute("data-state", "open"|"closed")` on the `[data-name=SheetContent]`
+  element, not on a child.
+- **`{..}` spreads land a `data-testid` on the backdrop as well as the panel.**
+  Pair the testid with `[role=dialog]` or the locator resolves to two elements.
+- **A closed `popover` is in the DOM.** `toBeHidden()` passes whether or not its
+  children rendered, so it cannot test lazy mounting — assert on the content
+  (e.g. a name appearing exactly once) instead.
+- Both of the first two shipped as green-but-meaningless assertions and were
+  only caught by mutation testing. When an assertion protects an overlay, mutate
+  the feature and watch it fail before believing it.
+
 ## Quarantine policy
 
 Flake → one retry. Still flaky → tag `@flaky`, file a Findings entry in the

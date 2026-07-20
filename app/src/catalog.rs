@@ -363,12 +363,29 @@ fn ResultsToolbar(
     results: Resource<Result<shared::SearchResults, ServerFnError<String>>>,
     list_view: Memo<bool>,
 ) -> impl IntoView {
-    // The mobile sheet's "Show N results" footer. Read off the resource
-    // directly rather than awaited: the sheet is open while a search is in
-    // flight, and a `None` there reads as "Show results" instead of blocking
-    // the button behind a suspense boundary.
-    let result_count =
-        Signal::derive(move || results.get().and_then(|r| r.ok()).map(|r| r.cards.len()));
+    // The mobile sheet's "Show N results" footer. The goal is to stay *outside*
+    // a suspense boundary — the sheet is open while a search is in flight, and
+    // a `None` here reads as "Show results" rather than blocking the button.
+    //
+    // But it must not read the resource in render to get that. Doing so warned
+    // ("reading a resource in hydrate mode outside a Suspense/Transition/
+    // effect") and the warning was right: SSR ran the closure before the
+    // resource resolved and emitted "Show results", hydration then *claimed*
+    // that text node without rewriting it, and the label stayed wrong until the
+    // next query change. Verified on `/catalog?q=bolt` — one result, label stuck
+    // at "Show results".
+    //
+    // An Effect-written signal keeps the non-blocking property and fixes the
+    // staleness: Effects don't run during SSR (so SSR still renders the `None`
+    // branch, deterministically), and the post-hydration write is a real signal
+    // change, which does update the DOM.
+    let count_after_hydrate = RwSignal::new(None::<usize>);
+    Effect::new(move |_| {
+        if let Some(Ok(r)) = results.get() {
+            count_after_hydrate.set(Some(r.cards.len()));
+        }
+    });
+    let result_count: Signal<Option<usize>> = count_after_hydrate.into();
 
     view! {
         <div class="flex flex-wrap items-center gap-3">
