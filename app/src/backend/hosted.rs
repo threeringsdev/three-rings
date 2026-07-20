@@ -425,7 +425,7 @@ impl CollectionStore for HostedBackend {
         .map_err(upstream)?;
         let summary = match updated {
             Some(row) => row.into_summary()?,
-            None => return Err(self.absent_or_inbox(&mut tx, id, "rename").await),
+            None => return Err(self.absent_or_inbox(&mut tx, id, "renamed").await),
         };
         tx.commit().await.map_err(upstream)?;
         Ok(summary)
@@ -440,7 +440,7 @@ impl CollectionStore for HostedBackend {
             .map_err(upstream)?
             .rows_affected();
         if affected == 0 {
-            return Err(self.absent_or_inbox(&mut tx, id, "delete").await);
+            return Err(self.absent_or_inbox(&mut tx, id, "deleted").await);
         }
         tx.commit().await.map_err(upstream)?;
         Ok(())
@@ -496,12 +496,21 @@ impl CollectionStore for HostedBackend {
             }
         }
 
-        sqlx::query("UPDATE collections SET parent_id = $2 WHERE id = $1")
-            .bind(id)
-            .bind(new_parent)
-            .execute(&mut *tx)
-            .await
-            .map_err(upstream)?;
+        // `NOT is_inbox`: the Inbox is pinned first at the top level (IA
+        // invariant) — nesting it would defeat the pin, so it joins the
+        // rename/delete protections. Found by the tree task's review: the
+        // sidebar pins Inbox only among the roots.
+        let affected =
+            sqlx::query("UPDATE collections SET parent_id = $2 WHERE id = $1 AND NOT is_inbox")
+                .bind(id)
+                .bind(new_parent)
+                .execute(&mut *tx)
+                .await
+                .map_err(upstream)?
+                .rows_affected();
+        if affected == 0 {
+            return Err(self.absent_or_inbox(&mut tx, id, "reparented").await);
+        }
         tx.commit().await.map_err(upstream)?;
         Ok(())
     }
@@ -1990,6 +1999,7 @@ const REPRESENTATIVE_PRINTING_JOIN: &str = " LEFT JOIN LATERAL ( \
 impl HostedBackend {
     /// Disambiguate a write that affected no rows: an existing-but-Inbox row is a
     /// `Conflict` (Inbox is protected), an absent/not-owned row is `NotFound`.
+    /// `op` is the past-tense verb for the message ("renamed", "deleted", …).
     async fn absent_or_inbox(
         &self,
         tx: &mut Transaction<'static, Postgres>,
@@ -2001,7 +2011,7 @@ impl HostedBackend {
             .fetch_optional(&mut **tx)
             .await
         {
-            Ok(Some((true,))) => ApiError::Conflict(format!("the Inbox cannot be {op}d")),
+            Ok(Some((true,))) => ApiError::Conflict(format!("the Inbox cannot be {op}")),
             Ok(Some((false,))) => ApiError::NotFound("collection".into()),
             Ok(None) => ApiError::NotFound("collection".into()),
             Err(e) => upstream(e),

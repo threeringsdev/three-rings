@@ -301,9 +301,16 @@ fn row_link(
     count: i64,
     pathname: Memo<String>,
 ) -> impl IntoView {
+    // Prefix match, not equality: a collection stays selected on its own
+    // subpages (`/my/collections/{id}/needs`) — you are still *in* that
+    // collection. The pinned rows keep exact matching (`/my` is a prefix of
+    // every collection route). Codex review, this task.
     let current = {
         let href = href.clone();
-        move || (pathname.get() == href).then_some("page")
+        move || {
+            let p = pathname.get();
+            (p == href || p.starts_with(&format!("{href}/"))).then_some("page")
+        }
     };
     view! {
         <a
