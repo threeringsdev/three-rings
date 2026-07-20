@@ -13,6 +13,7 @@ use crate::components::ui::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::ui::popover::{Popover, PopoverAlign, PopoverContent, PopoverTrigger};
 use crate::components::ui::separator::Separator;
 use crate::components::ui::skeleton::Skeleton;
+use crate::components::ui::sonner::Toaster;
 use crate::components::ui::theme_toggle::ThemeToggle;
 
 /// The signed-in user, fetched once and shared by the shell, the `/` redirect,
@@ -162,6 +163,10 @@ pub fn AppShell() -> impl IntoView {
         let p = location.pathname.get();
         p == "/my" || p.starts_with("/my/")
     });
+    // Shell-level, not page-level: the wireframe's "persists across searches"
+    // needs the choice to outlive the picker widget, and every add surface —
+    // catalog today, my-cards later — reads the same one.
+    crate::catalog::destination::provide_destination_state();
 
     view! {
         <div class="bg-background text-foreground flex min-h-screen flex-col">
@@ -183,6 +188,10 @@ pub fn AppShell() -> impl IntoView {
                 </main>
             </div>
             <BottomTabs my_mode />
+            // Mounted once, at the root: a toast outlives the row that raised
+            // it (an undo toast must survive the search that scrolls its card
+            // away), so it cannot live inside the page it was raised from.
+            <Toaster />
         </div>
     }
 }

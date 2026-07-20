@@ -380,44 +380,133 @@ pub async fn card_detail(
 /// authorization terminus. collection-api builds the UI that consumes this.
 #[server(prefix = "/api", endpoint = "list_collections")]
 pub async fn list_collections() -> Result<Vec<shared::CollectionSummary>, ServerFnError<String>> {
-    #[cfg(feature = "hosted")]
+    #[cfg(feature = "ssr")]
     {
-        use crate::backend::{CollectionStore, HostedBackend};
-        let headers = leptos_axum::extract::<axum::http::HeaderMap>()
-            .await
-            .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
-        let user_id = crate::auth::user_id_from_headers(&headers)
-            .await
-            .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
-        HostedBackend::for_user(user_id)
-            .await
-            .map_err(api_err)?
-            .list_collections()
-            .await
-            .map_err(api_err)
+        use crate::backend::CollectionStore;
+        collection_backend().await?.list_collections().await.map_err(api_err)
     }
-    #[cfg(all(feature = "native", not(feature = "hosted")))]
+    #[cfg(not(feature = "ssr"))]
     {
-        use crate::auth::cookies;
-        use crate::backend::{CollectionStore, NativeBackend};
-        let headers = leptos_axum::extract::<axum::http::HeaderMap>()
-            .await
-            .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
-        // The native embedded server never verifies the JWT — it forwards it to
-        // the hosted terminus, which does. We hand the backend both the current
-        // `tr_jwt` (may be absent once the 15-min token expires) and the
-        // long-lived `tr_session` + our origin, so a hosted 401 triggers a
-        // silent re-mint + one retry rather than surfacing as Unauthorized.
-        let token = cookies::cookie_value(&headers, cookies::JWT_COOKIE);
-        let session = cookies::cookie_value(&headers, cookies::SESSION_COOKIE);
-        let origin = cookies::request_origin(&headers);
-        NativeBackend::authed(token, session, origin)
-            .list_collections()
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// The session-scoped collection backend for a server fn, one per backend
+/// feature. Collection work — unlike the catalog reads — has no anonymous
+/// degradation, so this 401s rather than falling back.
+///
+/// Both arms extract the headers themselves and return the *same* shape, so an
+/// adapter body is one line per trait call instead of a duplicated
+/// header→session→backend chain per `cfg`. That duplication is what let the
+/// original `list_collections` inline a rule `catalog_backend` had already
+/// centralized for the catalog half; keeping one helper per backend is what
+/// stops the two halves drifting again.
+#[cfg(feature = "hosted")]
+async fn collection_backend() -> Result<crate::backend::HostedBackend, ServerFnError<String>> {
+    let headers = leptos_axum::extract::<axum::http::HeaderMap>()
+        .await
+        .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+    crate::backend::routes::session_backend(&headers)
+        .await
+        .map_err(api_err)
+}
+
+#[cfg(all(feature = "native", not(feature = "hosted")))]
+async fn collection_backend() -> Result<crate::backend::NativeBackend, ServerFnError<String>> {
+    use crate::auth::cookies;
+    let headers = leptos_axum::extract::<axum::http::HeaderMap>()
+        .await
+        .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+    // The native embedded server never verifies the JWT — it forwards it to the
+    // hosted terminus, which does. We hand the backend both the current `tr_jwt`
+    // (may be absent once the 15-min token expires) and the long-lived
+    // `tr_session` + our origin, so a hosted 401 triggers a silent re-mint + one
+    // retry rather than surfacing as Unauthorized.
+    let token = cookies::cookie_value(&headers, cookies::JWT_COOKIE);
+    let session = cookies::cookie_value(&headers, cookies::SESSION_COOKIE);
+    let origin = cookies::request_origin(&headers);
+    Ok(crate::backend::NativeBackend::authed(token, session, origin))
+}
+
+/// The catalog quick-add: one card, one destination, from `+ Want` / `+ Have`
+/// on a `/catalog` row (specs/app-ui.md → `/catalog`). Returns a
+/// [`shared::QuickAddReceipt`] whose `undo_move_id` drives the toast's Undo.
+///
+/// **Have goes through `move_cards`, not `add_holding`** — a deliberate choice,
+/// not an oversight. Both write the same thing (`add_holding` appends an intake
+/// `moves` row of its own), but only `move_cards` *returns* that row's id, and
+/// undo targets a specific move id (specs/collection-api.md → Undo). Routing a
+/// Have through the intake form of a move (`from = None`) is how the toast gets
+/// an undo handle without widening the trait. `undo_last_move` was the
+/// alternative and was rejected: it races a second tab or a fast second click,
+/// so the toast could undo a *different* add than the one it names.
+///
+/// **Want has no undo handle at all.** Desires are outside the move ledger and
+/// the trait exposes no desire-quantity operation to compensate with, so the
+/// receipt is `None` and the toast omits its action (queued as a follow-up).
+///
+/// POST, necessarily — this is a write. That means it cannot be exercised
+/// through the Tauri Android *dev* proxy, which strips POST bodies
+/// (specs/ui-work-loop.md Findings); the release webview is unaffected.
+#[server(prefix = "/api", endpoint = "quick_add")]
+pub async fn quick_add(
+    collection_id: shared::Id,
+    line: shared::AddLine,
+) -> Result<shared::QuickAddReceipt, ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        let backend = collection_backend().await?;
+        match line {
+            shared::AddLine::Have(have) => {
+                let receipt = backend
+                    .move_cards(shared::MoveRequest {
+                        from_collection_id: None,
+                        to_collection_id: Some(collection_id),
+                        printing_id: have.printing_id,
+                        finish: have.finish,
+                        condition: have.condition,
+                        language: have.language,
+                        quantity: have.quantity,
+                    })
+                    .await
+                    .map_err(api_err)?;
+                Ok(shared::QuickAddReceipt {
+                    undo_move_id: Some(receipt.move_id),
+                })
+            }
+            shared::AddLine::Want(want) => {
+                backend
+                    .add_desire(collection_id, want)
+                    .await
+                    .map_err(api_err)?;
+                Ok(shared::QuickAddReceipt { undo_move_id: None })
+            }
+        }
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (collection_id, line);
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// Undo one quick-add, from its toast's action. Idempotent at the trait level,
+/// so a double-click or a re-fired toast action is harmless.
+#[server(prefix = "/api", endpoint = "undo_quick_add")]
+pub async fn undo_quick_add(move_id: shared::Id) -> Result<(), ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .undo_move(move_id)
             .await
             .map_err(api_err)
     }
     #[cfg(not(feature = "ssr"))]
     {
+        let _ = move_id;
         Err(ServerFnError::ServerError("server-only".into()))
     }
 }

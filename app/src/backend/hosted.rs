@@ -198,14 +198,12 @@ impl CatalogStore for HostedBackend {
 
     async fn card_summary(&self, oracle_id: Id) -> ApiResult<CardSummary> {
         let card: SearchRowSql = sqlx::query_as(
-            "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, \
-                    (SELECT COALESCE(image_uris->>'normal', \
-                                     faces->0->'image_uris'->>'normal') FROM printings \
-                     WHERE oracle_id = c.oracle_id \
-                       AND COALESCE(image_uris->>'normal', \
-                                    faces->0->'image_uris'->>'normal') IS NOT NULL \
-                     ORDER BY id LIMIT 1) AS image_uri \
-             FROM cards c WHERE c.oracle_id = $1",
+            &("SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, \
+                       rep.id AS printing_id, rep.image_uri \
+               FROM cards c"
+                .to_string()
+                + REPRESENTATIVE_PRINTING_JOIN
+                + "WHERE c.oracle_id = $1"),
         )
         .bind(oracle_id)
         .fetch_optional(self.pool)
@@ -230,6 +228,7 @@ impl CatalogStore for HostedBackend {
         Ok(CardSummary {
             oracle_id: card.oracle_id,
             name: card.name,
+            printing_id: card.printing_id,
             image_uri: card.image_uri,
             mana_cost: card.mana_cost,
             type_line: card.type_line,
@@ -248,13 +247,11 @@ impl CatalogStore for HostedBackend {
         let limit = page.limit();
         let mut qb: sqlx::QueryBuilder<'_, sqlx::Postgres> = sqlx::QueryBuilder::new(
             "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, \
-             (SELECT COALESCE(image_uris->>'normal', \
-                              faces->0->'image_uris'->>'normal') FROM printings \
-              WHERE oracle_id = c.oracle_id \
-                AND COALESCE(image_uris->>'normal', \
-                             faces->0->'image_uris'->>'normal') IS NOT NULL \
-              ORDER BY id LIMIT 1) AS image_uri \
-             FROM cards c WHERE true",
+             rep.id AS printing_id, rep.image_uri \
+             FROM cards c"
+                .to_string()
+                + REPRESENTATIVE_PRINTING_JOIN
+                + "WHERE true",
         );
         crate::search::sql::apply(&mut qb, &terms);
         if let Some(c) = &cursor {
@@ -290,6 +287,7 @@ impl CatalogStore for HostedBackend {
                 .map(|r| CardSummary {
                     oracle_id: r.oracle_id,
                     name: r.name,
+                    printing_id: r.printing_id,
                     image_uri: r.image_uri,
                     mana_cost: r.mana_cost,
                     type_line: r.type_line,
@@ -1932,8 +1930,23 @@ struct SearchRowSql {
     name: String,
     mana_cost: Option<String>,
     type_line: Option<String>,
+    printing_id: Option<Uuid>,
     image_uri: Option<String>,
 }
+
+/// The **representative printing** of `cards c` — one lateral shared by the
+/// per-oracle projections (search, card summary) so they can't drift on which
+/// printing a row stands for. Ordering puts printings that have art first
+/// (`false` < `true`), then lowest id, so `image_uri` matches what the previous
+/// image-only subquery returned while `id` is populated even for a card whose
+/// printings all lack art — `+ Have` needs a printing id regardless.
+const REPRESENTATIVE_PRINTING_JOIN: &str = " LEFT JOIN LATERAL ( \
+     SELECT p.id, \
+            COALESCE(p.image_uris->>'normal', p.faces->0->'image_uris'->>'normal') AS image_uri \
+     FROM printings p WHERE p.oracle_id = c.oracle_id \
+     ORDER BY (COALESCE(p.image_uris->>'normal', \
+                        p.faces->0->'image_uris'->>'normal') IS NULL), p.id \
+     LIMIT 1 ) rep ON true ";
 
 impl HostedBackend {
     /// Disambiguate a write that affected no rows: an existing-but-Inbox row is a

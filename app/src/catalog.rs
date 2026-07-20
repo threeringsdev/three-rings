@@ -23,9 +23,11 @@
 //! adapter reads the session opportunistically, and the quick actions prompt
 //! sign-in rather than disappearing.
 
+pub mod destination;
 pub mod rail;
 
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use leptos_router::hooks::{use_navigate, use_query_map};
 use leptos_router::NavigateOptions;
 use shared::CardSummary;
@@ -38,6 +40,7 @@ use crate::components::ui::input_group::{
     InputGroupInput,
 };
 use crate::components::ui::skeleton::Skeleton;
+use crate::components::ui::sonner::{ToastHandle, ToastKind, ToastOptions};
 use crate::components::ui::table::{
     Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableWrapper,
 };
@@ -400,7 +403,8 @@ fn ResultsToolbar(
                     })}
                 </Transition>
             </p>
-            <div class="ml-auto">
+            <div class="ml-auto flex items-center gap-2">
+                <destination::DestinationPicker />
                 <ViewSwitch list_view />
             </div>
         </div>
@@ -622,6 +626,7 @@ fn CardTile(card: CardSummary) -> impl IntoView {
     let CardSummary {
         oracle_id,
         name,
+        printing_id,
         image_uri,
         mana_cost,
         type_line,
@@ -682,7 +687,7 @@ fn CardTile(card: CardSummary) -> impl IntoView {
                 </p>
                 <p class="text-muted-foreground truncate text-xs">{subtitle}</p>
             </div>
-            <QuickActions name />
+            <QuickActions name oracle_id printing_id />
         </li>
     }
 }
@@ -705,7 +710,15 @@ fn ResultsList(cards: Vec<CardSummary>) -> impl IntoView {
                         .into_iter()
                         .map(|card| {
                             let preview = card.clone();
-                            let CardSummary { oracle_id, name, mana_cost, type_line, owned, .. } = card;
+                            let CardSummary {
+                                oracle_id,
+                                name,
+                                printing_id,
+                                mana_cost,
+                                type_line,
+                                owned,
+                                ..
+                            } = card;
                             let link_name = name.clone();
                             // The view macro moves captures into per-node
                             // closures, so the link and the quick actions each
@@ -741,7 +754,7 @@ fn ResultsList(cards: Vec<CardSummary>) -> impl IntoView {
                                         {mana_cost.unwrap_or_default()}
                                     </TableCell>
                                     <TableCell class="p-2 text-right">
-                                        <QuickActions name />
+                                        <QuickActions name oracle_id printing_id />
                                     </TableCell>
                                 </TableRow>
                             }
@@ -753,12 +766,12 @@ fn ResultsList(cards: Vec<CardSummary>) -> impl IntoView {
     }
 }
 
-/// `+ Want` / `+ Have` on every result (wireframe). Anonymous visitors get the
-/// sign-in prompt this task specifies; the adds themselves are the destination
-/// picker's task, so the authed buttons are explicitly inert until then rather
-/// than silently doing nothing when clicked.
+/// `+ Want` / `+ Have` on every result (wireframe). Anonymous visitors get a
+/// sign-in prompt; a signed-in caller adds to whatever the sticky
+/// [`destination::DestinationPicker`] currently points at, and gets a
+/// confirmation toast — with Undo for a Have.
 #[component]
-fn QuickActions(name: String) -> impl IntoView {
+fn QuickActions(name: String, oracle_id: shared::Id, printing_id: Option<shared::Id>) -> impl IntoView {
     let user = expect_context::<CurrentUserResource>().0;
     let location = leptos_router::hooks::use_location();
 
@@ -779,23 +792,17 @@ fn QuickActions(name: String) -> impl IntoView {
                             };
                             format!("/login?next={}", encode_query_value(&here))
                         };
-                        ["Want", "Have"]
+                        [AddKind::Want, AddKind::Have]
                             .into_iter()
                             .map(|kind| {
-                                let label = format!("Add {name} to {kind}");
                                 if authed {
                                     view! {
-                                        <Button
-                                            variant=ButtonVariant::Outline
-                                            size=ButtonSize::Sm
-                                            class="h-7 px-2 text-xs"
-                                            {..}
-                                            disabled=true
-                                            title="Choose a destination — lands with the destination picker"
-                                            aria-label=label
-                                        >
-                                            {format!("+ {kind}")}
-                                        </Button>
+                                        <QuickAddButton
+                                            name=name.clone()
+                                            oracle_id
+                                            printing_id
+                                            kind
+                                        />
                                     }
                                         .into_any()
                                 } else {
@@ -806,10 +813,13 @@ fn QuickActions(name: String) -> impl IntoView {
                                         <a
                                             href=next.clone()
                                             data-testid="signin-prompt"
-                                            aria-label=format!("Sign in to add {name} to {kind}")
+                                            aria-label=format!(
+                                                "Sign in to add {name} to {}",
+                                                kind.noun(),
+                                            )
                                             class="border-input hover:bg-accent hover:text-accent-foreground inline-flex h-7 items-center rounded-md border px-2 text-xs"
                                         >
-                                            {format!("+ {kind}")}
+                                            {format!("+ {}", kind.noun())}
                                         </a>
                                     }
                                         .into_any()
@@ -821,4 +831,166 @@ fn QuickActions(name: String) -> impl IntoView {
             </Transition>
         </div>
     }
+}
+
+/// Which of the two quick actions a button is. The pair differ in more than a
+/// label — grain (printing vs oracle), undoability, and toast wording — so they
+/// share one component parameterized by this rather than two near-copies.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AddKind {
+    Want,
+    Have,
+}
+
+impl AddKind {
+    fn noun(self) -> &'static str {
+        match self {
+            AddKind::Want => "Want",
+            AddKind::Have => "Have",
+        }
+    }
+}
+
+/// One quick-add button: fires the add, then raises the toast.
+#[component]
+fn QuickAddButton(
+    name: String,
+    oracle_id: shared::Id,
+    printing_id: Option<shared::Id>,
+    kind: AddKind,
+) -> impl IntoView {
+    let toast = expect_context::<ToastHandle>();
+    let destination = destination::current_destination();
+    let pending = RwSignal::new(false);
+
+    // A Have is stored per *printing*, so a card whose oracle row resolved no
+    // representative printing can be Wanted but not Had. Disabling beats
+    // firing an add that the server can only reject.
+    let addable = matches!(kind, AddKind::Want) || printing_id.is_some();
+    let disabled = Signal::derive(move || {
+        pending.get() || destination.get().is_none() || !addable
+    });
+
+    let on_click = {
+        let name = name.clone();
+        move |_| {
+            // Re-read at click time, not render time: the picker may have moved
+            // since this row rendered, and the wireframe's sticky picker means
+            // the *current* choice is the one that counts.
+            let Some(dest) = destination.get_untracked() else {
+                return;
+            };
+            if pending.get_untracked() {
+                return;
+            }
+            pending.set(true);
+            let name = name.clone();
+            spawn_local(async move {
+                let line = match kind {
+                    AddKind::Want => shared::AddLine::Want(shared::AddWant {
+                        oracle_id,
+                        // No printing pin: "I want this card", not "I want
+                        // this printing". Pinning is the card-detail surface's.
+                        printing_id: None,
+                        board: shared::Board::default(),
+                        quantity: 1,
+                    }),
+                    AddKind::Have => shared::AddLine::Have(shared::AddHave {
+                        // Unreachable while `addable` gates the button; the
+                        // fallback keeps the closure total rather than
+                        // panicking if that gate is ever loosened.
+                        printing_id: match printing_id {
+                            Some(id) => id,
+                            None => {
+                                pending.set(false);
+                                return;
+                            }
+                        },
+                        finish: shared::Finish::default(),
+                        condition: shared::Condition::default(),
+                        language: shared::default_language(),
+                        board: shared::Board::default(),
+                        quantity: 1,
+                    }),
+                };
+                let result = crate::quick_add(dest.id, line).await;
+                pending.set(false);
+                match result {
+                    Ok(receipt) => raise_add_toast(toast, &name, &dest, kind, receipt.undo_move_id),
+                    Err(e) => {
+                        toast.show(
+                            ToastOptions::message(format!("Couldn't add {name}: {}", describe_error(&e).1))
+                                .kind(ToastKind::Error),
+                        );
+                    }
+                }
+            });
+        }
+    };
+
+    let aria = format!("Add {name} to {}", kind.noun());
+    view! {
+        <Button
+            variant=ButtonVariant::Outline
+            size=ButtonSize::Sm
+            class="h-7 px-2 text-xs"
+            {..}
+            disabled=disabled
+            aria-label=aria
+            data-testid=match kind {
+                AddKind::Want => "quick-add-want",
+                AddKind::Have => "quick-add-have",
+            }
+            on:click=on_click
+        >
+            {format!("+ {}", kind.noun())}
+        </Button>
+    }
+}
+
+/// The confirmation toast, and the Undo action when there is one to offer.
+fn raise_add_toast(
+    toast: ToastHandle,
+    name: &str,
+    dest: &destination::Destination,
+    kind: AddKind,
+    undo_move_id: Option<shared::Id>,
+) {
+    let verb = match kind {
+        AddKind::Want => "Wanted",
+        AddKind::Have => "Added",
+    };
+    let message = format!("{verb} {name} → {}", dest.label());
+    let options = ToastOptions::message(message).kind(ToastKind::Success);
+
+    // Undo exists only for a Have — a Want writes no move row, so there is
+    // nothing to reverse (specs/app-ui.md Findings). Offering a dead button
+    // would be worse than offering none.
+    let options = match undo_move_id {
+        Some(move_id) => {
+            let name = name.to_string();
+            options.action(
+                "Undo",
+                Callback::new(move |()| {
+                    let name = name.clone();
+                    spawn_local(async move {
+                        match crate::undo_quick_add(move_id).await {
+                            Ok(()) => {
+                                toast.show(ToastOptions::message(format!("Removed {name} again")))
+                            }
+                            Err(e) => toast.show(
+                                ToastOptions::message(format!(
+                                    "Couldn't undo: {}",
+                                    describe_error(&e).1
+                                ))
+                                .kind(ToastKind::Error),
+                            ),
+                        };
+                    });
+                }),
+            )
+        }
+        None => options,
+    };
+    toast.show(options);
 }
