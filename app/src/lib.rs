@@ -82,7 +82,7 @@ pub fn App() -> impl IntoView {
     let routes = view! {
         <Route path=StaticSegment("") view=shell::RootRedirect ssr=SsrMode::Async />
         <ParentRoute path=StaticSegment("") view=shell::AppShell>
-            <Route path=StaticSegment("catalog") view=shell::CatalogPage />
+            <Route path=StaticSegment("catalog") view=catalog::CatalogPage />
             <Route path=(StaticSegment("cards"), ParamSegment("id")) view=shell::CardDetailPage />
             <ParentRoute path=StaticSegment("my") view=shell::RequireAuth>
                 <Route path=StaticSegment("") view=shell::MyCardsPage ssr=SsrMode::Async />
@@ -134,6 +134,7 @@ pub mod account;
 pub mod auth_pages;
 #[cfg(feature = "component-bench")]
 pub mod bench;
+pub mod catalog;
 pub mod components;
 pub mod shell;
 
@@ -206,6 +207,73 @@ pub async fn catalog_count() -> Result<shared::CatalogCount, ServerFnError<Strin
     }
     #[cfg(not(feature = "ssr"))]
     {
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// One keyset page of catalog search results (specs/catalog-search.md) — the
+/// exemplar thin server-fn adapter the later page tasks copy: extract headers,
+/// pick the backend, project one trait method, map the error. No business logic
+/// here; the grammar and its SQL live behind `CatalogStore::search`.
+///
+/// **GET, not the server-fn POST default.** This is a pure read whose arguments
+/// belong in a cacheable URL, and the Tauri Android dev proxy strips POST bodies
+/// (specs/ui-work-loop.md Findings) — a POST adapter is unverifiable on-device.
+///
+/// Auth is **opportunistic**: a valid session fills `CardSummary::owned`, an
+/// absent or expired one degrades to the anonymous public projection rather than
+/// 401ing. `/catalog` is a public page.
+#[server(
+    prefix = "/api",
+    endpoint = "search_catalog",
+    input = leptos::server_fn::codec::GetUrl
+)]
+pub async fn search_catalog(
+    q: String,
+    cursor: Option<String>,
+) -> Result<shared::SearchResults, ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    let headers = leptos_axum::extract::<axum::http::HeaderMap>()
+        .await
+        .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+    #[cfg(feature = "ssr")]
+    let (query, page) = (
+        shared::SearchQuery { q: Some(q) },
+        shared::Page {
+            cursor,
+            limit: None,
+        },
+    );
+
+    #[cfg(feature = "hosted")]
+    {
+        use crate::backend::CatalogStore;
+        crate::backend::routes::catalog_backend(&headers)
+            .await
+            .map_err(api_err)?
+            .search(query, page)
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(all(feature = "native", not(feature = "hosted")))]
+    {
+        use crate::auth::cookies;
+        use crate::backend::{CatalogStore, NativeBackend};
+        // Same opportunistic rule, expressed the native way: hand the backend
+        // whatever session material the webview has (either may be absent) and
+        // let the hosted terminus decide. It answers anonymously rather than
+        // 401ing when the token is missing, so this needs no fallback arm.
+        let token = cookies::cookie_value(&headers, cookies::JWT_COOKIE);
+        let session = cookies::cookie_value(&headers, cookies::SESSION_COOKIE);
+        let origin = cookies::request_origin(&headers);
+        NativeBackend::authed(token, session, origin)
+            .search(query, page)
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (q, cursor);
         Err(ServerFnError::ServerError("server-only".into()))
     }
 }

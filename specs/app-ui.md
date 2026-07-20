@@ -214,6 +214,104 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Catalog page `/catalog` (2026-07-19)
+
+`app/src/catalog.rs` — query bar, results grid/list, view switch, anonymous
+quick actions; `search_catalog` server fn in `app/src/lib.rs`. The rail,
+destination picker, and mobile filter sheet are their own queued tasks.
+
+- **`search_catalog` is the adapter exemplar, and it is a `GET`**
+  (`input = leptos::server_fn::codec::GetUrl`) rather than the server-fn POST
+  default. Two reasons, both load-bearing: it's a pure read whose arguments
+  belong in a cacheable URL, and the Tauri Android dev proxy strips POST
+  bodies (ui-work-loop Findings), which would have made the on-device search
+  unverifiable. **Verified on-device**: typed search returns results through
+  the proxy. Later read adapters should copy this; write adapters can't.
+- **Opportunistic auth reuses `routes::catalog_backend`** (promoted to
+  `pub(crate)`) instead of re-deriving the rule. Two callers disagreeing about
+  when a catalog read is session-scoped is exactly the drift the seam exists
+  to stop. The `native` arm expresses the same rule via
+  `NativeBackend::authed` with possibly-absent session material.
+- **Stale-discard is the reactive layer's, not ours** — claim verified against
+  the source, not assumed: `Resource` is an `ArcAsyncDerived`, which stamps
+  each run with a monotonic version and drops a resolved future whose version
+  is no longer latest (reactive_graph 0.2.14 `arc_async_derived.rs`,
+  `if latest_version == this_version`). So catalog-search's "no stale results
+  ever render over newer input" holds independent of the debounce. **Debounce
+  closed at 250 ms as proposed** (catalog-search open question). What we do
+  *not* have is cancellation: an overtaken request is discarded on arrival,
+  never aborted — the debounce is what limits request volume.
+- **History is per search session, not per keystroke.** Refining replaces,
+  starting/ending a search pushes. Replace-always (the obvious reading of
+  "one entry per session") was implemented first and caught in probing: Back
+  from the first typed search walked straight off the site.
+- **View mode rides `?view=list`.** It is not search state and never enters
+  the query text, but keeping it in the URL makes it SSR correctly (no
+  post-hydration flip) and survive reload/share.
+- **Grid/list is a real `radiogroup` with roving focus** — the behavior V1's
+  vendoring parked here. `toggle_group`'s hardcoded `tabindex="-1"` became a
+  prop (deviation noted in-file); arrow-key selection + focus movement stays
+  feature-side, with catalog.rs as the reference wiring and a new bench
+  assertion pinning "exactly one tab stop, on the selected item".
+- **Two Leptos traps, both cost a debug cycle.** (1) `{..}` spread after a
+  path-valued prop (`bind_value=query_text {..}`) parses as *struct-update
+  syntax* and the spread silently vanishes into the value — put a
+  paren/string-terminated prop last. (2) Reading a signal in a `#[component]`
+  **body** bakes the value in at construction; the layout switch stopped
+  working until the `list_view` read moved into a closure. The regression
+  test written minutes earlier is what caught it.
+- **Result counts are `N` / `N+`, not a total.** The endpoint is keyset-paged
+  and deliberately runs no `COUNT` (catalog-search), so the wireframe's
+  "128 results" is not obtainable; "at least N" is the honest rendering.
+  Paging beyond the first page (`?cursor=`) is **deferred** — filed as a
+  follow-up task rather than absorbed.
+- **Codex adversarial review — 2 fixed, 1 accepted-as-documented, 1 disputed:**
+  - *Grammar errors blanked the result set* (high) — **confirmed by probe**
+    (grid count 1 → 0 on `bolt pow>3`) and **fixed**: the last OK page is
+    retained and rendered dimmed/inert under the error, since half-typed
+    queries hit the term-naming 422 constantly. Regression test added.
+  - *URL⇄field sync could clobber newer typing* (high) — **not reproducible**
+    (the window is between `navigate()` and the effect flush, sub-millisecond;
+    timed-keystroke probing at 240 ms spacing never hit it) but the mechanism
+    is real: the effect had no way to tell our own navigation from an external
+    one. **Fixed** by tracking the last self-pushed query and re-seeding the
+    field only on external URL movement.
+  - *No cancellation of in-flight requests* (medium) — **accepted, not fixed.**
+    The "no stale render" guarantee holds via the version counter (Codex
+    verified this rather than refuting it); true abort isn't exposed through
+    the server-fn client. The overstated "one in-flight request" wording in
+    our own doc comment was corrected instead.
+  - *`ApiError::Validation` reaches the UI as HTTP 500, not 422* (medium) —
+    **disputed.** This is the pre-existing, documented behavior of the shared
+    `api_err` helper (lib.rs: "the transport channel carries the message;
+    richer status semantics are collection-api's"). The status-correct channel
+    is the JSON API (`ApiError::http_status`), which is what the native backend
+    consumes; the Leptos server-fn channel is UI-internal and reads the
+    message. Making it status-accurate means a custom error type across every
+    server fn — filed as a follow-up task, not smuggled into this one.
+- **E2E mutation pass — 11/11 kills**, and it found two tests that passed
+  vacuously before it: the lazy-image assertion was wrapped in
+  `if (await img.count())` (a page rendering no images at all would have
+  skipped it), and "a signed-in visitor gets no sign-in prompts" would have
+  passed if the quick actions were deleted outright. Both strengthened, plus
+  the retained-results test now asserts the *actual cards* survive and a new
+  test pins `&`/`+` (the characters a naive encoder splits or eats) through a
+  full type→URL→reload round trip. Mutations confirmed killed: debounce
+  250 ms→31 s, `replace` forced false, `last_good` never retained, lazy→eager,
+  `authed` forced false, validation prefix renamed, encoder ignoring its
+  input, focus index pinned to 0, view switch dropping `q`, clear not
+  committing, and `url_q` ignoring `?q` — the last also kills the SSR test,
+  which is what proves that test asserts *`q` drove the search* rather than
+  merely that SSR happened.
+- **Verification**: web SSR asserted at request level (rendered results in raw
+  HTML for `?q=`), hydration CLEAN on 4 URLs (browse-all, search, list view,
+  error), bench-check CLEAN, fast tier 25/25, Android debug webview 8/8
+  on-device (incl. touch view-switch and zero horizontal overflow at phone
+  width).
+- **Known-cosmetic**: transform-layout printings still render the skeleton
+  instead of an image (`image_uri` NULL until the card-detail task's
+  `COALESCE` fix) — the tile degrades to skeleton + name rather than breaking.
+
 ### App shell + routing (2026-07-19)
 
 The shell (`app/src/shell.rs`): top bar (brand, desktop mode switch, theme

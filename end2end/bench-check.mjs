@@ -91,6 +91,13 @@ if (!(await page.textContent('body')).includes('mode: list')) {
 if ((await listItem.getAttribute('data-state')) !== 'on') {
   failures.push('toggle_group item did not reflect pressed state (data-state)');
 }
+// Roving focus: the group is ONE tab stop and it follows the selection, so
+// exactly one item may carry tabindex=0 and it must be the pressed one.
+const gridItem = page.locator('[data-name="ToggleGroupItem"]', { hasText: 'Grid' });
+if ((await listItem.getAttribute('tabindex')) !== '0' ||
+    (await gridItem.getAttribute('tabindex')) !== '-1') {
+  failures.push('toggle_group tabindex is not roving with the selection');
+}
 // label→checkbox association: clicking the label toggles the control
 const cb = page.locator('#bench-rare-checkbox');
 const cbState = await cb.getAttribute('data-state');
