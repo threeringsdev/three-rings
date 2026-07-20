@@ -66,6 +66,11 @@ test.describe("signed in", () => {
     // The current choice is marked — via data-chosen, not the primitive's
     // aria-selected (that means keyboard-highlighted, a different thing).
     await expect(options.first()).toHaveAttribute("data-chosen", "true");
+    // ...and the mark has to *track* the choice, not be painted on row 0. With
+    // only this row asserted, hard-coding `data-chosen="true"` would pass.
+    if ((await options.count()) > 1) {
+      await expect(options.nth(1)).not.toHaveAttribute("data-chosen", "true");
+    }
   });
 
   test("the chosen destination survives a search and a reload @fast", async ({
@@ -119,6 +124,33 @@ test.describe("signed in", () => {
     await expect(label).toHaveText(/Inbox/, { timeout: 10000 });
     const destination = (await label.textContent())?.trim() ?? "";
 
+    // Read the destination's real contents around the add, so this test proves
+    // the *database* moved rather than that a toast said so. Mutation analysis
+    // caught the earlier version: it passed with `undo_quick_add` stubbed to
+    // return Ok(()) without calling `undo_move`, because the 200 and the
+    // "Removed" toast were both still produced.
+    // The machine REST route, not the `list_collections` server fn: same data,
+    // plain GET + JSON, and `page.request` shares the context's session cookies.
+    const listRes = await page.request.get("/api/collections");
+    expect(listRes.status()).toBe(200);
+    const collections = await listRes.json();
+    const inboxId = (
+      collections.find((c: { is_inbox: boolean }) => c.is_inbox) ?? collections[0]
+    )?.id;
+    expect(inboxId, "the authed user must have a collection to add to").toBeTruthy();
+    const boltPresent = async () => {
+      const res = await page.request.get(
+        `/api/collections/${inboxId}/view?limit=200`,
+      );
+      expect(res.status()).toBe(200);
+      const view = await res.json();
+      const row = view.cards.find((c: { name: string }) =>
+        c.name.startsWith("Lightning Bolt"),
+      );
+      return row?.present ?? 0;
+    };
+    const before = await boltPresent();
+
     const have = page.getByTestId("quick-add-have").first();
     // Disabled until the destination resolves — an add with no destination
     // would have to guess where it goes.
@@ -135,6 +167,9 @@ test.describe("signed in", () => {
     const toast = page.locator("[data-name=Toast]").filter({ hasText: "Lightning Bolt" });
     await expect(toast).toContainText("Added");
     await expect(toast).toContainText(destination);
+    // Exactly one copy — the adapter builds the AddLine, so quantity can't be
+    // widened by the caller, and this is what pins that down.
+    expect(await boltPresent()).toBe(before + 1);
 
     // Undo is offered for a Have (it wrote a move row) and actually reverses.
     const undo = page.waitForResponse(
@@ -145,6 +180,8 @@ test.describe("signed in", () => {
     await expect(
       page.locator("[data-name=Toast]").filter({ hasText: /Removed/ }),
     ).toBeVisible();
+    // The whole point of Undo: the copy is gone again, not just the toast.
+    expect(await boltPresent()).toBe(before);
   });
 
   test("+ Want confirms but offers no undo @fast", async ({ page }) => {
@@ -180,6 +217,13 @@ test.describe("signed in", () => {
 
     const options = page.getByTestId("destination-option");
     await expect(options.first()).toBeVisible();
+    // Filtering to one row proves nothing if there was only one row. Mutation
+    // analysis flagged this as conditionally vacuous — require something to
+    // filter *out* rather than passing trivially on an Inbox-only fixture.
+    test.skip(
+      (await options.count()) < 2,
+      "test user has only the Inbox — nothing to filter out",
+    );
 
     await page.getByPlaceholder("Search collections…").fill("inbox");
     // Filtering hides non-matches rather than unmounting them, so assert on
