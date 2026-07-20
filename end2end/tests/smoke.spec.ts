@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { AUTH_STATE } from "./helpers";
+import { AUTH_STATE, hydrated } from "./helpers";
 
 // Shell smoke (specs/app-ui.md "App shell"): the route map SSRs, `/`
 // dispatches by auth state, the /my/* guard bounces anonymous visitors to
@@ -29,6 +29,7 @@ test("anonymous /my bounces to login with a return path @fast", async ({
   page,
 }) => {
   await page.goto("/my");
+  await hydrated(page);
   await page.waitForURL(
     (url) =>
       url.pathname === "/login" && url.searchParams.get("next") === "/my",
@@ -43,7 +44,11 @@ test("anonymous SPA nav to My cards bounces once to login @fast", async ({
   // exactly once — a tracked location read used to compound ?next while the
   // route unmounted (next=/login%3Fnext%3D…).
   await page.goto("/catalog");
-  await page.getByRole("navigation", { name: "Mode" }).getByText("My cards").click();
+  await hydrated(page);
+  await page
+    .getByRole("navigation", { name: "Mode" })
+    .getByText("My cards")
+    .click();
   await page.waitForURL(
     (url) =>
       url.pathname === "/login" && url.searchParams.get("next") === "/my",
@@ -61,6 +66,7 @@ test("login honors next after sign-in @fast", async ({ page }) => {
   const email = process.env.E2E_EMAIL!;
   const password = process.env.E2E_PASSWORD!;
   await page.goto("/my/shopping");
+  await hydrated(page);
   await page.waitForURL(
     (url) =>
       url.pathname === "/login" &&
@@ -78,6 +84,7 @@ test.describe("authed", () => {
 
   test("/ redirects the signed-in session to /my @fast", async ({ page }) => {
     await page.goto("/");
+    await hydrated(page);
     await page.waitForURL("/my");
     await expect(page.locator("h1")).toHaveText("All cards");
   });
@@ -86,6 +93,7 @@ test.describe("authed", () => {
     page,
   }) => {
     await page.goto("/my");
+    await hydrated(page);
     const modeSwitch = page.getByRole("navigation", { name: "Mode" });
     await expect(modeSwitch.getByText("My cards")).toHaveAttribute(
       "aria-current",
@@ -108,6 +116,7 @@ test.describe("authed", () => {
   }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/catalog");
+    await hydrated(page);
     const tabs = page.getByRole("navigation", { name: "Primary" });
     await expect(tabs).toBeVisible();
     await expect(page.getByRole("navigation", { name: "Mode" })).toBeHidden();
@@ -120,6 +129,7 @@ test.describe("authed", () => {
 
   test("user menu shows the signed-in account @fast", async ({ page }) => {
     await page.goto("/catalog");
+    await hydrated(page);
     await page.getByRole("button", { name: "Account menu" }).click();
     await expect(
       page.getByText(`Signed in as ${process.env.E2E_EMAIL}`),

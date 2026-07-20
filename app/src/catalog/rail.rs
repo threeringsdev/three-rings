@@ -79,6 +79,9 @@ pub struct RailState {
     /// a picker, until a `list_sets` adapter exists (see the spec Findings).
     pub set: String,
     pub colors: Vec<char>,
+    /// `c:colorless` — a Color-field filter with no checkbox to show it (the
+    /// wireframe's facet is the five colors). Tracked so it still counts.
+    pub colorless: bool,
     pub types: Vec<String>,
     pub rarities: Vec<String>,
     pub mana_value: Option<(Cmp, f64)>,
@@ -92,7 +95,7 @@ impl RailState {
             Field::Name => usize::from(!self.name.is_empty()),
             Field::Text => usize::from(!self.text.is_empty()),
             Field::Set => self.set_codes().len(),
-            Field::Color => self.colors.len(),
+            Field::Color => self.colors.len() + usize::from(self.colorless),
             Field::Type => self.types.len(),
             Field::Rarity => self.rarities.len(),
             Field::ManaValue => usize::from(self.mana_value.is_some()),
@@ -120,15 +123,41 @@ impl RailState {
     }
 }
 
+/// Does this field own *every* matching term, or only the first one it sees?
+///
+/// Only the name box owns a run: bare words are collectively what it holds
+/// (`lightning bolt` is two terms and one field). Every keyed facet owns just
+/// its first term, because a repeat like `c:u c:r` is an AND that the rail's
+/// single widget cannot express — so the extra is treated as hand-written text
+/// and preserved. [`read`] and [`rewrite`] must agree on this, or an edit drops
+/// something the rail told the user it wasn't touching.
+fn owns_every_match(field: Field) -> bool {
+    field == Field::Name
+}
+
+/// Serialize one name value back into the token the box should show, so that
+/// what is displayed re-parses to exactly the same predicate.
+fn name_token(v: &str) -> String {
+    let round_trips = matches!(
+        parse_tokens(v).as_deref(),
+        Ok([only]) if !only.term.negated && matches!(&only.term.pred, Pred::Name(n) if n == v)
+    );
+    // Needs quoting otherwise: it has whitespace, reads as a keyed term, or
+    // reads as a negation — each of which changes meaning if pasted in bare.
+    if round_trips {
+        v.to_string()
+    } else {
+        force_quote(v)
+    }
+}
+
 /// Read a query string into rail state. `Err` means the grammar rejected it,
 /// which is a normal mid-typing condition, not a bug — the caller renders the
 /// rail inert rather than guessing.
 ///
-/// Where a field has more than one term, the rail takes the **first** and
-/// leaves the rest as unowned text (the `Name` run is the exception: bare
-/// words are collectively the name box). So `c:ur c:w` shows U+R and keeps
-/// `c:w` verbatim — under-reporting in the badge, but never silently dropping
-/// half of what the user asked for on the next click.
+/// Per [`owns_every_match`], a repeated facet key shows its first term only
+/// and the rest stay hand-written text: `c:ur c:w` shows U+R and keeps `c:w`
+/// verbatim through any later edit.
 pub fn read(q: &str) -> Result<RailState, ParseError> {
     let tokens = parse_tokens(q)?;
     let mut st = RailState::default();
@@ -139,8 +168,14 @@ pub fn read(q: &str) -> Result<RailState, ParseError> {
         let Some(field) = field_of(&tok.term) else {
             continue;
         };
-        if field == Field::Name {
-            names.push(tok.raw.clone());
+        if owns_every_match(field) {
+            if let Pred::Name(v) = &tok.term.pred {
+                // The *value*, re-serialized — not the raw token. `name:bolt`
+                // and `bolt` are the same search, but echoing the raw form into
+                // the box would re-serialize on the next edit as the literal
+                // `"name:bolt"`, changing what is searched.
+                names.push(name_token(v));
+            }
             continue;
         }
         if seen.contains(&field) {
@@ -153,11 +188,11 @@ pub fn read(q: &str) -> Result<RailState, ParseError> {
             Pred::TypeLine(vals) => st.types = vals.clone(),
             Pred::Rarity(vals) => st.rarities = vals.clone(),
             Pred::Colors(cs) => st.colors = cs.clone(),
-            // `c:colorless` owns the Color field but checks no boxes: it is a
-            // real filter the rail can't draw. It stays in the query until the
-            // user touches a color, which replaces it — the same rule every
-            // other field follows.
-            Pred::Colorless => {}
+            // `c:colorless` owns the Color field but checks no box — the
+            // wireframe's facet draws the five colors only. It still has to
+            // *count*, or the badge reads 0 and the Reset button disappears on
+            // a query that is very much filtered.
+            Pred::Colorless => st.colorless = true,
             Pred::ManaValue(cmp, n) => st.mana_value = Some((*cmp, *n)),
             Pred::Name(_) | Pred::Identity(_) => unreachable!("not rail-owned"),
         }
@@ -172,15 +207,23 @@ pub fn read(q: &str) -> Result<RailState, ParseError> {
 /// The replacement lands **in the position the old term held**, not appended.
 /// Editing a filter must not make the query text reshuffle itself under the
 /// cursor of someone who is also typing in the box.
+///
+/// Only what the widget actually *showed* is replaced ([`owns_every_match`]):
+/// a repeated facet key like `c:u c:r` displays as U alone, so an edit rewrites
+/// the first and leaves `c:r` standing. Clobbering it here while `read` claimed
+/// not to own it is exactly the silent data loss the verbatim-preservation rule
+/// exists to prevent.
 pub fn rewrite(q: &str, field: Field, replacement: Option<String>) -> Result<String, ParseError> {
     let tokens = parse_tokens(q)?;
     let mut out: Vec<String> = Vec::new();
     let mut placed = false;
 
     for tok in &tokens {
-        if field_of(&tok.term) == Some(field) {
-            // First hit takes the replacement; the rest of this field's terms
-            // are what the replacement replaces, so they go away.
+        if field_of(&tok.term) == Some(field) && (!placed || owns_every_match(field)) {
+            // The first hit takes the replacement. Further hits are dropped
+            // only for a field that owns its whole run (the name box); for
+            // every other field they were never the widget's to begin with,
+            // so they fall through to the verbatim branch below.
             if !placed {
                 placed = true;
                 if let Some(r) = &replacement {
@@ -932,12 +975,60 @@ mod tests {
 
     #[test]
     fn only_the_first_term_of_a_field_is_owned() {
-        // Documented under-reporting: the second `c:` is not the rail's, so it
-        // is preserved rather than clobbered.
+        // The second `c:` is not the widget's — the rail showed U alone — so an
+        // edit rewrites the first and leaves the other standing. `read` and
+        // `rewrite` disagreeing here is silent data loss (Codex review, high).
         let st = read("c:u c:r").unwrap();
         assert_eq!(st.colors, vec!['U']);
+        assert_eq!(st.count(Field::Color), 1);
         let out = rewrite("c:u c:r", Field::Color, Some("c:w".into())).unwrap();
-        assert_eq!(out, "c:w");
+        assert_eq!(out, "c:w c:r");
+        // ...and the same for a repeated key that is a different alias.
+        let out = rewrite("t:instant type:land", Field::Type, Some("t:sorcery".into())).unwrap();
+        assert_eq!(out, "t:sorcery type:land");
+    }
+
+    #[test]
+    fn the_name_run_is_owned_whole() {
+        // The exception to the rule above: bare words are collectively the name
+        // box, so rewriting it replaces all of them rather than only the first.
+        let out = rewrite(
+            "lightning bolt t:instant",
+            Field::Name,
+            Some("shock".into()),
+        )
+        .unwrap();
+        assert_eq!(out, "shock t:instant");
+    }
+
+    #[test]
+    fn colorless_counts_even_though_it_has_no_checkbox() {
+        // `c:colorless` is a real Color filter the wireframe's five-checkbox
+        // facet cannot draw. Counting it 0 would hide the Reset button and the
+        // mobile badge on a filtered query (Codex review, medium).
+        let st = read("c:colorless").unwrap();
+        assert!(st.colorless);
+        assert!(st.colors.is_empty());
+        assert_eq!(st.count(Field::Color), 1);
+        assert_eq!(st.total(), 1);
+        // It is rail-owned, so picking a color replaces it and Reset clears it.
+        assert_eq!(
+            rewrite("c:colorless", Field::Color, Some("c:u".into())).unwrap(),
+            "c:u"
+        );
+        assert_eq!(reset("c:colorless bolt").unwrap(), "");
+    }
+
+    #[test]
+    fn the_name_box_shows_a_value_it_can_write_back() {
+        // `name:bolt` and `bolt` are the same search. Echoing the raw token
+        // would re-serialize on the next edit as the literal `"name:bolt"` —
+        // a different search than the user asked for (Codex review, medium).
+        let st = read("name:bolt").unwrap();
+        assert_eq!(st.name, "bolt");
+        let back = rewrite("name:bolt", Field::Name, name_terms(&st.name)).unwrap();
+        assert_eq!(back, "bolt");
+        assert_eq!(read(&back).unwrap().name, "bolt");
     }
 
     #[test]

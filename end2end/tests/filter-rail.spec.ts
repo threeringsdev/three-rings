@@ -96,6 +96,28 @@ test("a rail edit preserves terms the rail does not own, verbatim @fast", async 
   );
 });
 
+test("a repeated facet key keeps the term the rail did not show @fast", async ({
+  page,
+}) => {
+  // The rail shows the FIRST `c:` only, so the second is hand-written text by
+  // its own rule and must survive an edit — read() and rewrite() disagreeing
+  // here is silent data loss (Codex review, high).
+  await page.goto("/catalog?q=c%3Au%20c%3Ar");
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+  await expect(rail.getByRole("checkbox", { name: "Blue" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(rail.getByTestId("filter-count-color")).toContainText("1");
+
+  await rail.getByRole("checkbox", { name: "White" }).click();
+  await page.waitForURL((url) =>
+    (url.searchParams.get("q") ?? "").includes("c:uw"),
+  );
+  expect(q(page)).toBe("c:uw c:r");
+});
+
 test("a multi-select serializes to one comma-OR term @fast", async ({
   page,
 }) => {
@@ -111,9 +133,21 @@ test("a multi-select serializes to one comma-OR term @fast", async ({
     (url) => url.searchParams.get("q") === "t:instant,sorcery",
   );
 
-  // And it is a real search, not just a string: both types come back.
-  await expect(page.getByTestId("results-grid")).toBeVisible();
   await expect(rail.getByTestId("filter-count-type")).toContainText("2");
+
+  // And it is a real OR against the catalog, not just a string the UI echoes.
+  // Name-narrowed so the numbers stay well under the 50-row first page (paging
+  // is a later task) and the union is exactly decidable: an AND of the two
+  // substrings would return 0, one value alone returns 1, the OR returns both.
+  const countFor = async (query: string) => {
+    await page.goto(`/catalog?q=${encodeURIComponent(query)}`);
+    await hydrated(page);
+    await expect(page.getByTestId("results-grid")).toBeVisible();
+    return await page.locator("[data-testid=results-grid] li").count();
+  };
+  expect(await countFor("bolt t:instant")).toBe(1);
+  expect(await countFor("bolt t:sorcery")).toBe(1);
+  expect(await countFor("bolt t:instant,sorcery")).toBe(2);
 });
 
 test("typing in the query bar reflects back into the widgets @fast", async ({
@@ -303,5 +337,22 @@ test.describe("mobile", () => {
       (url.searchParams.get("q") ?? "").includes("t:instant,sorcery"),
     );
     await expect(page.getByTestId("filter-badge")).toContainText("5");
+  });
+
+  test("colorless counts even though it has no checkbox @fast", async ({
+    page,
+  }) => {
+    // `c:colorless` is a supported Color filter the five-checkbox facet cannot
+    // draw. If it counted 0 the badge would vanish on a filtered query and
+    // Reset would be unreachable (Codex review, medium).
+    await page.goto("/catalog?q=c%3Acolorless");
+    await hydrated(page);
+    await expect(page.getByTestId("filter-badge")).toContainText("1");
+
+    await page.getByRole("button", { name: /Filters/ }).click();
+    const sheet = page.locator("[data-testid=filter-sheet]");
+    await expect(sheet.getByRole("button", { name: "Reset" })).toBeVisible();
+    await sheet.getByRole("button", { name: "Reset" }).click();
+    await page.waitForURL((url) => url.pathname === "/catalog" && !url.search);
   });
 });
