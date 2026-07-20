@@ -115,7 +115,17 @@ pub fn App() -> impl IntoView {
         <Route path=StaticSegment("") view=shell::RootRedirect ssr=SsrMode::Async />
         <ParentRoute path=StaticSegment("") view=shell::AppShell>
             <Route path=StaticSegment("catalog") view=catalog::CatalogPage />
-            <Route path=(StaticSegment("cards"), ParamSegment("id")) view=shell::CardDetailPage />
+            // `Async`, not the default out-of-order streaming: this page is
+            // public and shareable, so the detail has to be in the markup a
+            // crawler or `curl` receives. Under OutOfOrder the whole
+            // Transition ships as a <template> + hoisting script and the
+            // in-place HTML is the skeleton (verified with curl during the
+            // card-detail task).
+            <Route
+                path=(StaticSegment("cards"), ParamSegment("id"))
+                view=cards::CardDetailPage
+                ssr=SsrMode::Async
+            />
             <ParentRoute path=StaticSegment("my") view=shell::RequireAuth>
                 <Route path=StaticSegment("") view=shell::MyCardsPage ssr=SsrMode::Async />
                 <Route
@@ -166,6 +176,7 @@ pub mod account;
 pub mod auth_pages;
 #[cfg(feature = "component-bench")]
 pub mod bench;
+pub mod cards;
 pub mod catalog;
 pub mod components;
 pub mod shell;
@@ -306,6 +317,58 @@ pub async fn search_catalog(
     #[cfg(not(feature = "ssr"))]
     {
         let _ = (q, cursor);
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// One card's full detail — printings, rulings, and (authed only) the caller's
+/// copies and where they live. Same thin-adapter shape as [`search_catalog`],
+/// and **GET** for the same two reasons: a pure cacheable read, and the Tauri
+/// Android dev proxy strips POST bodies.
+///
+/// Auth is **opportunistic** — `catalog_backend` hands back a session-scoped
+/// backend when the caller has one and an anonymous backend otherwise, which is
+/// exactly what decides whether `CardDetail::ownership` is `Some`. `/cards/:id`
+/// is a public page; a missing or expired session degrades to the public
+/// projection rather than 401ing.
+#[server(
+    prefix = "/api",
+    endpoint = "card_detail",
+    input = leptos::server_fn::codec::GetUrl
+)]
+pub async fn card_detail(
+    oracle_id: shared::Id,
+) -> Result<shared::CardDetail, ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    let headers = leptos_axum::extract::<axum::http::HeaderMap>()
+        .await
+        .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+
+    #[cfg(feature = "hosted")]
+    {
+        use crate::backend::CatalogStore;
+        crate::backend::routes::catalog_backend(&headers)
+            .await
+            .map_err(api_err)?
+            .card_detail(oracle_id)
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(all(feature = "native", not(feature = "hosted")))]
+    {
+        use crate::auth::cookies;
+        use crate::backend::{CatalogStore, NativeBackend};
+        let token = cookies::cookie_value(&headers, cookies::JWT_COOKIE);
+        let session = cookies::cookie_value(&headers, cookies::SESSION_COOKIE);
+        let origin = cookies::request_origin(&headers);
+        NativeBackend::authed(token, session, origin)
+            .card_detail(oracle_id)
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = oracle_id;
         Err(ServerFnError::ServerError("server-only".into()))
     }
 }

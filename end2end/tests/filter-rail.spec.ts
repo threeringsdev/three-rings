@@ -31,9 +31,23 @@ test("the rail reflects the URL query without JS @fast", async ({
   expect(html).toContain('aria-checked="true" aria-label="Instant"');
   expect(html).toContain('aria-checked="true" aria-label="Blue"');
   expect(html).toContain('aria-checked="true" aria-label="Red"');
-  // ...and the text fields carry `value`, or a shared link would render an
-  // empty-looking rail until wasm landed.
-  expect(html).toMatch(/id="filter-rail-mv"[^>]*value="2"/);
+  // ...and the fields carry `value`, or a shared link would render an
+  // empty-looking rail until wasm landed. `bind:value` alone does NOT emit the
+  // attribute — the `Input` primitive seeds it from `bind_value` (see its
+  // bind_value arm). Both component shapes are asserted because they are two
+  // separate render paths into that primitive:
+  expect(html).toMatch(/id="filter-rail-mv"[^>]*value="2"/); // Input, number
+});
+
+test("a shared link SSRs its text into every bound field @fast", async ({
+  request,
+}) => {
+  // The `bind:value`-renders-no-attribute trap, at the primitive. It is
+  // invisible in the browser (the field just looks empty for a beat) and every
+  // SSR'd form re-inherits it, so it is asserted request-level on both shapes.
+  const html = await (await request.get("/catalog?q=bolt")).text();
+  expect(html).toMatch(/id="catalog-query"[^>]*value="bolt"/); // InputGroupInput
+  expect(html).toMatch(/id="filter-rail-name"[^>]*value="bolt"/); // Input, text
 });
 
 test("checking a color rewrites its term in the URL and the box @fast", async ({
@@ -351,11 +365,26 @@ test.describe("mobile", () => {
     await expect(page.getByTestId("filter-badge")).toContainText("4");
 
     await page.getByRole("button", { name: /Filters/ }).click();
+    // Two locators on purpose: `panel` is the SheetContent (which carries the
+    // open/closed state), `sheet` is the rail body nested inside it.
+    // `data-state`, not toBeVisible — SheetContent slides in via a transform
+    // and keeps its box when closed, so a closed sheet and everything in it is
+    // "visible" to Playwright. Proved by mutation on the card-detail task
+    // (app-ui Findings).
+    const panel = page.locator('[data-name=SheetContent][aria-label="Filters"]');
+    await expect(panel).toHaveAttribute("data-state", "open");
     const sheet = page.locator("[data-testid=filter-sheet]");
-    await expect(sheet).toBeVisible();
     await expect(
       sheet.getByRole("checkbox", { name: "Instant" }),
     ).toHaveAttribute("aria-checked", "true");
+
+    // The footer count comes from an Effect-written signal, not a resource read
+    // in render. Reading the resource in render made SSR emit "Show results"
+    // and hydration claim that text node without rewriting it, so the label
+    // stayed countless until the next query change (app-ui Findings).
+    // On the panel, not a button locator: SheetContent renders its own X close
+    // button with the same aria-label as the footer's SheetClose.
+    await expect(panel).toContainText(/Show \d+ results/);
 
     // The sheet edits the same query text the rail does.
     await sheet.getByRole("checkbox", { name: "Sorcery" }).click();

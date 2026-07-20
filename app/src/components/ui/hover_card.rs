@@ -10,6 +10,10 @@
 //! - the anchor-positioning platform caveat is the same as `popover`; the
 //!   card is a hover preview (never the sole affordance), so no JS fallback
 //!   is needed — a mispositioned preview on a non-anchor engine is cosmetic
+//! - **`disabled`** (added by the card-detail task): touch browsers fire a
+//!   synthetic `mouseenter` on tap, so a caller offering a different
+//!   affordance on coarse pointers (a bottom sheet) would otherwise get both
+//!   at once. Disabling suppresses opens and closes any open card.
 
 use leptos::prelude::*;
 use tw_merge::tw_merge;
@@ -32,6 +36,8 @@ struct HoverCardContext {
     /// the trigger onto the content cancels the trigger's pending close
     /// (separate timers was the bug: the handoff closed the card).
     timer: HoverTimer,
+    /// Hover/focus opens are suppressed while this is true.
+    disabled: Signal<bool>,
 }
 
 #[component]
@@ -40,11 +46,31 @@ pub fn HoverCard(
     #[prop(into)]
     id: String,
     #[prop(default = HoverCardSide::default())] side: HoverCardSide,
+    /// Suppress hover/focus opening entirely — see the `disabled` note above.
+    /// Defaults to always-false, i.e. a plain hover card.
+    #[prop(optional, into)]
+    disabled: Signal<bool>,
     children: Children,
 ) -> impl IntoView {
     let anchor_name = format!("--hc-anchor-{id}");
     let content_id = format!("hc-content-{id}");
     let open = RwSignal::new(false);
+    let timer = HoverTimer::new();
+
+    // Becoming disabled must take the card down *and* cancel any pending open.
+    // Cancelling is the load-bearing half: a `mouseenter` that landed while
+    // still enabled has already scheduled `open.set(true)` 150 ms out, and
+    // clearing `open` here would be a no-op that the timer then undoes —
+    // leaving a card open while disabled. That race is exactly the hydration
+    // window in `cards::CardPreview`, where the pointer type resolves in an
+    // Effect after listeners are already attached.
+    let disable_timer = timer;
+    Effect::new(move |_| {
+        if disabled.get() {
+            disable_timer.cancel();
+            open.set(false);
+        }
+    });
 
     let (position_styles, transform_origin) = match side {
         HoverCardSide::Bottom => ("position-area: block-end; margin-top: 8px;", "center top"),
@@ -66,7 +92,8 @@ pub fn HoverCard(
         anchor_name: anchor_name.clone(),
         content_id: content_id.clone(),
         open,
-        timer: HoverTimer::new(),
+        timer,
+        disabled,
     };
 
     view! {
@@ -154,9 +181,24 @@ pub fn HoverCardTrigger(
     let ctx = expect_context::<HoverCardContext>();
     let open = ctx.open;
     let timer = ctx.timer;
+    let disabled = ctx.disabled;
     on_cleanup(move || timer.cancel());
 
-    let show = move || timer.schedule(150, move || open.set(true));
+    // Checked when the event arrives, not when the handler is built: the
+    // pointer type is resolved after hydration, so a handler that captured
+    // the value would be stale on exactly the devices this guards.
+    let show = move || {
+        if !disabled.get() {
+            // Re-checked when the timer fires, not only when it is scheduled:
+            // `disabled` can flip during the 150 ms intent delay, and the
+            // cancel in HoverCard's Effect races an already-queued callback.
+            timer.schedule(150, move || {
+                if !disabled.get_untracked() {
+                    open.set(true);
+                }
+            });
+        }
+    };
     let hide = move || timer.schedule(150, move || open.set(false));
 
     view! {

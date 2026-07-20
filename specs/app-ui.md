@@ -702,3 +702,185 @@ device's Chrome 145. Codex e2e mutation pass: 10 mutations applied transiently,
 - **Set is a text input, not a picker.** No `list_sets` adapter exists, and
   adding one is a server-fn of its own. `s:mh3,lea` typed as comma-separated
   codes is the honest interim; filed.
+
+### Card detail `/cards/:id` + previews (2026-07-20)
+
+**The multi-face projection fix, widened.** The spec named "the summary/detail
+projections"; the same bare `image_uris->>'normal'` appeared at **six** sites in
+`hosted.rs` (detail printings, `card_summary`, `search`, `collection_view`, and
+two tagged-card reads). Fixing only the two named would have left DFCs
+imageless in the catalog grid and every collection view, so all six took the
+`COALESCE(…, faces->0->'image_uris'->>'normal')` fallback. Measured on the dev
+POC catalog: **128 of 2,976 printings** had NULL top-level `image_uris` with
+`faces` populated, and all 128 resolve after the change; zero previously-working
+rows changed. `catalog.spec.ts`'s "transform layouts legitimately have no image"
+caveat is now obsolete.
+
+The four correlated subqueries additionally gained
+`AND COALESCE(...) IS NOT NULL ORDER BY id LIMIT 1`. That one is **defensive,
+not a fix for anything observed** — an unordered `LIMIT 1` could pick an artless
+printing while a sibling has art, but zero cards in the POC catalog currently
+have that mix. It matters at full-catalog scale (Scryfall carries artless
+placeholder rows).
+
+**`/cards/:id` needed `SsrMode::Async`, and the test that "proved" SSR couldn't
+tell.** The route inherited Leptos's default out-of-order streaming, which ships
+the whole `<Transition>` as a `<template>` plus a hoisting script while the
+in-place markup stays the skeleton. A `request.get(...).toContain(...)`
+assertion passes either way, because the template content *is* in the body — so
+the original SSR test was vacuous. Confirmed by counting unclosed `<template>`
+tags before the content (1 before, 0 after). The test now asserts the skeleton's
+`aria-label` is **absent**, which is what actually distinguishes the two.
+
+**Previews are lazily mounted, and that was a correctness fix, not an
+optimization.** Rendering both preview bodies up-front put every card's name and
+art into the DOM two extra times per row. That broke three *pre-existing*
+catalog tests: `getByText("Lightning Bolt").first()` began resolving to a hidden
+copy inside a closed popover. Both bodies now mount on the interaction that
+reveals them (latched, so they stay mounted after) — the sheet keys on its own
+`sheet_seen` latch rather than `sheet_open`, because gating on the live signal
+empties the panel on the same tick its 300 ms slide-out begins.
+
+**Grid tiles deliberately opt out of the hover preview** (`hover=false`) — a
+deviation from the spec's "any row/tile". A tile *is* the card art, so a hover
+card there is a smaller copy of what you are already looking at. The touch sheet
+stays on everywhere, since a tap still wants an alternative to navigating.
+
+**`hover_card` gained a `disabled` prop** (vendored-component deviation, bench
+section in the same commit). Touch browsers fire a synthetic `mouseenter` on
+tap, so without it a tap opened the sheet *and* the hover card. Two subtleties
+found by review: the disable must **cancel the pending timer**, not just clear
+`open` (an already-scheduled open fires 150 ms later and undoes it), and the
+timer callback re-checks `disabled` on fire because the flag can flip mid-delay
+— which is precisely the hydration window in `CardPreview`, where the pointer
+type resolves in an Effect after listeners are attached.
+
+**Mutation pass: 5 mutations, 5 kills — but two only after strengthening the
+tests.** Two assertions were vacuous and survived their mutation:
+
+- *Removing `disabled=coarse` did not fail the touch test.* The test tapped, and
+  the sheet's backdrop steals the pointer — the resulting `mouseleave` cancels
+  the pending hover open, so the hover card stayed shut for an unrelated reason.
+  The scenario `disabled` actually guards is a coarse pointer **travelling over**
+  a row without tapping (scrolling a list), where nothing would dismiss the card
+  afterwards. Rewritten to hover without clicking; it now kills.
+- *`toBeVisible()` on the sheet proved nothing.* `SheetContent` slides via a
+  transform and stays in the layout when closed, so a **closed** sheet is
+  "visible" to Playwright too. All sheet assertions moved to
+  `data-state=open|closed`.
+
+**Verification.** Full three-browser tier 148/148 (chromium + firefox + webkit)
+— run at the end of this task under the revised policy, not at a stage boundary.
+Android dev-webview: a new `end2end/android-card-detail-check.mjs` drives the
+real WebView over CDP, 11/11, and is the only place `(pointer: coarse)` is
+decided by an actual device rather than Playwright emulation. `bench-check`
+CLEAN (extended with the `disabled` assertions). Hydration CLEAN on the detail
+page, the multi-face page, and the malformed-id page. Merge gate green, 8/8.
+
+**Disputed / deferred:**
+
+- **Review (medium): `PreviewBody`'s "N owned" badge is unreachable.** Correct,
+  and it turned out to be a **pre-existing** hole rather than one this task
+  introduced: `HostedBackend::search` selects no `owned` column at all, so
+  `CardSummary::owned` is `None` on every search hit and `CardTile`'s identical
+  badge has never rendered either. Kept the branch rather than deleting it (it
+  mirrors the existing tile and goes live when the projection is fixed) and
+  filed the projection as its own task. It under-reports rather than
+  misinforming. This also forced the authed e2e to locate seeded holdings by
+  walking `t:creature` detail pages instead of filtering on `owned`.
+- **Review (low): `coarse` is sampled once, per card.** No `MediaQueryList`
+  change listener, and one signal + one `match_media` per `CardPreview` (~60 on
+  a catalog page) for what is a global fact. No correctness impact short of a
+  convertible flipping pointer modes mid-session; a shared context is the right
+  shape and is deferred rather than bolted on here.
+- **Codex review: retrieval, and a correction.** The first pass through this
+  task recorded that the Codex step "cannot run unattended". **That was wrong.**
+  The `/codex:*` slash commands are indeed `disable-model-invocation: true`, and
+  the `codex-rescue` subagent is a one-shot forwarder that returns before its
+  job finishes — but both commands are thin wrappers over
+  `scripts/codex-companion.mjs`, which is callable directly:
+
+  ```
+  node "$CLAUDE_PLUGIN_ROOT/scripts/codex-companion.mjs" status
+  node "$CLAUDE_PLUGIN_ROOT/scripts/codex-companion.mjs" result <job-id>
+  ```
+
+  Job `task-mrt56mi7-6w478m` was retrieved that way and its six findings are
+  folded in above. Convergence with the independent reviewer was high: Codex
+  independently flagged the `disabled` timer race, the `first()` hero art, and
+  — notably — **both** of the vacuous assertions the mutation pass had already
+  caught. It found two things the substitute missed: the hybrid-pointer gap and
+  the unasserted per-row quantities, both fixed here.
+
+  Lesson for the loop, and the reason ui-task-loop now says this: **the
+  autonomous path is the runtime script, not the subagent.** `codex-rescue`
+  dispatches and returns; polling it for the result gets a refusal, because its
+  own instructions forbid follow-up work. Do not read that refusal as "Codex is
+  unavailable".
+
+### Cross-task audit (2026-07-20, during the card-detail task)
+
+A sweep of every prior Phase 5 task's deferred/disputed items, looking for debt
+that was recorded in Findings but tracked nowhere. Nine items were filed as
+TODO tasks; three things are worth stating here.
+
+**The `/catalog` hydration warning was not benign, and its comment said it
+was.** `ResultsToolbar` derived the mobile sheet's "Show N results" footer by
+reading the results `Resource` in render, with a comment justifying it as a
+deliberate escape from the suspense boundary. The goal was right; the mechanism
+was not. SSR ran the closure before the resource resolved and emitted "Show
+results"; hydration *claimed* that text node without rewriting it; the label
+then stayed countless until the next query change. Reproduced on
+`/catalog?q=bolt` — two results, label reading "Show results". Fixed by moving
+the derivation into an Effect-written signal, which keeps the non-blocking
+property (Effects don't run in SSR, so SSR still renders the `None` branch
+deterministically) while making the post-hydration update a real signal change.
+`/catalog` is hydration-CLEAN again, and a regression assertion in
+`filter-rail.spec.ts` fails against the old shape. This was the only
+read-in-render of a resource in the codebase; the other four all go through
+`Suspend`.
+
+**How it survived two tasks is the more useful finding.** `git blame` puts the
+line on the filter-rail commit, and that task's Verification block lists unit
+tests, e2e, Android CDP and a mutation pass — **but no hydration probe**, which
+step 3 of the loop requires. The card-detail task then probed the detail pages
+it had touched, not `/catalog`. So a required step was omitted once, silently,
+and nothing in the loop's failure policy catches an omitted verification step.
+The ui-task-loop skill now names the probe's scope explicitly (the pages you
+touched **and** the pages that render components you touched).
+
+**Two vacuous assertions of the same shape as the card-detail ones were still
+live in `filter-rail.spec.ts`.** `await expect(sheet).toBeVisible()` on a
+closed `SheetContent` passes, for the reason recorded above — and the locator
+was pointed at the rail body nested *inside* the panel rather than the panel
+itself, so it could not have read the open state either way. Retargeted to
+`[data-name=SheetContent]` + `data-state`. Worth generalizing: **`toBeVisible()`
+is never the right assertion for this Sheet**, on any surface.
+
+### `bind:value` SSR seed, moved into the primitive (2026-07-20)
+
+`bind:value` is a client-side binding: it drives the DOM property and emits no
+`value` attribute, so every SSR'd input came back empty and filled in only once
+wasm landed. The filter-rail task found this and patched its call sites; by the
+time it was looked at again there were **three hand-written copies of the same
+workaround** (the query bar and two rail fields), each capturing
+`get_untracked()` and passing a one-shot `value` through the `{..}` spread.
+
+`Input` now seeds the attribute itself from `bind_value`, and the three call
+sites dropped their copies. The reasoning for fixing the primitive rather than
+documenting the workaround: the failure is invisible (the field just looks
+empty for a beat, on a shared link), it is re-inherited by every SSR'd form,
+and three Stage 3 tasks each ship one. `InputGroupInput` needed no change — it
+renders through `Input`.
+
+Locked by a request-level assertion in `filter-rail.spec.ts` covering **both**
+render paths into the primitive (`Input` directly and via `InputGroupInput`),
+since they are separate call chains. Mutation-checked: removing the seed fails
+the test.
+
+Not fixed, deliberately: `command`'s item registry is ordered by mount rather
+than document position, so an in-place keyed *reorder* of persistent items
+would make ↑↓ visit rows out of visual order. That one is filed rather than
+fixed — no current consumer reorders in place, and writing DOM-ordering code
+with nothing to verify it against is worse than the latent bug. Read that task
+before building the destination picker, quick-add, or ⌘K.

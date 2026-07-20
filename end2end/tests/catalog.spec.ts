@@ -213,8 +213,8 @@ test("card tiles lazy-load images and link to the card @fast", async ({
   );
   // Not guarded by a count check: "bolt" returns image-bearing printings, so a
   // page that rendered no <img> at all is a failure, not a skip. (Transform
-  // layouts legitimately have no image until the card-detail COALESCE fix —
-  // hence the specific query.)
+  // layouts used to have no image; the card-detail task's COALESCE fallback
+  // fixed that at all six projection sites, so any query works here now.)
   await expect(tile.locator("img")).toHaveAttribute("loading", "lazy");
   await expect(tile.locator("img")).toHaveAttribute("decoding", "async");
 });

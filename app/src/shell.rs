@@ -382,27 +382,8 @@ fn UserMenu() -> impl IntoView {
 
 // ---- Route skeletons — each replaced by its own Stage 2/3 task. ----
 
-/// `/cards/:id` — full detail (printings, rulings, your-copies) lands with
-/// the card-detail task.
-#[component]
-pub fn CardDetailPage() -> impl IntoView {
-    let params = use_params_map();
-    let id = move || params.read().get("id").unwrap_or_default();
-    view! {
-        <div class="space-y-6 p-6">
-            <h1 class="text-2xl font-bold">"Card detail"</h1>
-            <p class="text-muted-foreground text-sm">{id}</p>
-            <div class="flex gap-6">
-                <Skeleton class="aspect-[5/7] w-48 shrink-0" />
-                <div class="flex-1 space-y-3">
-                    <Skeleton class="h-6 w-1/2" />
-                    <Skeleton class="h-4 w-1/3" />
-                    <Skeleton class="h-4 w-2/3" />
-                </div>
-            </div>
-        </div>
-    }
-}
+// `/cards/:id` graduated out of this file into `crate::cards` with the
+// card-detail task, the same way `/catalog` did.
 
 /// `/my` — the All-cards aggregate table lands with its task.
 #[component]

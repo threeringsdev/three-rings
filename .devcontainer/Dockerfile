@@ -56,4 +56,14 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
  && apt-get update \
  && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
+
+# postgresql-client (psql) — the repo's own scripts shell out to it:
+# scripts/migrate.sh and scripts/seed-dev-data.sh (the latter resolves the e2e
+# user's uuid out of neon_auth."user" with the owner credential). Without it the
+# documented prereq for every /my/* screen only worked on a host that happened
+# to have psql, which contradicts this image being the canonical environment.
+# Client only — no server, no local database; everything still points at Neon.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-client \
+ && rm -rf /var/lib/apt/lists/*
 USER vscode

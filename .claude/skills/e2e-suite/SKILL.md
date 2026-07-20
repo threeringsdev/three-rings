@@ -1,6 +1,6 @@
 ---
 name: e2e-suite
-description: Author and run the three-rings Playwright e2e suite — login fixture (email verification is ON; never sign up in a test), tier tags (@fast per task, full tier at stage boundaries), Android webview project, webkit-as-WKWebView rationale, :3000 server lifecycle, quarantine policy. Use when writing, running, or debugging any e2e test, or when a UI task reaches its e2e step.
+description: Author and run the three-rings Playwright e2e suite — login fixture (email verification is ON; never sign up in a test), tier tags (@fast while iterating, full three-browser tier at the end of every task), Android webview project, webkit-as-WKWebView rationale, :3000 server lifecycle, quarantine policy. Use when writing, running, or debugging any e2e test, or when a UI task reaches its e2e step.
 ---
 
 # E2E suite — Playwright against the live dev server
@@ -40,17 +40,36 @@ The login fixture drives the real `/login` form once per worker and reuses
 
 ## Tiers
 
-- `@fast` in the test title = the per-task tier: `npx playwright test
-  --project=chromium --grep @fast`.
-- Full tier (stage boundaries, or any overlay/positioning change):
-  `npx playwright test` — chromium + firefox + **webkit**. Webkit stands in
-  for WKWebView (desktop is untested in-loop); an overlay that breaks in
-  webkit will break in the macOS shell.
+- `@fast` in the test title = the **iteration** tier, run as often as you like
+  while building: `npx playwright test --project=chromium --grep @fast`.
+  It is a fast-feedback loop, never the evidence a task is done.
+- Full tier = **the end of every task**, before the merge gate: `npx
+  playwright test` — chromium + firefox + **webkit**. Webkit stands in for
+  WKWebView (desktop is untested in-loop); an overlay that breaks in webkit
+  will break in the macOS shell. A task is not `[x]` until this tier is green
+  — a green `@fast` run alone never clears it. (Stage boundaries add the
+  Android **release** smoke, not a different browser tier.)
 - Android webview project: attach per the **android-smoke** recipe, then run
   the spec against the attached page. One page, one context — Android runs
   serialize (single worker) and share state; every spec must `goto` its own
   start URL (`http://tauri.localhost/<path>`, never JS `location.href` — it
   races the CDP session).
+
+## Assertions that lie
+
+- **`toBeVisible()` on a `Sheet` is always wrong.** `SheetContent` slides via a
+  transform and keeps its box when closed, so a *closed* sheet — and everything
+  nested in it — is "visible" to Playwright. Assert
+  `toHaveAttribute("data-state", "open"|"closed")` on the `[data-name=SheetContent]`
+  element, not on a child.
+- **`{..}` spreads land a `data-testid` on the backdrop as well as the panel.**
+  Pair the testid with `[role=dialog]` or the locator resolves to two elements.
+- **A closed `popover` is in the DOM.** `toBeHidden()` passes whether or not its
+  children rendered, so it cannot test lazy mounting — assert on the content
+  (e.g. a name appearing exactly once) instead.
+- Both of the first two shipped as green-but-meaningless assertions and were
+  only caught by mutation testing. When an assertion protects an overlay, mutate
+  the feature and watch it fail before believing it.
 
 ## Quarantine policy
 
