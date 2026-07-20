@@ -327,14 +327,8 @@ fn QueryBar(
                     placeholder="Search the catalog — t:instant c:ur cmc<=2"
                     {..}
                     aria-label="Search the catalog"
-                    // `bind:value` is a client-side binding only — it renders
-                    // no `value` attribute — so a shared `?q=` link used to
-                    // SSR with an empty box that filled in only once wasm
-                    // landed. Found while building the rail, which has three
-                    // more fields with the same shape. Set once, not
-                    // reactively: after hydration the property is what shows,
-                    // and a reactive attribute would race the binding.
-                    value=url_q.get_untracked()
+                    // No manual `value` seed: `Input` emits the SSR attribute
+                    // from `bind_value` itself now (see its bind_value arm).
                     on:input=on_input
                     on:keydown=on_key
                 />

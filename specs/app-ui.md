@@ -856,3 +856,31 @@ was pointed at the rail body nested *inside* the panel rather than the panel
 itself, so it could not have read the open state either way. Retargeted to
 `[data-name=SheetContent]` + `data-state`. Worth generalizing: **`toBeVisible()`
 is never the right assertion for this Sheet**, on any surface.
+
+### `bind:value` SSR seed, moved into the primitive (2026-07-20)
+
+`bind:value` is a client-side binding: it drives the DOM property and emits no
+`value` attribute, so every SSR'd input came back empty and filled in only once
+wasm landed. The filter-rail task found this and patched its call sites; by the
+time it was looked at again there were **three hand-written copies of the same
+workaround** (the query bar and two rail fields), each capturing
+`get_untracked()` and passing a one-shot `value` through the `{..}` spread.
+
+`Input` now seeds the attribute itself from `bind_value`, and the three call
+sites dropped their copies. The reasoning for fixing the primitive rather than
+documenting the workaround: the failure is invisible (the field just looks
+empty for a beat, on a shared link), it is re-inherited by every SSR'd form,
+and three Stage 3 tasks each ship one. `InputGroupInput` needed no change — it
+renders through `Input`.
+
+Locked by a request-level assertion in `filter-rail.spec.ts` covering **both**
+render paths into the primitive (`Input` directly and via `InputGroupInput`),
+since they are separate call chains. Mutation-checked: removing the seed fails
+the test.
+
+Not fixed, deliberately: `command`'s item registry is ordered by mount rather
+than document position, so an in-place keyed *reorder* of persistent items
+would make ↑↓ visit rows out of visual order. That one is filed rather than
+fixed — no current consumer reorders in place, and writing DOM-ordering code
+with nothing to verify it against is worse than the latent bug. Read that task
+before building the destination picker, quick-add, or ⌘K.

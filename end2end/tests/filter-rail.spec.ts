@@ -31,9 +31,23 @@ test("the rail reflects the URL query without JS @fast", async ({
   expect(html).toContain('aria-checked="true" aria-label="Instant"');
   expect(html).toContain('aria-checked="true" aria-label="Blue"');
   expect(html).toContain('aria-checked="true" aria-label="Red"');
-  // ...and the text fields carry `value`, or a shared link would render an
-  // empty-looking rail until wasm landed.
-  expect(html).toMatch(/id="filter-rail-mv"[^>]*value="2"/);
+  // ...and the fields carry `value`, or a shared link would render an
+  // empty-looking rail until wasm landed. `bind:value` alone does NOT emit the
+  // attribute — the `Input` primitive seeds it from `bind_value` (see its
+  // bind_value arm). Both component shapes are asserted because they are two
+  // separate render paths into that primitive:
+  expect(html).toMatch(/id="filter-rail-mv"[^>]*value="2"/); // Input, number
+});
+
+test("a shared link SSRs its text into every bound field @fast", async ({
+  request,
+}) => {
+  // The `bind:value`-renders-no-attribute trap, at the primitive. It is
+  // invisible in the browser (the field just looks empty for a beat) and every
+  // SSR'd form re-inherits it, so it is asserted request-level on both shapes.
+  const html = await (await request.get("/catalog?q=bolt")).text();
+  expect(html).toMatch(/id="catalog-query"[^>]*value="bolt"/); // InputGroupInput
+  expect(html).toMatch(/id="filter-rail-name"[^>]*value="bolt"/); // Input, text
 });
 
 test("checking a color rewrites its term in the URL and the box @fast", async ({

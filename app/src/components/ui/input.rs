@@ -91,29 +91,44 @@ pub fn Input(
     let type_str = r#type.as_str();
 
     match bind_value {
-        Some(signal) => view! {
-            <input
-                data-name="Input"
-                type=type_str
-                class=merged_class
-                placeholder=placeholder
-                name=name
-                id=id
-                title=title
-                autocomplete=autocomplete
-                disabled=disabled
-                readonly=readonly
-                required=required
-                autofocus=autofocus
-                minlength=minlength
-                min=min
-                max=max
-                step=step
-                bind:value=signal
-                node_ref=node_ref
-            />
+        // `bind:value` is a *client-side* binding — it drives the DOM property
+        // and renders no `value` attribute — so an SSR'd input comes back empty
+        // and only fills in once wasm lands. On a shared link that reads as
+        // data loss. Seeding the attribute here rather than at each call site
+        // is deliberate: the trap is invisible (the field just looks empty),
+        // every SSR'd form re-inherits it, and five callers had already grown
+        // their own copy of this workaround before it was fixed in one place.
+        //
+        // Set once, not reactively: after hydration the property that
+        // `bind:value` owns is what the browser shows, and a reactive attribute
+        // would be a second writer racing it.
+        Some(signal) => {
+            let ssr_seed = signal.get_untracked();
+            view! {
+                <input
+                    data-name="Input"
+                    type=type_str
+                    class=merged_class
+                    placeholder=placeholder
+                    name=name
+                    id=id
+                    title=title
+                    autocomplete=autocomplete
+                    disabled=disabled
+                    readonly=readonly
+                    required=required
+                    autofocus=autofocus
+                    minlength=minlength
+                    min=min
+                    max=max
+                    step=step
+                    value=ssr_seed
+                    bind:value=signal
+                    node_ref=node_ref
+                />
+            }
+            .into_any()
         }
-        .into_any(),
         None => view! {
             <input
                 data-name="Input"

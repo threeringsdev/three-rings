@@ -708,13 +708,6 @@ fn RailTextField(
                 bind_value=text
                 class="h-8 text-sm"
                 {..}
-                // `bind:value` is a client-side binding and renders no `value`
-                // attribute, so without this the box would SSR empty on a
-                // shared link and only fill in once wasm landed. Set once, not
-                // reactively: after hydration the property (which `bind:value`
-                // owns) is what the browser shows, and a reactive attribute
-                // would just be a second writer racing it.
-                value=initial.clone()
                 on:input=on_input
             />
         </div>
@@ -901,8 +894,6 @@ fn ManaValueSection(value: Signal<Option<(Cmp, f64)>>, #[prop(into)] id: String)
                     bind_value=num
                     class="h-8 text-sm"
                     {..}
-                    // SSR value — see the note in RailTextField.
-                    value=initial_num.clone()
                     on:change=on_num
                 />
             </div>
