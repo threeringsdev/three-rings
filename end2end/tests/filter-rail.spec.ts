@@ -55,6 +55,17 @@ test("checking a color rewrites its term in the URL and the box @fast", async ({
   await rail.getByRole("checkbox", { name: "Blue" }).click();
   await page.waitForURL((url) => url.searchParams.get("q") === "bolt c:ru");
   await expect(page.locator("#catalog-query")).toHaveValue("bolt c:ru");
+  // The rail is a view over the query, so it has to follow its own edit —
+  // asserting only the URL would pass on a rail whose boxes never re-check.
+  await expect(rail.getByRole("checkbox", { name: "Red" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(rail.getByRole("checkbox", { name: "Blue" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(rail.getByTestId("filter-count-color")).toContainText("2");
 });
 
 test("unchecking the last value removes the term entirely @fast", async ({
@@ -74,6 +85,13 @@ test("unchecking the last value removes the term entirely @fast", async ({
   await page.waitForURL((url) => url.searchParams.get("q") === "bolt");
   await expect(page.getByTestId("search-error")).toHaveCount(0);
   await expect(page.getByTestId("results-grid")).toBeVisible();
+  // ...and the box unchecks with it, rather than staying lit over a query that
+  // no longer carries the filter.
+  await expect(rail.getByRole("checkbox", { name: "Red" })).toHaveAttribute(
+    "aria-checked",
+    "false",
+  );
+  await expect(rail.getByTestId("filter-count-color")).toHaveCount(0);
 });
 
 test("a rail edit preserves terms the rail does not own, verbatim @fast", async ({
@@ -272,9 +290,17 @@ test("a rejected query makes the rail inert instead of wrong @fast", async ({
   await expect(
     page.locator(RAIL).getByTestId("filter-rail-inert"),
   ).toBeVisible();
+  // Inert means the whole widget set is gone — not just one checkbox. A rail
+  // still showing Reset or the text fields would happily eat the broken query
+  // on the next click.
   await expect(
     page.locator(RAIL).getByRole("checkbox", { name: "Blue" }),
   ).toHaveCount(0);
+  await expect(
+    page.locator(RAIL).getByRole("button", { name: "Reset" }),
+  ).toHaveCount(0);
+  await expect(page.locator("#filter-rail-name")).toHaveCount(0);
+  await expect(page.locator("#filter-rail-mv")).toHaveCount(0);
 
   // Fixing the query brings the widgets back.
   await page.fill("#catalog-query", "c:u");

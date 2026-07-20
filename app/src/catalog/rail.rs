@@ -922,6 +922,14 @@ fn mana_number(n: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared::search::parse;
+
+    fn t(pred: Pred) -> Term {
+        Term {
+            negated: false,
+            pred,
+        }
+    }
 
     #[test]
     fn reads_the_wireframe_query_into_widgets() {
@@ -1063,6 +1071,13 @@ mod tests {
         assert_eq!(read(&q).unwrap().name, "\"t:instant\"");
         // And it really is a name search, not a type filter.
         assert_eq!(read(&q).unwrap().types, Vec::<String>::new());
+
+        // A leading `-` is the same trap by another route: unquoted it would
+        // become a negation, inverting the filter the user typed (Codex e2e
+        // mutation pass — the keyed-term case alone did not cover it).
+        let neg = name_terms("-bolt").unwrap();
+        assert_eq!(neg, "\"-bolt\"");
+        assert_eq!(parse(&neg).unwrap(), vec![t(Pred::Name("-bolt".into()))]);
     }
 
     #[test]
@@ -1103,11 +1118,25 @@ mod tests {
 
     #[test]
     fn set_codes_tolerate_mid_typing_commas() {
-        let mut st = RailState::default();
-        st.set = "mh3, ,lea,".into();
+        let st = RailState {
+            set: "mh3, ,lea,".into(),
+            ..Default::default()
+        };
         assert_eq!(st.set_codes(), vec!["mh3", "lea"]);
         let q = rewrite("", Field::Set, facet_term("s", &st.set_codes())).unwrap();
         assert_eq!(q, "s:mh3,lea");
+    }
+
+    #[test]
+    fn colors_concatenate_rather_than_comma_separating() {
+        // `c:` means "has ALL of these", so its values are one letter-set —
+        // `c:ur`, not `c:u,r`, which the grammar rejects outright. Comma-OR is
+        // right for every *other* facet, which is exactly why this one needs
+        // its own guard (survived the first Codex mutation pass).
+        assert_eq!(color_term(&["u".into(), "r".into()]), Some("c:ur".into()));
+        assert_eq!(color_term(&[]), None);
+        let q = color_term(&["u".into(), "r".into()]).unwrap();
+        assert_eq!(read(&q).unwrap().colors, vec!['U', 'R']);
     }
 
     #[test]

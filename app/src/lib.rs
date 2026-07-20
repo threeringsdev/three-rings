@@ -1,3 +1,13 @@
+// Leptos view trees are one deeply-nested generic type per component, so the
+// type rustc has to resolve grows with the *page*, not with any one function.
+// The filter rail (seven stacked sections inside the shell's sidebar) crossed
+// the 128 default and failed to compile — but only for `aarch64-linux-android`,
+// which is the trap: the host targets still built, so nothing caught it until
+// the Android build ran. Raising the limit is the standard fix for this in
+// Leptos; the alternative is splitting components purely to appease the
+// compiler, which makes the UI code worse to read for no runtime benefit.
+#![recursion_limit = "512"]
+
 use leptos::children::ToChildren;
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};

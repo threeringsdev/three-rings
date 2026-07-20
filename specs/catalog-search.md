@@ -202,6 +202,24 @@ Alpha artifacts; negation; and the 422 naming `pow>3`.
   preserved-but-invisible, and the mobile badge already counts rail-matched
   terms. Revisit if silence confuses in practice.
 
+### Deviation: `t:` gained comma-OR (2026-07-19, the filter-rail task)
+
+The V1 table above marks comma-OR on `s:` and `r:` only. The rail's Type facet
+is a **multi-select** (wireframes: Creature/Instant/Sorcery/Artifact/
+Enchantment checkboxes), and this spec's own rationale for the comma extension
+— "flat Scryfall syntax cannot express *rare OR mythic* without parens, and it
+is what the rail's multi-select facets serialize to" — applies to it verbatim.
+`s:`/`r:` were simply the facets that existed when the grammar shipped.
+
+So `Pred::TypeLine` now carries `Vec<String>` and `t:instant,sorcery` means
+either. SQL is `c.type_line ILIKE ANY($1)` — one bind, and **parenthesized**,
+because `apply` splices predicates in after a bare `AND` and an unparenthesized
+disjunction would out-scope the surrounding ANDs and silently widen the query.
+Negation still wraps the whole group, so `-t:a,b` is "neither".
+
+Colors deliberately did **not** get this: `c:` means "has all of these", so its
+values are one letter-set (`c:ur`), not an OR list.
+
 ## Open questions
 
 - ~~Which Scryfall syntax subset ships in v1?~~ **Proposed above** (the
