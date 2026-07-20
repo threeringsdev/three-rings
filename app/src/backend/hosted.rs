@@ -7,11 +7,12 @@
 use shared::{
     union_color_identity, AddHave, AddLine, AddWant, AllCardsRow, AllCardsView, ApiError,
     ApiResult, BatchMove, Board, CardDetail, CardRow, CardSummary, CatalogCount, CollectionKind,
-    CollectionSummary, CollectionView, Condition, DeckCommanders, DesireLine, Finish, HoldingLine,
-    Id, LineResult, MoveReceipt, MoveRequest, NeedLocation, NeedRow, NeedsView, NewCollection,
-    NewTag, OwnershipEntry, Page, PrintingSummary, Rename, RenameTag, Reorder, Reparent, Ruling,
-    SearchQuery, SearchResults, SetBoard, SetQuantity, ShoppingList, ShoppingRow,
-    SuggestedDestination, Tag, TagAssignment, TagScope, TaggedCard, Teardown, TeardownReceipt,
+    CollectionSummary, CollectionTree, CollectionTreeRow, CollectionView, Condition,
+    DeckCommanders, DesireLine, Finish, HoldingLine, Id, LineResult, MoveReceipt, MoveRequest,
+    NeedLocation, NeedRow, NeedsView, NewCollection, NewTag, OwnershipEntry, Page, PrintingSummary,
+    Rename, RenameTag, Reorder, Reparent, Ruling, SearchQuery, SearchResults, SetBoard,
+    SetQuantity, ShoppingList, ShoppingRow, SuggestedDestination, Tag, TagAssignment, TagScope,
+    TaggedCard, Teardown, TeardownReceipt,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -303,18 +304,7 @@ impl CollectionStore for HostedBackend {
     async fn list_collections(&self) -> ApiResult<Vec<CollectionSummary>> {
         let user_id = self.session_id()?;
         let mut tx = self.scoped_tx().await?;
-
-        // Lazily provision the one Inbox on first authed load (idempotent via the
-        // `collections_one_inbox` partial unique index).
-        sqlx::query(
-            "INSERT INTO collections (user_id, kind, name, is_inbox) \
-             VALUES ($1, 'binder', 'Inbox', true) \
-             ON CONFLICT (user_id) WHERE is_inbox DO NOTHING",
-        )
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(upstream)?;
+        ensure_inbox(&mut tx, user_id).await?;
 
         let rows: Vec<CollectionRow> = sqlx::query_as(&format!(
             "SELECT {COLLECTION_COLS} FROM collections ORDER BY position, name"
@@ -325,6 +315,55 @@ impl CollectionStore for HostedBackend {
         tx.commit().await.map_err(upstream)?;
 
         rows.into_iter().map(CollectionRow::into_summary).collect()
+    }
+
+    async fn collection_tree(&self) -> ApiResult<CollectionTree> {
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        ensure_inbox(&mut tx, user_id).await?;
+
+        let rows: Vec<CollectionTreeSql> = sqlx::query_as(&format!(
+            "SELECT {COLLECTION_COLS}, COALESCE(h.present, 0)::bigint AS present \
+             FROM collections \
+             LEFT JOIN (SELECT collection_id, sum(quantity) AS present \
+                        FROM holdings GROUP BY collection_id) h \
+               ON h.collection_id = collections.id \
+             ORDER BY position, name"
+        ))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+
+        // The badge is a COUNT over the same short-card rule `shopping_list`
+        // renders (total desired − owned > 0, per oracle) — keep them in step.
+        let (shopping_short,): (i64,) = sqlx::query_as(
+            "WITH d AS ( \
+               SELECT oracle_id, sum(quantity) AS desired_total FROM desires GROUP BY oracle_id \
+             ), \
+             o AS ( \
+               SELECT p.oracle_id, sum(h.quantity) AS owned \
+               FROM holdings h JOIN printings p ON p.id = h.printing_id GROUP BY p.oracle_id \
+             ) \
+             SELECT count(*) FROM d LEFT JOIN o ON o.oracle_id = d.oracle_id \
+             WHERE d.desired_total > COALESCE(o.owned, 0)",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+
+        Ok(CollectionTree {
+            collections: rows
+                .into_iter()
+                .map(|r| {
+                    Ok(CollectionTreeRow {
+                        summary: r.row.into_summary()?,
+                        present: r.present,
+                    })
+                })
+                .collect::<ApiResult<Vec<_>>>()?,
+            shopping_short,
+        })
     }
 
     async fn create_collection(&self, req: NewCollection) -> ApiResult<CollectionSummary> {
@@ -386,7 +425,7 @@ impl CollectionStore for HostedBackend {
         .map_err(upstream)?;
         let summary = match updated {
             Some(row) => row.into_summary()?,
-            None => return Err(self.absent_or_inbox(&mut tx, id, "rename").await),
+            None => return Err(self.absent_or_inbox(&mut tx, id, "renamed").await),
         };
         tx.commit().await.map_err(upstream)?;
         Ok(summary)
@@ -401,7 +440,7 @@ impl CollectionStore for HostedBackend {
             .map_err(upstream)?
             .rows_affected();
         if affected == 0 {
-            return Err(self.absent_or_inbox(&mut tx, id, "delete").await);
+            return Err(self.absent_or_inbox(&mut tx, id, "deleted").await);
         }
         tx.commit().await.map_err(upstream)?;
         Ok(())
@@ -457,12 +496,21 @@ impl CollectionStore for HostedBackend {
             }
         }
 
-        sqlx::query("UPDATE collections SET parent_id = $2 WHERE id = $1")
-            .bind(id)
-            .bind(new_parent)
-            .execute(&mut *tx)
-            .await
-            .map_err(upstream)?;
+        // `NOT is_inbox`: the Inbox is pinned first at the top level (IA
+        // invariant) — nesting it would defeat the pin, so it joins the
+        // rename/delete protections. Found by the tree task's review: the
+        // sidebar pins Inbox only among the roots.
+        let affected =
+            sqlx::query("UPDATE collections SET parent_id = $2 WHERE id = $1 AND NOT is_inbox")
+                .bind(id)
+                .bind(new_parent)
+                .execute(&mut *tx)
+                .await
+                .map_err(upstream)?
+                .rows_affected();
+        if affected == 0 {
+            return Err(self.absent_or_inbox(&mut tx, id, "reparented").await);
+        }
         tx.commit().await.map_err(upstream)?;
         Ok(())
     }
@@ -1951,6 +1999,7 @@ const REPRESENTATIVE_PRINTING_JOIN: &str = " LEFT JOIN LATERAL ( \
 impl HostedBackend {
     /// Disambiguate a write that affected no rows: an existing-but-Inbox row is a
     /// `Conflict` (Inbox is protected), an absent/not-owned row is `NotFound`.
+    /// `op` is the past-tense verb for the message ("renamed", "deleted", …).
     async fn absent_or_inbox(
         &self,
         tx: &mut Transaction<'static, Postgres>,
@@ -1962,7 +2011,7 @@ impl HostedBackend {
             .fetch_optional(&mut **tx)
             .await
         {
-            Ok(Some((true,))) => ApiError::Conflict(format!("the Inbox cannot be {op}d")),
+            Ok(Some((true,))) => ApiError::Conflict(format!("the Inbox cannot be {op}")),
             Ok(Some((false,))) => ApiError::NotFound("collection".into()),
             Ok(None) => ApiError::NotFound("collection".into()),
             Err(e) => upstream(e),
@@ -1973,6 +2022,14 @@ impl HostedBackend {
 /// A `collections` row as decoded by sqlx. `kind` and `position` are read via
 /// SQL casts (`kind::text`, `position::float8`): sqlx without the decimal
 /// feature can't decode `numeric`, and the enum decodes cleanly as text.
+/// [`CollectionRow`] plus the own-present count of the sidebar-tree read.
+#[derive(sqlx::FromRow)]
+struct CollectionTreeSql {
+    #[sqlx(flatten)]
+    row: CollectionRow,
+    present: i64,
+}
+
 #[derive(sqlx::FromRow)]
 struct CollectionRow {
     id: Uuid,
@@ -2218,6 +2275,23 @@ fn decode_cursor<T: serde::de::DeserializeOwned>(s: &str) -> ApiResult<T> {
 /// a non-owned collection invisible, so this EXISTS both checks ownership and
 /// rejects a bad id. (The `holdings`/`desires` RLS policies only gate on their
 /// own `user_id`, not the collection's, so this guard is load-bearing.)
+/// Lazily provision the caller's one Inbox (idempotent via the
+/// `collections_one_inbox` partial unique index). Every "first `/my` request"
+/// read runs this — `list_collections` and `collection_tree`
+/// (specs/collection-api.md → Inbox provisioning).
+async fn ensure_inbox(tx: &mut Transaction<'static, Postgres>, user_id: Uuid) -> ApiResult<()> {
+    sqlx::query(
+        "INSERT INTO collections (user_id, kind, name, is_inbox) \
+         VALUES ($1, 'binder', 'Inbox', true) \
+         ON CONFLICT (user_id) WHERE is_inbox DO NOTHING",
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(upstream)?;
+    Ok(())
+}
+
 async fn require_owned_collection(
     tx: &mut Transaction<'static, Postgres>,
     collection_id: Id,

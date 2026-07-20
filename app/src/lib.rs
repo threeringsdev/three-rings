@@ -179,6 +179,7 @@ pub mod bench;
 pub mod cards;
 pub mod catalog;
 pub mod components;
+pub mod my;
 pub mod shell;
 
 #[cfg(feature = "ssr")]
@@ -386,6 +387,32 @@ pub async fn list_collections() -> Result<Vec<shared::CollectionSummary>, Server
         collection_backend()
             .await?
             .list_collections()
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// The My-cards sidebar read (specs/app-ui.md → Collection tree): every
+/// collection with its own present count plus the shopping-short badge, one
+/// round-trip; `crate::my::tree` reassembles nesting and rolls up the badges.
+/// GET per the read-adapter exemplar (`search_catalog`): cacheable URL, and the
+/// Tauri Android dev proxy strips POST bodies.
+#[server(
+    prefix = "/api",
+    endpoint = "collection_tree",
+    input = leptos::server_fn::codec::GetUrl
+)]
+pub async fn collection_tree() -> Result<shared::CollectionTree, ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .collection_tree()
             .await
             .map_err(api_err)
     }

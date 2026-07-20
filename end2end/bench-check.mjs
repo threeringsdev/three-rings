@@ -45,6 +45,9 @@ for (const marker of [
   'data-name="CommandItem"',
   'data-name="HoverCardTrigger"',
   'data-name="Toaster"',
+  'data-name="Collapsible"',
+  'data-name="Item"',
+  'data-name="ItemTitle"',
 ]) {
   if (!raw.includes(marker)) failures.push(`SSR body missing: ${marker}`);
 }
@@ -105,6 +108,33 @@ await page.locator('label[for="bench-rare-checkbox"]').click();
 await page.waitForTimeout(200);
 if ((await cb.getAttribute('data-state')) === cbState) {
   failures.push('label click did not toggle its checkbox (for/id association)');
+}
+
+// collapsible: trigger flips data-state + aria-expanded, and closed content
+// is inert (the grid animation keeps it in the DOM — its links must not be
+// tab-reachable).
+const colOpen = page.locator('#bench-collapsible-open');
+const colOpenTrigger = page.locator('[aria-controls="bench-collapsible-open"]');
+if ((await colOpen.getAttribute('data-state')) !== 'open') {
+  failures.push('collapsible default_open did not render open');
+}
+await colOpenTrigger.click();
+await page.waitForTimeout(200);
+if ((await colOpen.getAttribute('data-state')) !== 'closed') {
+  failures.push('collapsible trigger click did not close it');
+}
+if ((await colOpenTrigger.getAttribute('aria-expanded')) !== 'false') {
+  failures.push('collapsible aria-expanded did not follow the close');
+}
+await colOpenTrigger.click(); // restore
+await page.waitForTimeout(200);
+if (!(await page.locator('#bench-collapsible-closed').evaluate((el) => el.inert))) {
+  failures.push('closed collapsible content is not inert');
+}
+
+// item: the href arm must render a real <a> (the tree's pinned rows).
+if ((await page.locator('a[data-name="Item"]').count()) === 0) {
+  failures.push('item href arm did not render an <a>');
 }
 
 // dialog: trigger opens (Leptos state), ESC closes (listener + cleanup path)

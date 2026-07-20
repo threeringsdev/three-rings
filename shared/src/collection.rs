@@ -140,6 +140,29 @@ pub struct Reorder {
     pub position: f64,
 }
 
+/// One collection in the sidebar-tree read: its summary row plus its **own**
+/// present-copies count (children not rolled up — the client reassembles the
+/// tree from `parent_id` and rolls badges up during that walk).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CollectionTreeRow {
+    pub summary: CollectionSummary,
+    /// Copies held in this collection alone (`SUM(holdings.quantity)`).
+    pub present: i64,
+}
+
+/// The My-cards sidebar in one round-trip (specs/app-ui.md → Collection tree):
+/// every collection with its own present count, plus the shopping-list badge.
+/// Like `list_collections`, the read lazily provisions the Inbox — it is
+/// equally a "first `/my` request" (specs/collection-api.md → Inbox
+/// provisioning).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CollectionTree {
+    /// Flat, ordered by `(position, name)`; nesting is the client's walk.
+    pub collections: Vec<CollectionTreeRow>,
+    /// Distinct cards short (the Shopping list pinned row's badge).
+    pub shopping_short: i64,
+}
+
 /// A present-copies row (`holdings`), at printing + finish/condition/language +
 /// board grain.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

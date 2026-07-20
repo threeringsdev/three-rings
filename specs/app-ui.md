@@ -945,6 +945,85 @@ task, and the first UI task that **writes**.
   anyway because an adapter whose wire contract is wider than its name is a
   trap for the next caller. Quantity 1 is now true by construction.
 
+### Collection tree, read-only (2026-07-20)
+
+`app/src/my/tree.rs` (assembly + `CollectionTreeNav`), the vendored
+`collapsible` + `item`, the `CollectionStore::collection_tree` read
+(shared DTOs, hosted SQL, native client, `GET /api/collections/tree`,
+`collection_tree` GetUrl adapter), and the shell wiring (rail My-mode arm,
+mobile tab badge). Stage 3's opener; management (drag, context menus) is the
+next task.
+
+- **The read returns own-counts; the client rolls up.** `list_collections`
+  carries no counts and nothing else provides per-collection aggregates in one
+  call, so the tree got its own read model rather than N+1 `collection_view`
+  calls: flat rows (each `CollectionSummary` + `SUM(holdings.quantity)` for
+  that collection alone) plus the shopping-short count. The client already
+  reassembles nesting from `parent_id` (the DTO's documented contract), so
+  rolled-up badges, the All-cards total, and the Inbox tab badge are the same
+  walk. Assembly is pure and unit-tested (Inbox pin, sibling order, orphan
+  surfaces at top level, a parent cycle neither renders nor hangs).
+- **`ensure_inbox` extracted and shared.** The spec pins lazy Inbox
+  provisioning to "the first `/my` request" — `collection_tree` is exactly
+  that, so the INSERT moved out of `list_collections` into a helper both call
+  rather than being duplicated.
+- **The shopping badge is a COUNT over `shopping_list`'s own short rule**
+  (total desired − owned > 0 per oracle) — same CTE shape, so the badge and
+  the page it advertises cannot disagree.
+- **Vendoring deviations** (headers + gap analysis carry them): `collapsible`
+  gained `aria-expanded`/`aria-controls` (caller-supplied content id, the
+  deterministic-ID convention) and **`inert` when closed** — the grid
+  animation keeps collapsed content in the DOM, which would leave collapsed
+  tree links tab-reachable. `item`'s `variants!` was hand-expanded (V1
+  convention), `support_href` became a real `href` prop rendering an `<a>`,
+  and upstream's `[a]:`-arbitrary-variant hover classes moved onto that arm
+  as plain utilities (the `[a]:` form resolves to no usable CSS here).
+- **One shell-level resource, refetched by quick-add.** The desktop rail and
+  the mobile tab badge share a `CollectionTreeResource` (the
+  `CurrentUserResource` pattern); catalog `+ Have`/Undo refetch it so the
+  badges don't go stale on the page where adds happen. Anonymous shells skip
+  the fetch entirely (`None`) instead of 401ing on every public page view —
+  e2e-asserted at the request level.
+- **Codex review: 2 findings, both accepted and fixed.** (1) *Medium*:
+  `reparent_collection` never rejected the Inbox, so a raw API call could
+  nest it and defeat the pinned-first rendering (the pin only applies among
+  roots). Fixed at the API — `AND NOT is_inbox` + the same
+  `absent_or_inbox` disambiguation rename/delete use; verified live (409 on
+  the Inbox, legal reparents unaffected). The IA calls Inbox *renamable* but
+  collection-api ships it unrenamable — reparent now sides with the
+  shipped protections; if renamable is ever honored, reparent stays
+  protected regardless. (2) *Low*: selection used exact URL equality, so a
+  collection lost its highlight on its own `/needs` subpage — tree rows now
+  prefix-match (pinned rows stay exact, since `/my` prefixes everything).
+- **The `.pen` wireframes were unreachable this session** (no Pencil editor
+  open — the MCP needs one). Design authority fell back to
+  design/information-architecture.md's sidebar wireframe + this spec's text,
+  which specify the read-only tree completely (pins, delimiters, counts,
+  collapse). Flag for the maintainer if visual detail diverges from the DCol
+  frame.
+- **Verification:** unit 5/5 (assembly) + the suite's 84; SSR curls (authed
+  `/my` renders the full tree server-side; rollups internally consistent —
+  All cards 31 = 6+14+1+2+8 with Shoebox 3 = 1 own + 2 child); hydration
+  probes CLEAN anonymous ×4 and authed ×3; bench-check CLEAN with new
+  collapsible/item assertions (SSR markers, toggle, aria-expanded, inert,
+  href arm); fast tier 8/8; **full three-browser tier 196/196**; Android
+  dev-attach probe `android-tree-check.mjs` PASS on the real webview
+  (anonymous shell + bench collapse/inert — the tree itself is authed and
+  the dev proxy strips cookies, per the fixed platform matrix).
+- **Mutation pass: 7/7 kills** (one proposed mutation per test, each applied
+  transiently against the rebuilt binary — wasm hash polled per the
+  ui-task-loop rule — confirmed failing, reverted): skeleton-instead-of-tree
+  (SSR test), rollup → own-count (badge loop), `inert` dropped (collapse
+  test), selection back to exact-match (subpage assertion), row href →
+  `/my` (navigation), tab badge hardcoded 0 (mobile test), anonymous
+  client-side tree fetch injected (request-listener test). One analysis
+  subtlety worth keeping: the anonymous no-fetch assertion watches *browser*
+  requests, and an SSR-side guard regression fetches in-process where no
+  request listener can see it — the injected-`Effect` mutation is the
+  client-visible form of that regression, which is the half the test can
+  honestly own. Codex also noted per-assertion overlap in the multi-concern
+  tests (each behavior still has a killing assertion; no test was vacuous).
+
 - **The picker re-resolves against every collection list, not just the first**
   — Codex review, accepted and real. The state is the *shell's*, so it outlives
   the widget; seeding once meant a collection renamed or deleted between two

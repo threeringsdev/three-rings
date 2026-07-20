@@ -13,11 +13,11 @@
 
 use shared::{
     AddHave, AddLine, AddWant, AllCardsView, ApiError, ApiResult, BatchMove, CardDetail,
-    CardSummary, CatalogCount, CollectionSummary, CollectionView, DeckCommanders, DesireLine,
-    ErrorEnvelope, HoldingLine, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection,
-    NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard,
-    SetQuantity, ShoppingList, SuggestedDestination, Tag, TagAssignment, TaggedCard, Teardown,
-    TeardownReceipt,
+    CardSummary, CatalogCount, CollectionSummary, CollectionTree, CollectionView, DeckCommanders,
+    DesireLine, ErrorEnvelope, HoldingLine, Id, LineResult, MoveReceipt, MoveRequest, NeedsView,
+    NewCollection, NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults,
+    SetBoard, SetQuantity, ShoppingList, SuggestedDestination, Tag, TagAssignment, TaggedCard,
+    Teardown, TeardownReceipt,
 };
 use tokio::sync::OnceCell;
 
@@ -251,6 +251,11 @@ impl CollectionStore for NativeBackend {
     async fn list_collections(&self) -> ApiResult<Vec<CollectionSummary>> {
         self.require_session()?;
         self.get(super::paths::COLLECTIONS).await
+    }
+
+    async fn collection_tree(&self) -> ApiResult<CollectionTree> {
+        self.require_session()?;
+        self.get(super::paths::COLLECTION_TREE).await
     }
 
     async fn create_collection(&self, req: NewCollection) -> ApiResult<CollectionSummary> {

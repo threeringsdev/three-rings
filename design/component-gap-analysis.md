@@ -21,7 +21,7 @@ Screen legend: DCol/DCat/DSig = desktop collection/catalog/sign-in · OvHP = hov
 | Text input (quick search, query bar, fields) | DCol DCat DSig MCol MFil Proto | `input` (+ `input_group` for icon/hint affixes) | Direct |
 | Label + field group | DCat DSig MFil | `label` + `field` | Direct |
 | Checkbox option row | DCat MFil | `checkbox` + `label` | Direct |
-| Collapsible filter section | DCat MFil | `collapsible` | Direct |
+| Collapsible filter section | DCat MFil | `collapsible` | Direct — **adopted 2026-07-20** (tree task): + `aria-expanded`/`aria-controls` (caller-supplied content id) and `inert` when closed — the grid animation keeps collapsed content in the DOM, which left its links tab-reachable |
 | Badge / count chip (tree counts, tab badge, ×1 tile badge, needs chip, section counts) | DCol MRoot MCat MFil Proto | `badge` | Direct |
 | Keyboard hint (`/`, esc, ↑↓ ⏎ ⇧⏎ ⌥⏎ footer) | DCol Proto | `kbd` | Direct |
 | Separator | DCol MRoot Proto | `separator` | Direct |
@@ -32,7 +32,7 @@ Screen legend: DCol/DCat/DSig = desktop collection/catalog/sign-in · OvHP = hov
 | Hover preview shell | OvHP | `hover_card` | Direct (content is feature-side) |
 | Bottom sheet (grabber, scrim, sticky action) | MFil MCard | `sheet` | Direct (grabber styling ours) |
 | Mobile tab bar with badge | MRoot MCol MCat | `bottom_nav` + `badge` | Direct — verify maturity at adoption |
-| Drill-down list row (icon · label · count · ›) | MRoot | `item` | Direct — verify maturity at adoption |
+| Drill-down list row (icon · label · count · ›) | MRoot | `item` | Direct — **adopted 2026-07-20** (tree task): `variants!` hand-expanded (V1 convention); `support_href` became a real `href` prop rendering an `<a>`, with upstream's `[a]:`-arbitrary-variant hover classes moved onto that arm as plain utilities (the `[a]:` form resolves to no usable CSS here) |
 | Modal dialog (move confirm, teardown preview — spec'd flows, not drawn) | per ui-design flows | `dialog` / `alert_dialog` | Direct |
 | Placeholder bars (oracle text) | OvHP MCard | `skeleton` | Direct (at build time) |
 | Theme toggle (open theming question) | — | `theme_toggle` | Direct (when theming lands) |
