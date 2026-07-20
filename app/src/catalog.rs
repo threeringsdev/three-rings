@@ -771,7 +771,11 @@ fn ResultsList(cards: Vec<CardSummary>) -> impl IntoView {
 /// [`destination::DestinationPicker`] currently points at, and gets a
 /// confirmation toast — with Undo for a Have.
 #[component]
-fn QuickActions(name: String, oracle_id: shared::Id, printing_id: Option<shared::Id>) -> impl IntoView {
+fn QuickActions(
+    name: String,
+    oracle_id: shared::Id,
+    printing_id: Option<shared::Id>,
+) -> impl IntoView {
     let user = expect_context::<CurrentUserResource>().0;
     let location = leptos_router::hooks::use_location();
 
@@ -874,9 +878,7 @@ fn QuickAddButton(
     // representative printing can be Wanted but not Had. Disabling beats
     // firing an add that the server can only reject.
     let addable = matches!(kind, AddKind::Want) || printing_id.is_some();
-    let disabled = Signal::derive(move || {
-        pending.get() || destination.get().is_none() || !addable
-    });
+    let disabled = Signal::derive(move || pending.get() || destination.get().is_none() || !addable);
 
     let on_click = {
         let name = name.clone();
@@ -899,8 +901,11 @@ fn QuickAddButton(
                     Ok(receipt) => raise_add_toast(toast, &name, &dest, kind, receipt.undo_move_id),
                     Err(e) => {
                         toast.show(
-                            ToastOptions::message(format!("Couldn't add {name}: {}", describe_error(&e).1))
-                                .kind(ToastKind::Error),
+                            ToastOptions::message(format!(
+                                "Couldn't add {name}: {}",
+                                describe_error(&e).1
+                            ))
+                            .kind(ToastKind::Error),
                         );
                     }
                 }

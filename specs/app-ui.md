@@ -996,3 +996,34 @@ task, and the first UI task that **writes**.
   one per suite run against a single upserted row — bounded rows, growing
   count, on a throwaway test user. Acceptable for now; it resolves itself when
   the Want-undo follow-up lands.
+
+- **Mutation pass: 6/6 kills, and it caught a vacuous undo test.** The review's
+  most useful finding was that "+ Have … the toast undoes it" passed with
+  `undo_quick_add` stubbed to `Ok(())` — the 200 and the "Removed" toast were
+  both still produced, so nothing asserted the *database* had moved. The test
+  now brackets the add with reads of `GET /api/collections/{id}/view` (the
+  machine route; `page.request` shares the context's session cookies) and
+  asserts `present` goes `n → n+1 → n`. That also pins quantity to exactly one.
+  Two more assertions were strengthened as conditionally vacuous: `data-chosen`
+  could have been hard-coded on row 0 (now a non-chosen row is asserted too),
+  and the filter test proved nothing on an Inbox-only fixture (now skips below
+  two collections). Mutations killed: undo no-op, quantity 1→2, picker rendered
+  for anonymous, Want handed an undo id, `data-chosen` hard-coded,
+  `remember_destination` removed.
+
+- **A mutation run's first result was a false survival** — the exact trap the
+  ui-task-loop skill warns about, hit anyway. Three of four batch-A mutations
+  "survived" because Playwright started while cargo-leptos had finished the
+  wasm but not yet restarted the *server* binary; the wasm hash had already
+  changed, so waiting on it was not sufficient. Re-running against the settled
+  server killed all four. **Wait for `Serving` in the watch log, not just a new
+  wasm hash**, before believing any mutation result.
+
+- **Left in the dev DB deliberately: 2 Lightning Bolt copies** in the e2e
+  user's Inbox, from the killed mutation runs (a mutation that breaks undo
+  necessarily leaks the copy the test made). `end2end/cleanup-mutation-leftovers.mjs`
+  reports and, with `--apply`, removes them. It was *not* applied: the arithmetic
+  of what the runs should have leaked (+3) does not match what is there (2), so
+  the rows cannot be confidently attributed to this task rather than to
+  `seed-dev-data.sh`, and deleting shared dev-branch rows on a guess is worse
+  than leaving two spare cards in a test user's Inbox.

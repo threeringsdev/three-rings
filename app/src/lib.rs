@@ -383,7 +383,11 @@ pub async fn list_collections() -> Result<Vec<shared::CollectionSummary>, Server
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
-        collection_backend().await?.list_collections().await.map_err(api_err)
+        collection_backend()
+            .await?
+            .list_collections()
+            .await
+            .map_err(api_err)
     }
     #[cfg(not(feature = "ssr"))]
     {
@@ -425,7 +429,9 @@ async fn collection_backend() -> Result<crate::backend::NativeBackend, ServerFnE
     let token = cookies::cookie_value(&headers, cookies::JWT_COOKIE);
     let session = cookies::cookie_value(&headers, cookies::SESSION_COOKIE);
     let origin = cookies::request_origin(&headers);
-    Ok(crate::backend::NativeBackend::authed(token, session, origin))
+    Ok(crate::backend::NativeBackend::authed(
+        token, session, origin,
+    ))
 }
 
 /// The catalog quick-add: one card, one destination, from `+ Want` / `+ Have`

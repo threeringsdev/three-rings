@@ -106,9 +106,7 @@ fn remember_destination(id: Id) {
     #[cfg(feature = "hydrate")]
     {
         use wasm_bindgen::JsCast;
-        if let Some(doc) =
-            leptos::tachys::dom::document().dyn_ref::<web_sys::HtmlDocument>()
-        {
+        if let Some(doc) = leptos::tachys::dom::document().dyn_ref::<web_sys::HtmlDocument>() {
             let _ = doc.set_cookie(&format!(
                 "{DEST_COOKIE}={id}; Path=/; Max-Age=31536000; SameSite=Lax"
             ));
@@ -124,7 +122,10 @@ fn remember_destination(id: Id) {
 /// else the Inbox, else the first collection. Resolving against the live list
 /// is what makes a deleted or renamed collection degrade gracefully instead of
 /// leaving the picker pointing at nothing.
-fn initial_destination(collections: &[CollectionSummary], remembered: Option<Id>) -> Option<Destination> {
+fn initial_destination(
+    collections: &[CollectionSummary],
+    remembered: Option<Id>,
+) -> Option<Destination> {
     let chosen = remembered
         .and_then(|id| collections.iter().find(|c| c.id == id))
         .or_else(|| collections.iter().find(|c| c.is_inbox))
@@ -362,10 +363,7 @@ mod tests {
             collection("Alpha", false),
             collection("Inbox", true),
         ];
-        let names: Vec<_> = picker_order(list)
-            .into_iter()
-            .map(|c| c.name)
-            .collect();
+        let names: Vec<_> = picker_order(list).into_iter().map(|c| c.name).collect();
         assert_eq!(names, vec!["Inbox", "Alpha", "zebra"]);
     }
 
