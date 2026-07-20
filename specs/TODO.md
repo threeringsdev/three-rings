@@ -87,9 +87,10 @@ artifacts (wireframes.pen, information-architecture, add-flow-prototype,
 command-palette, component-gap-analysis) distilled into
 [app-ui](app-ui.md); the per-task agent loop (Claude builds → Codex adversarial
 review → platform verification → e2e authored + run → Codex e2e pass → gate) is
-[ui-work-loop](ui-work-loop.md). Stage boundaries (marked below) trigger the
-full e2e tier + Android release smoke if the tiered matrix is chosen by the
-spike. UI work stays on the ~3K-printing POC catalog (maintainer decision
+[ui-work-loop](ui-work-loop.md). The full three-browser e2e tier runs at the
+end of **every** task (revised 2026-07-20); stage boundaries (marked below)
+additionally carry the Android release smoke at phase end.
+UI work stays on the ~3K-printing POC catalog (maintainer decision
 2026-07-17); quick-add realism / perf findings are recorded as deferred.
 
 ### Stage 0 — loop infrastructure

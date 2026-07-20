@@ -81,10 +81,14 @@ once before phase end.
    Android: per the spike outcome (webview e2e, or `android-smoke` at stage
    boundaries). Desktop: none in-loop.
 4. **E2E** — author specs per the `e2e-suite` skill (auth fixture, tier tags);
-   run the fast tier (`npx playwright test --project=chromium`). Full
-   three-browser tier (chromium + firefox + **webkit** — webkit is the WKWebView
-   proxy since desktop is untested in-loop) at stage boundaries or whenever
-   overlay/positioning code changed.
+   iterate with the fast tier (`npx playwright test --project=chromium`), then
+   run the full three-browser tier (chromium + firefox + **webkit** — webkit is
+   the WKWebView proxy since desktop is untested in-loop) **at the end of every
+   task**. Revised 2026-07-20 (maintainer): the tier was originally scoped to
+   stage boundaries, but the filter-rail task showed boundary-only running lets
+   cross-browser breakage sit undetected across several tasks and then land as
+   a pile — the shell task's full tier surfaced 8 pre-existing firefox/webkit
+   failures at once. Full-tier green is now a precondition for `[x]`.
 5. **Codex e2e adversarial pass** — `/codex:adversarial-review` focused on the
    new test files: "which assertions still pass if the feature is broken;
    propose one mutation per test." Accepted mutations are applied transiently,
@@ -131,7 +135,8 @@ smoke is a separate concern).
 The current suite (`end2end/tests/example.spec.ts`) tests the counter being
 deleted. Reset: remove it; add the auth fixture (pre-seeded **verified** test
 user on the Neon dev branch — mechanism recorded in the `e2e-suite` skill when
-built); tier tags (`@fast` chromium-only per task; full tier at boundaries).
+built); tier tags (`@fast` chromium-only while iterating; full three-browser
+tier at the end of every task — revised 2026-07-20, see the per-task loop).
 The ad-hoc probes (`bench-check.mjs`, `hydration-check.mjs`, `auth-e2e.mjs`)
 stay as the probe layer beneath the suite.
 
@@ -230,7 +235,8 @@ evaluate) joins the `.mjs` probes.
 The three skills landed shaped by the spike's path-1 outcome:
 
 - `ui-task-loop` — the six-step loop with the matrix baked in (web + Android
-  webview e2e every task; full three-browser tier at stage boundaries; one
+  webview e2e every task; full three-browser tier at the end of every task
+  (revised 2026-07-20 from stage-boundaries-only); one
   Android **release** smoke at phase end, riding the polish task). Codex
   command names verified against the installed plugin
   (`/codex:adversarial-review [--wait|--background] [--base] [--scope] [focus]`,

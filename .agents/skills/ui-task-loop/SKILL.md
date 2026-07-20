@@ -36,9 +36,10 @@ one Android release smoke at phase end** (the polish task).
    `node end2end/android-cdp-check.mjs`, then run the task's e2e spec against
    the webview if it touches layout/input (overlay/positioning code always).
 4. **E2E** — author specs per the **e2e-suite** skill (login fixture, tier
-   tags). Run the fast tier: `npx playwright test --project=chromium`.
-   Full tier (chromium+firefox+webkit — webkit is the WKWebView proxy) at
-   stage boundaries or whenever overlay/positioning code changed.
+   tags). Iterate with the fast tier (`npx playwright test
+   --project=chromium`), then run the **full tier at the end of the task**:
+   `npx playwright test` (chromium+firefox+webkit — webkit is the WKWebView
+   proxy). Full-tier green is a precondition for `[x]`, every task.
 5. **Codex e2e pass** — `/codex:adversarial-review` focused on the new test
    files: "which assertions still pass if the feature is broken; propose one
    mutation per test." Apply accepted mutations transiently, confirm the test
@@ -69,5 +70,6 @@ one Android release smoke at phase end** (the polish task).
 - The Android manifest at src-tauri/gen/android/.../AndroidManifest.xml gets a
   deep-link intent-filter injected at build time — `git checkout` it before
   committing; never commit the injected copy.
-- A stage-boundary task additionally runs the full three-browser tier and (at
-  phase end only) the Android **release** smoke via the android-smoke skill.
+- The full three-browser tier runs at the end of **every** task (step 4), not
+  at stage boundaries. A stage-boundary task additionally runs the Android
+  **release** smoke via the android-smoke skill (at phase end only).
