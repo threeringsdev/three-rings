@@ -23,10 +23,10 @@
 
 use shared::{
     AddHave, AddLine, AddWant, AllCardsView, ApiResult, BatchMove, CardDetail, CardSummary,
-    CatalogCount, CollectionSummary, CollectionView, DeckCommanders, DesireLine, HoldingLine, Id,
-    LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection, NewTag, Page, Rename,
-    RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard, SetQuantity, ShoppingList,
-    SuggestedDestination, Tag, TagAssignment, TaggedCard, Teardown, TeardownReceipt,
+    CatalogCount, CollectionSummary, CollectionTree, CollectionView, DeckCommanders, DesireLine,
+    HoldingLine, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection, NewTag, Page,
+    Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard, SetQuantity,
+    ShoppingList, SuggestedDestination, Tag, TagAssignment, TaggedCard, Teardown, TeardownReceipt,
 };
 
 #[cfg(feature = "hosted")]
@@ -62,6 +62,9 @@ pub mod paths {
     pub const CATALOG_SEARCH: &str = "/api/catalog/search";
     /// GET = list the tree; POST = create.
     pub const COLLECTIONS: &str = "/api/collections";
+    /// GET the sidebar-tree read model (rows + counts). Static, so it cannot
+    /// collide with the `/api/collections/{id}/<op>` templates.
+    pub const COLLECTION_TREE: &str = "/api/collections/tree";
 
     /// Card detail / summary (by oracle id).
     pub const CARD_DETAIL_ROUTE: &str = "/api/cards/{id}";
@@ -202,6 +205,13 @@ pub trait CollectionStore {
     /// hosted side, and **lazily provisions the Inbox** on first authed load
     /// (idempotent via the `collections_one_inbox` unique index).
     async fn list_collections(&self) -> ApiResult<Vec<CollectionSummary>>;
+
+    /// The My-cards sidebar in one round-trip: every collection with its own
+    /// present count plus the shopping-short badge count
+    /// (specs/app-ui.md → Collection tree). Same flat shape and lazy Inbox
+    /// provisioning as [`Self::list_collections`] — this read *is* a
+    /// "first `/my` request".
+    async fn collection_tree(&self) -> ApiResult<CollectionTree>;
 
     /// Create a binder or deck; returns the new node. Rejects a `format` on a
     /// binder (`Validation`) and a non-existent / not-owned `parent_id`

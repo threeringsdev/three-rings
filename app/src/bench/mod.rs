@@ -18,11 +18,13 @@ mod breadcrumb;
 mod button;
 mod card;
 mod checkbox;
+mod collapsible;
 mod command;
 mod dialog;
 mod hover_card;
 mod input;
 mod input_group;
+mod item;
 mod kbd;
 mod popover;
 mod separator;
@@ -99,6 +101,16 @@ const SECTIONS: &[BenchSection] = &[
         id: "card",
         title: "Card",
         demo: card::demo,
+    },
+    BenchSection {
+        id: "collapsible",
+        title: "Collapsible",
+        demo: collapsible::demo,
+    },
+    BenchSection {
+        id: "item",
+        title: "Item",
+        demo: item::demo,
     },
     BenchSection {
         id: "dialog",

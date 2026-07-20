@@ -39,6 +39,7 @@ where
             paths::COLLECTIONS,
             get(list_collections).post(create_collection),
         )
+        .route(paths::COLLECTION_TREE, get(collection_tree))
         .route(
             &paths::collection_op_route(op::RENAME),
             post(rename_collection),
@@ -155,6 +156,20 @@ async fn list_collections(user: AuthUser) -> Response {
             HostedBackend::for_user(user.user_id)
                 .await?
                 .list_collections()
+                .await
+        }
+        .await,
+    )
+}
+
+/// `GET /api/collections/tree` — the sidebar-tree read model: flat rows with
+/// own-present counts + the shopping-short badge (Inbox provisioned lazily).
+async fn collection_tree(user: AuthUser) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .collection_tree()
                 .await
         }
         .await,

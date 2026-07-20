@@ -167,6 +167,9 @@ pub fn AppShell() -> impl IntoView {
     // needs the choice to outlive the picker widget, and every add surface —
     // catalog today, my-cards later — reads the same one.
     crate::catalog::destination::provide_destination_state();
+    // Also shell-level: the desktop rail's tree and the mobile tab badge read
+    // one fetch, and quick-add refetches it after a successful add/undo.
+    crate::my::tree::provide_collection_tree();
 
     view! {
         <div class="bg-background text-foreground flex min-h-screen flex-col">
@@ -230,8 +233,7 @@ fn ModeSwitch(my_mode: Memo<bool>) -> impl IntoView {
 }
 
 /// Desktop sidebar rail — mode-filled (specs/app-ui.md): Catalog mode gets the
-/// filter rail, My cards mode gets the collection tree (still its own task, so
-/// still a placeholder).
+/// filter rail, My cards mode the collection tree.
 ///
 /// The rail is rendered for the whole Catalog mode rather than only on
 /// `/catalog`, which is what "mode-filled" means: it reads and writes the same
@@ -246,14 +248,7 @@ fn SidebarRail(my_mode: Memo<bool>) -> impl IntoView {
                     when=move || my_mode.get()
                     fallback=|| view! { <crate::catalog::rail::FilterRail /> }
                 >
-                    <p class="text-muted-foreground text-xs font-medium uppercase tracking-wide">
-                        "Collections"
-                    </p>
-                    <div class="space-y-2">
-                        <div class="bg-muted/50 h-4 w-3/4 rounded-md"></div>
-                        <div class="bg-muted/50 h-4 w-1/2 rounded-md"></div>
-                        <div class="bg-muted/50 h-4 w-2/3 rounded-md"></div>
-                    </div>
+                    <crate::my::tree::CollectionTreeNav />
                 </Show>
             </div>
         </aside>
@@ -261,11 +256,11 @@ fn SidebarRail(my_mode: Memo<bool>) -> impl IntoView {
 }
 
 /// Mobile bottom tabs (wireframe: `[📖 Catalog] [🗂 My cards •N]`). The badge
-/// is the Inbox unsorted count — wired up by the collection-tree task, `None`
-/// (hidden) until then.
+/// is the Inbox unsorted count, read off the shared tree resource (hidden at
+/// zero and on an anonymous shell).
 #[component]
 fn BottomTabs(my_mode: Memo<bool>) -> impl IntoView {
-    let inbox_count: Option<u32> = None;
+    let tree = expect_context::<crate::my::tree::CollectionTreeResource>().0;
     const TAB: &str = "flex flex-1 flex-col items-center justify-center gap-0.5 py-2 text-xs";
 
     view! {
@@ -302,15 +297,24 @@ fn BottomTabs(my_mode: Memo<bool>) -> impl IntoView {
                     <span aria-hidden="true" class="text-base">
                         "🗂"
                     </span>
-                    {inbox_count
-                        .filter(|n| *n > 0)
-                        .map(|n| {
-                            view! {
-                                <Badge variant=BadgeVariant::Default size=BadgeSize::Sm>
-                                    {n}
-                                </Badge>
-                            }
+                    // NB: string fallback, never `|| ()` (the unit-fallback
+                    // hydration trap, specs/auth.md Findings 2026-07-13).
+                    <Suspense fallback=|| "">
+                        {move || Suspend::new(async move {
+                            let n = match tree.await {
+                                Some(Ok(dto)) => crate::my::tree::assemble(dto).inbox_count,
+                                _ => 0,
+                            };
+                            (n > 0)
+                                .then(|| {
+                                    view! {
+                                        <Badge variant=BadgeVariant::Default size=BadgeSize::Sm>
+                                            {n}
+                                        </Badge>
+                                    }
+                                })
                         })}
+                    </Suspense>
                 </span>
                 <span>"My cards"</span>
             </a>

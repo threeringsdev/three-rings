@@ -872,6 +872,9 @@ fn QuickAddButton(
 ) -> impl IntoView {
     let toast = expect_context::<ToastHandle>();
     let destination = destination::current_destination();
+    // Captured at setup, not looked up in the async block (no owner there).
+    // The sidebar tree's badges count what this button changes.
+    let tree = use_context::<crate::my::tree::CollectionTreeResource>();
     let pending = RwSignal::new(false);
 
     // A Have is stored per *printing*, so a card whose oracle row resolved no
@@ -898,7 +901,12 @@ fn QuickAddButton(
                 let result = crate::quick_add(dest.id, kind.wire(), oracle_id, printing_id).await;
                 pending.set(false);
                 match result {
-                    Ok(receipt) => raise_add_toast(toast, &name, &dest, kind, receipt.undo_move_id),
+                    Ok(receipt) => {
+                        if let Some(t) = tree {
+                            t.0.refetch();
+                        }
+                        raise_add_toast(toast, tree, &name, &dest, kind, receipt.undo_move_id)
+                    }
                     Err(e) => {
                         toast.show(
                             ToastOptions::message(format!(
@@ -934,8 +942,11 @@ fn QuickAddButton(
 }
 
 /// The confirmation toast, and the Undo action when there is one to offer.
+/// `tree` is the shared sidebar resource to refetch after an undo lands (the
+/// caller already refetched for the add itself).
 fn raise_add_toast(
     toast: ToastHandle,
+    tree: Option<crate::my::tree::CollectionTreeResource>,
     name: &str,
     dest: &destination::Destination,
     kind: AddKind,
@@ -961,6 +972,9 @@ fn raise_add_toast(
                     spawn_local(async move {
                         match crate::undo_quick_add(move_id).await {
                             Ok(()) => {
+                                if let Some(t) = tree {
+                                    t.0.refetch();
+                                }
                                 toast.show(ToastOptions::message(format!("Removed {name} again")))
                             }
                             Err(e) => toast.show(

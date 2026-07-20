@@ -32,10 +32,11 @@ pub use catalog::{
 };
 pub use collection::{
     default_language, AddHave, AddLine, AddWant, AllCardsRow, AllCardsView, BatchMove, Board,
-    CardRow, CollectionKind, CollectionSummary, CollectionView, Condition, DesireLine, Finish,
-    HoldingLine, LineResult, MoveItem, MoveReceipt, MoveRequest, NeedLocation, NeedRow, NeedsView,
-    NewCollection, Page, QuickAddKind, QuickAddReceipt, Rename, Reorder, Reparent, SetQuantity,
-    ShoppingList, ShoppingRow, SuggestedDestination, Teardown, TeardownReceipt,
+    CardRow, CollectionKind, CollectionSummary, CollectionTree, CollectionTreeRow, CollectionView,
+    Condition, DesireLine, Finish, HoldingLine, LineResult, MoveItem, MoveReceipt, MoveRequest,
+    NeedLocation, NeedRow, NeedsView, NewCollection, Page, QuickAddKind, QuickAddReceipt, Rename,
+    Reorder, Reparent, SetQuantity, ShoppingList, ShoppingRow, SuggestedDestination, Teardown,
+    TeardownReceipt,
 };
 pub use tags::{
     union_color_identity, DeckCommanders, NewTag, RenameTag, SetBoard, Tag, TagAssignment,
