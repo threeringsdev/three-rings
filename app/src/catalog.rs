@@ -30,6 +30,7 @@ use leptos_router::hooks::{use_navigate, use_query_map};
 use leptos_router::NavigateOptions;
 use shared::CardSummary;
 
+use crate::cards::CardPreview;
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::ui::input_group::{
@@ -604,6 +605,9 @@ fn ResultsGrid(cards: Vec<CardSummary>) -> impl IntoView {
 
 #[component]
 fn CardTile(card: CardSummary) -> impl IntoView {
+    // The preview renders from this same summary rather than fetching — see
+    // `crate::cards::CardPreview`.
+    let preview = card.clone();
     let CardSummary {
         oracle_id,
         name,
@@ -613,6 +617,9 @@ fn CardTile(card: CardSummary) -> impl IntoView {
         owned,
     } = card;
     let href = format!("/cards/{oracle_id}");
+    // The whole `<a>` subtree now lives inside CardPreview's children closure,
+    // which moves its captures — so the alt text needs its own copy.
+    let alt_name = name.clone();
     let subtitle = match (&type_line, &mana_cost) {
         (Some(t), Some(m)) if !m.is_empty() => format!("{t} · {m}"),
         (Some(t), _) => t.clone(),
@@ -622,21 +629,24 @@ fn CardTile(card: CardSummary) -> impl IntoView {
 
     view! {
         <li class="group/tile flex flex-col gap-2">
+            // hover=false: the tile is already the card art, so a hover
+            // preview would just repeat it smaller. Touch still gets the sheet.
+            <CardPreview card=preview hover=false>
             <a
                 href=href
                 class="focus-visible:ring-ring relative block rounded-lg focus-visible:ring-2 focus-visible:outline-none"
             >
                 // The skeleton sits *behind* the image rather than being swapped
                 // out on load: no JS, no layout shift, and it is what shows
-                // through for the printings whose image_uri is still NULL
-                // (the multi-face projection fix is the card-detail task).
+                // through for a printing with genuinely no art (the multi-face
+                // NULLs it used to cover are fixed at the projection now).
                 <Skeleton class="aspect-[5/7] w-full" />
                 {image_uri
                     .map(|src| {
                         view! {
                             <img
                                 src=src
-                                alt=name.clone()
+                                alt=alt_name
                                 loading="lazy"
                                 decoding="async"
                                 class="absolute inset-0 size-full rounded-lg object-cover"
@@ -654,6 +664,7 @@ fn CardTile(card: CardSummary) -> impl IntoView {
                         }
                     })}
             </a>
+            </CardPreview>
             <div class="min-w-0">
                 <p class="truncate text-sm font-medium" title=name.clone()>
                     {name.clone()}
@@ -682,6 +693,7 @@ fn ResultsList(cards: Vec<CardSummary>) -> impl IntoView {
                     {cards
                         .into_iter()
                         .map(|card| {
+                            let preview = card.clone();
                             let CardSummary { oracle_id, name, mana_cost, type_line, owned, .. } = card;
                             let link_name = name.clone();
                             // The view macro moves captures into per-node
@@ -690,12 +702,14 @@ fn ResultsList(cards: Vec<CardSummary>) -> impl IntoView {
                             view! {
                                 <TableRow>
                                     <TableCell class="p-2">
-                                        <a
-                                            href=format!("/cards/{oracle_id}")
-                                            class="font-medium hover:underline"
-                                        >
-                                            {link_name}
-                                        </a>
+                                        <CardPreview card=preview>
+                                            <a
+                                                href=format!("/cards/{oracle_id}")
+                                                class="font-medium hover:underline"
+                                            >
+                                                {link_name}
+                                            </a>
+                                        </CardPreview>
                                         {(owned.unwrap_or(0) > 0)
                                             .then(|| {
                                                 view! {

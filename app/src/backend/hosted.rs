@@ -101,8 +101,14 @@ impl CatalogStore for HostedBackend {
         .ok_or_else(|| ApiError::NotFound("card".into()))?;
 
         let printings: Vec<PrintingRowSql> = sqlx::query_as(
+            // Multi-face fallback: migration 0002 leaves top-level `image_uris`
+            // NULL on double-faced layouts and puts the per-face images in
+            // `faces`, so a bare `image_uris->>'normal'` renders every DFC
+            // imageless. Every image projection in this file carries the same
+            // COALESCE (specs/app-ui.md, card-detail task).
             "SELECT p.id, s.code AS set_code, s.name AS set_name, p.collector_number, p.rarity, \
-                    p.image_uris->>'normal' AS image_uri, p.finishes::text[] AS finishes \
+                    COALESCE(p.image_uris->>'normal', p.faces->0->'image_uris'->>'normal') \
+                        AS image_uri, p.finishes::text[] AS finishes \
              FROM printings p LEFT JOIN sets s ON s.id = p.set_id \
              WHERE p.oracle_id = $1 ORDER BY s.released_at NULLS LAST, p.collector_number",
         )
@@ -193,7 +199,8 @@ impl CatalogStore for HostedBackend {
     async fn card_summary(&self, oracle_id: Id) -> ApiResult<CardSummary> {
         let card: SearchRowSql = sqlx::query_as(
             "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, \
-                    (SELECT image_uris->>'normal' FROM printings \
+                    (SELECT COALESCE(image_uris->>'normal', \
+                                     faces->0->'image_uris'->>'normal') FROM printings \
                      WHERE oracle_id = c.oracle_id LIMIT 1) AS image_uri \
              FROM cards c WHERE c.oracle_id = $1",
         )
@@ -238,7 +245,8 @@ impl CatalogStore for HostedBackend {
         let limit = page.limit();
         let mut qb: sqlx::QueryBuilder<'_, sqlx::Postgres> = sqlx::QueryBuilder::new(
             "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, \
-             (SELECT image_uris->>'normal' FROM printings \
+             (SELECT COALESCE(image_uris->>'normal', \
+                              faces->0->'image_uris'->>'normal') FROM printings \
               WHERE oracle_id = c.oracle_id LIMIT 1) AS image_uri \
              FROM cards c WHERE true",
         );
@@ -656,7 +664,9 @@ impl CollectionStore for HostedBackend {
                GROUP BY printing_id \
              ) \
              SELECT p.oracle_id, pr.printing_id, ca.name, s.code AS set_code, \
-                    p.collector_number, p.image_uris->>'normal' AS image_uri, \
+                    p.collector_number, \
+                    COALESCE(p.image_uris->>'normal', p.faces->0->'image_uris'->>'normal') \
+                        AS image_uri, \
                     ca.mana_cost, ca.type_line, ca.colors, pr.present, \
                     COALESCE(w.desired, 0) AS desired, COALESCE(o.owned, 0) AS owned, \
                     COALESCE(ro.present_rollup, 0) AS present_rollup, \
@@ -1275,7 +1285,8 @@ impl CollectionStore for HostedBackend {
         require_owned_collection(&mut tx, collection_id).await?;
         let rows: Vec<TaggedCardSql> = sqlx::query_as(
             "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, c.color_identity, \
-                    (SELECT image_uris->>'normal' FROM printings \
+                    (SELECT COALESCE(image_uris->>'normal', \
+                                     faces->0->'image_uris'->>'normal') FROM printings \
                      WHERE oracle_id = c.oracle_id LIMIT 1) AS image_uri \
              FROM card_tags ct JOIN cards c ON c.oracle_id = ct.oracle_id \
              WHERE ct.collection_id = $1 AND ct.tag_id = $2 ORDER BY c.name",
@@ -1294,7 +1305,8 @@ impl CollectionStore for HostedBackend {
         require_owned_collection(&mut tx, collection_id).await?;
         let rows: Vec<TaggedCardSql> = sqlx::query_as(
             "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, c.color_identity, \
-                    (SELECT image_uris->>'normal' FROM printings \
+                    (SELECT COALESCE(image_uris->>'normal', \
+                                     faces->0->'image_uris'->>'normal') FROM printings \
                      WHERE oracle_id = c.oracle_id LIMIT 1) AS image_uri \
              FROM card_tags ct JOIN tags t ON t.id = ct.tag_id \
              JOIN cards c ON c.oracle_id = ct.oracle_id \
