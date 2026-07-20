@@ -448,26 +448,42 @@ async fn collection_backend() -> Result<crate::backend::NativeBackend, ServerFnE
 /// POST, necessarily — this is a write. That means it cannot be exercised
 /// through the Tauri Android *dev* proxy, which strips POST bodies
 /// (specs/ui-work-loop.md Findings); the release webview is unaffected.
+///
+/// **The arguments are scalars, and the `AddLine` is built here.** An earlier
+/// shape took the caller's whole `AddLine`, which let anything holding a
+/// session POST `quantity: 20`, a printing-pinned Want, or a non-default board
+/// at an endpoint whose entire contract is "one copy, default grain". That is
+/// not a privilege escalation — the same caller can already reach
+/// `POST /api/collections/{id}/have` with any quantity on their *own*
+/// collections — but an adapter whose wire contract is wider than its name is
+/// a trap for the next caller. Quantity 1 is now true by construction.
 #[server(prefix = "/api", endpoint = "quick_add")]
 pub async fn quick_add(
     collection_id: shared::Id,
-    line: shared::AddLine,
+    kind: shared::QuickAddKind,
+    oracle_id: shared::Id,
+    printing_id: Option<shared::Id>,
 ) -> Result<shared::QuickAddReceipt, ServerFnError<String>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
         let backend = collection_backend().await?;
-        match line {
-            shared::AddLine::Have(have) => {
+        match kind {
+            shared::QuickAddKind::Have => {
+                // Holdings are per-printing; a card whose oracle row resolved
+                // no representative printing can be Wanted but not Had.
+                let printing_id = printing_id.ok_or_else(|| {
+                    ServerFnError::ServerError("this card has no printing to add".to_string())
+                })?;
                 let receipt = backend
                     .move_cards(shared::MoveRequest {
                         from_collection_id: None,
                         to_collection_id: Some(collection_id),
-                        printing_id: have.printing_id,
-                        finish: have.finish,
-                        condition: have.condition,
-                        language: have.language,
-                        quantity: have.quantity,
+                        printing_id,
+                        finish: shared::Finish::default(),
+                        condition: shared::Condition::default(),
+                        language: shared::default_language(),
+                        quantity: 1,
                     })
                     .await
                     .map_err(api_err)?;
@@ -475,9 +491,20 @@ pub async fn quick_add(
                     undo_move_id: Some(receipt.move_id),
                 })
             }
-            shared::AddLine::Want(want) => {
+            shared::QuickAddKind::Want => {
                 backend
-                    .add_desire(collection_id, want)
+                    .add_desire(
+                        collection_id,
+                        shared::AddWant {
+                            oracle_id,
+                            // No printing pin: "I want this card", not "I want
+                            // this printing". Pinning is the card-detail
+                            // surface's job, not a catalog row's.
+                            printing_id: None,
+                            board: shared::Board::default(),
+                            quantity: 1,
+                        },
+                    )
                     .await
                     .map_err(api_err)?;
                 Ok(shared::QuickAddReceipt { undo_move_id: None })
@@ -486,7 +513,7 @@ pub async fn quick_add(
     }
     #[cfg(not(feature = "ssr"))]
     {
-        let _ = (collection_id, line);
+        let _ = (collection_id, kind, oracle_id, printing_id);
         Err(ServerFnError::ServerError("server-only".into()))
     }
 }

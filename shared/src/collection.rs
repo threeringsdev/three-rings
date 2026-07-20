@@ -307,6 +307,15 @@ pub struct MoveReceipt {
     pub move_id: Id,
 }
 
+/// Which catalog quick action fired. The two differ in grain — a Have is
+/// per-printing, a Want is per-oracle — and in whether the result is undoable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuickAddKind {
+    Want,
+    Have,
+}
+
 /// What a catalog quick-add produced, and whether the confirmation toast can
 /// offer Undo.
 ///

@@ -849,6 +849,13 @@ impl AddKind {
             AddKind::Have => "Have",
         }
     }
+
+    fn wire(self) -> shared::QuickAddKind {
+        match self {
+            AddKind::Want => shared::QuickAddKind::Want,
+            AddKind::Have => shared::QuickAddKind::Have,
+        }
+    }
 }
 
 /// One quick-add button: fires the add, then raises the toast.
@@ -886,34 +893,7 @@ fn QuickAddButton(
             pending.set(true);
             let name = name.clone();
             spawn_local(async move {
-                let line = match kind {
-                    AddKind::Want => shared::AddLine::Want(shared::AddWant {
-                        oracle_id,
-                        // No printing pin: "I want this card", not "I want
-                        // this printing". Pinning is the card-detail surface's.
-                        printing_id: None,
-                        board: shared::Board::default(),
-                        quantity: 1,
-                    }),
-                    AddKind::Have => shared::AddLine::Have(shared::AddHave {
-                        // Unreachable while `addable` gates the button; the
-                        // fallback keeps the closure total rather than
-                        // panicking if that gate is ever loosened.
-                        printing_id: match printing_id {
-                            Some(id) => id,
-                            None => {
-                                pending.set(false);
-                                return;
-                            }
-                        },
-                        finish: shared::Finish::default(),
-                        condition: shared::Condition::default(),
-                        language: shared::default_language(),
-                        board: shared::Board::default(),
-                        quantity: 1,
-                    }),
-                };
-                let result = crate::quick_add(dest.id, line).await;
+                let result = crate::quick_add(dest.id, kind.wire(), oracle_id, printing_id).await;
                 pending.set(false);
                 match result {
                     Ok(receipt) => raise_add_toast(toast, &name, &dest, kind, receipt.undo_move_id),

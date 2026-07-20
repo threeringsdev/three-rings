@@ -136,6 +136,31 @@ fn initial_destination(collections: &[CollectionSummary], remembered: Option<Id>
     })
 }
 
+/// Bring the current choice back in line with a freshly-fetched list.
+///
+/// Three cases, and the middle one is the one that bites: nothing chosen yet →
+/// seed; the chosen collection still exists → keep the *id* but refresh its
+/// name and inbox flag, so a rename elsewhere shows up instead of leaving a
+/// stale label; the chosen collection is gone → fall back as if nothing were
+/// chosen, rather than keeping an id every add would `NotFound` on.
+fn reconcile(
+    collections: &[CollectionSummary],
+    current: Option<Destination>,
+    remembered: Option<Id>,
+) -> Option<Destination> {
+    match current {
+        Some(current) => match collections.iter().find(|c| c.id == current.id) {
+            Some(live) => Some(Destination {
+                id: live.id,
+                name: live.name.clone(),
+                is_inbox: live.is_inbox,
+            }),
+            None => initial_destination(collections, remembered),
+        },
+        None => initial_destination(collections, remembered),
+    }
+}
+
 /// Order the picker shows collections in: Inbox pinned to the top, then the
 /// rest by name.
 ///
@@ -176,15 +201,19 @@ fn PickerBody() -> impl IntoView {
     let state = expect_context::<DestinationState>().0;
     let collections = Resource::new(|| (), |_| crate::list_collections());
 
-    // Seed the choice from the resolved list exactly once — `state.set` inside
-    // the resource read would re-run on every dependency change and stomp a
-    // user's pick every time the list refetched.
+    // Re-resolve against every list the resource yields — seeding once was not
+    // enough. The state outlives this widget (it is the shell's), so a
+    // collection renamed or deleted between two mounts would otherwise leave
+    // the trigger showing a stale name, or quick-add pointed at an id the
+    // server will answer `NotFound` for.
     Effect::new(move |_| {
-        if state.get_untracked().is_some() {
-            return;
-        }
         if let Some(Ok(list)) = collections.get() {
-            state.set(initial_destination(&list, stored_destination_id()));
+            let next = reconcile(&list, state.get_untracked(), stored_destination_id());
+            // Only write on a real change: `set` notifies unconditionally, and
+            // an identical write each refetch is churn every subscriber pays.
+            if next != state.get_untracked() {
+                state.set(next);
+            }
         }
     });
 
@@ -338,6 +367,45 @@ mod tests {
             .map(|c| c.name)
             .collect();
         assert_eq!(names, vec!["Inbox", "Alpha", "zebra"]);
+    }
+
+    fn dest(c: &CollectionSummary) -> Destination {
+        Destination {
+            id: c.id,
+            name: c.name.clone(),
+            is_inbox: c.is_inbox,
+        }
+    }
+
+    #[test]
+    fn reconcile_picks_up_a_rename_without_losing_the_choice() {
+        let mut list = vec![collection("Inbox", true), collection("Shoebox", false)];
+        let chosen = dest(&list[1]);
+        list[1].name = "Deck box".into();
+        let after = reconcile(&list, Some(chosen.clone()), None).unwrap();
+        assert_eq!(after.id, chosen.id, "the choice itself must survive");
+        assert_eq!(after.name, "Deck box", "but its label must be live");
+    }
+
+    #[test]
+    fn reconcile_falls_back_when_the_chosen_collection_is_deleted() {
+        let list = [collection("Inbox", true), collection("Shoebox", false)];
+        let chosen = dest(&list[1]);
+        let remaining = [list[0].clone()];
+        let after = reconcile(&remaining, Some(chosen), None).unwrap();
+        assert!(
+            after.is_inbox,
+            "a deleted destination must not stay selected — every add would 404"
+        );
+    }
+
+    #[test]
+    fn reconcile_leaves_a_live_choice_alone() {
+        let list = vec![collection("Inbox", true), collection("Shoebox", false)];
+        let chosen = dest(&list[1]);
+        // Even with a cookie pointing elsewhere: the in-session pick wins.
+        let after = reconcile(&list, Some(chosen.clone()), Some(list[0].id)).unwrap();
+        assert_eq!(after, chosen);
     }
 
     #[test]

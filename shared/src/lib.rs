@@ -35,8 +35,8 @@ pub use collection::{
     CardRow,
     CollectionKind, CollectionSummary, CollectionView, Condition, DesireLine, Finish, HoldingLine,
     LineResult, MoveItem, MoveReceipt, MoveRequest, NeedLocation, NeedRow, NeedsView,
-    NewCollection, Page, QuickAddReceipt, Rename, Reorder, Reparent, SetQuantity, ShoppingList,
-    ShoppingRow, SuggestedDestination, Teardown, TeardownReceipt,
+    NewCollection, Page, QuickAddKind, QuickAddReceipt, Rename, Reorder, Reparent, SetQuantity,
+    ShoppingList, ShoppingRow, SuggestedDestination, Teardown, TeardownReceipt,
 };
 pub use tags::{
     union_color_identity, DeckCommanders, NewTag, RenameTag, SetBoard, Tag, TagAssignment,
