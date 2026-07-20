@@ -307,6 +307,28 @@ pub struct MoveReceipt {
     pub move_id: Id,
 }
 
+/// Which catalog quick action fired. The two differ in grain — a Have is
+/// per-printing, a Want is per-oracle — and in whether the result is undoable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuickAddKind {
+    Want,
+    Have,
+}
+
+/// What a catalog quick-add produced, and whether the confirmation toast can
+/// offer Undo.
+///
+/// `Some` for `+ Have`: holdings writes append a `moves` row, and undo is that
+/// ledger's `undone_at` flag (specs/collection-api.md → Undo). `None` for
+/// `+ Want`: desires are not part of the move ledger and there is no
+/// desire-quantity operation to compensate with, so a Want is confirmed but not
+/// undoable — the toast drops its action rather than offering one that lies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuickAddReceipt {
+    pub undo_move_id: Option<Id>,
+}
+
 /// One line of a batch move — the persistent selection tray: N `(card, from)`
 /// pairs to one destination, applied in a single transaction (all-or-nothing).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

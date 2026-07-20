@@ -884,3 +884,146 @@ would make ↑↓ visit rows out of visual order. That one is filed rather than
 fixed — no current consumer reorders in place, and writing DOM-ordering code
 with nothing to verify it against is worse than the latent bug. Read that task
 before building the destination picker, quick-add, or ⌘K.
+
+### Destination picker + Want/Have quick actions + undo toasts (2026-07-20)
+
+`app/src/catalog/destination.rs` (picker + shell-level state), the
+`QuickAddButton`/`raise_add_toast` half of `app/src/catalog.rs`, and the
+`quick_add` / `undo_quick_add` adapters in `app/src/lib.rs`. Stage 2's last
+task, and the first UI task that **writes**.
+
+- **`+ Want` is not undoable, and the toast says so by omitting the button.**
+  This is the task's one real gap and it is an API-shape finding, not a UI
+  choice. Undo is the `moves` ledger's `undone_at` flag
+  (specs/collection-api.md), and `add_desire` writes no ledger row; the trait
+  exposes no desire-quantity operation to compensate with either (`desires` can
+  be added, board-relabeled, or cascade-deleted with their collection — nothing
+  else). So a Want can be confirmed but not reversed. Offering a dead Undo
+  would be worse than offering none. **Filed as a follow-up** — it needs
+  `set_desire_quantity` on the trait, both backends, and a route, which is
+  collection-api's surface, not a UI task's.
+
+- **`+ Have` goes through `move_cards`, not `add_holding`.** Both write the
+  same thing — `add_holding` appends its own intake `moves` row — but only
+  `move_cards` *returns* that row's id, and undo targets a specific move id.
+  Routing a Have through the intake form of a move (`from = None`) is how the
+  toast gets an undo handle without widening the trait. `undo_last_move` was
+  the alternative and was rejected: it races a second tab or a fast second
+  click, so the toast could undo a *different* add than the one it names.
+  Note this also means the task's original "adapters over batch-add" framing
+  did not survive contact — `batch_add` returns `Vec<LineResult>`, which
+  carries no ids at all, so it cannot back an undoable single-card add.
+
+- **`CardSummary` gained `printing_id`, because a catalog row could not be
+  Had.** Holdings are per-printing; the catalog is per-oracle. The projections
+  already chose a representative printing to source `image_uri` from, but
+  discarded its id. Both per-oracle projections (search, card summary) now
+  share one `REPRESENTATIVE_PRINTING_JOIN` lateral so they cannot drift on
+  which printing a row stands for. The lateral orders by
+  `(image IS NULL, id)`, which returns the *same* printing the previous
+  image-only correlated subquery did, while also populating an id for a card
+  whose printings all lack art — that card can now be Wanted and Had rather
+  than being silently unaddable.
+
+- **The server-fn POST default is URL-encoded, not JSON, and it silently
+  mangles nested DTOs.** The first cut passed the caller's whole `AddLine`
+  (an internally-tagged enum) and got
+  `invalid type: string "1", expected i32` on `quantity` — every field
+  flattened to a string. Worth knowing before the next adapter takes a struct:
+  either declare `input = Json` or keep the arguments scalar. This one ended up
+  scalar for an unrelated reason (below), so it needs no codec override.
+
+- **Adapter arguments are scalars and the DTO is built server-side** — Codex
+  review, accepted. Taking the caller's `AddLine` let anything holding a
+  session POST `quantity: 20`, a printing-pinned Want, or a non-default board
+  at an endpoint whose whole contract is "one copy, default grain". Severity
+  was argued down from the reviewer's *medium*: it is **not** a privilege
+  escalation, since the same caller can already reach
+  `POST /api/collections/{id}/have` with any quantity on their own
+  collections, and `moves` carries `ENABLE`+`FORCE` RLS with an owner policy
+  (verified — a cross-user `undo_move` finds no row and 404s). It was fixed
+  anyway because an adapter whose wire contract is wider than its name is a
+  trap for the next caller. Quantity 1 is now true by construction.
+
+- **The picker re-resolves against every collection list, not just the first**
+  — Codex review, accepted and real. The state is the *shell's*, so it outlives
+  the widget; seeding once meant a collection renamed or deleted between two
+  mounts left a stale label, or an id every add would `NotFound` on. The
+  module doc had already claimed the label was "always resolved from the live
+  list", so the code was contradicting its own contract. `reconcile` now keeps
+  the chosen id, refreshes its name/flag, and falls back when it is gone.
+
+- **`command`'s mount-order registry is safe for this consumer, and the
+  reasoning is worth keeping.** The queue task carried the V3 caveat forward.
+  The picker sorts its collections (Inbox pinned, then by name) *before* any
+  item mounts, and typing *hides* rows rather than reordering them, so
+  registration order still equals document order. No `compareDocumentPosition`
+  sort was needed. The caveat stands unchanged for quick-add and ⌘K.
+
+- **Persistence is a cookie, matching `theme_toggle`, not localStorage.**
+  `tr_dest` is readable during SSR *and* in the wasm, so the server renders the
+  chosen destination instead of a placeholder that a corrective effect rewrites
+  a frame later. It stores the id only — the label always comes from the live
+  list, which is what makes a rename or delete degrade gracefully.
+
+- **Verification gap that nearly shipped: the hydration probe runs
+  anonymously.** The picker only renders for a session, so
+  `hydration-check.mjs` walked `/catalog` and reported CLEAN having never
+  instantiated the component under test. Added
+  `end2end/hydration-check-authed.mjs`, which reuses the Playwright login
+  fixture's storageState; `/catalog`, `?q=`, `?view=list` and `/my` are CLEAN
+  authed. Any future authed-only surface needs this probe, not the other one.
+
+- **Android on-device coverage is anonymous-only here, by policy, not by
+  omission.** ui-work-loop's spike fixed the matrix: the dev proxy strips POST
+  bodies and Cookie headers, so authed interactions stay on the web tiers
+  (webkit = the WKWebView proxy). Everything this task added on the authed side
+  — picker, adds, toasts — is therefore unverifiable on the emulator until the
+  already-queued "Android release auth check" task runs. The anonymous
+  `/catalog` surface (sign-in-prompt quick actions, no picker) was checked
+  on-device.
+
+- **Operational trap: `cargo tauri android dev` and the container's
+  `cargo leptos watch` fight over `target/`.** Running the Android dev build
+  while the web e2e tier was in flight failed the login fixture on a 15 s
+  navigation timeout. Same family as the release-build clobber already
+  documented in the e2e-suite skill, different trigger: two watch servers, one
+  target dir. Sequence the platforms; never run them concurrently.
+
+- **These e2e tests write to the Neon dev branch.** Every `+ Have` the suite
+  makes is undone by the test that made it, so holdings return to their prior
+  state. `+ Want` has no undo to call, so its desire row's quantity grows by
+  one per suite run against a single upserted row — bounded rows, growing
+  count, on a throwaway test user. Acceptable for now; it resolves itself when
+  the Want-undo follow-up lands.
+
+- **Mutation pass: 6/6 kills, and it caught a vacuous undo test.** The review's
+  most useful finding was that "+ Have … the toast undoes it" passed with
+  `undo_quick_add` stubbed to `Ok(())` — the 200 and the "Removed" toast were
+  both still produced, so nothing asserted the *database* had moved. The test
+  now brackets the add with reads of `GET /api/collections/{id}/view` (the
+  machine route; `page.request` shares the context's session cookies) and
+  asserts `present` goes `n → n+1 → n`. That also pins quantity to exactly one.
+  Two more assertions were strengthened as conditionally vacuous: `data-chosen`
+  could have been hard-coded on row 0 (now a non-chosen row is asserted too),
+  and the filter test proved nothing on an Inbox-only fixture (now skips below
+  two collections). Mutations killed: undo no-op, quantity 1→2, picker rendered
+  for anonymous, Want handed an undo id, `data-chosen` hard-coded,
+  `remember_destination` removed.
+
+- **A mutation run's first result was a false survival** — the exact trap the
+  ui-task-loop skill warns about, hit anyway. Three of four batch-A mutations
+  "survived" because Playwright started while cargo-leptos had finished the
+  wasm but not yet restarted the *server* binary; the wasm hash had already
+  changed, so waiting on it was not sufficient. Re-running against the settled
+  server killed all four. **Wait for `Serving` in the watch log, not just a new
+  wasm hash**, before believing any mutation result.
+
+- **Left in the dev DB deliberately: 2 Lightning Bolt copies** in the e2e
+  user's Inbox, from the killed mutation runs (a mutation that breaks undo
+  necessarily leaks the copy the test made). `end2end/cleanup-mutation-leftovers.mjs`
+  reports and, with `--apply`, removes them. It was *not* applied: the arithmetic
+  of what the runs should have leaked (+3) does not match what is there (2), so
+  the rows cannot be confidently attributed to this task rather than to
+  `seed-dev-data.sh`, and deleting shared dev-branch rows on a guess is worse
+  than leaving two spare cards in a test user's Inbox.

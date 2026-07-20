@@ -31,11 +31,11 @@ pub use catalog::{
     SearchResults,
 };
 pub use collection::{
-    AddHave, AddLine, AddWant, AllCardsRow, AllCardsView, BatchMove, Board, CardRow,
-    CollectionKind, CollectionSummary, CollectionView, Condition, DesireLine, Finish, HoldingLine,
-    LineResult, MoveItem, MoveReceipt, MoveRequest, NeedLocation, NeedRow, NeedsView,
-    NewCollection, Page, Rename, Reorder, Reparent, SetQuantity, ShoppingList, ShoppingRow,
-    SuggestedDestination, Teardown, TeardownReceipt,
+    default_language, AddHave, AddLine, AddWant, AllCardsRow, AllCardsView, BatchMove, Board,
+    CardRow, CollectionKind, CollectionSummary, CollectionView, Condition, DesireLine, Finish,
+    HoldingLine, LineResult, MoveItem, MoveReceipt, MoveRequest, NeedLocation, NeedRow, NeedsView,
+    NewCollection, Page, QuickAddKind, QuickAddReceipt, Rename, Reorder, Reparent, SetQuantity,
+    ShoppingList, ShoppingRow, SuggestedDestination, Teardown, TeardownReceipt,
 };
 pub use tags::{
     union_color_identity, DeckCommanders, NewTag, RenameTag, SetBoard, Tag, TagAssignment,

@@ -77,6 +77,12 @@ pub struct CardDetail {
 pub struct CardSummary {
     pub oracle_id: Id,
     pub name: String,
+    /// The card's **representative printing** — the one whose art `image_uri`
+    /// shows, and the grain `+ Have` adds at (holdings are per-printing, while
+    /// a catalog row is per-oracle). Prefers a printing that has an image,
+    /// falling back to the card's first printing so a card whose printings all
+    /// lack art is still addable. `None` only for a card with no printings.
+    pub printing_id: Option<Id>,
     pub image_uri: Option<String>,
     pub mana_cost: Option<String>,
     pub type_line: Option<String>,

@@ -105,6 +105,19 @@ pub(crate) async fn catalog_backend(headers: &http::HeaderMap) -> ApiResult<Host
     }
 }
 
+/// The session-scoped counterpart of [`catalog_backend`]: collection reads and
+/// writes have no anonymous degradation, so an absent/invalid JWT is
+/// `Unauthorized` here rather than a public-data fallback.
+///
+/// Same `pub(crate)` rationale — the web UI's collection server fns share this
+/// rule instead of each inlining its own header→user→backend chain.
+pub(crate) async fn session_backend(headers: &http::HeaderMap) -> ApiResult<HostedBackend> {
+    let user_id = crate::auth::user_id_from_headers(headers)
+        .await
+        .map_err(|e| shared::ApiError::Unauthorized(e.to_string()))?;
+    HostedBackend::for_user(user_id).await
+}
+
 /// `GET /api/cards/{id}` — the full card page (ownership block when authed).
 async fn card_detail(headers: http::HeaderMap, Path(id): Path<Id>) -> Response {
     json_result(async { catalog_backend(&headers).await?.card_detail(id).await }.await)
