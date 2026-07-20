@@ -342,7 +342,7 @@ fn use_rail_state() -> Memo<Result<RailState, ParseError>> {
 /// lookups — calling them per widget costs nothing.
 fn use_commit() -> impl Fn(Field, Option<String>) + Clone + 'static {
     let query_map = use_query_map();
-    let navigate = use_navigate();
+    let go = use_navigate_query();
     move |field: Field, replacement: Option<String>| {
         let q = query_map.read_untracked().get("q").unwrap_or_default();
         let Ok(next) = rewrite(&q, field, replacement) else {
@@ -351,17 +351,7 @@ fn use_commit() -> impl Fn(Field, Option<String>) + Clone + 'static {
             // how a user's text gets eaten — so refuse instead.
             return;
         };
-        let list_view =
-            query_map.read_untracked().get(super::VIEW_PARAM).as_deref() == Some(super::LIST_VIEW);
-        // Replace, don't push: dragging through a facet list would otherwise
-        // bury the previous page under one history entry per checkbox.
-        navigate(
-            &super::catalog_url(&next, list_view),
-            NavigateOptions {
-                replace: true,
-                ..Default::default()
-            },
-        );
+        go(next);
     }
 }
 
@@ -372,14 +362,22 @@ fn use_navigate_query() -> impl Fn(String) + Clone + 'static {
     let query_map = use_query_map();
     let navigate = use_navigate();
     move |next: String| {
-        let list_view =
-            query_map.read_untracked().get(super::VIEW_PARAM).as_deref() == Some(super::LIST_VIEW);
-        // Replace, don't push: dragging down a facet list would otherwise bury
-        // the previous page under one history entry per checkbox.
+        let params = query_map.read_untracked();
+        let list_view = params.get(super::VIEW_PARAM).as_deref() == Some(super::LIST_VIEW);
+        let was_searching = !params.get("q").unwrap_or_default().is_empty();
+        drop(params);
+
+        // History granularity is per *search session*, exactly as the query bar
+        // does it (see `QueryBar::commit`): the first filter on a bare
+        // `/catalog` pushes, so Back returns to browse-all; refining an
+        // existing query replaces, so dragging down a facet list can't bury the
+        // previous page under one entry per checkbox. The two surfaces edit the
+        // same string, so they must agree on this or Back behaves differently
+        // depending on which one you used last.
         navigate(
             &super::catalog_url(&next, list_view),
             NavigateOptions {
-                replace: true,
+                replace: was_searching,
                 ..Default::default()
             },
         );
@@ -453,7 +451,10 @@ fn RailBody(heading_id: &'static str) -> impl IntoView {
     };
 
     view! {
-        <div data-testid="filter-rail">
+        // The testid is the instance id: the desktop rail and the mobile sheet
+        // render the same body, and the sheet's content is in the DOM even
+        // while closed, so a shared testid would match two nodes on every page.
+        <div data-testid=heading_id>
             <div class="mb-4 flex items-center justify-between">
                 <h2 id=heading_id class="text-sm font-medium">
                     "Filters"
@@ -485,7 +486,7 @@ fn RailBody(heading_id: &'static str) -> impl IntoView {
             >
                 <div class="space-y-4">
                     <RailTextField
-                        id="filter-name"
+                        id=format!("{heading_id}-name")
                         label="Card name"
                         placeholder="e.g. Lightning Bolt"
                         field=Field::Name
@@ -493,7 +494,7 @@ fn RailBody(heading_id: &'static str) -> impl IntoView {
                         to_term=name_terms
                     />
                     <RailTextField
-                        id="filter-text"
+                        id=format!("{heading_id}-text")
                         label="Card text"
                         placeholder="e.g. draw a card"
                         field=Field::Text
@@ -508,7 +509,7 @@ fn RailBody(heading_id: &'static str) -> impl IntoView {
                         default_open=false
                     >
                         <RailTextField
-                            id="filter-set"
+                            id=format!("{heading_id}-set")
                             label="Set codes"
                             placeholder="e.g. mh3, lea"
                             field=Field::Set
@@ -562,9 +563,10 @@ fn RailBody(heading_id: &'static str) -> impl IntoView {
                         to_term=rarity_term
                         default_open=false
                     />
-                    <ManaValueSection value=Signal::derive(move || {
-                        ok.get().and_then(|s| s.mana_value)
-                    }) />
+                    <ManaValueSection
+                        value=Signal::derive(move || ok.get().and_then(|s| s.mana_value))
+                        id=format!("{heading_id}-mv")
+                    />
                 </div>
             </Show>
         </div>
@@ -602,7 +604,7 @@ fn rarity_term(vals: &[String]) -> Option<String> {
 /// reason) as the query bar's field sync in the parent module.
 #[component]
 fn RailTextField(
-    id: &'static str,
+    #[prop(into)] id: String,
     label: &'static str,
     placeholder: &'static str,
     field: Field,
@@ -654,7 +656,7 @@ fn RailTextField(
 
     view! {
         <div class="space-y-1.5">
-            <Label html_for=id class=if hide_label { "sr-only" } else { "text-xs" }>
+            <Label html_for=id.clone() class=if hide_label { "sr-only" } else { "text-xs" }>
                 {label}
             </Label>
             <Input
@@ -780,7 +782,7 @@ fn RailFacet(
 
 /// Mana value: a comparison and a number, together one `mv` term.
 #[component]
-fn ManaValueSection(value: Signal<Option<(Cmp, f64)>>) -> impl IntoView {
+fn ManaValueSection(value: Signal<Option<(Cmp, f64)>>, #[prop(into)] id: String) -> impl IntoView {
     let commit = use_commit();
     let count = Signal::derive(move || usize::from(value.read().is_some()));
     let op = RwSignal::new(
@@ -844,11 +846,11 @@ fn ManaValueSection(value: Signal<Option<(Cmp, f64)>>) -> impl IntoView {
                         })
                         .collect_view()}
                 </select>
-                <Label html_for="filter-mv" class="sr-only">
+                <Label html_for=id.clone() class="sr-only">
                     "Mana value"
                 </Label>
                 <Input
-                    id="filter-mv"
+                    id=id.clone()
                     r#type=InputType::Number
                     min="0"
                     step="1"
