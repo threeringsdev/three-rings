@@ -117,7 +117,7 @@ UI work stays on the ~3K-printing POC catalog (maintainer decision
 
 ### Stage 3 — My-cards surface
 
-- [ ] Collection tree, read-only: nesting, per-node collapse, pinned system rows, selection, rolled-up count badges; tree server-fn adapter (specs: [app-ui](app-ui.md))
+- [~] Collection tree, read-only: nesting, per-node collapse, pinned system rows, selection, rolled-up count badges; tree server-fn adapter (specs: [app-ui](app-ui.md))
 - [ ] Collection tree, management: drag reparent/reorder, context-menu create/rename/delete with dialog confirms, cycle-guard error surfacing (specs: [app-ui](app-ui.md))
 - [ ] Count stepper (custom): hover/focus-revealed `− n +`, click-to-type, keyboard ±, commit-on-blur; optimistic update + undo toast; standalone bench section — **build click-to-type on the vendored `Input`, not a raw `<input>`**: `bind:value` is a client-side binding that emits no `value` attribute, so a hand-rolled SSR'd field renders empty until wasm lands. `Input` seeds the attribute from `bind_value` itself (PR #43); a bare element re-inherits the trap, and it is invisible in review because the field merely looks empty for a beat (specs: [app-ui](app-ui.md))
 - [ ] `/my` All cards view: aggregate table with three-count columns + expandable location summary, quick search, keyset paging (specs: [app-ui](app-ui.md))
