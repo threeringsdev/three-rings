@@ -606,3 +606,99 @@ uuid owner-side, then runs the seed as `app_runtime`). Decisions:
   sentinel spoofable → **disputed**: the e2e account is purpose-built and
   script-owned by contract. All fixes re-verified live (idempotent no-op
   path + fresh-user path).
+
+### Filter rail + query↔rail sync (2026-07-19)
+
+`app/src/catalog/rail.rs` — the pure `read`/`rewrite`/`reset` layer plus the
+widgets; `FilterRail` fills the shell's Catalog-mode sidebar and `FilterSheet`
+is the mobile slide-over. The rail holds **no state of its own**: it reads `?q=`
+and every edit rewrites that string and navigates, so a rail edit and a typed
+edit are the same operation.
+
+- **The grammar moved to `shared/src/search.rs`** — the move catalog-search's
+  Parser section predicted ("may motivate moving the *parser* (not the SQL) to
+  `shared/`"). Both halves of the two-surface UX need it now: the hosted backend
+  translates terms to SQL, and the rail reads the query in wasm *and* in SSR
+  under either backend. Only `sql.rs` stayed behind `hosted`.
+- **`parse_tokens` is the new entry point, and the raw text is the point.**
+  Re-serializing from the AST would rewrite a user's `type:` to `t:` and drop
+  their quotes, so "unrecognized terms preserved verbatim" is implemented by
+  re-emitting each unowned token's original characters, never by pretty-printing.
+- **Ownership is one rule, shared by `read` and `rewrite`** (`owns_every_match`).
+  Only the name box owns a run — bare words are collectively one field; every
+  keyed facet owns just its first term, because a repeat like `c:u c:r` is an
+  AND its single widget cannot express. The first version had `read` showing
+  only the first while `rewrite` deleted them all, silently dropping the second
+  (Codex, high) — the shared predicate is what keeps the two honest.
+- **`t:` gained comma-OR** (grammar + `ILIKE ANY` in sql.rs). The wireframe's
+  Type facet is a multi-select and flat syntax has no other way to say "instant
+  OR sorcery" — exactly the case catalog-search's comma micro-extension exists
+  for; it was specified on `s:`/`r:` only because those were the facets that
+  existed then. Recorded as a deviation in catalog-search.
+- **Colors concatenate, everything else comma-separates.** `c:` means "has all
+  of these", so its values are one letter-set (`c:ur`), not an OR list. This is
+  the one facet where the comma rule does *not* apply, and it survived the first
+  mutation pass unnoticed — it now has its own unit test.
+- **`c:colorless` counts without a checkbox.** It is a real Color filter the
+  wireframe's five-box facet cannot draw. Counting it 0 hid the Reset button and
+  the mobile badge on a filtered query (Codex, medium).
+- **The name box shows a value it can write back**, not the raw token: `name:bolt`
+  displays as `bolt`, because echoing the raw form would re-serialize on the next
+  edit as the literal `"name:bolt"` — a different search (Codex, medium).
+  Conversely anything typed *into* that box that would parse as a keyed term or a
+  negation is force-quoted, so "Card name" can never become a type filter.
+- **A rejected query makes the rail inert, not empty.** There is no honest way to
+  reflect an unparseable query into widgets, and rewriting one term of it means
+  guessing which term is broken; empty-but-clickable boxes would eat the user's
+  text on the next click.
+- **Sections are `<details>`**, seeded once (wireframe defaults, plus "open if it
+  already has filters") and then left to the user. Deriving openness reactively
+  would slam a section shut under someone mid-click. Consequence: a filter typed
+  into the query bar for a collapsed section shows only as the summary badge.
+- **History matches the query bar's rule** — first filter on a bare `/catalog`
+  pushes, refinements replace. The two surfaces edit the same string, so Back
+  must not depend on which one you used last. The first version replaced
+  unconditionally and walked straight off the site.
+
+**Regression found while building this:** `bind:value` is a client-side binding
+and renders **no `value` attribute**, so every SSR'd input — including the
+catalog task's own query bar — came back empty on a shared `?q=` link and only
+filled in after wasm landed. Fixed here for the query bar and all four rail
+fields with a one-time `value=` alongside the binding (set once, not reactively:
+after hydration the property is what shows, and a reactive attribute would race
+the binding).
+
+**Hydration test seam:** `data-hydrated` on `<html>`, stamped by an `Effect` in
+`app/src/lib.rs` (Effects don't run during SSR, so the attribute *is* the
+definition of hydrated). Added because the rail e2e specs flaked under parallel
+load: typing into an SSR'd input before hydration drops the input silently. It
+also fixed **8 pre-existing firefox/webkit failures** in `catalog.spec.ts` /
+`smoke.spec.ts` — those had never been run at the full tier — and cut the
+three-browser tier from 49 s to 18 s by replacing implicit retry waiting with a
+deterministic gate.
+
+**`#![recursion_limit = "512"]` on the `app` crate.** A Leptos view tree is one
+deeply-nested generic type per page, and the rail's seven stacked sections
+crossed rustc's 128 default — *but only for `aarch64-linux-android`*. The host
+targets built fine, so nothing caught it until the Android build ran. Worth
+knowing for the rest of Phase 5: the per-page type grows as screens gain
+sections, and the failure surfaces on the target you compile last.
+
+**Verification:** unit 20/20 (`catalog::rail`) + 22 in `shared::search`; e2e
+118/118 across chromium/firefox/webkit, stable over three consecutive runs;
+Android on-device via CDP (`end2end/android-rail-check.mjs`) — badge count,
+sheet open, facet click rewriting the query, and body scroll-lock, all on the
+device's Chrome 145. Codex e2e mutation pass: 10 mutations applied transiently,
+10 caught (the colour-serializer one only after adding the test it exposed).
+
+**Disputed / deferred:**
+
+- **Codex (medium): rail edit vs a pending query-bar debounce.** Real — type in
+  the box, click a facet inside 250 ms, and the debounce fires last with its
+  captured text, losing the facet edit. Not fixed here: the two surfaces live in
+  different subtrees (the rail is in the shell, the bar is in the page), so
+  sharing the pending-timer handle needs a context that `use_navigate`'s
+  non-`Send` closure can't ride. Filed as its own task rather than bolted on.
+- **Set is a text input, not a picker.** No `list_sets` adapter exists, and
+  adding one is a server-fn of its own. `s:mh3,lea` typed as comma-separated
+  codes is the honest interim; filed.

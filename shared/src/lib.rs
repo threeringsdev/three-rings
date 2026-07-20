@@ -16,6 +16,14 @@ use uuid::Uuid;
 
 pub mod catalog;
 pub mod collection;
+/// The catalog query grammar (specs/catalog-search.md). It lives here, not in
+/// `app`, because *both* halves of the two-surface UX need it: the hosted
+/// backend translates the parsed terms to SQL, and the filter rail — which
+/// runs in the browser (wasm) and in SSR under either backend — has to read
+/// the query text to fill its widgets and rewrite terms in it. Only the SQL
+/// emission stayed behind `hosted`. Pure and dependency-free, per this crate's
+/// rules.
+pub mod search;
 pub mod tags;
 
 pub use catalog::{

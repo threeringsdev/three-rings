@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { AUTH_STATE } from "./helpers";
+import { AUTH_STATE, hydrated } from "./helpers";
 
 // Catalog page (specs/app-ui.md "/catalog", specs/catalog-search.md).
 //
@@ -29,6 +29,7 @@ test("browse-all renders without a query @fast", async ({ page }) => {
   // Empty query is a valid search (specs/catalog-search.md), not an empty
   // state: /catalog with no ?q must still list cards.
   await page.goto("/catalog");
+  await hydrated(page);
   await expect(page.getByTestId("results-grid")).toBeVisible();
   await expect(
     page.locator("[data-testid=results-grid] li").first(),
@@ -38,6 +39,7 @@ test("browse-all renders without a query @fast", async ({ page }) => {
 
 test("typing debounces into a URL-canonical search @fast", async ({ page }) => {
   await page.goto("/catalog");
+  await hydrated(page);
   const requests: string[] = [];
   page.on("request", (r) => {
     if (r.url().includes("/api/search_catalog")) requests.push(r.url());
@@ -60,6 +62,7 @@ test("a shared search URL restores the field and the results @fast", async ({
 }) => {
   // The URL is the whole state: landing cold on one must repopulate the box.
   await page.goto("/catalog?q=bolt");
+  await hydrated(page);
   await expect(page.locator("#catalog-query")).toHaveValue("bolt");
   await expect(page.getByText("Lightning Bolt").first()).toBeVisible();
 });
@@ -68,6 +71,7 @@ test("back leaves the search session, not the site @fast", async ({ page }) => {
   // Refining replaces history; starting a search pushes. So one Back from a
   // refined query returns to browse-all rather than walking off the site.
   await page.goto("/catalog");
+  await hydrated(page);
   await page.fill("#catalog-query", "bolt");
   await page.waitForURL((url) => url.searchParams.get("q") === "bolt");
   await page.fill("#catalog-query", "counter");
@@ -82,6 +86,7 @@ test("back leaves the search session, not the site @fast", async ({ page }) => {
 
 test("clearing the query returns to browse-all @fast", async ({ page }) => {
   await page.goto("/catalog?q=bolt");
+  await hydrated(page);
   await page.getByLabel("Clear search").click();
   await page.waitForURL((url) => url.pathname === "/catalog" && !url.search);
   await expect(page.locator("#catalog-query")).toHaveValue("");
@@ -95,6 +100,7 @@ test("a grammar error renders inline and keeps the page @fast", async ({
   // the term (specs/catalog-search.md). Half-typed queries hit this constantly,
   // so it must read as a message about the query, not as a page failure.
   await page.goto("/catalog?q=pow%3E3");
+  await hydrated(page);
   const err = page.getByTestId("search-error");
   await expect(err).toBeVisible();
   await expect(err).toContainText("pow>3");
@@ -111,6 +117,7 @@ test("a mid-typing grammar error keeps the last good results @fast", async ({
   // query is a message about the query — the last page that did parse stays,
   // dimmed and inert, underneath it.
   await page.goto("/catalog?q=bolt");
+  await hydrated(page);
   await expect(page.getByTestId("results-grid")).toBeVisible();
 
   await page.fill("#catalog-query", "bolt pow>3");
@@ -118,7 +125,9 @@ test("a mid-typing grammar error keeps the last good results @fast", async ({
   await expect(page.getByTestId("results-grid")).toBeVisible();
   // It must be the *previous* page that was kept, not any grid: assert the
   // actual cards survived, or "retained" could mean an empty marked container.
-  await expect(page.getByTestId("results-grid")).toContainText("Lightning Bolt");
+  await expect(page.getByTestId("results-grid")).toContainText(
+    "Lightning Bolt",
+  );
   await expect(page.locator("[data-stale=true]")).toBeVisible();
 
   // Fixing the query clears both the error and the stale marking.
@@ -138,6 +147,7 @@ test("punctuation-heavy queries round-trip through the URL @fast", async ({
   // shows up as "no results" rather than passing.
   const q = 't:instant c:r mv<=2 -o:"draw a card"';
   await page.goto("/catalog");
+  await hydrated(page);
   await page.fill("#catalog-query", q);
   await page.waitForURL((url) => url.searchParams.get("q") === q);
   await expect(page.locator("#catalog-query")).toHaveValue(q);
@@ -154,6 +164,7 @@ test("the view switch is a radiogroup with roving focus @fast", async ({
   page,
 }) => {
   await page.goto("/catalog?q=bolt");
+  await hydrated(page);
   const group = page.getByRole("radiogroup", { name: "Result layout" });
   const grid = group.getByRole("radio", { name: "Grid view" });
   const list = group.getByRole("radio", { name: "List view" });
@@ -181,16 +192,20 @@ test("the view switch is a radiogroup with roving focus @fast", async ({
 
 test("switching view keeps the query @fast", async ({ page }) => {
   await page.goto("/catalog?q=bolt");
+  await hydrated(page);
   await page.getByRole("radio", { name: "List view" }).click();
   await page.waitForURL((url) => url.searchParams.get("view") === "list");
   expect(new URL(page.url()).searchParams.get("q")).toBe("bolt");
-  await expect(page.getByTestId("results-list")).toContainText("Lightning Bolt");
+  await expect(page.getByTestId("results-list")).toContainText(
+    "Lightning Bolt",
+  );
 });
 
 test("card tiles lazy-load images and link to the card @fast", async ({
   page,
 }) => {
   await page.goto("/catalog?q=bolt");
+  await hydrated(page);
   const tile = page.locator("[data-testid=results-grid] li").first();
   await expect(tile.locator("a").first()).toHaveAttribute(
     "href",
@@ -212,6 +227,7 @@ test("a query keeps URL-structural characters intact @fast", async ({
   // Either way the user silently searched something other than what they typed.
   const q = "bolt &foo +bar";
   await page.goto("/catalog");
+  await hydrated(page);
   await page.fill("#catalog-query", q);
   await page.waitForURL((url) => url.searchParams.get("q") === q);
   expect(new URL(page.url()).searchParams.get("q")).toBe(q);
@@ -223,6 +239,7 @@ test("anonymous quick actions prompt sign-in with a return path @fast", async ({
   page,
 }) => {
   await page.goto("/catalog?q=bolt");
+  await hydrated(page);
   const prompt = page
     .locator("[data-testid=results-grid] li")
     .first()
@@ -242,10 +259,13 @@ test("anonymous quick actions prompt sign-in with a return path @fast", async ({
 test.describe("authed", () => {
   test.use({ storageState: AUTH_STATE });
 
-  test("a signed-in visitor gets no sign-in prompts @fast", async ({ page }) => {
+  test("a signed-in visitor gets no sign-in prompts @fast", async ({
+    page,
+  }) => {
     // The session is read opportunistically by the search adapter; when it is
     // present the quick actions stop being sign-in bait.
     await page.goto("/catalog?q=bolt");
+    await hydrated(page);
     await expect(page.getByTestId("results-grid")).toBeVisible();
     await expect(page.getByTestId("signin-prompt")).toHaveCount(0);
     // Assert the positive too — "no prompts" is also true of a page with no

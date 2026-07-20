@@ -1,3 +1,13 @@
+// Leptos view trees are one deeply-nested generic type per component, so the
+// type rustc has to resolve grows with the *page*, not with any one function.
+// The filter rail (seven stacked sections inside the shell's sidebar) crossed
+// the 128 default and failed to compile — but only for `aarch64-linux-android`,
+// which is the trap: the host targets still built, so nothing caught it until
+// the Android build ran. Raising the limit is the standard fix for this in
+// Leptos; the alternative is splitting components purely to appease the
+// compiler, which makes the UI code worse to read for no runtime benefit.
+#![recursion_limit = "512"]
+
 use leptos::children::ToChildren;
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
@@ -41,6 +51,27 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
     }
 }
 
+/// Stamp `data-hydrated` on `<html>` once the wasm client has taken over.
+///
+/// A test seam, and a deliberate one. Every page here is SSR-then-hydrate, so
+/// there is a window where the markup is on screen but no event listener is
+/// attached yet — input typed in it is dropped, and a test that types during
+/// that window fails intermittently for reasons that have nothing to do with
+/// what it is testing (observed while writing the filter-rail specs: the same
+/// `page.fill` passed alone and failed under parallel load).
+///
+/// `Effect`s do not run during SSR, so the attribute's presence *is* the
+/// definition of "hydrated" rather than an approximation of it. See
+/// `end2end/tests/helpers.ts` for the matching wait.
+fn mark_hydrated() {
+    Effect::new(|_| {
+        #[cfg(feature = "hydrate")]
+        if let Some(el) = document().document_element() {
+            let _ = el.set_attribute("data-hydrated", "true");
+        }
+    });
+}
+
 /// The `tr_theme` cookie override, else the dark default — shared with the
 /// toggle so the shell and the component can never disagree.
 fn initial_theme_is_dark() -> bool {
@@ -68,6 +99,7 @@ pub fn App() -> impl IntoView {
     // Provides context that manages stylesheets, titles, meta tags, etc.
     provide_meta_context();
     shell::provide_current_user();
+    mark_hydrated();
 
     // Route definitions are composed as a plain tuple (what the view! macro
     // builds from <Routes> children anyway) so the bench route can be

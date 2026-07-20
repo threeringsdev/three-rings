@@ -6,8 +6,21 @@
 //! grammar doesn't recognize is a [`ParseError`] naming the offending term —
 //! never a silently-dropped filter.
 //!
-//! Pure and dependency-free: this is the TDD core; SQL emission lives in
-//! [`super::sql`].
+//! Pure and dependency-free: this is the TDD core; SQL emission lives in the
+//! hosted backend (`app/src/search/sql.rs`), which is the only half that needs
+//! sqlx. The grammar itself is shared because the filter rail edits the same
+//! query text client-side (specs/catalog-search.md "One filter state, two
+//! views over it").
+//!
+//! Two entry points, and the difference matters:
+//!
+//! - [`parse`] — the AST, for translation. Lossy on purpose: `type:` and `t:`
+//!   collapse to the same [`Pred`].
+//! - [`parse_tokens`] — the AST *paired with the raw token it came from*, for
+//!   the rail. Rewriting a query has to leave every term the rail doesn't own
+//!   byte-for-byte intact (the spec's "unrecognized terms preserved verbatim"),
+//!   and re-serializing from a lossy AST would quietly rewrite the user's
+//!   `type:` into `t:` and their `"quotes"` away.
 
 /// Comparison operator on numeric terms (`mv:`/`cmc:`); `:` means equal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,8 +39,15 @@ pub enum Pred {
     Name(String),
     /// `o:` / `oracle:` / `text:` — oracle-text substring (all faces).
     OracleText(String),
-    /// `t:` / `type:` — type_line substring.
-    TypeLine(String),
+    /// `t:` / `type:` — type_line substrings, comma-OR.
+    ///
+    /// Comma-OR here is this task's grammar extension: the rail's Type facet
+    /// is a multi-select (wireframes: Creature/Instant/Sorcery/Artifact/
+    /// Enchantment checkboxes), and flat syntax has no other way to say
+    /// "instant OR sorcery" — which is exactly the case catalog-search's
+    /// comma micro-extension exists for. It was specified only on `s:`/`r:`
+    /// because those were the facets that existed when the grammar shipped.
+    TypeLine(Vec<String>),
     /// `s:` / `set:` / `e:` — set codes, comma-OR. Printing-scoped.
     Set(Vec<String>),
     /// `r:` / `rarity:` — rarities, comma-OR. Printing-scoped.
@@ -66,7 +86,54 @@ pub enum ParseError {
 /// Parse a query string into the flat term list. Empty input is a valid,
 /// empty query (browse-all).
 pub fn parse(q: &str) -> Result<Vec<Term>, ParseError> {
-    tokenize(q)?.into_iter().map(term_from).collect()
+    Ok(parse_tokens(q)?.into_iter().map(|t| t.term).collect())
+}
+
+/// One token of the query, kept next to what it parsed to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawTerm {
+    /// Exactly the characters the user typed for this term — quotes, alias
+    /// spelling, and letter case included. This is what gets re-emitted for
+    /// every term the rail does not own.
+    pub raw: String,
+    pub term: Term,
+}
+
+/// Parse, keeping each term's original text (see the module docs for why the
+/// rail needs this and [`parse`] does not).
+pub fn parse_tokens(q: &str) -> Result<Vec<RawTerm>, ParseError> {
+    tokenize(q)?
+        .into_iter()
+        .map(|raw| term_from(raw.clone()).map(|term| RawTerm { raw, term }))
+        .collect()
+}
+
+/// Quote a value for re-insertion into a query if it needs it.
+///
+/// Whitespace has to be quoted or the term splits into two on the next parse.
+/// A comma must *not* be escaped away — it is the OR separator, and callers
+/// that mean OR pass the values separately.
+pub fn quote_value(v: &str) -> String {
+    if v.chars().any(char::is_whitespace) {
+        format!("\"{}\"", v.replace('"', ""))
+    } else {
+        v.to_string()
+    }
+}
+
+/// Serialize `key:a,b,c` from a facet's selected values, quoting as needed.
+/// Returns `None` for an empty selection — the caller drops the term entirely
+/// rather than emitting a valueless `key:`, which the grammar rejects.
+pub fn facet_term(key: &str, values: &[String]) -> Option<String> {
+    if values.is_empty() {
+        return None;
+    }
+    let joined = values
+        .iter()
+        .map(|v| quote_value(v))
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(format!("{key}:{joined}"))
 }
 
 /// Whitespace-split respecting double quotes; tokens keep their raw text
@@ -200,7 +267,7 @@ fn term_from(raw: String) -> Result<Term, ParseError> {
     let pred = match key.as_str() {
         "name" => Pred::Name(unquote(val)),
         "o" | "oracle" | "text" => Pred::OracleText(unquote(val)),
-        "t" | "type" => Pred::TypeLine(unquote(val)),
+        "t" | "type" => Pred::TypeLine(csv(&raw, val)?),
         "s" | "set" | "e" => Pred::Set(csv(&raw, val)?),
         "r" | "rarity" => Pred::Rarity(csv(&raw, val)?),
         "c" | "color" => {
@@ -293,12 +360,42 @@ mod tests {
     #[test]
     fn comma_is_or_within_a_term() {
         assert_eq!(
-            parse("s:mh3,lea r:rare,mythic").unwrap(),
+            parse("s:mh3,lea r:rare,mythic t:instant,sorcery").unwrap(),
             vec![
                 t(Pred::Set(vec!["mh3".into(), "lea".into()])),
                 t(Pred::Rarity(vec!["rare".into(), "mythic".into()])),
+                t(Pred::TypeLine(vec!["instant".into(), "sorcery".into()])),
             ]
         );
+    }
+
+    #[test]
+    fn parse_tokens_keeps_the_text_the_user_typed() {
+        // The rail rewrites its own terms and re-emits everything else
+        // verbatim, so the alias spelling, the case, and the quoting all have
+        // to survive the round trip — the AST alone has lost all three.
+        let toks = parse_tokens("type:Instant -id:wu o:\"draw a card\"").unwrap();
+        let raws: Vec<&str> = toks.iter().map(|t| t.raw.as_str()).collect();
+        assert_eq!(raws, vec!["type:Instant", "-id:wu", "o:\"draw a card\""]);
+        assert_eq!(toks[0].term, t(Pred::TypeLine(vec!["instant".into()])));
+    }
+
+    #[test]
+    fn facet_terms_serialize_back_into_the_grammar() {
+        assert_eq!(
+            facet_term("r", &["rare".into(), "mythic".into()]),
+            Some("r:rare,mythic".into())
+        );
+        // A value with a space must come back quoted or it splits into two
+        // terms on the next parse — the round trip is the whole contract.
+        let term = facet_term("t", &["legendary creature".into()]).unwrap();
+        assert_eq!(term, "t:\"legendary creature\"");
+        assert_eq!(
+            parse(&term).unwrap(),
+            vec![t(Pred::TypeLine(vec!["legendary creature".into()]))]
+        );
+        // An empty selection is no term at all — `t:` alone is a parse error.
+        assert_eq!(facet_term("t", &[]), None);
     }
 
     #[test]
@@ -355,7 +452,7 @@ mod tests {
         assert_eq!(
             parse("-t:instant -goblin").unwrap(),
             vec![
-                neg(Pred::TypeLine("instant".into())),
+                neg(Pred::TypeLine(vec!["instant".into()])),
                 neg(Pred::Name("goblin".into()))
             ]
         );
@@ -366,7 +463,7 @@ mod tests {
         assert_eq!(
             parse("t:instant c:ur mv<=2 -s:mh3 \"fire // ice\"").unwrap(),
             vec![
-                t(Pred::TypeLine("instant".into())),
+                t(Pred::TypeLine(vec!["instant".into()])),
                 t(Pred::Colors(vec!['U', 'R'])),
                 t(Pred::ManaValue(Cmp::Le, 2.0)),
                 neg(Pred::Set(vec!["mh3".into()])),
