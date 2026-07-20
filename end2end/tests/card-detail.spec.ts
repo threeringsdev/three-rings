@@ -67,6 +67,14 @@ test("card detail SSRs the card, its printings and its rulings @fast", async ({
   expect(html).toContain('data-testid="card-detail"');
   expect(html).toContain(card.name);
   expect(html).toContain('data-testid="card-printings"');
+  // The load-bearing half. Under Leptos's default out-of-order streaming the
+  // body still *contains* all of the above — inside a <template> the client
+  // hoists — while the in-place markup is the skeleton. Asserting the skeleton
+  // is gone is what distinguishes real SSR from "it's in there somewhere"
+  // (this assertion failed before the route took SsrMode::Async).
+  expect(html, "page streamed a skeleton instead of SSR-ing").not.toContain(
+    'aria-label="Loading card"',
+  );
   // This card has WotC rulings in the POC set; their absence would mean the
   // rulings query silently returned nothing.
   expect(html).toContain('data-testid="card-rulings"');
@@ -172,8 +180,12 @@ test("hovering a list row opens a preview without changing the URL @fast", async
   const hoverBody = page
     .locator("[data-testid=card-preview-hover]")
     .first();
-  // Lazily mounted: nothing in the DOM until the pointer arrives.
   await expect(hoverBody).toBeHidden();
+  // Lazily mounted — and this is the assertion that actually says so: the
+  // popover element itself is always in the DOM, so only the absence of a
+  // *second* copy of the card name proves the body hasn't rendered. Eager
+  // bodies made getByText(name).first() resolve to a hidden node.
+  await expect(page.getByText(SINGLE_FACE_QUERY, { exact: true })).toHaveCount(1);
 
   await page.getByTestId("card-preview-trigger").first().hover();
   await expect(hoverBody).toBeVisible(); // 150 ms hover intent
@@ -206,7 +218,10 @@ test.describe("touch", () => {
     // The spread puts the testid on the backdrop as well as the panel; the
     // dialog is the one with the content in it.
     const sheet = page.locator("[data-testid=card-preview-sheet][role=dialog]");
-    await expect(sheet).toBeVisible();
+    // `data-state`, not toBeVisible: the sheet slides in via a transform and
+    // stays in the layout when closed, so a closed sheet is "visible" to
+    // Playwright too (found by mutation — app-ui Findings).
+    await expect(sheet).toHaveAttribute("data-state", "open");
     await expect(sheet).toContainText(SINGLE_FACE_QUERY);
     // The tap was intercepted: still on the catalog, not the detail page.
     expect(new URL(page.url()).pathname).toBe("/catalog");
@@ -217,23 +232,31 @@ test.describe("touch", () => {
     await expect(page.getByTestId("card-name")).toContainText(SINGLE_FACE_QUERY);
   });
 
-  test("touch gets no hover card on top of the sheet @fast", async ({
+  test("a coarse pointer over a row never raises a hover card @fast", async ({
     page,
   }) => {
-    // Touch browsers fire a synthetic mouseenter on tap, so without the
-    // hover card's `disabled` prop a tap would open both at once.
+    // Touch browsers fire a synthetic mouseenter, so a finger that merely
+    // travels over a row — scrolling the list, say — would raise a hover card
+    // that nothing then dismisses (there is no mouseleave until you touch
+    // something else). That is what the hover_card `disabled` prop guards.
+    //
+    // Deliberately NO click here. Tapping happens to mask the bug: the sheet's
+    // backdrop steals the pointer, whose mouseleave cancels the pending open —
+    // so a tap-based assertion passes even with `disabled` removed (verified by
+    // mutation, app-ui Findings).
     await page.goto(
       `/catalog?q=${encodeURIComponent(SINGLE_FACE_QUERY)}&view=list`,
     );
     await hydrated(page);
 
-    await page.getByTestId("card-preview-trigger").first().click();
+    await page.getByTestId("card-preview-trigger").first().hover();
+    await page.waitForTimeout(400); // well past the 150 ms hover intent
+    await expect(
+      page.locator("[data-testid=card-preview-hover]").first(),
+    ).toBeHidden();
+    // ...and the sheet did not open either — a hover is not a tap.
     await expect(
       page.locator("[data-testid=card-preview-sheet][role=dialog]"),
-    ).toBeVisible();
-    await page.waitForTimeout(400); // past the hover intent delay
-    await expect(
-      page.locator("[data-testid=card-preview-hover]"),
-    ).toBeHidden();
+    ).toHaveAttribute("data-state", "closed");
   });
 });

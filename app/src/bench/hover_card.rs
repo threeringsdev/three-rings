@@ -36,7 +36,7 @@ pub fn demo() -> AnyView {
             "Hover "
             <HoverCard id="bench-hovercard-disabled" disabled=disabled>
                 <HoverCardTrigger class="underline decoration-dotted cursor-help">
-                    "Counterspell"
+                    <span id="bench-hovercard-disabled-anchor">"Counterspell"</span>
                 </HoverCardTrigger>
                 <HoverCardContent {..} data-testid="bench-hovercard-disabled-content">
                     <p class="font-medium">"Counterspell"</p>

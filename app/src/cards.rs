@@ -160,27 +160,39 @@ pub fn CardPreview(
         }
     });
 
+    // Latched, not live: the point is to mount a body before the affordance
+    // that reveals it appears, and unmounting again would empty the sheet
+    // mid-slide (it animates out over 300 ms) or thrash the hover card on
+    // every mouseleave.
+    let hovered = RwSignal::new(false);
+    let sheet_seen = RwSignal::new(false);
+
     let on_click = move |ev: leptos::ev::MouseEvent| {
+        // A modified click is a navigation instruction, not a preview request
+        // — swallowing it would break "open in a new tab" for anyone with a
+        // keyboard attached to a touch device.
+        if ev.meta_key() || ev.ctrl_key() || ev.shift_key() || ev.alt_key() {
+            return;
+        }
         if coarse.get() {
             ev.prevent_default();
+            sheet_seen.set(true);
             sheet_open.set(true);
         }
     };
 
-    // Latched, not a live hover state: the point is to mount the body before
-    // the hover card's 150 ms intent delay elapses, and unmounting on every
-    // mouseleave would thrash it for no gain.
-    let hovered = RwSignal::new(false);
-
+    // `span`, not `div`: this sits inside HoverCardTrigger's own `<span>`,
+    // and flow content inside phrasing content is invalid HTML.
     let trigger = view! {
-        <div
+        <span
+            class="block"
             on:click=on_click
             on:mouseenter=move |_| hovered.set(true)
             on:focusin=move |_| hovered.set(true)
             data-testid="card-preview-trigger"
         >
             {children()}
-        </div>
+        </span>
     };
 
     let trigger = if hover {
@@ -201,7 +213,11 @@ pub fn CardPreview(
 
     view! {
         {trigger}
-        <Sheet id=format!("card-sheet-{oracle_id}") open=sheet_open>
+        // `contents`: the Sheet's wrapper div would otherwise be a second flex
+        // item inside a grid tile's `<li>`, adding a phantom gap between the
+        // art and the caption. Backdrop and panel are both position:fixed, so
+        // the wrapper has no layout job to do.
+        <Sheet id=format!("card-sheet-{oracle_id}") open=sheet_open class="contents">
             <SheetContent
                 direction=SheetDirection::Bottom
                 aria_label=name
@@ -212,7 +228,10 @@ pub fn CardPreview(
                 {..}
                 data-testid="card-preview-sheet"
             >
-                <Show when=move || sheet_open.get()>
+                // Keyed on the latch, not on `sheet_open`: gating on the live
+                // signal unmounts the body on the same tick the close
+                // animation starts, so the sheet slides away as an empty box.
+                <Show when=move || sheet_seen.get()>
                     <div class="space-y-4 p-4">
                         <PreviewBody card=card.clone() />
                         <a
@@ -261,9 +280,14 @@ pub fn CardDetailPage() -> impl IntoView {
                     Suspend::new(async move {
                         match detail.await {
                             Some(Ok(card)) => view! { <CardDetailBody card=card /> }.into_any(),
-                            Some(Err(e)) => {
-                                view! { <NotFound detail=message_of(&e) /> }.into_any()
-                            }
+                            Some(Err(e)) => match classify(&e) {
+                                Failure::Missing(detail) => {
+                                    view! { <NotFound detail=detail /> }.into_any()
+                                }
+                                Failure::Broken(detail) => {
+                                    view! { <LoadFailed detail=detail /> }.into_any()
+                                }
+                            },
                             None => {
                                 view! { <NotFound detail="That card id isn't valid." /> }.into_any()
                             }
@@ -275,12 +299,41 @@ pub fn CardDetailPage() -> impl IntoView {
     }
 }
 
-/// The transport only carries `ApiError`'s `Display` string, so this is all the
-/// structure there is to recover (the status-semantics gap is queued in TODO).
-fn message_of(e: &ServerFnError<String>) -> String {
-    match e {
+enum Failure {
+    /// The catalog answered, and this card genuinely isn't in it.
+    Missing(String),
+    /// Something upstream broke — a different thing from "no such card", and
+    /// telling a visitor their card doesn't exist because Neon is unreachable
+    /// is a lie they'd act on.
+    Broken(String),
+}
+
+/// The Leptos error channel collapses every `ApiError` onto one variant
+/// carrying its `Display` string (the status-semantics gap queued in TODO), so
+/// the `not found: ` prefix is the only signal available here. Anything else is
+/// treated as breakage, which is the safe direction: a missing card
+/// misreported as an outage is recoverable, the reverse is not.
+fn classify(e: &ServerFnError<String>) -> Failure {
+    let raw = match e {
         ServerFnError::ServerError(msg) => msg.clone(),
         other => other.to_string(),
+    };
+    match raw.strip_prefix("not found: ") {
+        Some(_) => Failure::Missing("We don't have that card in the catalog.".into()),
+        None => Failure::Broken(raw),
+    }
+}
+
+#[component]
+fn LoadFailed(#[prop(into)] detail: String) -> impl IntoView {
+    view! {
+        <div class="space-y-2" data-testid="card-detail-error">
+            <h1 class="text-2xl font-bold">"We couldn't load this card"</h1>
+            <p class="text-muted-foreground text-sm">
+                "Something went wrong on our side — try again in a moment."
+            </p>
+            <p class="text-muted-foreground text-xs">{detail}</p>
+        </div>
     }
 }
 
@@ -328,9 +381,11 @@ fn CardDetailBody(card: CardDetail) -> impl IntoView {
         ..
     } = card;
 
-    // The first printing is the oldest (the query orders by release date), and
-    // it is the one whose art represents the card.
-    let hero = printings.first().and_then(|p| p.image_uri.clone());
+    // The oldest printing (the query orders by release date) represents the
+    // card — but `find_map`, not `first()`: Scryfall carries artless rows
+    // (placeholders, some non-English printings), and letting one of those sit
+    // first would blank the hero while every later printing has art.
+    let hero = printings.iter().find_map(|p| p.image_uri.clone());
     let stats = match (power, toughness, loyalty) {
         (Some(p), Some(t), _) => Some(format!("{p}/{t}")),
         (_, _, Some(l)) => Some(format!("Loyalty {l}")),

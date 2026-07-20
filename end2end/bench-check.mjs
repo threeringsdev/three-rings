@@ -248,13 +248,34 @@ await page.waitForTimeout(400); // > 150ms intent
 if (!(await hcOpenNow())) failures.push('hover_card did not open on hover');
 // trigger→content handoff: moving onto the card must NOT close it (the
 // shared-timer fix — separate timers closed it ~150ms after entering content).
-await page.locator('[data-name="HoverCardContent"]').hover();
+await page.locator('#hc-content-bench-hovercard').hover();
 await page.waitForTimeout(400);
 if (!(await hcOpenNow())) failures.push('hover_card closed on trigger→content handoff');
 // leaving the content closes it.
 await page.mouse.move(0, 0);
 await page.waitForTimeout(400);
 if (await hcOpenNow()) failures.push('hover_card did not close on mouse-out');
+
+// hover_card `disabled`: suppressed opens, and disabling closes an open card.
+const hcDisTrigger = page.locator('#bench-hovercard-disabled-anchor');
+const hcDisOpen = () => page.evaluate(() =>
+  document.getElementById('hc-content-bench-hovercard-disabled')?.matches(':popover-open') ?? false);
+const disableBtn = page.locator('[data-testid="bench-hovercard-disable"]');
+await hcDisTrigger.scrollIntoViewIfNeeded();
+// enabled: opens as normal
+await hcDisTrigger.hover();
+await page.waitForTimeout(400);
+if (!(await hcDisOpen())) failures.push('hover_card(disabled=false) did not open');
+// disabling while open must take it down
+await disableBtn.click();
+await page.waitForTimeout(300);
+if (await hcDisOpen()) failures.push('hover_card did not close when disabled');
+// and it must stay shut on a fresh hover
+await page.mouse.move(0, 0);
+await page.waitForTimeout(200);
+await hcDisTrigger.hover();
+await page.waitForTimeout(400);
+if (await hcDisOpen()) failures.push('disabled hover_card opened on hover');
 
 // ID stability: two fresh SSR renders must serve identical overlay id wiring
 // (deterministic caller IDs — the use_random_id class of bug).

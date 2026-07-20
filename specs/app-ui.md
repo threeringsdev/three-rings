@@ -702,3 +702,102 @@ device's Chrome 145. Codex e2e mutation pass: 10 mutations applied transiently,
 - **Set is a text input, not a picker.** No `list_sets` adapter exists, and
   adding one is a server-fn of its own. `s:mh3,lea` typed as comma-separated
   codes is the honest interim; filed.
+
+### Card detail `/cards/:id` + previews (2026-07-20)
+
+**The multi-face projection fix, widened.** The spec named "the summary/detail
+projections"; the same bare `image_uris->>'normal'` appeared at **six** sites in
+`hosted.rs` (detail printings, `card_summary`, `search`, `collection_view`, and
+two tagged-card reads). Fixing only the two named would have left DFCs
+imageless in the catalog grid and every collection view, so all six took the
+`COALESCE(…, faces->0->'image_uris'->>'normal')` fallback. Measured on the dev
+POC catalog: **128 of 2,976 printings** had NULL top-level `image_uris` with
+`faces` populated, and all 128 resolve after the change; zero previously-working
+rows changed. `catalog.spec.ts`'s "transform layouts legitimately have no image"
+caveat is now obsolete.
+
+The four correlated subqueries additionally gained
+`AND COALESCE(...) IS NOT NULL ORDER BY id LIMIT 1`. That one is **defensive,
+not a fix for anything observed** — an unordered `LIMIT 1` could pick an artless
+printing while a sibling has art, but zero cards in the POC catalog currently
+have that mix. It matters at full-catalog scale (Scryfall carries artless
+placeholder rows).
+
+**`/cards/:id` needed `SsrMode::Async`, and the test that "proved" SSR couldn't
+tell.** The route inherited Leptos's default out-of-order streaming, which ships
+the whole `<Transition>` as a `<template>` plus a hoisting script while the
+in-place markup stays the skeleton. A `request.get(...).toContain(...)`
+assertion passes either way, because the template content *is* in the body — so
+the original SSR test was vacuous. Confirmed by counting unclosed `<template>`
+tags before the content (1 before, 0 after). The test now asserts the skeleton's
+`aria-label` is **absent**, which is what actually distinguishes the two.
+
+**Previews are lazily mounted, and that was a correctness fix, not an
+optimization.** Rendering both preview bodies up-front put every card's name and
+art into the DOM two extra times per row. That broke three *pre-existing*
+catalog tests: `getByText("Lightning Bolt").first()` began resolving to a hidden
+copy inside a closed popover. Both bodies now mount on the interaction that
+reveals them (latched, so they stay mounted after) — the sheet keys on its own
+`sheet_seen` latch rather than `sheet_open`, because gating on the live signal
+empties the panel on the same tick its 300 ms slide-out begins.
+
+**Grid tiles deliberately opt out of the hover preview** (`hover=false`) — a
+deviation from the spec's "any row/tile". A tile *is* the card art, so a hover
+card there is a smaller copy of what you are already looking at. The touch sheet
+stays on everywhere, since a tap still wants an alternative to navigating.
+
+**`hover_card` gained a `disabled` prop** (vendored-component deviation, bench
+section in the same commit). Touch browsers fire a synthetic `mouseenter` on
+tap, so without it a tap opened the sheet *and* the hover card. Two subtleties
+found by review: the disable must **cancel the pending timer**, not just clear
+`open` (an already-scheduled open fires 150 ms later and undoes it), and the
+timer callback re-checks `disabled` on fire because the flag can flip mid-delay
+— which is precisely the hydration window in `CardPreview`, where the pointer
+type resolves in an Effect after listeners are attached.
+
+**Mutation pass: 5 mutations, 5 kills — but two only after strengthening the
+tests.** Two assertions were vacuous and survived their mutation:
+
+- *Removing `disabled=coarse` did not fail the touch test.* The test tapped, and
+  the sheet's backdrop steals the pointer — the resulting `mouseleave` cancels
+  the pending hover open, so the hover card stayed shut for an unrelated reason.
+  The scenario `disabled` actually guards is a coarse pointer **travelling over**
+  a row without tapping (scrolling a list), where nothing would dismiss the card
+  afterwards. Rewritten to hover without clicking; it now kills.
+- *`toBeVisible()` on the sheet proved nothing.* `SheetContent` slides via a
+  transform and stays in the layout when closed, so a **closed** sheet is
+  "visible" to Playwright too. All sheet assertions moved to
+  `data-state=open|closed`.
+
+**Verification.** Full three-browser tier 148/148 (chromium + firefox + webkit)
+— run at the end of this task under the revised policy, not at a stage boundary.
+Android dev-webview: a new `end2end/android-card-detail-check.mjs` drives the
+real WebView over CDP, 11/11, and is the only place `(pointer: coarse)` is
+decided by an actual device rather than Playwright emulation. `bench-check`
+CLEAN (extended with the `disabled` assertions). Hydration CLEAN on the detail
+page, the multi-face page, and the malformed-id page. Merge gate green, 8/8.
+
+**Disputed / deferred:**
+
+- **Review (medium): `PreviewBody`'s "N owned" badge is unreachable.** Correct,
+  and it turned out to be a **pre-existing** hole rather than one this task
+  introduced: `HostedBackend::search` selects no `owned` column at all, so
+  `CardSummary::owned` is `None` on every search hit and `CardTile`'s identical
+  badge has never rendered either. Kept the branch rather than deleting it (it
+  mirrors the existing tile and goes live when the projection is fixed) and
+  filed the projection as its own task. It under-reports rather than
+  misinforming. This also forced the authed e2e to locate seeded holdings by
+  walking `t:creature` detail pages instead of filtering on `owned`.
+- **Review (low): `coarse` is sampled once, per card.** No `MediaQueryList`
+  change listener, and one signal + one `match_media` per `CardPreview` (~60 on
+  a catalog page) for what is a global fact. No correctness impact short of a
+  convertible flipping pointer modes mid-session; a shared context is the right
+  shape and is deferred rather than bolted on here.
+- **Codex adversarial review did not run.** The loop's step-2 Codex pass is
+  driven by slash commands marked `disable-model-invocation`, and the
+  `codex-rescue` subagent is a one-shot forwarder that returns before its Codex
+  job finishes — so an autonomous run cannot retrieve the result. The job was
+  dispatched (`task-mrt56mi7-6w478m`) and is retrievable by a human via
+  `/codex:status`. An independent adversarial review was run in its place and
+  its findings are what this section records. **The loop's step 2 does not work
+  unattended as written** — filed against ui-work-loop.

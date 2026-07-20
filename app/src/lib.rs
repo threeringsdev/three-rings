@@ -115,7 +115,17 @@ pub fn App() -> impl IntoView {
         <Route path=StaticSegment("") view=shell::RootRedirect ssr=SsrMode::Async />
         <ParentRoute path=StaticSegment("") view=shell::AppShell>
             <Route path=StaticSegment("catalog") view=catalog::CatalogPage />
-            <Route path=(StaticSegment("cards"), ParamSegment("id")) view=cards::CardDetailPage />
+            // `Async`, not the default out-of-order streaming: this page is
+            // public and shareable, so the detail has to be in the markup a
+            // crawler or `curl` receives. Under OutOfOrder the whole
+            // Transition ships as a <template> + hoisting script and the
+            // in-place HTML is the skeleton (verified with curl during the
+            // card-detail task).
+            <Route
+                path=(StaticSegment("cards"), ParamSegment("id"))
+                view=cards::CardDetailPage
+                ssr=SsrMode::Async
+            />
             <ParentRoute path=StaticSegment("my") view=shell::RequireAuth>
                 <Route path=StaticSegment("") view=shell::MyCardsPage ssr=SsrMode::Async />
                 <Route

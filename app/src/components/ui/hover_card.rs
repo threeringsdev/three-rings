@@ -55,11 +55,19 @@ pub fn HoverCard(
     let anchor_name = format!("--hc-anchor-{id}");
     let content_id = format!("hc-content-{id}");
     let open = RwSignal::new(false);
+    let timer = HoverTimer::new();
 
-    // Becoming disabled while open must take the card down, otherwise a card
-    // opened just before the pointer type flipped would stick.
+    // Becoming disabled must take the card down *and* cancel any pending open.
+    // Cancelling is the load-bearing half: a `mouseenter` that landed while
+    // still enabled has already scheduled `open.set(true)` 150 ms out, and
+    // clearing `open` here would be a no-op that the timer then undoes —
+    // leaving a card open while disabled. That race is exactly the hydration
+    // window in `cards::CardPreview`, where the pointer type resolves in an
+    // Effect after listeners are already attached.
+    let disable_timer = timer;
     Effect::new(move |_| {
         if disabled.get() {
+            disable_timer.cancel();
             open.set(false);
         }
     });
@@ -84,7 +92,7 @@ pub fn HoverCard(
         anchor_name: anchor_name.clone(),
         content_id: content_id.clone(),
         open,
-        timer: HoverTimer::new(),
+        timer,
         disabled,
     };
 
@@ -181,7 +189,14 @@ pub fn HoverCardTrigger(
     // the value would be stale on exactly the devices this guards.
     let show = move || {
         if !disabled.get() {
-            timer.schedule(150, move || open.set(true));
+            // Re-checked when the timer fires, not only when it is scheduled:
+            // `disabled` can flip during the 150 ms intent delay, and the
+            // cancel in HoverCard's Effect races an already-queued callback.
+            timer.schedule(150, move || {
+                if !disabled.get_untracked() {
+                    open.set(true);
+                }
+            });
         }
     };
     let hide = move || timer.schedule(150, move || open.set(false));

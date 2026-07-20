@@ -201,7 +201,10 @@ impl CatalogStore for HostedBackend {
             "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, \
                     (SELECT COALESCE(image_uris->>'normal', \
                                      faces->0->'image_uris'->>'normal') FROM printings \
-                     WHERE oracle_id = c.oracle_id LIMIT 1) AS image_uri \
+                     WHERE oracle_id = c.oracle_id \
+                       AND COALESCE(image_uris->>'normal', \
+                                    faces->0->'image_uris'->>'normal') IS NOT NULL \
+                     ORDER BY id LIMIT 1) AS image_uri \
              FROM cards c WHERE c.oracle_id = $1",
         )
         .bind(oracle_id)
@@ -247,7 +250,10 @@ impl CatalogStore for HostedBackend {
             "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, \
              (SELECT COALESCE(image_uris->>'normal', \
                               faces->0->'image_uris'->>'normal') FROM printings \
-              WHERE oracle_id = c.oracle_id LIMIT 1) AS image_uri \
+              WHERE oracle_id = c.oracle_id \
+                AND COALESCE(image_uris->>'normal', \
+                             faces->0->'image_uris'->>'normal') IS NOT NULL \
+              ORDER BY id LIMIT 1) AS image_uri \
              FROM cards c WHERE true",
         );
         crate::search::sql::apply(&mut qb, &terms);
@@ -1287,7 +1293,10 @@ impl CollectionStore for HostedBackend {
             "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, c.color_identity, \
                     (SELECT COALESCE(image_uris->>'normal', \
                                      faces->0->'image_uris'->>'normal') FROM printings \
-                     WHERE oracle_id = c.oracle_id LIMIT 1) AS image_uri \
+                     WHERE oracle_id = c.oracle_id \
+                       AND COALESCE(image_uris->>'normal', \
+                                    faces->0->'image_uris'->>'normal') IS NOT NULL \
+                     ORDER BY id LIMIT 1) AS image_uri \
              FROM card_tags ct JOIN cards c ON c.oracle_id = ct.oracle_id \
              WHERE ct.collection_id = $1 AND ct.tag_id = $2 ORDER BY c.name",
         )
@@ -1307,7 +1316,10 @@ impl CollectionStore for HostedBackend {
             "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, c.color_identity, \
                     (SELECT COALESCE(image_uris->>'normal', \
                                      faces->0->'image_uris'->>'normal') FROM printings \
-                     WHERE oracle_id = c.oracle_id LIMIT 1) AS image_uri \
+                     WHERE oracle_id = c.oracle_id \
+                       AND COALESCE(image_uris->>'normal', \
+                                    faces->0->'image_uris'->>'normal') IS NOT NULL \
+                     ORDER BY id LIMIT 1) AS image_uri \
              FROM card_tags ct JOIN tags t ON t.id = ct.tag_id \
              JOIN cards c ON c.oracle_id = ct.oracle_id \
              WHERE ct.collection_id = $1 AND t.builtin = 'commander' ORDER BY c.name",
