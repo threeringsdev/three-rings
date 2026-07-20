@@ -141,3 +141,33 @@ Carry-forward items (recorded above, none architecture-threatening):
 - Where native builds get `DATABASE_URL` (desktop inherits the shell env today; Android has no env) — moot once data-access-backends puts the API boundary in front of the database.
 - Neon pooler (PgBouncer transaction mode) vs. sqlx migration locks — revisit with data-access-backends.
 - `leptos_ui` upstream forces `leptos/nightly` — keep vendoring `clx!` (ui-components.md).
+
+### Embedded server: `build_router` must run inside a Tokio runtime (2026-07-20)
+
+The first Tauri **release** artifacts built since this spike (the CI `.dmg` and
+APK, 2026-07-20) both failed to open. One root cause, and it is a property of
+the embedded-server shape this spike established rather than of any UI change:
+
+`app::build_router` calls `leptos_axum::generate_route_list(App)`, which
+**renders the app** to enumerate its routes. That render runs `App`, which
+provides the shared current-user `Resource`, and constructing a Resource spawns
+onto Leptos's global executor — `tokio::spawn` (any_spawner 0.3
+`Executor::init_tokio`). `tokio::spawn` panics without a runtime in scope.
+
+The web target never notices: `server/src/main.rs` is `#[tokio::main]`, so its
+whole body already holds a runtime. The Tauri setup hook does not — it runs on
+the main thread before any `block_on`. Fix is one line: wrap the call in
+`tauri::async_runtime::block_on`, which enters the runtime context (line 181 of
+any_spawner is `tokio::spawn`, needing only a runtime, not a `LocalSet`).
+
+**Why it presented as two different mysteries.** On macOS the setup hook runs
+inside the ObjC `applicationDidFinishLaunching` callback, so the panic could not
+unwind across the FFI boundary and became `panic_cannot_unwind` → `abort()`;
+Finder-launched apps discard stderr, so the crash report showed only `SIGABRT`
+with no message. On Android the identical panic *was* in logcat all along
+(`RustStdoutStderr`). Lesson for future native debugging: **read logcat first**
+— the Android surface reports what the macOS one swallows, even when the macOS
+symptom is the one being investigated.
+
+Anything else added to the setup hook that renders or spawns needs the same
+treatment; the trap is that the sync-looking `build_router` is what renders.

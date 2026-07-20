@@ -475,3 +475,24 @@ the pipeline is complete.
   headroom for hydration batches is trivial; the bulk path doesn't run
   there), build-minutes impact of a second repo-built service. *(resolved
   during execution — stage 3)*
+
+### POC subset ingested into **production** (Neon `main`, 2026-07-20)
+
+The stage-1 POC ran against the Neon **dev** branch only, which left the
+deployed web app *and* every native build showing an empty catalog — the native
+backend targets the hosted production API by design
+(`DEFAULT_WEB_ORIGIN`, app/src/backend/native.rs), so "empty catalog" was the
+correct behavior of a correct app against an unpopulated database. Surfaced
+while testing the first Tauri release artifacts.
+
+Production was migrated (`0007` catalog-ingestion + `0008` search-indexes; it
+had been sitting at `0006`) and the POC ingest run against it:
+**2,637 cards / 2,976 printings / 9,654 rulings**, verified through the live
+API (`/api/catalog_count` → 2637, `/api/catalog/search?q=bolt` → Lightning Bolt
+with art). Both branches now carry the same subset, so native testing exercises
+real data instead of an empty shell.
+
+Worth noting for the eventual full ingest: production had **zero** user rows
+(0 collections, 0 holdings) at the time, so this was additive against an empty
+database. That will not be true next time — the full-load task should assume
+live user data and re-read the hash-gated upsert guarantees before running.

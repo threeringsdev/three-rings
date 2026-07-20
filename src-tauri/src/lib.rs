@@ -140,7 +140,27 @@ pub fn run() {
                     conf
                 };
 
-                let router = app::build_router(conf.leptos_options);
+                // Must run inside the Tokio runtime context, hence the
+                // `block_on` around what is otherwise synchronous code.
+                //
+                // `build_router` calls `generate_route_list(App)`, which *renders*
+                // the app to enumerate its routes. That render runs `App`, which
+                // provides the shared current-user `Resource`, and creating a
+                // Resource spawns onto Leptos's global executor — `tokio::spawn`
+                // (any_spawner 0.3, `Executor::init_tokio`). `tokio::spawn`
+                // panics without a runtime in scope.
+                //
+                // The web server never notices: `server/src/main.rs` is
+                // `#[tokio::main]`, so its whole body already has a runtime. Here
+                // the setup hook runs on the main thread, and on macOS it is
+                // called from inside the ObjC `applicationDidFinishLaunching`
+                // callback — so the panic cannot unwind across the FFI boundary
+                // and aborts the process instead, with the message going to
+                // stderr where a Finder-launched app discards it. That is what
+                // made this a silent "app won't open" on macOS and a
+                // `panic_cannot_unwind` abort on Android, from one root cause.
+                let router =
+                    tauri::async_runtime::block_on(async move { app::build_router(conf.leptos_options) });
 
                 let (port, listener) = tauri::async_runtime::block_on(async {
                     let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
