@@ -9,6 +9,7 @@ pub mod checkbox;
 mod clx;
 pub mod collapsible;
 pub mod command;
+pub mod context_menu;
 pub mod dialog;
 pub mod hover_card;
 pub mod input;

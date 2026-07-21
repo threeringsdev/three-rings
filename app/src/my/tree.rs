@@ -1,4 +1,4 @@
-//! The My-cards sidebar: the read-only collection tree (specs/app-ui.md →
+//! The My-cards sidebar: the collection tree (specs/app-ui.md →
 //! "Collection tree"; design/information-architecture.md → My cards mode).
 //!
 //! The server returns flat rows ([`shared::CollectionTree`]); [`assemble`]
@@ -7,19 +7,26 @@
 //! not a tree node) above a delimiter, **Inbox** first inside the tree,
 //! **Shopping list** below a delimiter at the bottom.
 //!
-//! Management (drag reparent/reorder, context menus) is the next task; this
-//! surface only navigates.
+//! Management (context-menu create/rename/delete with dialog confirms, drag
+//! reparent/reorder) lives in [`super::tree_manage`]; this file wires its
+//! handlers onto the rows.
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_location;
 use shared::{CollectionTreeRow, Id};
 use std::collections::{HashMap, HashSet};
 
+use super::tree_manage::{
+    commit_drop, provide_tree_manage, DragState, DropIntent, MenuTarget, TreeDialogs, TreeManage,
+    TreeMenu,
+};
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::collapsible::{Collapsible, CollapsibleContent, CollapsibleTrigger};
+use crate::components::ui::context_menu::{use_context_menu, ContextMenu};
 use crate::components::ui::item::{Item, ItemSize};
 use crate::components::ui::separator::Separator;
 use crate::components::ui::skeleton::Skeleton;
+use crate::components::ui::sonner::ToastHandle;
 
 /// The one tree fetch per document load, provided at the shell so the desktop
 /// rail and the mobile tab badge share it (mirroring `CurrentUserResource`).
@@ -133,6 +140,7 @@ pub fn assemble(dto: shared::CollectionTree) -> AssembledTree {
 pub fn CollectionTreeNav() -> impl IntoView {
     let tree = expect_context::<CollectionTreeResource>().0;
     let pathname = use_location().pathname;
+    provide_tree_manage();
 
     view! {
         <nav aria-label="Collections">
@@ -152,6 +160,7 @@ pub fn CollectionTreeNav() -> impl IntoView {
                     }
                 })}
             </Suspense>
+            <TreeDialogs />
         </nav>
     }
 }
@@ -167,9 +176,41 @@ fn tree_skeleton() -> impl IntoView {
     }
 }
 
+/// The assembled tree, wrapped in one shared [`ContextMenu`]. The wrapper
+/// lives here — inside the `Suspend` — rather than in `CollectionTreeNav`
+/// so its `Provider` and the rows share one synchronous owner: a `Provider`
+/// placed above the `Suspense` boundary does not reach `use_context_menu()`
+/// calls made inside the resolved async view (whereas `TreeManage`, provided
+/// in the component body, does). `TreeBody` reads the menu handle from *under*
+/// the wrapper.
 fn assembled_view(t: AssembledTree, pathname: Memo<String>) -> impl IntoView {
     view! {
-        <div class="text-sm">
+        <ContextMenu id="tree">
+            <TreeBody t pathname />
+            <TreeMenu />
+        </ContextMenu>
+    }
+}
+
+#[component]
+fn TreeBody(t: AssembledTree, pathname: Memo<String>) -> impl IntoView {
+    let manage = expect_context::<TreeManage>();
+    let menu = use_context_menu();
+
+    view! {
+        // Right-click on the rail background (not a row — rows stop
+        // propagation) → top-level create menu.
+        <div
+            class="text-sm"
+            data-tree-root
+            on:contextmenu=move |ev| {
+                ev.prevent_default();
+                manage.menu_target.set(Some(MenuTarget::Background));
+                if let Some(menu) = menu {
+                    menu.open_at(f64::from(ev.client_x()), f64::from(ev.client_y()));
+                }
+            }
+        >
             <PinnedRow
                 href="/my"
                 icon="🗂"
@@ -226,9 +267,15 @@ fn PinnedRow(
 
 /// One tree row (recursive). Parents wrap their children in a `Collapsible`
 /// whose chevron is the trigger; the name itself is always the navigation
-/// link, so collapsing never blocks reaching a collection.
+/// link, so collapsing never blocks reaching a collection. [`RowShell`]
+/// carries the management wiring (context menu, drag) for both shapes.
 #[component]
 fn TreeRow(node: TreeNode, depth: usize, pathname: Memo<String>) -> AnyView {
+    // Self + every descendant — the drop targets this row may not take
+    // (client-side cycle pre-check) and the delete-confirm's subtree count.
+    let mut forbidden = HashSet::new();
+    subtree_ids(&node, &mut forbidden);
+
     let TreeNode {
         row,
         rolled_up,
@@ -243,11 +290,14 @@ fn TreeRow(node: TreeNode, depth: usize, pathname: Memo<String>) -> AnyView {
         rolled_up,
         pathname,
     );
+    let name = row.summary.name.clone();
+    let is_inbox = row.summary.is_inbox;
+    let parent_id = row.summary.parent_id;
 
     if children.is_empty() {
         view! {
             <li data-tree-row=id.to_string()>
-                <div class="flex items-center" style:padding-left=indent>
+                <RowShell id name is_inbox parent_id forbidden cards=rolled_up indent>
                     <span
                         aria-hidden="true"
                         class="text-muted-foreground w-5 shrink-0 text-center text-[10px]"
@@ -255,7 +305,7 @@ fn TreeRow(node: TreeNode, depth: usize, pathname: Memo<String>) -> AnyView {
                         "•"
                     </span>
                     {link}
-                </div>
+                </RowShell>
             </li>
         }
         .into_any()
@@ -264,7 +314,7 @@ fn TreeRow(node: TreeNode, depth: usize, pathname: Memo<String>) -> AnyView {
         view! {
             <li data-tree-row=id.to_string()>
                 <Collapsible default_open=true content_id=format!("tree-children-{id}")>
-                    <div class="flex items-center" style:padding-left=indent>
+                    <RowShell id name is_inbox parent_id forbidden cards=rolled_up indent>
                         <CollapsibleTrigger
                             class="text-muted-foreground hover:text-foreground w-5 shrink-0 rounded-sm text-center"
                             attr:aria-label=toggle_label
@@ -277,7 +327,7 @@ fn TreeRow(node: TreeNode, depth: usize, pathname: Memo<String>) -> AnyView {
                             </span>
                         </CollapsibleTrigger>
                         {link}
-                    </div>
+                    </RowShell>
                     <CollapsibleContent>
                         <ul class="space-y-0.5">
                             {children
@@ -291,6 +341,173 @@ fn TreeRow(node: TreeNode, depth: usize, pathname: Memo<String>) -> AnyView {
         }
         .into_any()
     }
+}
+
+/// The row container: indentation plus the management wiring shared by leaf
+/// and parent rows — right-click aims the shared context menu, and the drag
+/// handlers implement reparent (drop into) / reorder (drop on an edge band)
+/// with the drop hint painted via `data-drop-hint`.
+#[component]
+fn RowShell(
+    id: Id,
+    name: String,
+    is_inbox: bool,
+    parent_id: Option<Id>,
+    forbidden: HashSet<Id>,
+    cards: i64,
+    indent: String,
+    children: Children,
+) -> impl IntoView {
+    let manage = expect_context::<TreeManage>();
+    let menu = use_context_menu();
+    let toast = expect_context::<ToastHandle>();
+    let tree = expect_context::<CollectionTreeResource>();
+
+    let descendants = forbidden.len() - 1;
+    let hint = move || {
+        manage
+            .drop_hint
+            .get()
+            .filter(|(h, _)| *h == id)
+            .map(|(_, i)| i.as_str())
+    };
+
+    view! {
+        // `data-tree-row-head` marks *this* row's own clickable/draggable
+        // strip — distinct from a parent `<li>`'s `Collapsible` wrapper, which
+        // also contains descendant heads. Tests and drag both target the head.
+        <div
+            data-tree-row-head=id.to_string()
+            class="data-[drop-hint=into]:bg-accent/60 data-[drop-hint=into]:rounded-md data-[drop-hint=before]:shadow-[inset_0_2px_0_0_var(--color-ring)] data-[drop-hint=after]:shadow-[inset_0_-2px_0_0_var(--color-ring)] flex items-center"
+            style:padding-left=indent
+            draggable=(!is_inbox).then_some("true")
+            data-drop-hint=hint
+            on:contextmenu=move |ev| {
+                ev.prevent_default();
+                ev.stop_propagation();
+                manage
+                    .menu_target
+                    .set(
+                        Some(MenuTarget::Row {
+                            id,
+                            name: name.clone(),
+                            is_inbox,
+                            descendants,
+                            cards,
+                        }),
+                    );
+                if let Some(menu) = menu {
+                    menu.open_at(f64::from(ev.client_x()), f64::from(ev.client_y()));
+                }
+            }
+            on:dragstart=move |ev| {
+                if is_inbox {
+                    // The Inbox is pinned and unreparentable — cancel the
+                    // native link drag its `<a>` would otherwise start.
+                    ev.prevent_default();
+                    return;
+                }
+                begin_drag(&ev, id);
+                manage
+                    .drag
+                    .set(
+                        Some(DragState {
+                            id,
+                            parent_id,
+                            forbidden: forbidden.clone(),
+                        }),
+                    );
+            }
+            on:dragover=move |ev| {
+                let Some(drag) = manage.drag.get_untracked() else {
+                    return;
+                };
+                if drag.forbidden.contains(&id) {
+                    return;
+                }
+                let Some(intent) = drop_intent(&ev, is_inbox) else {
+                    return;
+                };
+                ev.prevent_default();
+                if manage.drop_hint.get_untracked() != Some((id, intent)) {
+                    manage.drop_hint.set(Some((id, intent)));
+                }
+            }
+            on:drop=move |ev| {
+                ev.prevent_default();
+                manage.drop_hint.set(None);
+                let Some(drag) = manage.drag.get_untracked() else {
+                    return;
+                };
+                manage.drag.set(None);
+                if drag.forbidden.contains(&id) {
+                    return;
+                }
+                let Some(intent) = drop_intent(&ev, is_inbox) else {
+                    return;
+                };
+                commit_drop(tree, toast, drag, id, intent);
+            }
+            on:dragend=move |_| {
+                manage.drag.set(None);
+                manage.drop_hint.set(None);
+            }
+        >
+            {children()}
+        </div>
+    }
+}
+
+/// Collect a node's id plus every descendant's.
+fn subtree_ids(node: &TreeNode, out: &mut HashSet<Id>) {
+    out.insert(node.row.summary.id);
+    for c in &node.children {
+        subtree_ids(c, out);
+    }
+}
+
+/// Mark the drag for the browser: Firefox won't start a drag without
+/// `setData`, and "move" is the honest effect. Hydrate-only (the
+/// `DataTransfer` APIs aren't in the SSR build's web-sys feature set).
+#[cfg(feature = "hydrate")]
+fn begin_drag(ev: &leptos::web_sys::DragEvent, id: Id) {
+    if let Some(dt) = ev.data_transfer() {
+        dt.set_effect_allowed("move");
+        let _ = dt.set_data("text/plain", &id.to_string());
+    }
+}
+
+#[cfg(not(feature = "hydrate"))]
+fn begin_drag(_ev: &leptos::web_sys::DragEvent, _id: Id) {}
+
+/// Where on the row this drag sits: the top/bottom quarter bands mean
+/// reorder (before/after among siblings), the middle means reparent into.
+/// The Inbox only ever accepts `Into` — it is pinned first client-side, so
+/// ordering relative to it is meaningless. Hydrate-only (needs rect math).
+#[cfg(feature = "hydrate")]
+fn drop_intent(ev: &leptos::web_sys::DragEvent, is_inbox: bool) -> Option<DropIntent> {
+    use leptos::wasm_bindgen::JsCast;
+    let el = ev
+        .current_target()?
+        .dyn_into::<leptos::web_sys::HtmlElement>()
+        .ok()?;
+    let rect = el.get_bounding_client_rect();
+    let y = f64::from(ev.client_y()) - rect.top();
+    let h = rect.height().max(1.0);
+    Some(if is_inbox {
+        DropIntent::Into
+    } else if y < h * 0.25 {
+        DropIntent::Before
+    } else if y > h * 0.75 {
+        DropIntent::After
+    } else {
+        DropIntent::Into
+    })
+}
+
+#[cfg(not(feature = "hydrate"))]
+fn drop_intent(_ev: &leptos::web_sys::DragEvent, _is_inbox: bool) -> Option<DropIntent> {
+    None
 }
 
 /// The navigation link + count badge shared by leaf and parent rows.
