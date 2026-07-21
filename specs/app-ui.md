@@ -1106,3 +1106,113 @@ next task.
   the rows cannot be confidently attributed to this task rather than to
   `seed-dev-data.sh`, and deleting shared dev-branch rows on a guess is worse
   than leaving two spare cards in a test user's Inbox.
+
+### Collection tree, management (2026-07-20)
+
+`app/src/my/tree_manage.rs` (the shared context menu, three confirm dialogs,
+and the drag commit layer) plus the drag/menu wiring on the rows in
+`app/src/my/tree.rs`; the newly vendored `context_menu`; and five thin
+server-fn adapters in `app/src/lib.rs` (create/rename/delete/reparent/reorder).
+The backend trait already had every method — this task is entirely UI + thin
+adapters. Stage 3's second task; completes the collection-tree gap component.
+
+- **`drag_and_drop` (registry) evaluated and rejected; the drag layer is
+  custom.** The registry primitive reorders by mutating the live DOM during
+  `dragover` (`insert_before` on real nodes) — under a hydrated Leptos view
+  those nodes belong to the reactive graph, so the next signal update renders
+  against a DOM Leptos no longer owns. It is also flat-list-only (Y-sort within
+  one container; no drop-*onto* for reparent) and reports nothing back. Ours is
+  signal-driven HTML5 DnD on the row heads: `dragstart` stamps a `DragState`
+  (the node, its parent, and its forbidden-target set), `dragover` classifies
+  the pointer's Y-band into `Before`/`Into`/`After` and paints a `data-drop-hint`,
+  and `drop` calls a **pure** `plan_drop` that returns the writes to make. The
+  fractional-index math is unit-tested in isolation (9 cases) because it is the
+  part most prone to off-by-one; the server returns siblings `ORDER BY position,
+  name`, so the neighbor lookup can trust document order.
+
+- **The Inbox never drags and only accepts `Into`.** It is pinned first
+  client-side, so ordering relative to it is meaningless; `drop_intent` collapses
+  its bands to `Into`, and its `dragstart` is cancelled (its row is an `<a>`, so
+  the native link-drag had to be suppressed explicitly).
+
+- **Cycle prevention is client-first, server-backstopped.** The dragged node's
+  `forbidden` set (itself + every descendant, from `subtree_ids`) makes its own
+  subtree undroppable in the UI — no request is even sent. The unchanged
+  `reparent_collection` 409 is the backstop for anything that bypasses the
+  client. The e2e pins *both*: it asserts the drag sends **no** reparent request
+  (the client refusal) *and* that a direct API cycle returns 409 — because
+  asserting only the end-state can't tell "client refused" from "client sent,
+  server rejected" (both leave the tree unchanged). That distinction was a Codex
+  mutation-pass finding; without the no-request assertion, dropping `subtree_ids`'
+  recursion survived.
+
+- **`context_menu` rewired to `popover="manual"` after `"auto"` failed the
+  right-click.** The obvious port used `popover="auto"` (top layer + light
+  dismiss + ESC for free). It broke: a right-click's own trailing pointerup is
+  read as an outside interaction and dismisses the auto popover the instant it
+  opens — engine-dependent (one of chromium/firefox/webkit kept it, two didn't;
+  observed as a `closed->closed` toggle). The fix is two parts: `popover="manual"`
+  (no automatic dismissal) with our own `window` pointerdown-outside + ESC
+  listeners, and **deferring the open one macrotask** so the opening gesture
+  finishes before the menu enters the top layer. Verified on all three web
+  engines *and* the real Android webview (long-press → `contextmenu`). One shared
+  menu serves all N rows via `use_context_menu()`; the right-click sets a
+  `menu_target` signal that the panel reads.
+
+- **The `ContextMenu` provider had to move inside the `Suspense`.** First wiring
+  put `<ContextMenu>` in `CollectionTreeNav`, wrapping the `<Suspense>`. The rows
+  render inside `Suspend::new(async {…})`, and a context provided by the
+  `<Provider>` component *above* that async boundary does not reach
+  `use_context_menu()` calls *inside* it — the menu's content populated (that is
+  driven by `menu_target`, provided in the component body, which does cross) but
+  never opened (the open signal, from the provider, resolved to `None`). Moving
+  the wrapper into `assembled_view` (a `TreeBody` child reads the handle) puts
+  the provider and the rows in one synchronous owner. `TreeManage` stays provided
+  in `CollectionTreeNav` because dialogs live outside the menu wrapper.
+
+- **Codex review: 4 findings, all resolved.** (1) *high* — the delete confirm
+  reread the live `menu_target` at submit, while create/rename snapshot their
+  subject; a right-click landing elsewhere while the dialog was open would delete
+  the wrong row. Now snapshotted into `delete_req` on open (regression test:
+  open delete for A, dispatch `contextmenu` on B behind the modal backdrop,
+  confirm still deletes A — verified it kills the un-snapshotted mutation). (2)
+  *med* — the deferred open used an uncancelled timeout, so a `close` racing the
+  macrotask could revive a dismissed menu; a generation stamp now invalidates a
+  pending open on `close`/re-open. (3) *high→med* — a cross-parent edge-drop is
+  two writes (reparent, then position) with no combining trait op; on a
+  reparent-ok/reorder-fail the node *did* move parent, so the toast no longer
+  claims "Couldn't move" — it says "Moved, but couldn't set its order." (4) *med*
+  — fractional-index position collisions: real but inherent and unreachable at
+  this scale (integer seed positions; needs ~50 midpoint inserts between one
+  pair). Queued as a follow-up rather than building a rebalancer now.
+
+- **Mutation pass: 12 analyzed, 9 killed outright, 3 gaps — 2 real,
+  strengthened.** (a) bench-check *claimed* outside-click coverage in a comment
+  but only tested ESC; an empty `pointer_outside` survived. Added the actual
+  outside-click assertion (kill-verified). (b) the cycle-guard no-request
+  assertion above. The third "gap" (the menu-visibility test doesn't click
+  Rename) is covered at the suite level — the "Rename edits the name" test
+  exercises that callback end-to-end, so the mutation dies there.
+
+- **Delete-confirm copy counts holdings, not desires.** "This permanently
+  deletes N nested collections and M cards" — M is the rolled-up `present`
+  (holdings). The cascade also drops desires, which are not surfaced in the
+  count; "cards" reads as the meaningful number and the copy already warns it is
+  irreversible. Left as-is.
+
+- **These e2e tests mutate the dev branch and self-clean.** Every test creates
+  uniquely-named `zz-e2e-…` scratch collections via the API and deletes them in a
+  `finally` (delete cascades the subtree, so one delete per created root). Names
+  are worker-index + a per-file counter — no wall-clock — so parallel workers and
+  the three browser projects don't collide. A crashed test can leak a
+  `zz-e2e-…` root; they are harmless and greppable.
+
+- **Verification.** Unit 79 (9 new `plan_drop` cases + the assembly suite);
+  SSR authed curl shows the management markup server-side (`data-tree-root`,
+  `data-tree-row-head`, the `role="menu"` panel); hydration CLEAN anon `/catalog`
+  + `/dev/components` and authed `/my`; bench-check CLEAN with the new
+  context-menu block (open, item-select, ESC, outside-click); **full
+  three-browser tier 223→ (14 new management tests × 3)**; Android webview
+  `android-tree-manage-check.mjs` PASS (open, on-screen positioning, item tap,
+  outside-tap dismiss) on Chrome 145; Codex review + mutation pass both clean
+  after fixes.

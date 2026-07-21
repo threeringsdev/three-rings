@@ -85,8 +85,13 @@ test.describe("signed in", () => {
     );
 
     // Every row's badge is its rollup — the parent rows are the ones that
-    // can get this wrong, so assert all of them.
+    // can get this wrong, so assert all of them. Skip the `zz-e2e-` scratch
+    // collections the management spec creates/deletes in parallel against the
+    // same dev user: `fetchTree` (a live DB read) picks them up, but they may
+    // vanish mid-assertion. They carry zero cards, so they never alter a seed
+    // row's rollup — ignoring them keeps this test isolated from that churn.
     for (const row of dto.collections) {
+      if (row.summary.name.startsWith("zz-e2e-")) continue;
       await expect(rowBadge(page, row.summary.id)).toHaveText(
         String(rollup(dto, row.summary.id)),
       );
@@ -102,13 +107,23 @@ test.describe("signed in", () => {
 
   test("chevron collapses the subtree @fast", async ({ page }) => {
     const dto = await fetchTree(page);
-    const parent = dto.collections.find((r) =>
-      dto.collections.some((c) => c.summary.parent_id === r.summary.id),
+    // Prefer a *seed* nested pair, never a `zz-e2e-` scratch one the
+    // management spec may delete mid-test (see the rollup test's note).
+    const parent = dto.collections.find(
+      (r) =>
+        !r.summary.name.startsWith("zz-e2e-") &&
+        dto.collections.some(
+          (c) =>
+            c.summary.parent_id === r.summary.id &&
+            !c.summary.name.startsWith("zz-e2e-"),
+        ),
     );
     expect(parent, "seed data must include a nested collection").toBeTruthy();
     const parentId = parent!.summary.id;
     const child = dto.collections.find(
-      (c) => c.summary.parent_id === parentId,
+      (c) =>
+        c.summary.parent_id === parentId &&
+        !c.summary.name.startsWith("zz-e2e-"),
     )!;
 
     await page.goto("/my");

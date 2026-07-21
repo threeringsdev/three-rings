@@ -20,6 +20,7 @@ mod card;
 mod checkbox;
 mod collapsible;
 mod command;
+mod context_menu;
 mod dialog;
 mod hover_card;
 mod input;
@@ -131,6 +132,11 @@ const SECTIONS: &[BenchSection] = &[
         id: "command",
         title: "Command",
         demo: command::demo,
+    },
+    BenchSection {
+        id: "context-menu",
+        title: "Context menu",
+        demo: context_menu::demo,
     },
     BenchSection {
         id: "hover-card",

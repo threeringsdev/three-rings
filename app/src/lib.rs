@@ -422,6 +422,130 @@ pub async fn collection_tree() -> Result<shared::CollectionTree, ServerFnError<S
     }
 }
 
+/// Create a binder or deck from the tree's context menu (specs/app-ui.md →
+/// Collection tree, management). **Scalars, not the whole [`shared::NewCollection`]**
+/// — the quick_add convention: the tree's create dialog never sets a format,
+/// so the adapter's wire contract cannot carry one either (`format: None` by
+/// construction; the deck view's format editing is its own task's adapter).
+#[server(prefix = "/api", endpoint = "create_collection")]
+pub async fn create_collection(
+    parent_id: Option<shared::Id>,
+    kind: shared::CollectionKind,
+    name: String,
+) -> Result<shared::CollectionSummary, ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .create_collection(shared::NewCollection {
+                parent_id,
+                kind,
+                name,
+                format: None,
+            })
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (parent_id, kind, name);
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// Rename a collection (tree context menu). The API rejects the Inbox with a
+/// 409 — surfaced, not pre-hidden, so a raw retry can't silently no-op.
+#[server(prefix = "/api", endpoint = "rename_collection")]
+pub async fn rename_collection(
+    id: shared::Id,
+    name: String,
+) -> Result<shared::CollectionSummary, ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .rename_collection(id, shared::Rename { name })
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (id, name);
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// Delete a collection (tree context menu). The DB cascades the whole
+/// subtree — child collections, holdings, desires — which is why the UI
+/// fronts this with a confirm dialog naming those counts.
+#[server(prefix = "/api", endpoint = "delete_collection")]
+pub async fn delete_collection(id: shared::Id) -> Result<(), ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .delete_collection(id)
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = id;
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// Reparent a collection (tree drag). `new_parent_id = None` = top level.
+/// The API is the cycle-guard terminus (409 when the target parent is the
+/// node or one of its descendants) — the client pre-checks only to paint
+/// drop targets, never to decide legality.
+#[server(prefix = "/api", endpoint = "reparent_collection")]
+pub async fn reparent_collection(
+    id: shared::Id,
+    new_parent_id: Option<shared::Id>,
+) -> Result<(), ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .reparent_collection(id, shared::Reparent { new_parent_id })
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (id, new_parent_id);
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// Set a collection's fractional sibling position (tree drag) — the client
+/// computed the midpoint of the neighbors it dropped between.
+#[server(prefix = "/api", endpoint = "reorder_collection")]
+pub async fn reorder_collection(
+    id: shared::Id,
+    position: f64,
+) -> Result<(), ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .reorder_collection(id, shared::Reorder { position })
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (id, position);
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
 /// The session-scoped collection backend for a server fn, one per backend
 /// feature. Collection work — unlike the catalog reads — has no anonymous
 /// degradation, so this 401s rather than falling back.

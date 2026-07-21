@@ -307,6 +307,35 @@ await hcDisTrigger.hover();
 await page.waitForTimeout(400);
 if (await hcDisOpen()) failures.push('disabled hover_card opened on hover');
 
+// context_menu: right-click opens the manual popover at the pointer (the
+// auto-popover light-dismiss race is why it is manual), an item runs its
+// action and closes, ESC and outside-click both close.
+const ctxTarget = page.locator('[data-bench-context-target]');
+const ctxMenu = page.locator('#context-menu-bench-context-menu');
+const ctxOpen = () => ctxMenu.evaluate((el) => el.matches(':popover-open'));
+await ctxTarget.scrollIntoViewIfNeeded();
+await ctxTarget.click({ button: 'right' });
+await page.waitForTimeout(150);
+if (!(await ctxOpen())) failures.push('context_menu did not open on right-click');
+await page.locator('#context-menu-bench-context-menu [role="menuitem"]', { hasText: 'Rename…' }).click();
+await page.waitForTimeout(150);
+if (await ctxOpen()) failures.push('context_menu did not close after an item click');
+if ((await page.locator('[data-bench-context-last]').textContent()) !== 'rename') {
+  failures.push('context_menu item did not run its on_select');
+}
+await ctxTarget.click({ button: 'right' });
+await page.waitForTimeout(150);
+await page.keyboard.press('Escape');
+await page.waitForTimeout(150);
+if (await ctxOpen()) failures.push('context_menu did not close on ESC');
+// outside-click dismiss (the custom pointerdown light-dismiss — distinct code
+// path from ESC; an empty `pointer_outside` would survive an ESC-only check).
+await ctxTarget.click({ button: 'right' });
+await page.waitForTimeout(150);
+await page.mouse.click(3, 3);
+await page.waitForTimeout(150);
+if (await ctxOpen()) failures.push('context_menu did not close on outside click');
+
 // ID stability: two fresh SSR renders must serve identical overlay id wiring
 // (deterministic caller IDs — the use_random_id class of bug).
 const raw2 = await (await page.request.get(url)).text();
