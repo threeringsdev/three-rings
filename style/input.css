@@ -26,6 +26,22 @@
     --accent-foreground: oklch(0.205 0 0);
     --destructive: oklch(0.577 0.245 27.325);
     --destructive-foreground: oklch(0.985 0 0);
+    /* success/warning bases darkened from upstream's 0.65 L: white text on
+       the upstream values is 2.9-3.3:1 (AA needs 4.5), and the hover:bg-*/90
+       alpha state composites over the white page, so the base carries enough
+       headroom for the hover to stay >= 4.5 too */
+    --success: oklch(0.48 0.16 145);
+    --success-foreground: oklch(0.985 0 0);
+    --success-light: oklch(0.95 0.08 145);
+    --success-dark: oklch(0.35 0.16 145);
+    --warning: oklch(0.48 0.16 55);
+    --warning-foreground: oklch(0.985 0 0);
+    --warning-light: oklch(0.95 0.08 55);
+    --warning-dark: oklch(0.35 0.16 55);
+    --info: oklch(0.55 0.18 250);
+    --info-foreground: oklch(0.985 0 0);
+    --info-light: oklch(0.95 0.08 250);
+    --info-dark: oklch(0.35 0.18 250);
     --border: oklch(0.922 0 0);
     --input: oklch(0.922 0 0);
     --ring: oklch(0.708 0 0);
@@ -48,6 +64,22 @@
     --accent-foreground: oklch(0.985 0 0);
     --destructive: oklch(0.704 0.191 22.216);
     --destructive-foreground: oklch(0.205 0 0);
+    --success: oklch(0.65 0.16 145);
+    --success-foreground: oklch(0.205 0 0);
+    --success-light: oklch(0.25 0.08 145);
+    --success-dark: oklch(0.75 0.16 145);
+    /* 0.67 L (upstream 0.65): the hover:bg-warning/90 composite over the
+       dark page drops the upstream value to 4.45:1 against the dark text */
+    --warning: oklch(0.67 0.16 55);
+    --warning-foreground: oklch(0.205 0 0);
+    --warning-light: oklch(0.25 0.08 55);
+    --warning-dark: oklch(0.75 0.16 55);
+    --info: oklch(0.65 0.18 250);
+    /* dark text like its success/warning siblings — upstream's white text
+       on the 0.65 L info base is 3.1:1, under WCAG AA's 4.5:1 */
+    --info-foreground: oklch(0.205 0 0);
+    --info-light: oklch(0.25 0.08 250);
+    --info-dark: oklch(0.75 0.18 250);
     --border: oklch(1 0 0 / 10%);
     --input: oklch(1 0 0 / 15%);
     --ring: oklch(0.556 0 0);
@@ -73,6 +105,18 @@
     --color-accent-foreground: var(--accent-foreground);
     --color-destructive: var(--destructive);
     --color-destructive-foreground: var(--destructive-foreground);
+    --color-success: var(--success);
+    --color-success-foreground: var(--success-foreground);
+    --color-success-light: var(--success-light);
+    --color-success-dark: var(--success-dark);
+    --color-warning: var(--warning);
+    --color-warning-foreground: var(--warning-foreground);
+    --color-warning-light: var(--warning-light);
+    --color-warning-dark: var(--warning-dark);
+    --color-info: var(--info);
+    --color-info-foreground: var(--info-foreground);
+    --color-info-light: var(--info-light);
+    --color-info-dark: var(--info-dark);
     --color-border: var(--border);
     --color-input: var(--input);
     --color-ring: var(--ring);

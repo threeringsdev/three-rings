@@ -13,6 +13,9 @@ pub fn demo() -> AnyView {
             <Badge variant=BadgeVariant::Muted>"Muted"</Badge>
             <Badge variant=BadgeVariant::Destructive>"2 to buy"</Badge>
             <Badge variant=BadgeVariant::Outline>"Outline"</Badge>
+            <Badge variant=BadgeVariant::Success>"Success"</Badge>
+            <Badge variant=BadgeVariant::Warning>"Warning"</Badge>
+            <Badge variant=BadgeVariant::Info>"Info"</Badge>
             <Badge size=BadgeSize::Sm variant=BadgeVariant::Muted>"×1"</Badge>
             <Badge size=BadgeSize::Lg>"6 missing"</Badge>
         </div>

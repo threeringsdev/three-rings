@@ -15,6 +15,9 @@ pub fn demo() -> AnyView {
                 <Button variant=ButtonVariant::Accent>"Accent"</Button>
                 <Button variant=ButtonVariant::Destructive>"Destructive"</Button>
                 <Button variant=ButtonVariant::Link>"Link"</Button>
+                <Button variant=ButtonVariant::Warning>"Warning"</Button>
+                <Button variant=ButtonVariant::Success>"Success"</Button>
+                <Button variant=ButtonVariant::Bordered>"Bordered"</Button>
             </div>
             <div class="flex flex-wrap items-center gap-2">
                 <Button size=ButtonSize::Lg>"Large"</Button>

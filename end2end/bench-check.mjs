@@ -110,6 +110,61 @@ if ((await cb.getAttribute('data-state')) === cbState) {
   failures.push('label click did not toggle its checkbox (for/id association)');
 }
 
+// Re-added token variants (button Warning/Success/Bordered, badge
+// Success/Warning/Info): an undefined theme token generates NO utility CSS,
+// so the element silently falls back to a transparent background — assert
+// each resolves a real color and the families stay distinct.
+const TRANSPARENT = 'rgba(0, 0, 0, 0)';
+const variantBg = {};
+for (const [component, name] of [
+  ['Button', 'Warning'],
+  ['Button', 'Success'],
+  ['Badge', 'Success'],
+  ['Badge', 'Warning'],
+  ['Badge', 'Info'],
+]) {
+  const el = page.locator(`[data-name="${component}"]`, { hasText: name }).first();
+  const { bg, fg, inherited } = await el.evaluate((n) => {
+    const s = getComputedStyle(n);
+    return {
+      bg: s.backgroundColor,
+      fg: s.color,
+      inherited: getComputedStyle(n.parentElement).color,
+    };
+  });
+  if (!bg || bg === TRANSPARENT) {
+    failures.push(`${component} ${name} background did not resolve (token missing?): ${bg}`);
+  }
+  // A missing text token drops the utility and the element just inherits —
+  // the variant's own text color must differ from its container's.
+  if (fg === inherited) {
+    failures.push(`${component} ${name} text color did not resolve (inherited ${fg})`);
+  }
+  variantBg[`${component}:${name}`] = bg;
+}
+if (variantBg['Button:Warning'] === variantBg['Button:Success']) {
+  failures.push('button Warning and Success resolved to the same background');
+}
+const badgeBgs = new Set([
+  variantBg['Badge:Success'],
+  variantBg['Badge:Warning'],
+  variantBg['Badge:Info'],
+]);
+if (badgeBgs.size !== 3) {
+  failures.push('badge Success/Warning/Info backgrounds are not distinct');
+}
+// Bordered is transparent by design; its border must carry the token color.
+// A missing border token falls back to currentcolor, so equality with the
+// text color is the failure signature — not just transparency.
+const bordered = page.locator('[data-name="Button"]', { hasText: 'Bordered' }).first();
+const border = await bordered.evaluate((n) => {
+  const s = getComputedStyle(n);
+  return { width: s.borderTopWidth, color: s.borderTopColor, text: s.color };
+});
+if (border.width === '0px' || border.color === TRANSPARENT || border.color === border.text) {
+  failures.push(`button Bordered border did not resolve: ${JSON.stringify(border)}`);
+}
+
 // collapsible: trigger flips data-state + aria-expanded, and closed content
 // is inert (the grid animation keeps it in the DOM — its links must not be
 // tab-reachable).

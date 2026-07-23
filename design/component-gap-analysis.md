@@ -51,9 +51,13 @@ badge, input, input_group, kbd, separator, checkbox, label, toggle_group,
 breadcrumb, skeleton, and card are in `app/src/components/ui/`. Batch-wide
 deviations (full list per file header): `variants!` hand-expanded to enums +
 match (no `leptos_ui`/`paste`); button `Warning`/`Success`/`Bordered` and
-badge `Success`/`Warning`/`Info` variants dropped — they reference tokens
-`style/input.css` doesn't define, so Tailwind would silently emit no CSS
-(re-add variant + token together); icons inlined (Lucide paths) instead of
+badge `Success`/`Warning`/`Info` variants initially dropped — they reference
+tokens `style/input.css` didn't define, so Tailwind would silently emit no
+CSS — then re-added 2026-07-23 together with the upstream
+`success`/`warning`/`info` token families (base/foreground/light/dark, both
+modes); button `Bordered` deviates from upstream's hardcoded
+`border-zinc-200` to the default token border color (app-ui "Tokens, not
+hex"); icons inlined (Lucide paths) instead of
 the registry icons crate; label's runtime-named peer classes replaced with
 the static `peer-disabled:` pair (Tailwind can't generate CSS for
 runtime-built class names — upstream bug for any Tailwind build);

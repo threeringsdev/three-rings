@@ -1216,3 +1216,60 @@ adapters. Stage 3's second task; completes the collection-tree gap component.
   `android-tree-manage-check.mjs` PASS (open, on-screen positioning, item tap,
   outside-tap dismiss) on Chrome 145; Codex review + mutation pass both clean
   after fixes.
+
+### Status-token variants re-added (2026-07-23)
+
+V1's dropped variants restored: button `Warning`/`Success`/`Bordered`, badge
+`Success`/`Warning`/`Info`, with the full upstream `success`/`warning`/`info`
+token families (base/foreground/light/dark, both modes) from rust-ui
+`style/tailwind.css` @ 43e1e32 in `style/input.css` + `@theme inline`
+mappings, mirrored into the bench theme panel. Bench rows for every new
+variant; bench-check gained a token-variant section asserting computed
+backgrounds resolve (non-emission → transparent is the failure mode),
+text utilities emitted (color ≠ inherited), family distinctness, and the
+Bordered border (width / transparency / currentcolor-fallback equality).
+
+- **Upstream's status colors fail WCAG AA — four value deviations, recorded
+  in input.css comments.** White text on the 0.65 L light bases is 2.9–3.3:1
+  (AA needs 4.5). And the `hover:bg-*/90` idiom alpha-composites over the
+  page background, so light-mode hovers *lighten* — the base must carry
+  headroom for the hover state too. Deviations: light `--success`/`--warning`
+  0.65→0.48 L (base 5.81/6.58, hover-over-white 4.77/5.36); dark `--warning`
+  0.65→0.67 L (upstream hover composite was 4.45); dark `--info-foreground`
+  white→dark text like its siblings (white was 3.10). Plus the class-level
+  deviation: `Bordered` swaps upstream's hardcoded `border-zinc-200` for the
+  token border ("Tokens, not hex"; fixed light zinc reads wrong in dark).
+  Method note: composite in **gamma-encoded sRGB** (what browsers do), then
+  WCAG luminance on the decoded result — Codex's linear-space compositing
+  overestimated the hover drop and *missed* the dark-warning 4.45 failure;
+  the gamma-space numbers were confirmed by Codex's own recompute to four
+  decimals in the final round (verdict CONFIRMED, all enabled pairs ≥ 4.5:1
+  including badge pairs 6.9–9.9 and Bordered text 4.73/7.26).
+- **Codex review, three rounds, 4/4 findings confirmed + fixed:** (1) the
+  base contrast failures above; (2) the probe originally checked only
+  backgrounds — a missing `*-foreground`/`*-dark` mapping silently inherits,
+  so a text-≠-inherited assertion was added; (3) the Bordered check could
+  false-pass on the `currentcolor` fallback when `border-border` fails to
+  emit — border-color-≠-text-color added; (4) round 2 caught the hover
+  composite gap. Known limit, accepted: computed-style assertions catch
+  **non-emission**, not wrong-but-plausible values — value correctness is
+  pinned by the reviewed token list itself.
+- **Mutation pass 4/4 kills**, one per assertion class, each verified
+  against the rebuilt CSS/wasm (`--color-warning` mapping deleted → bg
+  assertion fired; `--color-warning-foreground` deleted → text assertion;
+  `--color-info-light` aliased to success-light → distinctness; `border`
+  dropped from the Bordered arm → width check, full wasm rebuild awaited).
+  Codex enumerated 15 candidate mutations: the executed four cover each
+  distinct assertion code path (the rest are per-token repetitions of the
+  same loop assertions); its two `--color-border` mutations were analyzed
+  statically, not executed — that mapping is app-wide and pre-existing, and
+  round 2 confirmed the currentcolor equality catches its removal.
+- **Verification.** bench-check CLEAN on the final values (and thrice
+  during mutation cycling); hydration CLEAN anon (`/`, `/login`, `/catalog`,
+  `/catalog?q=`) + authed (`/my`, `/catalog`, a card page); SSR curl carries
+  the variant classes and the compiled CSS the utilities; fast tier 76/76;
+  **full three-browser tier 226/226**; Android webview dev-attach:
+  `android-cdp-check.mjs` PASS + a variant drive on `/dev/components`
+  observing the final token oklch values computed on-device (Chrome 145).
+  No app screen uses the variants yet — the polish task's error/empty
+  states are the intended consumers.

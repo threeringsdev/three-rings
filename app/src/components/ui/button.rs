@@ -3,9 +3,10 @@
 //! specs/ui-components.md. Ours now; deviations from upstream:
 //! - `variants!` (leptos_ui, nightly hazard) hand-expanded into plain enums +
 //!   match — same class strings, no `paste`/derive machinery
-//! - `Warning`/`Success`/`Bordered` variants dropped (they reference
-//!   `warning`/`success` tokens style/input.css doesn't define — Tailwind
-//!   would emit no CSS) along with the unused `Mobile`/`Badge` sizes
+//! - unused `Mobile`/`Badge` sizes dropped
+//! - `Bordered` swaps upstream's hardcoded `border-zinc-200` for the default
+//!   token border color (app-ui "Tokens, not hex"; a fixed light zinc reads
+//!   wrong in our dark-default theme)
 //! - `support_href` dropped: this renders a real `<button>`; link-styled
 //!   navigation uses an `<a>` with `ButtonVariant::Link` classes instead
 
@@ -21,6 +22,9 @@ pub enum ButtonVariant {
     Ghost,
     Accent,
     Link,
+    Warning,
+    Success,
+    Bordered,
 }
 
 impl ButtonVariant {
@@ -33,6 +37,9 @@ impl ButtonVariant {
             Self::Ghost => "hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50",
             Self::Accent => "bg-accent text-accent-foreground hover:bg-accent/80",
             Self::Link => "text-primary underline-offset-4 hover:underline",
+            Self::Warning => "bg-warning text-warning-foreground hover:bg-warning/90",
+            Self::Success => "bg-success text-success-foreground hover:bg-success/90",
+            Self::Bordered => "bg-transparent border text-muted-foreground",
         }
     }
 }
