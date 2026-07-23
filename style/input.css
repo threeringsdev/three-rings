@@ -26,11 +26,13 @@
     --accent-foreground: oklch(0.205 0 0);
     --destructive: oklch(0.577 0.245 27.325);
     --destructive-foreground: oklch(0.985 0 0);
-    --success: oklch(0.65 0.16 145);
+    /* success/warning bases darkened from upstream's 0.65 L: white text on
+       the upstream values is 2.9-3.3:1, under WCAG AA's 4.5:1 */
+    --success: oklch(0.52 0.16 145);
     --success-foreground: oklch(0.985 0 0);
     --success-light: oklch(0.95 0.08 145);
     --success-dark: oklch(0.35 0.16 145);
-    --warning: oklch(0.65 0.16 55);
+    --warning: oklch(0.52 0.16 55);
     --warning-foreground: oklch(0.985 0 0);
     --warning-light: oklch(0.95 0.08 55);
     --warning-dark: oklch(0.35 0.16 55);
@@ -69,7 +71,9 @@
     --warning-light: oklch(0.25 0.08 55);
     --warning-dark: oklch(0.75 0.16 55);
     --info: oklch(0.65 0.18 250);
-    --info-foreground: oklch(0.985 0 0);
+    /* dark text like its success/warning siblings — upstream's white text
+       on the 0.65 L info base is 3.1:1, under WCAG AA's 4.5:1 */
+    --info-foreground: oklch(0.205 0 0);
     --info-light: oklch(0.25 0.08 250);
     --info-dark: oklch(0.75 0.18 250);
     --border: oklch(1 0 0 / 10%);
