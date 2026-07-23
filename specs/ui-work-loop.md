@@ -23,8 +23,8 @@ that fixes the platform matrix.
 **Out:** changing the merge gate (validate stays byte-identical to CI); desktop
 macOS in-loop verification (debug Tauri points at the web dev server — it would
 re-test the web path in a native window; release desktop checks remain a manual/
-milestone activity); CI e2e (local-loop concern for now; promoting Playwright
-into CI is a possible follow-up once the suite stabilizes).
+milestone activity); CI e2e (local-loop concern — the possible follow-up of
+promoting Playwright into CI was decided **against** 2026-07-23, see Findings).
 
 ## Design
 
@@ -148,7 +148,10 @@ stay as the probe layer beneath the suite.
 - **Playwright in CI** — once the suite stabilizes, should the fast tier join
   the merge gate (needs a served build + dev-branch DB access in CI, which
   contradicts the no-DB-creds-in-GitHub rule — would need a seeded local PG or
-  a dedicated Neon branch token)? Deferred; revisit at phase end.
+  a dedicated Neon branch token)? *(resolved 2026-07-23 — **no**: Playwright
+  stays a local-loop precondition for `[x]`; the gate stays creds-free. Four
+  grounds + explicit revisit conditions in Findings, "Playwright stays out of
+  the merge gate".)*
 
 ## Findings
 
@@ -307,6 +310,99 @@ fast tier 3/3 and full three-browser tier 7/7 green against the dev server.
   block would fight the long-lived watch and its minutes-long builds);
   single-developer risk accepted, a build-stamp `/health` route noted as a
   possible future hardening.
+
+### Playwright stays out of the merge gate (2026-07-23)
+
+Resolves the "Playwright in CI" open question: **no** — the e2e tiers stay a
+local-loop precondition for `[x]` (full three-browser tier every task, per the
+2026-07-20 revision), and the merge gate stays creds-free and byte-identical
+to the local validate suite. Four grounds, each checked against the current
+suite rather than the OQ's original sketch:
+
+1. **The standing no-Neon-creds-in-GitHub rule.** CLAUDE.md: "No
+   `DATABASE_URL` in GitHub — no CI job talks to Neon." It was reaffirmed
+   2026-07-16 when the ingestion cron chose Render *specifically because* the
+   rule ruled out GitHub Actions (TODO Decisions log). Every variant that
+   runs the *real* suite (authed, data-backed) ends at a Neon credential in a
+   GitHub secret: the dev-branch `DATABASE_URL` directly, or a Neon API key
+   to mint per-run branches — the OQ's "dedicated Neon branch token" is still
+   a Neon credential in GitHub.
+2. **The auth fixture hard-depends on the hosted Neon Auth service.**
+   `playwright.config.ts` gives all three browser projects
+   `dependencies: ["setup"]`, and `auth.setup.ts` signs in through the real
+   `/login`, which proxies to the Neon-hosted Better Auth service
+   (`NEON_AUTH_BASE_URL` — sign-in 500s without it). So the OQ's "seeded local
+   PG" escape hatch cannot run the suite: a CI-local Postgres has no auth
+   service and no Neon-managed `neon_auth."user"` sync, the setup project
+   fails, and every spec fails with it (6 of 7 spec files use the authed
+   storageState). A creds-free tier would mean standing up a bespoke
+   better-auth deployment plus a fake `neon_auth` sync — substantial new
+   infrastructure that then exercises a *different* auth stack than the one
+   that ships.
+3. **Concurrent CI runs race the suite's writes on shared mutable state.**
+   The tests write as the single seeded e2e user (quick-add + undo,
+   tree create/rename/delete/drag-reparent) against the shared dev branch.
+   One push to a PR branch starts *two* runs — the `push` and `pull_request`
+   events land in different concurrency groups (`refs/heads/<branch>` vs
+   `refs/pull/<n>/merge`), so validate.yml's cancel-in-progress does not
+   collapse them — and unrelated branches add more. Interleaved writes to one
+   user's collections are structural flake, not retry-tunable noise. The
+   isolation fix (ephemeral per-run Neon branches) is otherwise technically
+   sound — Neon Auth is provisioned *per branch* (`.env.example` documents the
+   branch-specific auth URLs), so a fresh branch carries its own isolated auth
+   service and data and would exercise the shipped auth stack — but it circles
+   back to ground 1: the rejection is the credential, not feasibility.
+4. **Cost/latency lands on every push of the workflow auto-merge waits on.**
+   Serving a build + installing Playwright browsers + running the tier adds
+   minutes to a gate that runs twice per PR-branch push, in a repo whose
+   runner budget is deliberately frugal (Blacksmith free tier; the artifact
+   cadence is already split by cost). The marginal coverage is small: the
+   loop already makes full-tier green a hard precondition for `[x]` on every
+   task, with Codex mutation passes guarding assertion strength.
+
+One creds-free Playwright shape *is* technically workable (Codex review of
+this decision, accepted): an anonymous-only subset — `--no-deps` (or a
+dedicated project without the setup dependency) skips `auth.setup.ts`, and an
+unauthenticated `fetch_current_user` returns `None` before any upstream auth
+call (app/src/account.rs), so `/`, the `/my`→`/login` guard bounce, `/login`,
+and hydration all serve with no DB or auth credential. **Declined on marginal
+value, not feasibility**: that tier covers only the anonymous shell — no
+search results, no collections, none of the surfaces the suite exists for —
+duplicating the per-task local probes (hydration-check.mjs + SSR curls) while
+paying browser-install + serve minutes twice per PR-branch push. If a CI
+browser check ever becomes wanted, this subset is the creds-free entry point.
+
+What the gate *should* gain instead, creds-free: the queued headless
+release-binary launch assertion (build the release server, assert it binds
+and answers `GET /catalog` — the DB probe is non-fatal by design, so it needs
+no `DATABASE_URL`). On cost grounds that task, not a Playwright tier, is the
+right first CI runtime smoke; it would have caught the 2026-07-20
+crash-on-launch that shipped to `latest`.
+
+**Revisit conditions** (so "no" doesn't quietly rot into dogma): (a) the auth
+stack gains a self-hostable/CI-reachable path, or Neon ships OIDC-federated
+short-lived tokens for Actions (no long-lived secret at rest in GitHub);
+(b) contributors outside the loop start pushing UI changes, so the local
+tiers stop being a reliable invariant; (c) per-run write isolation becomes
+possible without Neon API access. Any of those reopens the question; until
+then it is settled, not deferred.
+
+Residual risk, accepted: a change pushed outside the loop can auto-merge
+unit-green with broken UI. Single-maintainer repo; the loop is the standing
+discipline; the launch-assertion task narrows the worst case (a server that
+won't boot).
+
+Codex adversarial review of this decision (4 findings): (1) high —
+"every variant needs a Neon credential / not Playwright" overstated; the
+anonymous `--no-deps` subset is creds-free-workable → **accepted**, rationale
+amended to decline it on value (above); (2) medium — per-run Neon branches
+mischaracterizable as technically invalid when branchable per-branch auth
+makes them sound → **accepted**, ground 3 now names it policy-not-feasibility;
+(3) low — playwright.config.ts's tier comment still said "stage boundaries",
+stale since the 2026-07-20 every-task revision this decision leans on →
+**accepted**, comment fixed in this diff; (4) low — TODO still `[~]` while
+the texts say resolved → **no change**, that is the loop's mid-task state;
+the `[x]` flip lands in the task's final commit as always.
 
 ### Gate build gets its own target dir (2026-07-23)
 
