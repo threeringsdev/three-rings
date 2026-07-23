@@ -56,7 +56,9 @@ one backend — `hosted` (sqlx against Neon, the authorization terminus) or
 `native` (HTTPS client to the hosted API, no sqlx). `hydrate` is the wasm client.
 
 cargo-leptos config lives in `Cargo.toml` (`[[workspace.metadata.leptos]]`):
-name `app`, `site-root = target/site`, `site-pkg-dir = pkg`,
+name `app`, `site-root = CARGO_TARGET_DIR/site` (the marker resolves to
+`target/site` by default; the merge gate sets `CARGO_TARGET_DIR=target/gate` to
+isolate its release build), `site-pkg-dir = pkg`,
 `tailwind-input-file = style/input.css`, `site-addr = 127.0.0.1:3000`,
 `reload-port = 3001`.
 
@@ -120,8 +122,17 @@ cargo clippy -p app --features native --all-targets -- -D warnings          # na
 cargo clippy -p app --features hosted,component-bench --all-targets -- -D warnings          # bench code, hosted server half
 cargo clippy -p app --features hydrate,component-bench --target wasm32-unknown-unknown -- -D warnings  # bench code, wasm half
 cargo test --workspace --exclude frontend
-cargo leptos build --release                                            # full Tailwind + wasm pipeline
+CARGO_TARGET_DIR=target/gate cargo leptos build --release               # full Tailwind + wasm pipeline; own target dir (below)
 ```
+
+The release build carries **its own target dir** (`CARGO_TARGET_DIR=target/gate`):
+`site-root` is the `CARGO_TARGET_DIR/site` marker in `Cargo.toml`, so the gate's
+site output lands in `target/gate/site` instead of `target/site` — the directory a
+concurrently-running `cargo leptos watch` serves on :3000. Sharing it (the old
+default) let the release wasm overwrite the debug server's `target/site/pkg`, and
+every page then hydration-panicked until the watch was restarted. CI omits the env
+var (no watch server there; keeping output under `target/` preserves the rust-cache
+paths).
 
 The `app` crate has a three-way feature split (specs/data-access-backends.md):
 `ssr` is the embedded-server substrate; a complete server build must also enable

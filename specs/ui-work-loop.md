@@ -277,14 +277,16 @@ fast tier 3/3 and full three-browser tier 7/7 green against the dev server.
   (Playwright forbids importing one test file from another). The setup test
   carries `@fast` in its title or `--grep @fast` filters the dependency away
   and every authed test fails on a missing state file.
-- **Release-build clobber trap (major)**: the validate gate's
+- **Release-build clobber trap (major)** — **resolved 2026-07-23**: the validate gate's
   `cargo leptos build --release` overwrites `target/site/pkg` under the
   running debug watch — every page then hydration-panics
   (tachys `hydration.rs:163 unreachable`) and forms fall back to native
   POSTs. A source-file `touch` did *not* reliably rebuild the frontend half;
   **restart the watch after any release build**. Recorded in the e2e-suite
   skill; this cost ~30 min of diagnosis and will bite every loop iteration
-  that verifies after gating.
+  that verifies after gating. The gate now runs its release build under a
+  dedicated `CARGO_TARGET_DIR=target/gate`, so it can no longer touch the
+  watch's `target/site/pkg` — see "Gate build gets its own target dir" below.
 - **Codex invocation path**: the review slash commands are human-only
   (`disable-model-invocation: true` in the plugin), so autonomous loop runs
   route reviews through the `codex-rescue` agent with a review-only prompt —
@@ -305,3 +307,42 @@ fast tier 3/3 and full three-browser tier 7/7 green against the dev server.
   block would fight the long-lived watch and its minutes-long builds);
   single-developer risk accepted, a build-stamp `/health` route noted as a
   possible future hardening.
+
+### Gate build gets its own target dir (2026-07-23)
+
+Fixes the "Release-build clobber trap" structurally instead of by discipline.
+`cargo leptos build` has no `--target-dir` flag, so the isolation rides an env
+var plus a one-line `Cargo.toml` change: `site-root` became the
+`CARGO_TARGET_DIR/site` **marker** that cargo-leptos resolves against the real
+cargo target directory (`config/project.rs` `parse_raw`). Consequences:
+
+- **Default (env unset)** → the marker resolves to `target/site`, byte-for-byte
+  the old behavior. Every non-gate build keeps it because none of them set the
+  var: `cargo leptos watch`, `cargo leptos serve`, the Docker/Render image
+  (`COPY /app/target/site`), and the Tauri `beforeBuildCommand`. Confirmed live —
+  the watch started under the new `Cargo.toml`, wrote `target/site/pkg`, and
+  served :3000 normally.
+- **Merge gate** runs `CARGO_TARGET_DIR=target/gate cargo leptos build
+  --release`. `cargo metadata` honors `CARGO_TARGET_DIR`, so the target dir
+  becomes `target/gate`; site → `target/gate/site`, wasm →
+  `target/gate/front` (front_target_dir defaults to `CARGO_TARGET_DIR/front`),
+  native artifacts → `target/gate/…`. Nothing the gate writes lands in the
+  watch's `target/site/pkg`.
+
+Only the release-build step is isolated; the clippy/test steps keep sharing
+`target/` with the watch (they never write `site-root`, and sharing lets them
+reuse the watch's compiled deps — cargo's per-target lock serializes them
+safely). CI (`validate.yml`) is deliberately left unchanged: no watch server
+runs there, and keeping the build under `target/` preserves the
+`useblacksmith/rust-cache` paths.
+
+**Verified** with a `cargo leptos watch --features component-bench` live on
+:3000 throughout a full gate run (all 8 steps green, macOS host incl.
+`three_rings`): the release build populated `target/gate/site/pkg` (2.1 MB
+release wasm) while the watch's `target/site/pkg` stayed byte-identical (all
+five files' md5 unchanged before/after), the served `/pkg/app.wasm` remained the
+14 MB debug build, and `/login` + `/dev/components` still hydrated **CLEAN with
+no watch restart** — the exact verify-after-gating scenario that used to force
+one. Docs updated in lockstep: the validate skill (+`.agents` mirror),
+CLAUDE.md/AGENTS.md Verify section, and the e2e-suite clobber-trap note (which
+now flags that a *bare* `cargo leptos build --release` still clobbers).
