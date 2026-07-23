@@ -10,6 +10,7 @@ mod clx;
 pub mod collapsible;
 pub mod command;
 pub mod context_menu;
+pub mod count_stepper;
 pub mod dialog;
 pub mod hover_card;
 pub mod input;

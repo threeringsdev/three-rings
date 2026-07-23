@@ -21,6 +21,7 @@ mod checkbox;
 mod collapsible;
 mod command;
 mod context_menu;
+mod count_stepper;
 mod dialog;
 mod hover_card;
 mod input;
@@ -147,6 +148,11 @@ const SECTIONS: &[BenchSection] = &[
         id: "sonner",
         title: "Sonner (toaster)",
         demo: sonner::demo,
+    },
+    BenchSection {
+        id: "count-stepper",
+        title: "Count stepper (custom)",
+        demo: count_stepper::demo,
     },
     BenchSection {
         id: "table",

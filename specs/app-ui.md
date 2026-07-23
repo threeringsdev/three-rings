@@ -214,6 +214,104 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Count stepper (custom gap component) (2026-07-23)
+
+`app/src/components/ui/count_stepper.rs` — custom gap component №2 (the first
+custom one built; collection-tree was the other, across two tasks). Composes
+the vendored `Button` + `Input`; the interaction logic is the work. Bench
+section in `app/src/bench/count_stepper.rs` (a happy-path stepper and a
+failing-save stepper exercising the caller-revert contract).
+
+**Contract.** `value: RwSignal<i32>` is caller-owned; the stepper writes each
+commit into it optimistically and fires `on_commit(StepperCommit { from, to })`
+**after** the write. The caller owns persistence — on failure it sets `value`
+back and toasts (the bench's failing stepper demonstrates this). The stepper
+mounts no `Toaster`; it `expect_context`s one, so a host must provide it.
+
+**One editing session, one commit.** ± steps and typed edits accumulate in a
+`pending`/`text` session shown immediately; the session commits **once** — on
+blur out of the stepper, or ⏎. ⎋ cancels. This is the "commit-on-blur" the
+collection-view spec wants, not per-keystroke writes.
+
+**Three engine/lifecycle traps hit while building:**
+- *The blur-commit must be deferred.* The display⇄edit element swap unmounts a
+  *focused* node, which fires a `focusout` with no `relatedTarget` — read
+  synchronously that's indistinguishable from focus leaving the stepper, so an
+  immediate commit closes edit mode the instant a click opens it. Fix: a
+  `focusout` that looks like an exit *schedules* the commit (0ms macrotask);
+  it commits only if focus genuinely ended up outside. Removing the defer
+  breaks click-to-type entirely — mutation-verified (the input never stays
+  open; the "commits on Enter" test fails).
+- *WebKit doesn't focus a `<button>` on click.* The ± buttons `preventDefault`
+  their `pointerdown` (no focus steal) and, when nothing inside holds focus
+  yet, programmatically focus the count element so blur-commit has an anchor in
+  every engine. Verified across the full three-browser tier (webkit = the
+  WKWebView proxy) and on the real Android webview.
+- *Built on the vendored `Input`, not a raw `<input>`.* Per the queue note and
+  the `bind:value`-SSR-seed finding: `Input` seeds the `value` *attribute* from
+  the bound signal (PR #43). The stepper's edit field is only ever mounted
+  client-side (never SSR'd, since editing starts false), so the SSR-empty trap
+  doesn't strictly bite here — but using `Input` keeps the seed and the e2e
+  asserts the `value` attribute (not just the property) so a regression to a
+  bare element is caught.
+
+**Codex adversarial review (step 2): 4 of 6 accepted and fixed, 2 addressed in
+e2e.**
+1. (high) The deferred blur callback fires from a raw timer that outlives the
+   reactive owner; if a parent unmounts the row (a list refetch) first,
+   `commit_session` read disposed signals. **Fixed** — guarded with
+   `try_get_untracked` on entry; bail if disposed.
+2. (high) `label` (component-owned) was read *after* `on_commit`; a caller that
+   removes the row synchronously on a committed 0 (the component itself defines
+   0 as deletion) disposes `label` first. **Fixed** — read `label` / build the
+   toast message before `on_commit`, and fire `on_commit` last (after the
+   optimistic write and the toast).
+3. (med) The edit-mode number input carried `min` but not `max`, so native
+   ArrowUp overshot the upper bound until commit clamped. **Fixed** — `max`
+   added via the attribute spread (`Input`'s `max` prop can't take an `Option`).
+4. (med) The ± buttons announced `aria-disabled` at a bound but stayed live,
+   opening a same-value pending session on click. **Fixed** — `step()` no-ops
+   when the clamp doesn't change the value, so the click is genuinely inert.
+5. (med) bench-check's SSR marker check couldn't catch a dropped `Input` seed.
+   **Addressed** — the e2e/bench now assert the mounted input's `value`
+   *attribute*.
+6. (med) bench-check is Chromium-only and never blurred an active edit input to
+   an external target. **Addressed** — the Playwright spec adds a
+   blur-to-external-target commit case and runs the **full three-browser tier**
+   (webkit).
+
+**Codex e2e mutation pass (step 5): most assertions solid; two real gaps
+strengthened, one documented.**
+- *Commit cardinality* (items 2, 12): the "commit once" tests recorded only the
+  *last* event, so a duplicate identical `on_commit(3→5)` was undetectable.
+  **Strengthened** — the bench harness exposes a commit *count*
+  (`bench-stepper-count`); the spec + bench-check assert exactly one commit per
+  session (and that Undo is the second). Mutation-verified: duplicating the
+  `on_commit.run` call now fails the count assertion.
+- *Optimistic-first on failed save* (item 17): bench-check checked only the
+  eventual reverted value, which passes even if `value.set(to)` were skipped.
+  **Strengthened** — it now asserts the optimistic value appears *before* the
+  simulated rejection lands.
+- *Min-bound "opens no dead session"* (items 8, 16): **documented, not further
+  instrumented.** A dead `pending = Some(min)` session at the bound is
+  unobservable through commits (it never commits either way, since `to == from`)
+  and has no user-visible effect. The meaningful contract — the click causes no
+  value change and no commit, and the control announces `aria-disabled` — is
+  asserted; distinguishing the harmless dead session would need bench-only
+  session-state instrumentation not worth its weight.
+
+**Platform verification.** Web: hydration CLEAN on `/`, `/login`, `/catalog`,
+`/dev/components` (anon) and `/catalog`, `/my` (authed); bench-check CLEAN with
+the new stepper assertions. Android: dev-attach over CDP, `android-stepper-check.mjs`
+PASS on Chrome 145 (hover-reveal, accumulate+blur commit, undo, click-to-type
+seed, Enter commit). Full three-browser e2e tier green (250/250; one pre-existing
+drag-reorder flake in `collection-tree-manage.spec.ts` passed on the one-retry).
+
+**Deferred / carried forward.** The stepper ships as a standalone bench
+component; wiring it into the `/my/collections/:id` collection view (the real
+HERE-column editor over `set_holding_quantity`) is that task's job — this task
+built and proved the component in isolation, per the queue entry.
+
 ### Catalog page `/catalog` (2026-07-19)
 
 `app/src/catalog.rs` — query bar, results grid/list, view switch, anonymous
