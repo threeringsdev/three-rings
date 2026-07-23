@@ -38,11 +38,21 @@ cargo clippy -p app --features native --all-targets -- -D warnings         # nat
 cargo clippy -p app --features hosted,component-bench --all-targets -- -D warnings
 cargo clippy -p app --features hydrate,component-bench --target wasm32-unknown-unknown -- -D warnings
 cargo test --workspace --exclude frontend                                  # add --exclude three_rings in-container
-cargo leptos build --release
+CARGO_TARGET_DIR=target/gate cargo leptos build --release                  # own target dir — see below
 ```
 
 The two `component-bench` clippy lines are part of the gate: the bench is
 cfg'd out of every release command, so nothing else ever compiles that code.
+
+The release build gets its **own target dir** (`CARGO_TARGET_DIR=target/gate`).
+`site-root` in `Cargo.toml` is the `CARGO_TARGET_DIR/site` marker, so with the env
+set the build writes its site to `target/gate/site` instead of `target/site` — the
+directory a concurrently-running `cargo leptos watch` serves on :3000. Without the
+isolation the release build overwrites `target/site/pkg` with release wasm while
+the debug server keeps serving debug SSR, and every page hydration-panics until the
+watch is restarted (a source touch does not reliably fix it). CI omits the env var:
+there is no watch server there, and keeping the output under `target/` preserves the
+rust-cache paths.
 
 ## Exit-code discipline
 

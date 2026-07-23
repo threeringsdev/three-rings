@@ -85,7 +85,13 @@ bin-profile-release = "server-release"
 lib-package = "frontend"
 
 # The site root folder is where cargo-leptos generate all output. WARNING: all content of this folder will be erased on a rebuild. Use it in your server setup.
-site-root = "target/site"
+# `CARGO_TARGET_DIR/…` is a cargo-leptos marker (config/project.rs) that resolves
+# against the actual cargo target directory, so site-root tracks CARGO_TARGET_DIR:
+# unset it resolves to `target/site` — the default that watch, Docker, and the
+# Tauri build all keep. The merge gate exports CARGO_TARGET_DIR=target/gate so its
+# release build writes to target/gate/site and can't clobber a running watch's
+# target/site/pkg (see specs/ui-work-loop.md Findings).
+site-root = "CARGO_TARGET_DIR/site"
 
 # The site-root relative folder where all compiled output (JS, WASM and CSS) is written
 # Defaults to pkg
