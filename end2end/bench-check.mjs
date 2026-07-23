@@ -358,6 +358,12 @@ await page.waitForTimeout(200);
 if ((await stepLast.textContent()) !== '3 → 5') {
   failures.push(`stepper blur did not commit 3 → 5 (got ${await stepLast.textContent()})`);
 }
+// Commit cardinality: a two-click session must fire on_commit exactly ONCE
+// (a lone `last` caption is overwritten by a duplicate and can't prove this).
+const stepCount = page.locator('[data-testid="bench-stepper-count"]');
+if ((await stepCount.textContent()) !== '1') {
+  failures.push(`stepper committed ${await stepCount.textContent()} times, want exactly 1`);
+}
 const stepToast = page.locator('[data-name="Toast"]', { hasText: 'Lightning Bolt: 3 → 5' });
 if ((await stepToast.count()) === 0) {
   failures.push('stepper commit raised no undo toast');
@@ -458,7 +464,17 @@ if ((await failValue.textContent())?.trim() !== '0') {
   failures.push(`stepper − did not clamp at min 0 (got ${await failValue.textContent()})`);
 }
 await blurActive();
-await page.waitForTimeout(700); // commit, then the simulated 400ms rejection
+// Optimistic-first: the commit applies value.set(to) synchronously, so the
+// count shows 0 the instant the session closes — BEFORE the pretend server
+// rejects ~400ms later. Checking only the eventual 2 would pass even if the
+// optimistic write were skipped (the pending clear falls back to value=2),
+// so this early assertion is the one that proves the optimistic path (Codex
+// mutation pass item 17).
+await page.waitForTimeout(120);
+if ((await failValue.textContent())?.trim() !== '0') {
+  failures.push(`failing save did not apply the optimistic 0 (got ${await failValue.textContent()})`);
+}
+await page.waitForTimeout(600); // let the simulated 400ms rejection land
 if ((await failValue.textContent())?.trim() !== '2') {
   failures.push('failing save did not revert the optimistic count');
 }

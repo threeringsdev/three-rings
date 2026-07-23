@@ -21,12 +21,17 @@ pub fn demo() -> AnyView {
 fn StepperRows() -> impl IntoView {
     let toast = expect_context::<ToastHandle>();
 
-    // Happy path: commits always "succeed"; the caption mirrors the last
-    // commit event so the probe can tell a pending step from a committed one.
+    // Happy path: commits always "succeed". The caption mirrors the last
+    // commit event so the probe can tell a pending step from a committed one;
+    // the count exposes commit *cardinality* so a test can prove a session
+    // commits exactly ONCE (not per click) — a lone `last` caption is
+    // overwritten by duplicates and can't (Codex mutation pass, app-ui Findings).
     let basic = RwSignal::new(3);
     let last = RwSignal::new(String::from("—"));
+    let commits = RwSignal::new(0u32);
     let on_basic = Callback::new(move |c: StepperCommit| {
         last.set(format!("{} → {}", c.from, c.to));
+        commits.update(|n| *n += 1);
     });
 
     // Failing save: the pretend server rejects every commit a beat later —
@@ -53,6 +58,8 @@ fn StepperRows() -> impl IntoView {
                 <span class="text-xs text-muted-foreground">
                     "last commit: "
                     <span data-testid="bench-stepper-last">{move || last.get()}</span>
+                    " · commits: "
+                    <span data-testid="bench-stepper-count">{move || commits.get().to_string()}</span>
                 </span>
             </div>
             <div id="bench-stepper-failing" class="flex items-center gap-4">

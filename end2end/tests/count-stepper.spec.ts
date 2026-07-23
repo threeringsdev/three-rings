@@ -23,6 +23,7 @@ const V = `${basic} [data-testid="count-stepper-value"]`;
 const INC = `${basic} [data-testid="count-stepper-inc"]`;
 const INPUT = `${basic} [data-testid="count-stepper-input"]`;
 const LAST = '[data-testid="bench-stepper-last"]';
+const COUNT = '[data-testid="bench-stepper-count"]';
 
 async function open(page: Page) {
   await page.goto(BENCH);
@@ -61,14 +62,19 @@ test("@fast steps accumulate and commit once on blur, with an undo toast", async
   await expect(page.locator(LAST)).toHaveText("—");
 
   await blurOut(page);
-  // Exactly one commit for the whole session (3 → 5), not one per click.
+  // Exactly one commit for the whole session (3 → 5), not one per click. The
+  // commit *count* is what proves cardinality — a lone last-event caption is
+  // overwritten by a duplicate identical commit and can't (Codex mutation pass).
   await expect(page.locator(LAST)).toHaveText("3 → 5");
+  await expect(page.locator(COUNT)).toHaveText("1");
   const toast = page.locator('[data-name="Toast"]', { hasText: "Lightning Bolt: 3 → 5" });
   await expect(toast).toBeVisible();
 
   await toast.getByRole("button", { name: "Undo" }).click();
   await expect(page.locator(V)).toHaveText("3");
   await expect(page.locator(LAST)).toHaveText("5 → 3");
+  // Undo is itself a commit through the real on_commit channel — the second.
+  await expect(page.locator(COUNT)).toHaveText("2");
 });
 
 test("click-to-type swaps in the seeded Input and commits on Enter", async ({
