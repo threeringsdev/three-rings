@@ -27,10 +27,11 @@ export default defineConfig({
     trace: "on-first-retry",
   },
 
-  // Tiers (specs/ui-work-loop.md): per-task fast tier is
+  // Tiers (specs/ui-work-loop.md): the fast tier is for iterating —
   //   npx playwright test --project=chromium --grep @fast
-  // stage boundaries / overlay changes run the full three-browser tier
-  // (webkit is the WKWebView stand-in — desktop is untested in-loop).
+  // The full three-browser tier runs at the end of EVERY task (revised
+  // 2026-07-20; full-tier green is a precondition for [x]) — webkit is the
+  // WKWebView stand-in, since desktop is untested in-loop.
   projects: [
     { name: "setup", testMatch: /auth\.setup\.ts/ },
     {
