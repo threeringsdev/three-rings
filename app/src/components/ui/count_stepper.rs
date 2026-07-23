@@ -98,12 +98,22 @@ pub fn CountStepper(
                 .trim()
                 .parse::<i32>()
                 .unwrap_or_else(|_| value.get_untracked());
-            text.set(clamp(base + delta).to_string());
+            let next = clamp(base + delta);
+            if next != base {
+                text.set(next.to_string());
+            }
         } else {
             let base = pending
                 .get_untracked()
                 .unwrap_or_else(|| value.get_untracked());
-            pending.set(Some(clamp(base + delta)));
+            let next = clamp(base + delta);
+            // No dead session at a bound: opening a pending session at the
+            // same value would reveal the ± controls and anchor focus only to
+            // commit nothing. The ± buttons announce `aria-disabled` there, and
+            // this makes the click actually inert to match.
+            if next != base {
+                pending.set(Some(next));
+            }
         }
     };
 
@@ -147,18 +157,32 @@ pub fn CountStepper(
     };
 
     let commit_session = move || {
-        let target = if editing.get_untracked() {
+        // The deferred blur path (below) fires this from a raw timer, which
+        // outlives the reactive owner — so if a parent unmounted the row in the
+        // meantime (a list refetch), the component's signals are disposed. Bail
+        // rather than read them. Everything after the guard is synchronous, so
+        // the owner can't vanish mid-body.
+        let (Some(is_editing), Some(from)) =
+            (editing.try_get_untracked(), value.try_get_untracked())
+        else {
+            return;
+        };
+        let target = if is_editing {
             text.get_untracked().trim().parse::<i32>().ok().map(clamp)
         } else {
             pending.get_untracked()
         };
         pending.set(None);
         editing.set(false);
-        let from = value.get_untracked();
         if let Some(to) = target {
             if to != from {
+                // Read the component-owned `label` and build the toast message
+                // *before* on_commit: a committed 0 is a deletion, and a caller
+                // that removes the row synchronously would dispose `label`, so
+                // reading it afterward would touch disposed state. on_commit
+                // therefore fires last, after the optimistic write and toast.
+                let message = format!("{}: {from} → {to}", label.get_value());
                 value.set(to);
-                on_commit.run(StepperCommit { from, to });
                 let undo = Callback::new(move |()| {
                     // The row may have unmounted since (a refetch re-rendered
                     // the list); a disposed signal makes undo a no-op.
@@ -174,10 +198,11 @@ pub fn CountStepper(
                     }
                 });
                 toast.show(
-                    ToastOptions::message(format!("{}: {from} → {to}", label.get_value()))
+                    ToastOptions::message(message)
                         .kind(ToastKind::Success)
                         .action("Undo", undo),
                 );
+                on_commit.run(StepperCommit { from, to });
             }
         }
     };
@@ -285,6 +310,12 @@ pub fn CountStepper(
                             class="h-6 w-12 min-w-0 px-1 py-0 text-right md:text-sm [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                             node_ref={input_ref}
                             {..}
+                            // Native ArrowUp/Down step *and clamp* on the
+                            // number input; without `max` it overshoots the
+                            // upper bound until the commit clamps (min rides
+                            // the typed prop above; the spread carries max
+                            // because Input's `max` prop can't take an Option).
+                            max=max.map(|m| m.to_string())
                             aria-label=input_aria.clone()
                             data-testid="count-stepper-input"
                         />

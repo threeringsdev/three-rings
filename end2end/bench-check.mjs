@@ -381,6 +381,14 @@ if ((await stepInput.count()) === 0) {
   if ((await stepInput.inputValue()) !== '3') {
     failures.push(`stepper input not seeded with the count (got ${await stepInput.inputValue()})`);
   }
+  // The seed must be the vendored Input's `value` *attribute* path (PR #43),
+  // not merely a bind:value property write — a bare <input bind:value> would
+  // set the property but render no attribute. Asserting the attribute is what
+  // distinguishes "built on Input" from a raw element that re-inherits the
+  // SSR-empty trap the spec calls out.
+  if ((await stepInput.getAttribute('value')) !== '3') {
+    failures.push(`stepper input missing the seeded value attribute (got ${await stepInput.getAttribute('value')})`);
+  }
   await page.keyboard.type('7'); // select-all on entry: typing replaces
   await page.keyboard.press('Enter');
   await page.waitForTimeout(200);
@@ -391,30 +399,41 @@ if ((await stepInput.count()) === 0) {
     failures.push(`stepper typed commit event wrong (got ${await stepLast.textContent()})`);
   }
 }
-// ⎋ cancels the typed session without committing
+// commit a typed session by BLURRING to an external target (not ⏎): the
+// focusout path must commit, not just the Enter path.
+await stepValue.click();
+await page.waitForTimeout(200);
+await page.keyboard.type('4');
+await blurActive();
+await page.waitForTimeout(200);
+if ((await stepValue.textContent())?.trim() !== '4') {
+  failures.push(`stepper blur from edit mode did not commit (got ${await stepValue.textContent()})`);
+}
+if ((await stepLast.textContent()) !== '7 → 4') {
+  failures.push(`stepper edit-blur commit event wrong (got ${await stepLast.textContent()})`);
+}
+// ⎋ cancels the typed session without committing (value stays at 4)
 await stepValue.click();
 await page.waitForTimeout(200);
 await page.keyboard.type('9');
 await page.keyboard.press('Escape');
 await page.waitForTimeout(200);
-if ((await stepValue.textContent())?.trim() !== '7') {
-  failures.push('stepper ⎋ did not cancel the typed session');
+if ((await stepValue.textContent())?.trim() !== '4') {
+  failures.push(`stepper ⎋ did not cancel the typed session (got ${await stepValue.textContent()})`);
 }
-if ((await stepLast.textContent()) !== '3 → 7') {
-  failures.push('stepper ⎋ still committed');
+if ((await stepLast.textContent()) !== '7 → 4') {
+  failures.push('stepper ⎋ still committed (last-commit changed)');
 }
 // keyboard ± on the focused count, clamped at max=9; ⎋ clears pending steps
 await stepValue.evaluate((el) => el.focus());
-await page.keyboard.press('+');
-await page.keyboard.press('+');
-await page.keyboard.press('+'); // 7 → 8 → 9 → clamp
+for (let i = 0; i < 6; i++) await page.keyboard.press('+'); // 4→…→9→clamp
 await page.waitForTimeout(150);
 if ((await stepValue.textContent())?.trim() !== '9') {
   failures.push(`stepper keyboard + did not step/clamp to max (got ${await stepValue.textContent()})`);
 }
 await page.keyboard.press('Escape');
 await page.waitForTimeout(150);
-if ((await stepValue.textContent())?.trim() !== '7') {
+if ((await stepValue.textContent())?.trim() !== '4') {
   failures.push('stepper display-mode ⎋ did not clear pending steps');
 }
 // failing save: min-clamped session commits optimistically, then the caller
