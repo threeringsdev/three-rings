@@ -45,6 +45,7 @@ for (const marker of [
   'data-name="CommandItem"',
   'data-name="HoverCardTrigger"',
   'data-name="Toaster"',
+  'data-name="CountStepper"',
   'data-name="Collapsible"',
   'data-name="Item"',
   'data-name="ItemTitle"',
@@ -321,6 +322,129 @@ await page.locator('[data-name="Toast"] button', { hasText: 'Undo' }).click();
 await page.waitForTimeout(150);
 if ((await page.locator('[data-name="Toast"]').count()) !== 0) {
   failures.push('sonner undo did not dismiss the toast');
+}
+
+// count_stepper (custom gap component): hover-reveal ±, one commit + one undo
+// toast per blur-ended session, click-to-type on the vendored Input, ⎋ cancel
+// in both modes, min/max clamping, and the failing-save revert contract.
+const stepBasic = page.locator('#bench-stepper-basic [data-testid="count-stepper"]');
+const stepValue = page.locator('#bench-stepper-basic [data-testid="count-stepper-value"]');
+const stepInc = page.locator('#bench-stepper-basic [data-testid="count-stepper-inc"]');
+const stepLast = page.locator('[data-testid="bench-stepper-last"]');
+const blurActive = () => page.evaluate(() => {
+  if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+});
+await stepBasic.scrollIntoViewIfNeeded();
+await page.waitForTimeout(250);
+const restOpacity = await stepInc.evaluate((el) => getComputedStyle(el).opacity);
+await stepBasic.hover();
+await page.waitForTimeout(300); // transition-opacity
+const hoverOpacity = await stepInc.evaluate((el) => getComputedStyle(el).opacity);
+if (!(parseFloat(restOpacity) === 0 && parseFloat(hoverOpacity) === 1)) {
+  failures.push(`stepper ± not hover-revealed (rest ${restOpacity}, hover ${hoverOpacity})`);
+}
+// two + clicks show pending immediately but commit nothing until blur
+await stepInc.click();
+await stepInc.click();
+await page.waitForTimeout(150);
+if ((await stepValue.textContent())?.trim() !== '5') {
+  failures.push(`stepper ++ did not show pending 5 (got ${await stepValue.textContent()})`);
+}
+if ((await stepLast.textContent()) !== '—') {
+  failures.push('stepper committed before blur (session should be open)');
+}
+await blurActive();
+await page.waitForTimeout(200);
+if ((await stepLast.textContent()) !== '3 → 5') {
+  failures.push(`stepper blur did not commit 3 → 5 (got ${await stepLast.textContent()})`);
+}
+const stepToast = page.locator('[data-name="Toast"]', { hasText: 'Lightning Bolt: 3 → 5' });
+if ((await stepToast.count()) === 0) {
+  failures.push('stepper commit raised no undo toast');
+} else {
+  await stepToast.locator('button', { hasText: 'Undo' }).click();
+  await page.waitForTimeout(200);
+  if ((await stepValue.textContent())?.trim() !== '3') {
+    failures.push('stepper undo did not restore the old count');
+  }
+  if ((await stepLast.textContent()) !== '5 → 3') {
+    failures.push('stepper undo did not re-commit through on_commit');
+  }
+}
+// click-to-type: the count swaps for the vendored Input, seeded + selected
+await stepValue.click();
+await page.waitForTimeout(200);
+const stepInput = page.locator('#bench-stepper-basic [data-testid="count-stepper-input"]');
+if ((await stepInput.count()) === 0) {
+  failures.push('stepper click-to-type mounted no input');
+} else {
+  if ((await stepInput.inputValue()) !== '3') {
+    failures.push(`stepper input not seeded with the count (got ${await stepInput.inputValue()})`);
+  }
+  await page.keyboard.type('7'); // select-all on entry: typing replaces
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+  if ((await stepValue.textContent())?.trim() !== '7') {
+    failures.push('stepper ⏎ did not commit the typed count');
+  }
+  if ((await stepLast.textContent()) !== '3 → 7') {
+    failures.push(`stepper typed commit event wrong (got ${await stepLast.textContent()})`);
+  }
+}
+// ⎋ cancels the typed session without committing
+await stepValue.click();
+await page.waitForTimeout(200);
+await page.keyboard.type('9');
+await page.keyboard.press('Escape');
+await page.waitForTimeout(200);
+if ((await stepValue.textContent())?.trim() !== '7') {
+  failures.push('stepper ⎋ did not cancel the typed session');
+}
+if ((await stepLast.textContent()) !== '3 → 7') {
+  failures.push('stepper ⎋ still committed');
+}
+// keyboard ± on the focused count, clamped at max=9; ⎋ clears pending steps
+await stepValue.evaluate((el) => el.focus());
+await page.keyboard.press('+');
+await page.keyboard.press('+');
+await page.keyboard.press('+'); // 7 → 8 → 9 → clamp
+await page.waitForTimeout(150);
+if ((await stepValue.textContent())?.trim() !== '9') {
+  failures.push(`stepper keyboard + did not step/clamp to max (got ${await stepValue.textContent()})`);
+}
+await page.keyboard.press('Escape');
+await page.waitForTimeout(150);
+if ((await stepValue.textContent())?.trim() !== '7') {
+  failures.push('stepper display-mode ⎋ did not clear pending steps');
+}
+// failing save: min-clamped session commits optimistically, then the caller
+// reverts (the pretend server rejects 400ms later) and reports the error.
+const failStep = page.locator('#bench-stepper-failing [data-testid="count-stepper"]');
+const failValue = page.locator('#bench-stepper-failing [data-testid="count-stepper-value"]');
+const failDec = page.locator('#bench-stepper-failing [data-testid="count-stepper-dec"]');
+await failStep.scrollIntoViewIfNeeded();
+await failStep.hover();
+await failDec.click();
+await failDec.click(); // 2 → 1 → 0
+await page.waitForTimeout(150);
+// at the min bound the − button reports itself disabled (Playwright refuses
+// to click aria-disabled elements, which is itself the signal working) —
+// keyboard − must clamp rather than go negative
+if ((await failDec.getAttribute('aria-disabled')) !== 'true') {
+  failures.push('stepper − not aria-disabled at min');
+}
+await page.keyboard.press('-');
+await page.waitForTimeout(150);
+if ((await failValue.textContent())?.trim() !== '0') {
+  failures.push(`stepper − did not clamp at min 0 (got ${await failValue.textContent()})`);
+}
+await blurActive();
+await page.waitForTimeout(700); // commit, then the simulated 400ms rejection
+if ((await failValue.textContent())?.trim() !== '2') {
+  failures.push('failing save did not revert the optimistic count');
+}
+if ((await page.locator('[data-name="Toast"]', { hasText: "Couldn't save count" }).count()) === 0) {
+  failures.push('failing save raised no error toast');
 }
 
 // hover_card: hover opens after the intent delay.
