@@ -402,14 +402,42 @@ pub struct TeardownReceipt {
 }
 
 /// A row of the virtual "All cards" view (specs/collection-api.md → AllCardsView):
-/// per oracle card, the global owned count and how many collections hold it (the
-/// `7 across 3 collections` summary replacing per-collection present).
+/// per oracle card, the aggregate counts across *every* collection.
+///
+/// `/my` is "same row treatment as collection view" (specs/app-ui.md), so the
+/// render fields come from the very same [`CardSummary`](crate::CardSummary) the
+/// catalog rows use — one projection, one preview component, one flip control,
+/// rather than a parallel set of near-identical columns.
+///
+/// The two derived numbers are deliberately *not* fields: `owned` is
+/// `card.owned` (filled from the same holdings aggregate as `locations`) and the
+/// `7 across 3 collections` denominator is `locations.len()`. A stored copy of
+/// either could disagree with the list it summarizes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AllCardsRow {
-    pub oracle_id: Id,
-    pub name: String,
-    pub owned: i32,
-    pub in_collections: i32,
+    /// Name, art, mana cost, type line, representative printing, flip faces —
+    /// and `owned`, the global present total, always `Some` here (this view is
+    /// session-scoped; there is no anonymous `/my`).
+    pub card: crate::CardSummary,
+    /// Desired across every collection — the WANTED column.
+    pub wanted: i32,
+    /// Every collection holding copies, quantity-desc then name: the expandable
+    /// location summary that replaces the collection view's HERE column.
+    pub locations: Vec<CardLocation>,
+}
+
+impl AllCardsRow {
+    /// Copies held across all collections — the OWNED column. Equals the sum of
+    /// [`locations`](Self::locations) by construction.
+    pub fn owned(&self) -> i32 {
+        self.card.owned.unwrap_or(0)
+    }
+
+    /// How many collections hold at least one copy (the `across N collections`
+    /// half of the location summary).
+    pub fn in_collections(&self) -> usize {
+        self.locations.len()
+    }
 }
 
 /// One keyset page of the everything-view, sorted by (name, oracle).
@@ -419,9 +447,12 @@ pub struct AllCardsView {
     pub next_cursor: Option<String>,
 }
 
-/// Where a needed card sits in another of the user's collections.
+/// Where copies of a card sit — one of the user's collections and how many are
+/// in it. Shared by the needs view (fillable-from locations) and `/my`'s
+/// expandable location summary; the shape was identical, so the name is the
+/// general one rather than either caller's.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct NeedLocation {
+pub struct CardLocation {
     pub collection_id: Id,
     pub collection_name: String,
     pub quantity: i32,
@@ -438,7 +469,7 @@ pub struct NeedRow {
     pub present_here: i32,
     pub owned_elsewhere: i32,
     pub short: i32,
-    pub locations: Vec<NeedLocation>,
+    pub locations: Vec<CardLocation>,
 }
 
 /// A collection's needs, split Owned-elsewhere vs Short (specs → NeedsView).

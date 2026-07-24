@@ -7,7 +7,22 @@ description: Author and run the three-rings Playwright e2e suite — login fixtu
 
 Suite lives in `end2end/` (`npx playwright test` from there). The ad-hoc
 `.mjs` probes (`hydration-check`, `bench-check`, `android-cdp-check`) are the
-layer *beneath* the suite — cheap diagnostics, not tests.
+layer *beneath* the suite — cheap diagnostics, not tests. The ones a task may
+need are `npm run` scripts in `end2end/package.json` so they are discoverable
+rather than folklore:
+
+| Script | What it proves |
+|---|---|
+| `npm run probe:hydration -- <url…>` | no console errors/warnings, anonymous |
+| `npm run probe:hydration-authed -- <url…>` | same, signed in (needs `--project=setup` first) |
+| `npm run probe:bench` | `/dev/components` SSR + hydration + tokens |
+| `npm run probe:paging [limit]` | `/my` keyset paging walked at a small page size |
+
+**A probe covers what the browser tier structurally cannot.** `probe:paging`
+exists because page size is fixed in the UI, so only the JSON route can ask for
+a page small enough to iterate; it walks the whole set asserting no duplicate,
+no skipped row, stable order, and exactly one terminal cursor. If you add a
+probe, add its script line here — an unregistered probe is one nobody runs.
 
 ## Server lifecycle
 

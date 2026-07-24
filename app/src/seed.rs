@@ -7,6 +7,11 @@
 //! Idempotent by sentinel: if a collection named [`SENTINEL`] exists, the tree
 //! is assumed seeded and nothing is written. Re-seeding from scratch =
 //! recreate the e2e user (`end2end/seed-e2e-user.sh` with a fresh `.env`).
+//!
+//! **Two independently-sentinelled blocks.** The tree above is one; the bulk
+//! box ([`BULK`]) is the other, added later and gated on its own name so an
+//! already-seeded user picks it up on a plain re-run rather than needing the
+//! whole fixture rebuilt. New blocks should follow that shape.
 
 use shared::{
     AddHave, AddLine, AddWant, ApiError, Board, CollectionKind, Finish, Id, LineResult,
@@ -18,6 +23,19 @@ use crate::backend::{CatalogStore, CollectionStore, HostedBackend};
 
 /// The seed's presence marker; also the first collection it creates.
 const SENTINEL: &str = "Trade Binder";
+
+/// The bulk box — its own sentinel, its own block (see the module doc).
+const BULK: &str = "Bulk Box";
+
+/// How many distinct cards the bulk box holds.
+///
+/// Not decoration: `/my`'s page size is 50, so without a fixture larger than
+/// that the everything-view can never render a second page and its "Next page"
+/// control is unreachable by any browser test (found by the Codex review of the
+/// All-cards task). The rest of the tree contributes ~19 distinct cards, so 60
+/// here puts the fixture comfortably past one page with room for the tree to
+/// change. `/my/collections/:id` will want the same headroom.
+const BULK_CARDS: usize = 60;
 
 /// Sums of what one run wrote, for the closing println.
 #[derive(Debug, Default)]
@@ -33,10 +51,6 @@ pub async fn run(user_id: Uuid) -> Result<Stats, ApiError> {
 
     // list_collections lazily provisions the Inbox on first authed load.
     let existing = be.list_collections().await?;
-    if existing.iter().any(|c| c.name == SENTINEL) {
-        println!("seed: '{SENTINEL}' already present — nothing to do");
-        return Ok(Stats::default());
-    }
     let inbox = existing
         .iter()
         .find(|c| c.is_inbox)
@@ -48,9 +62,25 @@ pub async fn run(user_id: Uuid) -> Result<Stats, ApiError> {
     // otherwise strand a partial tree behind the sentinel. On error, delete
     // the root collections this run created (cascades to children/holdings);
     // Inbox arrivals may linger, which a re-run tolerates (add_holding upserts).
+    let mut stats = Stats::default();
     let mut roots: Vec<Id> = Vec::new();
-    match build(&be, inbox, &mut roots).await {
-        Ok(stats) => Ok(stats),
+    let result = async {
+        if existing.iter().any(|c| c.name == SENTINEL) {
+            println!("seed: '{SENTINEL}' already present — skipping the tree");
+        } else {
+            build(&be, inbox, &mut roots, &mut stats).await?;
+        }
+        if existing.iter().any(|c| c.name == BULK) {
+            println!("seed: '{BULK}' already present — skipping the bulk box");
+        } else {
+            build_bulk(&be, &mut roots, &mut stats).await?;
+        }
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => Ok(stats),
         Err(e) => {
             for id in roots {
                 let _ = be.delete_collection(id).await;
@@ -60,9 +90,58 @@ pub async fn run(user_id: Uuid) -> Result<Stats, ApiError> {
     }
 }
 
-async fn build(be: &HostedBackend, inbox: Id, roots: &mut Vec<Id>) -> Result<Stats, ApiError> {
-    let mut stats = Stats::default();
+/// The bulk box: one flat binder holding [`BULK_CARDS`] distinct cards, so the
+/// fixture exceeds a page of any `/my/*` view (see [`BULK_CARDS`]). Deliberately
+/// boring — one copy each, no wants, no nesting — because its whole job is
+/// volume; the interesting shapes live in [`build`].
+///
+/// **It skips whatever is currently short.** The picks are the catalog's
+/// alphabetically-first cards, which overlaps the deck's `t:creature` picks —
+/// including the two the tree deliberately wants and holds *nowhere*. Filling
+/// the bulk box blindly quietly owns them, and the "short → shopping list" leg
+/// of the fixture (which `/my`, the needs view and `/my/shopping` all read)
+/// evaporates. Found the first time this block ran.
+async fn build_bulk(
+    be: &HostedBackend,
+    roots: &mut Vec<Id>,
+    stats: &mut Stats,
+) -> Result<(), ApiError> {
+    let short: Vec<Id> = be
+        .shopping_list()
+        .await?
+        .rows
+        .into_iter()
+        .map(|r| r.oracle_id)
+        .collect();
+    // Over-fetch by the number skipped so the box still reaches BULK_CARDS.
+    let picks: Vec<Pick> = find(be, "", BULK_CARDS + short.len())
+        .await?
+        .into_iter()
+        .filter(|p| !short.contains(&p.oracle))
+        .take(BULK_CARDS)
+        .collect();
 
+    let bulk = create(be, None, CollectionKind::Binder, BULK, None, stats).await?;
+    roots.push(bulk);
+    let lines: Vec<AddLine> = picks
+        .iter()
+        .map(|c| {
+            AddLine::Have(AddHave {
+                printing_id: c.printing,
+                quantity: 1,
+                ..have_defaults()
+            })
+        })
+        .collect();
+    batch(be, bulk, lines, stats).await
+}
+
+async fn build(
+    be: &HostedBackend,
+    inbox: Id,
+    roots: &mut Vec<Id>,
+    stats: &mut Stats,
+) -> Result<(), ApiError> {
     // -- catalog picks (POC subset; each query must return rows or the seed
     //    aborts with a clear error rather than building a half tree)
     let commanders = find(be, "t:legendary t:creature", 1).await?;
@@ -72,17 +151,9 @@ async fn build(be: &HostedBackend, inbox: Id, roots: &mut Vec<Id>) -> Result<Sta
 
     // -- the tree (top-level ids recorded for cleanup-on-error; Rares
     //    cascades with Shoebox)
-    let trade = create(be, None, CollectionKind::Binder, SENTINEL, None, &mut stats).await?;
+    let trade = create(be, None, CollectionKind::Binder, SENTINEL, None, stats).await?;
     roots.push(trade);
-    let shoebox = create(
-        be,
-        None,
-        CollectionKind::Binder,
-        "Shoebox",
-        None,
-        &mut stats,
-    )
-    .await?;
+    let shoebox = create(be, None, CollectionKind::Binder, "Shoebox", None, stats).await?;
     roots.push(shoebox);
     let rares = create(
         be,
@@ -90,7 +161,7 @@ async fn build(be: &HostedBackend, inbox: Id, roots: &mut Vec<Id>) -> Result<Sta
         CollectionKind::Binder,
         "Rares",
         None,
-        &mut stats,
+        stats,
     )
     .await?;
     let deck = create(
@@ -99,17 +170,17 @@ async fn build(be: &HostedBackend, inbox: Id, roots: &mut Vec<Id>) -> Result<Sta
         CollectionKind::Deck,
         "Commander Deck",
         Some("commander"),
-        &mut stats,
+        stats,
     )
     .await?;
     roots.push(deck);
 
     // -- Inbox: a few unsorted arrivals
     for card in &creatures[0..4] {
-        add_have(be, inbox, card.printing, 1, Board::Main, false, &mut stats).await?;
+        add_have(be, inbox, card.printing, 1, Board::Main, false, stats).await?;
     }
 
-    // -- Trade Binder: the bulk box (one foil playset for variety)
+    // -- Trade Binder: mixed quantities (one foil playset for variety)
     let trade_lines: Vec<AddLine> = creatures[4..10]
         .iter()
         .enumerate()
@@ -126,45 +197,27 @@ async fn build(be: &HostedBackend, inbox: Id, roots: &mut Vec<Id>) -> Result<Sta
             })
         })
         .collect();
-    batch(be, trade, trade_lines, &mut stats).await?;
+    batch(be, trade, trade_lines, stats).await?;
 
     // -- Rares nested under Shoebox
     for card in &lands[0..2] {
-        add_have(be, rares, card.printing, 1, Board::Main, false, &mut stats).await?;
+        add_have(be, rares, card.printing, 1, Board::Main, false, stats).await?;
     }
 
     // -- The deck: commander + mainboard, one sideboard card, and wants that
     //    populate the needs buckets: two owned-elsewhere (held in Trade
     //    Binder) and two short (never held anywhere → shopping list).
     let commander = &commanders[0];
-    add_have(
-        be,
-        deck,
-        commander.printing,
-        1,
-        Board::Main,
-        false,
-        &mut stats,
-    )
-    .await?;
+    add_have(be, deck, commander.printing, 1, Board::Main, false, stats).await?;
     for card in creatures[0..3].iter().chain(&instants[0..3]) {
-        add_have(be, deck, card.printing, 1, Board::Main, false, &mut stats).await?;
+        add_have(be, deck, card.printing, 1, Board::Main, false, stats).await?;
     }
-    add_have(
-        be,
-        deck,
-        instants[3].printing,
-        1,
-        Board::Side,
-        false,
-        &mut stats,
-    )
-    .await?;
+    add_have(be, deck, instants[3].printing, 1, Board::Side, false, stats).await?;
     for card in &creatures[4..6] {
-        add_want(be, deck, card.oracle, 1, &mut stats).await?; // owned in Trade Binder
+        add_want(be, deck, card.oracle, 1, stats).await?; // owned in Trade Binder
     }
     for card in &creatures[10..12] {
-        add_want(be, deck, card.oracle, 2, &mut stats).await?; // short → shopping list
+        add_want(be, deck, card.oracle, 2, stats).await?; // short → shopping list
     }
 
     // -- commander tag (the built-in system tag, found by name in deck scope)
@@ -193,7 +246,7 @@ async fn build(be: &HostedBackend, inbox: Id, roots: &mut Vec<Id>) -> Result<Sta
     .await?;
     stats.moves += 1;
 
-    Ok(stats)
+    Ok(())
 }
 
 /// A picked card: oracle + its first printing.

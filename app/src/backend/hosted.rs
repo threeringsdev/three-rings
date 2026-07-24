@@ -6,10 +6,10 @@
 
 use shared::{
     union_color_identity, AddHave, AddLine, AddWant, AllCardsRow, AllCardsView, ApiError,
-    ApiResult, BatchMove, Board, CardDetail, CardRow, CardSummary, CatalogCount, CollectionKind,
-    CollectionSummary, CollectionTree, CollectionTreeRow, CollectionView, Condition,
-    DeckCommanders, DesireLine, Finish, HoldingLine, Id, LineResult, MoveReceipt, MoveRequest,
-    NeedLocation, NeedRow, NeedsView, NewCollection, NewTag, OwnershipEntry, Page, PrintingSummary,
+    ApiResult, BatchMove, Board, CardDetail, CardLocation, CardRow, CardSummary, CatalogCount,
+    CollectionKind, CollectionSummary, CollectionTree, CollectionTreeRow, CollectionView,
+    Condition, DeckCommanders, DesireLine, Finish, HoldingLine, Id, LineResult, MoveReceipt,
+    MoveRequest, NeedRow, NeedsView, NewCollection, NewTag, OwnershipEntry, Page, PrintingSummary,
     Rename, RenameTag, Reorder, Reparent, Ruling, SearchQuery, SearchResults, SetBoard,
     SetQuantity, ShoppingList, ShoppingRow, SuggestedDestination, Tag, TagAssignment, TagScope,
     TaggedCard, Teardown, TeardownReceipt,
@@ -917,34 +917,60 @@ impl CollectionStore for HostedBackend {
         Ok(TeardownReceipt { moves })
     }
 
-    async fn all_cards(&self, page: Page) -> ApiResult<AllCardsView> {
+    async fn all_cards(&self, q: Option<String>, page: Page) -> ApiResult<AllCardsView> {
         let mut tx = self.scoped_tx().await?;
         let cursor: Option<OracleCursor> = page.cursor.as_deref().map(decode_cursor).transpose()?;
         let limit = page.limit();
-        let base = "WITH agg AS ( \
-               SELECT p.oracle_id, sum(h.quantity)::int AS owned, \
-                      count(DISTINCT h.collection_id)::int AS in_collections \
+
+        // `mine` is a FULL OUTER JOIN, not an inner one: a card you *want* but
+        // hold nowhere still belongs in the everything-view (it is what the
+        // shopping list is made of, and the collection view lists desired rows
+        // the same way). Such a row is owned 0 / no locations / wanted N.
+        //
+        // Neither CTE filters by user — both tables are RLS-scoped and this
+        // runs inside `scoped_tx`, so the caller's own rows are all that exist
+        // here. The catalog joins (`cards`, `printings`) are unscoped by design.
+        let base = format!(
+            "WITH held AS ( \
+               SELECT p.oracle_id, sum(h.quantity)::int AS owned \
                FROM holdings h JOIN printings p ON p.id = h.printing_id \
                GROUP BY p.oracle_id \
-             ) \
-             SELECT a.oracle_id, c.name, a.owned, a.in_collections \
-             FROM agg a JOIN cards c ON c.oracle_id = a.oracle_id";
-        let keyset = if cursor.is_some() {
-            " WHERE (c.name, a.oracle_id) > ($1, $2) ORDER BY c.name, a.oracle_id LIMIT $3"
-        } else {
-            " ORDER BY c.name, a.oracle_id LIMIT $1"
-        };
-        let sql = format!("{base}{keyset}");
-        let mut q = sqlx::query_as::<_, AllCardsRowSql>(&sql);
-        if let Some(c) = &cursor {
-            q = q.bind(&c.name).bind(c.oracle_id);
+             ), \
+             wanted AS ( \
+               SELECT oracle_id, sum(quantity)::int AS wanted \
+               FROM desires GROUP BY oracle_id \
+             ), \
+             mine AS ( \
+               SELECT COALESCE(held.oracle_id, wanted.oracle_id) AS oracle_id, \
+                      COALESCE(held.owned, 0) AS owned, \
+                      COALESCE(wanted.wanted, 0) AS wanted \
+               FROM held FULL OUTER JOIN wanted ON wanted.oracle_id = held.oracle_id \
+             ) {select} JOIN mine ON mine.oracle_id = c.oracle_id{rep}WHERE true",
+            select = summary_select_with(", mine.owned, mine.wanted"),
+            rep = REPRESENTATIVE_PRINTING_JOIN,
+        );
+        let mut qb: sqlx::QueryBuilder<'_, sqlx::Postgres> = sqlx::QueryBuilder::new(base);
+        // Quick search: a plain name substring, not the catalog grammar (see the
+        // trait doc). Same escaping helper as `/catalog`'s bare terms, so a
+        // typed `%` is literal in both places.
+        if let Some(needle) = q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            qb.push(" AND c.name ILIKE ");
+            qb.push_bind(crate::search::sql::pattern(needle));
         }
-        let mut rows: Vec<AllCardsRowSql> = q
-            .bind(limit + 1)
+        if let Some(c) = &cursor {
+            qb.push(" AND (c.name, c.oracle_id) > (");
+            qb.push_bind(c.name.clone());
+            qb.push(", ");
+            qb.push_bind(c.oracle_id);
+            qb.push(")");
+        }
+        qb.push(" ORDER BY c.name, c.oracle_id LIMIT ");
+        qb.push_bind(limit + 1);
+        let mut rows: Vec<AllCardsRowSql> = qb
+            .build_query_as()
             .fetch_all(&mut *tx)
             .await
             .map_err(upstream)?;
-        tx.commit().await.map_err(upstream)?;
 
         let has_more = rows.len() as i64 > limit;
         rows.truncate(limit as usize);
@@ -952,20 +978,51 @@ impl CollectionStore for HostedBackend {
             .then(|| {
                 rows.last().map(|r| {
                     encode_cursor(&OracleCursor {
-                        name: r.name.clone(),
-                        oracle_id: r.oracle_id,
+                        name: r.card.name.clone(),
+                        oracle_id: r.card.oracle_id,
                     })
                 })
             })
             .flatten();
+
+        // Where the copies actually are — one query for the whole page, grouped
+        // in Rust (the `needs` view's shape, minus its exclude-here filter).
+        // Same transaction as the totals above, so `owned` and the sum of a
+        // row's locations cannot disagree across a concurrent move.
+        let oracles: Vec<Uuid> = rows.iter().map(|r| r.card.oracle_id).collect();
+        let locs: Vec<LocationSql> = sqlx::query_as(
+            "SELECT p.oracle_id, h.collection_id, c.name AS collection_name, \
+                    sum(h.quantity)::int AS quantity \
+             FROM holdings h JOIN printings p ON p.id = h.printing_id \
+             JOIN collections c ON c.id = h.collection_id \
+             WHERE p.oracle_id = ANY($1) \
+             GROUP BY p.oracle_id, h.collection_id, c.name \
+             ORDER BY quantity DESC, c.name",
+        )
+        .bind(&oracles)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+
         Ok(AllCardsView {
             cards: rows
                 .into_iter()
-                .map(|r| AllCardsRow {
-                    oracle_id: r.oracle_id,
-                    name: r.name,
-                    owned: r.owned,
-                    in_collections: r.in_collections,
+                .map(|r| {
+                    let locations = locs
+                        .iter()
+                        .filter(|l| l.oracle_id == r.card.oracle_id)
+                        .map(|l| CardLocation {
+                            collection_id: l.collection_id,
+                            collection_name: l.collection_name.clone(),
+                            quantity: l.quantity,
+                        })
+                        .collect();
+                    AllCardsRow {
+                        wanted: r.wanted,
+                        card: r.card.into_summary(Some(r.owned)),
+                        locations,
+                    }
                 })
                 .collect(),
             next_cursor,
@@ -1031,7 +1088,7 @@ impl CollectionStore for HostedBackend {
                     locations: locs
                         .iter()
                         .filter(|l| l.oracle_id == r.oracle_id)
-                        .map(|l| NeedLocation {
+                        .map(|l| CardLocation {
                             collection_id: l.collection_id,
                             collection_name: l.collection_name.clone(),
                             quantity: l.quantity,
@@ -1855,12 +1912,15 @@ struct SuggestedRow {
     present: i32,
 }
 
+/// One everything-view row: the shared summary projection plus this caller's
+/// two aggregate totals. Flattened rather than re-listing the summary columns,
+/// so `/my` cannot drift from `/catalog` on what a card row *is*.
 #[derive(sqlx::FromRow)]
 struct AllCardsRowSql {
-    oracle_id: Uuid,
-    name: String,
+    #[sqlx(flatten)]
+    card: SearchRowSql,
     owned: i32,
-    in_collections: i32,
+    wanted: i32,
 }
 
 /// Keyset key for the everything-view: (name, oracle).
@@ -1994,6 +2054,14 @@ impl SearchRowSql {
 /// compile-time constants, not user input) so SQL and the Rust-side gate in
 /// [`shared::CardFaceSummary::build`] cannot drift.
 fn summary_select() -> String {
+    summary_select_with("")
+}
+
+/// [`summary_select`] with extra columns appended to the select list — for
+/// projections that render the same card row *plus* their own numbers (`/my`'s
+/// owned/wanted totals). `extra_cols` is our own SQL fragment, never user input,
+/// and must start with its own comma.
+fn summary_select_with(extra_cols: &str) -> String {
     let layouts = shared::catalog::BACK_FACE_LAYOUTS
         .iter()
         .map(|l| format!("'{l}'"))
@@ -2002,7 +2070,7 @@ fn summary_select() -> String {
     format!(
         "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, c.layout, \
          CASE WHEN c.layout IN ({layouts}) THEN c.card_faces END AS card_faces, \
-         rep.id AS printing_id, rep.image_uri, rep.face_image_uris \
+         rep.id AS printing_id, rep.image_uri, rep.face_image_uris{extra_cols} \
          FROM cards c"
     )
 }

@@ -393,10 +393,13 @@ impl CollectionStore for NativeBackend {
         .await
     }
 
-    async fn all_cards(&self, page: Page) -> ApiResult<AllCardsView> {
+    async fn all_cards(&self, q: Option<String>, page: Page) -> ApiResult<AllCardsView> {
         self.require_session()?;
         let mut path = super::paths::ALL_CARDS.to_string();
         let mut qs = Vec::new();
+        if let Some(q) = q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            qs.push(format!("q={}", urlencode(q)));
+        }
         if let Some(cursor) = &page.cursor {
             qs.push(format!("cursor={cursor}"));
         }

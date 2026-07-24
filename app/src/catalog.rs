@@ -10,10 +10,10 @@
 //!   same string; nothing here may take a second source of truth for the query.
 //! - **First page SSRs when the URL carries `q`.** The results `Resource` is
 //!   keyed on the URL's query, so a cold load renders markup, not a spinner.
-//! - **Live typing: ~250 ms debounce, stale-response discard.** The debounce is
-//!   ours (below); the discard is the reactive layer's — see
-//!   `SEARCH_DEBOUNCE_MS`. Note what this is *not*: an overtaken request is
-//!   discarded on arrival, not aborted in flight.
+//! - **Live typing: ~250 ms debounce, stale-response discard.** Both live in
+//!   the shared [`QueryBar`](crate::components::query_bar) — the debounce is
+//!   ours, the discard is the reactive layer's. Note what this is *not*: an
+//!   overtaken request is discarded on arrival, not aborted in flight.
 //! - **Parse errors are results, not failures.** The grammar rejects unknown
 //!   terms by design (`ApiError::Validation`, 422) and a half-typed query hits
 //!   that constantly, so it renders inline under the bar and leaves the previous
@@ -33,12 +33,9 @@ use leptos_router::NavigateOptions;
 use shared::CardSummary;
 
 use crate::cards::CardPreview;
+use crate::components::query_bar::QueryBar;
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::button::{Button, ButtonSize, ButtonVariant};
-use crate::components::ui::input_group::{
-    InputGroup, InputGroupAddon, InputGroupAddonAlign, InputGroupButton, InputGroupButtonSize,
-    InputGroupInput,
-};
 use crate::components::ui::skeleton::Skeleton;
 use crate::components::ui::sonner::{ToastHandle, ToastKind, ToastOptions};
 use crate::components::ui::table::{
@@ -46,24 +43,6 @@ use crate::components::ui::table::{
 };
 use crate::components::ui::toggle_group::{ToggleGroup, ToggleGroupItem, ToggleGroupVariant};
 use crate::shell::CurrentUserResource;
-
-/// Idle time after the last keystroke before the URL (and so the search) moves.
-///
-/// 250 ms is specs/catalog-search.md's proposal, left "tunable at execution";
-/// kept as proposed — see that spec's Findings for the measurement.
-///
-/// The number is the *comfort* knob only. The correctness guarantee — "no stale
-/// results ever render over newer input" — does not depend on it: `Resource` is
-/// an `ArcAsyncDerived`, which stamps every run with a monotonic version and
-/// drops a resolved future whose version is no longer the latest
-/// (reactive_graph 0.2.14, `arc_async_derived.rs`: `if latest_version ==
-/// this_version`). Overlapping searches therefore cannot land out of order
-/// however short the debounce gets.
-///
-/// What the debounce *does* buy is request volume: a request already in flight
-/// is discarded on arrival, never aborted, so shortening this trades server
-/// work for responsiveness rather than trading away correctness.
-const SEARCH_DEBOUNCE_MS: f64 = 250.0;
 
 /// `?view=list` renders the table; anything else (including absent) is the grid.
 /// View mode rides the URL alongside `q` so a reload or a shared link keeps the
@@ -96,7 +75,10 @@ fn catalog_url(q: &str, list_view: bool) -> String {
 /// Percent-encode a query *value*. Deliberately conservative: the search
 /// grammar is punctuation-heavy (`t:instant c:ur cmc<=2`) and `&`, `#`, `+`
 /// and friends would otherwise be read as URL structure or as a space.
-fn encode_query_value(s: &str) -> String {
+///
+/// `pub(crate)` because every URL-canonical search surface needs the same rule
+/// (`/my`'s quick search builds its `?q=` with it).
+pub(crate) fn encode_query_value(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
         match b {
@@ -194,162 +176,19 @@ pub fn CatalogPage() -> impl IntoView {
                     })}
                 </Transition>
             </div>
-            <QueryBar query_text url_q list_view />
+            <QueryBar
+                text=query_text
+                url_q
+                // Reads `list_view` untracked at commit time: the layout is URL
+                // state this bar must preserve, not search state it owns.
+                to_url=Callback::new(move |q: String| catalog_url(&q, list_view.get_untracked()))
+                id="catalog-query"
+                placeholder="Search the catalog — t:instant c:ur cmc<=2"
+                aria_label="Search the catalog"
+            />
             <ResultsToolbar results list_view />
             <Results results last_good list_view />
         </div>
-    }
-}
-
-/// The search box. Owns the debounce: keystrokes move a local signal
-/// immediately (so typing never feels laggy) and schedule the navigation that
-/// actually searches.
-#[component]
-fn QueryBar(
-    query_text: RwSignal<String>,
-    url_q: Memo<String>,
-    list_view: Memo<bool>,
-) -> impl IntoView {
-    let navigate = use_navigate();
-    let query_map = use_query_map();
-    let pending = StoredValue::new(None::<leptos::leptos_dom::helpers::TimeoutHandle>);
-
-    // The last query *we* put in the URL. Without it, the field-sync effect
-    // below cannot tell our own navigation from someone else's, and a keystroke
-    // landing in the window between `navigate()` and the effect flushing would
-    // be reverted to the older text we just committed — the URL would win an
-    // argument it started.
-    let self_pushed = StoredValue::new(url_q.get_untracked());
-
-    // History granularity is per *search session*, not per keystroke: refining
-    // a query replaces, but starting or ending one pushes. Replacing
-    // everything would make Back walk straight off the site from the first
-    // search a visitor types; pushing everything would bury the previous page
-    // under one entry per character.
-    let commit = {
-        let navigate = navigate.clone();
-        move |q: String| {
-            let was_searching = !query_map
-                .read_untracked()
-                .get("q")
-                .unwrap_or_default()
-                .is_empty();
-            let replace = was_searching && !q.is_empty();
-            self_pushed.set_value(q.clone());
-            navigate(
-                &catalog_url(&q, list_view.get_untracked()),
-                NavigateOptions {
-                    replace,
-                    ..Default::default()
-                },
-            );
-        }
-    };
-
-    // Re-seed the field only when the URL moved without us: Back/Forward, a
-    // shared link, or (later) a filter-rail edit rewriting a term. Our own
-    // commits are already in the box by definition.
-    Effect::new(move |_| {
-        let from_url = url_q.get();
-        if from_url != self_pushed.get_value() {
-            self_pushed.set_value(from_url.clone());
-            query_text.set(from_url);
-        }
-    });
-
-    let schedule = {
-        let commit = commit.clone();
-        move |q: String| {
-            // Collapse the burst: only the last keystroke of a run searches.
-            pending.update_value(|h| {
-                if let Some(h) = h.take() {
-                    h.clear();
-                }
-            });
-            let commit = commit.clone();
-            let handle = set_timeout_with_handle(
-                move || commit(q.clone()),
-                std::time::Duration::from_millis(SEARCH_DEBOUNCE_MS as u64),
-            );
-            pending.set_value(handle.ok());
-        }
-    };
-
-    // Leaving the page with a timer armed would fire a navigate into a
-    // torn-down router.
-    on_cleanup(move || {
-        pending.update_value(|h| {
-            if let Some(h) = h.take() {
-                h.clear();
-            }
-        });
-    });
-
-    let on_input = {
-        let schedule = schedule.clone();
-        move |_| schedule(query_text.get_untracked())
-    };
-    // Enter searches now rather than waiting out the debounce.
-    let on_key = {
-        let commit = commit.clone();
-        move |ev: leptos::ev::KeyboardEvent| {
-            if ev.key() == "Enter" {
-                ev.prevent_default();
-                pending.update_value(|h| {
-                    if let Some(h) = h.take() {
-                        h.clear();
-                    }
-                });
-                commit(query_text.get_untracked());
-            }
-        }
-    };
-    let on_clear = move |_| {
-        pending.update_value(|h| {
-            if let Some(h) = h.take() {
-                h.clear();
-            }
-        });
-        query_text.set(String::new());
-        commit(String::new());
-    };
-
-    view! {
-        <search>
-            <InputGroup class="w-full">
-                <InputGroupAddon>
-                    <span aria-hidden="true">"🔍"</span>
-                </InputGroupAddon>
-                // NB: the prop immediately before `{..}` must not end in a bare
-                // path — `bind_value=query_text {..}` parses as struct-update
-                // syntax and the spread silently becomes part of the value.
-                <InputGroupInput
-                    id="catalog-query"
-                    name="q"
-                    bind_value=query_text
-                    placeholder="Search the catalog — t:instant c:ur cmc<=2"
-                    {..}
-                    aria-label="Search the catalog"
-                    // No manual `value` seed: `Input` emits the SSR attribute
-                    // from `bind_value` itself now (see its bind_value arm).
-                    on:input=on_input
-                    on:keydown=on_key
-                />
-                <InputGroupAddon align=InputGroupAddonAlign::InlineEnd>
-                    <Show when=move || !query_text.read().is_empty()>
-                        <InputGroupButton
-                            size=InputGroupButtonSize::IconXs
-                            class=""
-                            {..}
-                            aria-label="Clear search"
-                            on:click=on_clear.clone()
-                        >
-                            "✕"
-                        </InputGroupButton>
-                    </Show>
-                </InputGroupAddon>
-            </InputGroup>
-        </search>
     }
 }
 
