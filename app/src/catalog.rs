@@ -631,6 +631,7 @@ fn CardTile(card: CardSummary) -> impl IntoView {
         mana_cost,
         type_line,
         owned,
+        ..
     } = card;
     let href = format!("/cards/{oracle_id}");
     // The whole `<a>` subtree now lives inside CardPreview's children closure,

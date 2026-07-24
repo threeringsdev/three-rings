@@ -27,8 +27,8 @@ pub mod search;
 pub mod tags;
 
 pub use catalog::{
-    CardDetail, CardSummary, CatalogCount, OwnershipEntry, PrintingSummary, Ruling, SearchQuery,
-    SearchResults,
+    has_back_face, CardDetail, CardFace, CardFaceSummary, CardSummary, CatalogCount,
+    OwnershipEntry, PrintingSummary, Ruling, SearchQuery, SearchResults,
 };
 pub use collection::{
     default_language, AddHave, AddLine, AddWant, AllCardsRow, AllCardsView, BatchMove, Board,

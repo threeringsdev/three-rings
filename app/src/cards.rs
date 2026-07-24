@@ -24,6 +24,7 @@ use leptos_router::hooks::use_params_map;
 use shared::{CardDetail, CardSummary, OwnershipEntry, PrintingSummary, Ruling};
 
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
+use crate::components::ui::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::ui::card::{Card, CardContent, CardHeader, CardTitle};
 use crate::components::ui::hover_card::{HoverCard, HoverCardContent, HoverCardTrigger};
 use crate::components::ui::separator::Separator;
@@ -66,10 +67,98 @@ fn CardArt(
     }
 }
 
+/// The face-dependent slice of a card surface — what the flip control swaps.
+/// One shape serves the detail page (all fields) and the previews (which have
+/// no oracle text or stats to show).
+#[derive(Clone, PartialEq)]
+struct FacePanel {
+    name: String,
+    mana_cost: Option<String>,
+    type_line: Option<String>,
+    oracle_text: Option<String>,
+    stats: Option<String>,
+    image_uri: Option<String>,
+}
+
+/// "2/3", "Loyalty 4", "Defense 5", or nothing — the printed stat corner of a
+/// card or face. Top-level card columns carry no `defense` today; faces can
+/// (battle fronts), so the panel handles it once here.
+fn stats_line(
+    power: Option<&str>,
+    toughness: Option<&str>,
+    loyalty: Option<&str>,
+    defense: Option<&str>,
+) -> Option<String> {
+    match (power, toughness, loyalty, defense) {
+        (Some(p), Some(t), _, _) => Some(format!("{p}/{t}")),
+        (_, _, Some(l), _) => Some(format!("Loyalty {l}")),
+        (_, _, _, Some(d)) => Some(format!("Defense {d}")),
+        _ => None,
+    }
+}
+
+/// The DFC flip control (specs/TODO.md, back-face task): cycles the visible
+/// face of a card whose layout has a real back face (`shared::has_back_face`).
+/// Overlaid on the card art by an `absolute` class; callers render it only
+/// when there are ≥ 2 flip faces, so `n_faces` is never zero here.
+#[component]
+fn FlipButton(
+    face: RwSignal<usize>,
+    n_faces: usize,
+    /// Compact variant for the small preview art.
+    #[prop(optional)]
+    small: bool,
+) -> impl IntoView {
+    let size = if small {
+        ButtonSize::IconXs
+    } else {
+        ButtonSize::IconSm
+    };
+    view! {
+        <Button
+            variant=ButtonVariant::Secondary
+            size=size
+            class="absolute right-1.5 top-1.5 z-10 rounded-full opacity-90 shadow-md"
+            {..}
+            aria-label="Flip card"
+            data-testid="card-flip"
+            on:click=move |ev: leptos::ev::MouseEvent| {
+                // Never a navigation, and inside a preview the click must not
+                // bubble to the trigger span that routes taps to the sheet.
+                ev.prevent_default();
+                ev.stop_propagation();
+                face.update(|f| *f = (*f + 1) % n_faces);
+            }
+        >
+            <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+            >
+                <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+                <path d="M21 3v5h-5" />
+                <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+                <path d="M8 16H3v5" />
+            </svg>
+        </Button>
+    }
+}
+
 /// The shared body of both preview affordances: art, name, mana cost, type
 /// line, and an owned badge when the caller has copies. Deliberately renders
 /// from an already-loaded [`CardSummary`] — a preview that fetched would defeat
 /// the point of being lightweight, and the catalog already holds this data.
+///
+/// A card with a real back face (`CardSummary::faces` non-empty — the layout
+/// decision is the projection's) gets the flip control here too, swapping
+/// name / mana / type / art per face. Face state is per-affordance: the hover
+/// card and the sheet are separate `PreviewBody` instances, each starting at
+/// the front.
 #[component]
 fn PreviewBody(card: CardSummary) -> impl IntoView {
     let CardSummary {
@@ -78,20 +167,68 @@ fn PreviewBody(card: CardSummary) -> impl IntoView {
         mana_cost,
         type_line,
         owned,
+        faces,
         ..
     } = card;
     let owned = owned.unwrap_or(0);
+    let flippable = faces.len() >= 2;
+    let n_faces = faces.len();
+    let face = RwSignal::new(0usize);
+
+    let panel: Signal<FacePanel> = if flippable {
+        let front_img = image_uri;
+        Signal::derive(move || {
+            let i = face.get().min(faces.len() - 1);
+            let f = &faces[i];
+            FacePanel {
+                name: f.name.clone(),
+                mana_cost: f.mana_cost.clone(),
+                type_line: f.type_line.clone(),
+                oracle_text: None,
+                stats: None,
+                // Face 0 falls back to the flattened front image — same
+                // printing, same value, but covers a projection that filled
+                // only `image_uri`.
+                image_uri: f
+                    .image_uri
+                    .clone()
+                    .or_else(|| (i == 0).then(|| front_img.clone()).flatten()),
+            }
+        })
+    } else {
+        let base = FacePanel {
+            name: name.clone(),
+            mana_cost,
+            type_line,
+            oracle_text: None,
+            stats: None,
+            image_uri,
+        };
+        Signal::derive(move || base.clone())
+    };
 
     view! {
         <div class="flex gap-3">
-            <CardArt name=name.clone() image_uri=image_uri class="w-24 shrink-0" />
+            <div class="relative w-24 shrink-0">
+                {move || {
+                    let p = panel.get();
+                    view! { <CardArt name=p.name image_uri=p.image_uri /> }
+                }}
+                {flippable.then(|| view! { <FlipButton face n_faces small=true /> })}
+            </div>
             <div class="min-w-0 space-y-1">
-                <p class="text-sm font-medium">{name}</p>
-                {mana_cost
-                    .filter(|m| !m.is_empty())
-                    .map(|m| view! { <p class="text-muted-foreground text-xs">{m}</p> })}
-                {type_line
-                    .map(|t| view! { <p class="text-muted-foreground text-xs">{t}</p> })}
+                <p class="text-sm font-medium">{move || panel.with(|p| p.name.clone())}</p>
+                {move || {
+                    panel
+                        .with(|p| p.mana_cost.clone())
+                        .filter(|m| !m.is_empty())
+                        .map(|m| view! { <p class="text-muted-foreground text-xs">{m}</p> })
+                }}
+                {move || {
+                    panel
+                        .with(|p| p.type_line.clone())
+                        .map(|t| view! { <p class="text-muted-foreground text-xs">{t}</p> })
+                }}
                 {(owned > 0)
                     .then(|| {
                         view! {
@@ -382,6 +519,9 @@ fn CardDetailSkeleton() -> impl IntoView {
 
 #[component]
 fn CardDetailBody(card: CardDetail) -> impl IntoView {
+    // Parsed before the destructure moves the fields; empty for every layout
+    // without a real back face (shared::CardDetail::flip_faces).
+    let flip_faces = card.flip_faces();
     let CardDetail {
         name,
         mana_cost,
@@ -398,33 +538,120 @@ fn CardDetailBody(card: CardDetail) -> impl IntoView {
     } = card;
 
     // The oldest printing (the query orders by release date) represents the
-    // card — but `find_map`, not `first()`: Scryfall carries artless rows
+    // card — but searched, not `first()`: Scryfall carries artless rows
     // (placeholders, some non-English printings), and letting one of those sit
-    // first would blank the hero while every later printing has art.
-    let hero = printings.iter().find_map(|p| p.image_uri.clone());
-    let stats = match (power, toughness, loyalty) {
-        (Some(p), Some(t), _) => Some(format!("{p}/{t}")),
-        (_, _, Some(l)) => Some(format!("Loyalty {l}")),
-        _ => None,
+    // first would blank the hero while every later printing has art. The same
+    // printing supplies the per-face art, so front and back stay one printing;
+    // the second `find` is the degenerate case of a printing whose face 0 has
+    // no art but a later face does (`image_uri` coalesces face 0 only).
+    let hero_printing = printings
+        .iter()
+        .find(|p| p.image_uri.is_some())
+        .or_else(|| {
+            printings
+                .iter()
+                .find(|p| p.face_image_uris.iter().any(|f| f.is_some()))
+        });
+    let hero = hero_printing.and_then(|p| p.image_uri.clone());
+    let hero_face_images = hero_printing
+        .map(|p| p.face_image_uris.clone())
+        .unwrap_or_default();
+
+    let flippable = flip_faces.len() >= 2;
+    let n_faces = flip_faces.len();
+    let face = RwSignal::new(0usize);
+    // The combined "Front // Back" name stays on the page as a subtitle when
+    // the heading swaps per face — it is the card's canonical identity (and
+    // what search matched on).
+    let combined_name = flippable.then(|| name.clone());
+
+    let panel: Signal<FacePanel> = if flippable {
+        let front_img = hero;
+        Signal::derive(move || {
+            let i = face.get().min(flip_faces.len() - 1);
+            let f = &flip_faces[i];
+            FacePanel {
+                name: f.name.clone(),
+                mana_cost: f.mana_cost.clone(),
+                type_line: f.type_line.clone(),
+                oracle_text: f.oracle_text.clone(),
+                stats: stats_line(
+                    f.power.as_deref(),
+                    f.toughness.as_deref(),
+                    f.loyalty.as_deref(),
+                    f.defense.as_deref(),
+                ),
+                image_uri: hero_face_images
+                    .get(i)
+                    .cloned()
+                    .flatten()
+                    .or_else(|| (i == 0).then(|| front_img.clone()).flatten()),
+            }
+        })
+    } else {
+        let base = FacePanel {
+            name: name.clone(),
+            mana_cost,
+            type_line,
+            oracle_text,
+            stats: stats_line(
+                power.as_deref(),
+                toughness.as_deref(),
+                loyalty.as_deref(),
+                None,
+            ),
+            image_uri: hero,
+        };
+        Signal::derive(move || base.clone())
     };
 
     view! {
         <div class="grid gap-6 md:grid-cols-[18rem_1fr]">
-            <CardArt name=name.clone() image_uri=hero class="md:w-72" />
+            <div class="relative md:w-72">
+                {move || {
+                    let p = panel.get();
+                    view! { <CardArt name=p.name image_uri=p.image_uri /> }
+                }}
+                {flippable.then(|| view! { <FlipButton face n_faces /> })}
+            </div>
 
             <div class="min-w-0 space-y-6">
                 <div class="space-y-2">
                     <h1 class="text-2xl font-bold" data-testid="card-name">
-                        {name.clone()}
+                        {move || panel.with(|p| p.name.clone())}
                     </h1>
+                    {combined_name
+                        .map(|n| {
+                            view! {
+                                <p
+                                    class="text-muted-foreground text-xs"
+                                    data-testid="card-combined-name"
+                                >
+                                    {n}
+                                </p>
+                            }
+                        })}
                     <p class="text-muted-foreground text-sm">
-                        {type_line.unwrap_or_default()}
-                        {mana_cost
-                            .filter(|m| !m.is_empty())
-                            .map(|m| format!(" · {m}"))
-                            .unwrap_or_default()}
+                        {move || {
+                            panel
+                                .with(|p| {
+                                    format!(
+                                        "{}{}",
+                                        p.type_line.clone().unwrap_or_default(),
+                                        p.mana_cost
+                                            .clone()
+                                            .filter(|m| !m.is_empty())
+                                            .map(|m| format!(" · {m}"))
+                                            .unwrap_or_default(),
+                                    )
+                                })
+                        }}
                     </p>
-                    {stats.map(|s| view! { <p class="text-sm font-medium">{s}</p> })}
+                    {move || {
+                        panel
+                            .with(|p| p.stats.clone())
+                            .map(|s| view! { <p class="text-sm font-medium">{s}</p> })
+                    }}
                     {(!keywords.is_empty())
                         .then(|| {
                             view! {
@@ -444,18 +671,21 @@ fn CardDetailBody(card: CardDetail) -> impl IntoView {
                         })}
                 </div>
 
-                {oracle_text
-                    .filter(|t| !t.is_empty())
-                    .map(|t| {
-                        view! {
-                            <p
-                                class="text-sm leading-relaxed whitespace-pre-line"
-                                data-testid="card-oracle-text"
-                            >
-                                {t}
-                            </p>
-                        }
-                    })}
+                {move || {
+                    panel
+                        .with(|p| p.oracle_text.clone())
+                        .filter(|t| !t.is_empty())
+                        .map(|t| {
+                            view! {
+                                <p
+                                    class="text-sm leading-relaxed whitespace-pre-line"
+                                    data-testid="card-oracle-text"
+                                >
+                                    {t}
+                                </p>
+                            }
+                        })
+                }}
 
                 <Separator />
 
