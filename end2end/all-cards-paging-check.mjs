@@ -1,20 +1,24 @@
 // Keyset-paging probe for `/my` (specs/app-ui.md → "`/my`"). Not a test — a
 // probe, like the hydration and bench checks.
 //
-// Why this exists as a probe rather than an e2e assertion: the page asks for 50
-// rows and the dev fixture holds ~19, so the *UI* can never render a "Next
-// page" link, and no browser-level test can walk more than one page. The paging
-// logic itself lives in `HostedBackend::all_cards`, and the hosted JSON route
+// Why this exists as a probe rather than an e2e assertion: the page's 50-row
+// page size is fixed, so a browser test walks at most two pages of the dev
+// fixture and never sees a boundary condition twice. The paging logic lives in
+// `HostedBackend::all_cards`, and the hosted JSON route
 // (`GET /api/all-cards?limit=`) is the one caller that can ask for a page small
-// enough to iterate. So this walks the whole set at limit=3 and asserts the
-// four properties keyset paging can get wrong:
+// enough to iterate. So this walks the whole set at a small limit and asserts
+// the five properties keyset paging can get wrong:
 //
 //   1. no row appears twice across pages (a cursor that is inclusive rather
 //      than exclusive repeats the boundary row);
 //   2. no row is skipped — the concatenation equals the single-page read,
 //      element for element;
 //   3. the order is (name, oracle) throughout, across page boundaries;
-//   4. `next_cursor` is null exactly once, on the final page.
+//   4. `next_cursor` is null exactly once, on the final page;
+//   5. every non-terminal page holds exactly the number of rows it ASKED for.
+//      This is the only assertion here whose expectation the server does not
+//      also compute — an off-by-one in the `limit + 1` / truncate / cursor
+//      dance is self-consistent, so 1–4 all still pass under it.
 //
 // Usage: node all-cards-paging-check.mjs [limit]
 //   Needs playwright/.auth/user.json (run `npx playwright test --project=setup`).
@@ -36,7 +40,9 @@ if (!fs.existsSync(stateFile)) {
 
 let failures = 0;
 const check = (ok, label, detail = "") => {
-  console.log(`${ok ? "ok  " : "FAIL"} ${label}${detail ? ` — ${detail}` : ""}`);
+  console.log(
+    `${ok ? "ok  " : "FAIL"} ${label}${detail ? ` — ${detail}` : ""}`,
+  );
   if (!ok) failures++;
 };
 
@@ -53,8 +59,12 @@ const get = async (url) => {
 };
 
 try {
-  // The reference: one unpaged read (the page's own adapter, default 50).
-  const whole = await get("/api/all_cards?q=");
+  // The reference: everything in one page. 200 is `Page::limit`'s clamp, so
+  // this is the largest single read the API will serve — and asserting it comes
+  // back terminal is what makes it a legitimate reference. (The page's own
+  // adapter cannot be used for this: it takes no limit, so its 50-row default
+  // is itself a page once the fixture exceeds it.)
+  const whole = await get("/api/all-cards?limit=200");
   check(
     whole.cards.length > LIMIT,
     "fixture is larger than one probe page",
@@ -62,8 +72,8 @@ try {
   );
   check(
     whole.next_cursor === null,
-    "the unpaged read is terminal",
-    `next_cursor=${JSON.stringify(whole.next_cursor)}`,
+    "the reference read holds the whole fixture",
+    whole.next_cursor === null ? "" : "it paged — raise the reference limit",
   );
 
   // Walk it at LIMIT.
@@ -72,12 +82,26 @@ try {
   let cursor = null;
   let pages = 0;
   let terminals = 0;
+  let wrongSize = 0;
   for (;;) {
     const url =
       `/api/all-cards?limit=${LIMIT}` +
       (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
     const page = await get(url);
     pages++;
+    // Page size, asserted against the number we ASKED for rather than against
+    // anything the server also computed. Every page but the last must be full:
+    // an off-by-one in the `limit + 1` fetch / truncate / cursor dance
+    // (`HostedBackend::all_cards`) still walks the whole set consistently, so
+    // nothing else here notices it — the gap the Codex mutation pass found.
+    if (page.next_cursor !== null && page.cards.length !== LIMIT) {
+      wrongSize++;
+      check(
+        false,
+        `page ${pages} holds ${LIMIT} rows`,
+        `got ${page.cards.length}`,
+      );
+    }
     walked.push(...page.cards);
     if (page.next_cursor === null) {
       terminals++;
@@ -96,11 +120,16 @@ try {
   }
   check(pages > 1, "the walk really paged", `${pages} pages`);
   check(terminals === 1, "exactly one terminal page", `${terminals}`);
+  if (!wrongSize) check(true, `every non-terminal page holds ${LIMIT} rows`);
 
   // 1. No duplicates.
   const ids = walked.map((r) => r.card.oracle_id);
   const dupes = ids.filter((id, i) => ids.indexOf(id) !== i);
-  check(dupes.length === 0, "no row appears twice", dupes.slice(0, 3).join(", "));
+  check(
+    dupes.length === 0,
+    "no row appears twice",
+    dupes.slice(0, 3).join(", "),
+  );
 
   // 2. Nothing skipped — same rows, same order, as the single-page read.
   const same =
@@ -150,7 +179,9 @@ try {
       )
       .find((s) => names.filter((n) => n.includes(s)).length > 1) ??
     whole.cards[0].card.name.slice(0, 4);
-  const filtered = await get(`/api/all_cards?q=${encodeURIComponent(needle)}`);
+  const filtered = await get(
+    `/api/all-cards?limit=200&q=${encodeURIComponent(needle)}`,
+  );
   const filteredPaged = await get(
     `/api/all-cards?limit=1&q=${encodeURIComponent(needle)}`,
   );
@@ -159,7 +190,13 @@ try {
     "a filtered page honors its limit",
     `${filteredPaged.cards.length}`,
   );
-  if (filtered.cards.length > 1) {
+  if (filtered.cards.length > 1 && !filteredPaged.next_cursor) {
+    // Reachable only when the server is already broken (a mutation that
+    // shortens a page can leave a full result set behind a null cursor).
+    // Report it rather than throwing on `cursor=null` — a probe that crashes
+    // buries the findings above it.
+    check(false, "a non-final filtered page carries a cursor", "got null");
+  } else if (filtered.cards.length > 1) {
     const second = await get(
       `/api/all-cards?limit=50&q=${encodeURIComponent(needle)}&cursor=${encodeURIComponent(filteredPaged.next_cursor)}`,
     );

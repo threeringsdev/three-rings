@@ -214,6 +214,154 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### `/my` All cards view (2026-07-24)
+
+`app/src/my/all_cards.rs` — the everything-view, over a reworked
+`CollectionStore::all_cards`.
+
+**The row is a catalog row, by construction.** "Same row treatment as
+collection view" is enforced by rendering the *same DTO*: `AllCardsRow` now
+carries a whole `CardSummary`, so the name cell reuses `CardPreview` (hover
+card, touch sheet, DFC flip) and the SQL reuses `summary_select()` — which
+grew a `summary_select_with(extra_cols)` sibling so a projection can add its
+own columns without re-listing the shared ones. Two fields were *removed*
+rather than kept: `owned` is `card.owned` and `in_collections` is
+`locations.len()`, both derived by `impl AllCardsRow`, because a stored copy of
+either can disagree with the list it summarizes. `NeedLocation` was renamed
+`CardLocation` — the needs view and this one wanted the identical shape.
+
+**The everything-view includes cards you only *want*.** `all_cards` had been an
+inner join on `holdings`, so a card desired-but-held-nowhere did not exist in
+it — invisible in `/my` while sitting on the shopping list. The aggregate is now
+`held FULL OUTER JOIN wanted`, and that row renders owned `—` / no locations /
+WANTED n. The e2e asserts the row's *existence*, not just its numbers, since
+that is the regression shape.
+
+**Quick search is deliberately not the catalog grammar.** `/my`'s box filters a
+list you already own, so it is a plain name substring — but through
+`crate::search::sql::pattern` (now `pub(crate)`), so a typed `%` is literal in
+both places. Asserted on-page: `?q=%` matches nothing.
+
+**HERE → WHERE, in three shapes.** The spec's `7 across 3 collections` phrasing
+only works in the plural, so: no locations → `—` with no control; exactly one →
+`3 in Trade Binder`, linked (a disclosure would expand to the sentence it is
+already showing); several → the spec's summary, expandable. Recorded as a
+refinement, not a deviation.
+
+**A `collapsible`'s padding leaks when closed.** `CollapsibleContent`'s `class`
+lands on the *inner* div, and `min-h-0` zeroes its content box but not its
+padding, so `class="pt-1"` left ~4 px of open track under every collapsed row.
+Spacing belongs on the child. Worth knowing for the next consumer — the vendored
+component's prop reads like it is inside the clipped region, and it is, but not
+below zero.
+
+**`/catalog`'s query bar became a shared component.** `app/src/components/
+query_bar.rs`, used by both pages. The debounce, the `self_pushed` URL⇄field
+guard, the per-search-session history granularity and the timer cleanup are four
+separately-earned behaviors; copying them into `/my` would have meant
+re-earning them. It is an app-level composite over vendored primitives, not a
+registry component, so it carries no bench section — its behavior is asserted by
+the `/catalog` and `/my` specs and by the on-device probe. Note the view-macro
+trap it re-triggered: the prop immediately before `{..}` must not end in a bare
+path (`placeholder=placeholder {..}` parses as struct-update and the spread
+vanishes, reported as "no field `aria`" on the props builder).
+
+**Keyset paging is forward-only.** A cursor describes "everything after this
+row", so Previous would need a reverse-ordered query and a `before` cursor.
+Browser Back already walks the pages you came through (each Next is a real
+history entry); the pager adds "Back to the start". Editing the search drops the
+cursor — a new filter has no page two yet.
+
+**The dev seed grew a bulk box, because the fixture could not reach page two.**
+`/my` asks for 50 rows and the seed held ~19 distinct cards, so the "Next page"
+link was unreachable by *any* browser test — the Codex review's second finding,
+and correct: every paging assertion was deep-linking a cursor obtained from the
+JSON route, so `Pager`'s href could have pointed anywhere. `app/src/seed.rs` now
+has a second, independently-sentinelled block (`BULK` / `BULK_CARDS = 60`) that
+an already-seeded user picks up on a plain re-run. It **skips whatever is
+currently short**: filling it blindly owned the two cards the tree deliberately
+wants and holds nowhere, and the whole "short → shopping list" leg of the
+fixture evaporated on the first run. `/my/collections/:id` will want the same
+headroom.
+
+**Codex adversarial review: zero findings in the feature code** (all six focus
+areas explicitly clear), three in the tests, all three accepted:
+
+1. *WANTED was verified against itself* — the expectation came from the same
+   projection the page renders, so a regression that summed wrong would agree
+   with itself. Now cross-checked against `/api/shopping-list`, which computes
+   the same cross-collection desire total through its own CTEs. Note the trap
+   found while wiring it: "on the shopping list" means `desired > owned`, **not**
+   "held nowhere" — the held-nowhere half filters on `owned === 0`.
+2. *The Next-page link was never clicked* — fixed by the seed change above; the
+   spec now clicks it and asserts the URL, the rows, and the way home.
+3. *The paging probe was unregistered* — no npm script, no doc reference, so a
+   duplicate/skip/cursor regression could pass the suite unless someone
+   remembered the command. `end2end/package.json` now carries `probe:*` scripts
+   for every probe a task may need, and the e2e-suite skill lists them with the
+   rule that an unregistered probe is one nobody runs.
+
+**Keyset paging is proved by a probe, not by the browser tier.** Page size is
+fixed in the UI, so only the JSON route can ask for a page small enough to
+iterate. `end2end/all-cards-paging-check.mjs` walks the whole set at limit 3 and
+7 and asserts no duplicate, no skipped row, order stable across boundaries,
+exactly one terminal cursor, and that a filter survives paging. Its reference
+read is `limit=200` (`Page::limit`'s clamp) *and asserts it came back terminal* —
+the page's own adapter cannot serve as the reference, because its 50-row default
+is itself a page now.
+
+**The e2e reads rows another spec writes.** `destination-picker.spec.ts` fires
+real `+ Have`/`+ Want` at the same dev user in a parallel worker, and `/my`
+aggregates every collection, so an API snapshot and the render compared against
+it can straddle a concurrent write. It surfaced as a firefox-only failure on the
+first full-tier run and is not browser-specific at all. Every API-cross-checked
+assertion now re-reads *and* re-renders inside `expect(...).toPass()`: a real bug
+fails every attempt, a mutation that lands mid-attempt is gone by the next. This
+is the "concurrent runs racing the seeded e2e user" hazard the Playwright-in-CI
+decision names, met inside a single run.
+
+**On-device coverage is the anonymous half, and it is the right half.** `/my` is
+authed and the dev proxy strips Cookie headers, so the table is unreachable on
+the emulator. What `end2end/android-all-cards-check.mjs` does cover is the
+shared `QueryBar` (typing → debounce → navigation → field survives its own
+commit → clear → Back re-seeds) and the anonymous `/my` → `/login?next=/my`
+bounce, which on this platform goes through the `data-ssr-path` shim rather than
+a browser-followed 302. 10/10 on Chrome 145.
+
+**Mutation pass: 4 analyzed, 2 real gaps closed and kill-verified, 1 already
+covered elsewhere, 1 documented as residual.**
+
+- *`take(1)` in `CardsTable` survived the SSR test* — `toContain('…all-cards-row')`
+  plus the first card's name cannot tell one row from fifty. The test now
+  extracts every `data-oracle` from the raw HTML and compares the **list** to
+  the API's. Mutation applied, test failed, reverted.
+- *`rows.truncate(limit - 1)` survived every paging assertion* — the page and the
+  test's oracle both read the same backend, so they agree on a 49-row page and
+  walk the whole set consistently. Fixed in the probe, which now asserts each
+  non-terminal page holds exactly the number of rows it **asked for** — the one
+  expectation nothing server-side computes. Mutation applied, probe failed 33
+  checks, reverted. (It also made the probe throw on `cursor=null`; guarded, so
+  a broken server produces findings rather than a stack trace.)
+- *`0 AS wanted` survived "three columns agree"* — true, and the reason is worth
+  naming: that test's oracle **is** the projection under test, so it can only
+  prove projection-to-DOM fidelity, never aggregate correctness. The suite does
+  kill this mutation, via the shopping-list cross-check added for the earlier
+  review finding.
+- **Residual, queued:** no fixture card is desired in *two* collections, so
+  "WANTED is a sum" and "WANTED is a max" are indistinguishable against this
+  seed. The SQL is a plain `sum(quantity) GROUP BY oracle_id` and the
+  cross-check catches a dropped/zeroed total, but the sum-vs-max distinction is
+  currently unobservable. Closing it needs a third seed block wanting one card
+  from two collections — filed as a follow-up rather than a third re-seed inside
+  this task.
+
+**Anonymous `/my` answers 200, not 302, to a request without `Accept: text/html`.**
+Noticed while curl-probing and chased rather than assumed: `leptos_axum`'s
+redirect only applies on the HTML render path, so a bare `curl` (which sends
+`Accept: */*`) gets the page and a browser gets the 302. Not a regression — `/`
+behaves the same way and always has. Probe `/my` with a browser-like `Accept`
+header or the result means nothing.
+
 ### Count stepper (custom gap component) (2026-07-23)
 
 `app/src/components/ui/count_stepper.rs` — custom gap component №2 (the first

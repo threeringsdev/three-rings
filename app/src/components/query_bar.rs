@@ -125,7 +125,7 @@ pub fn QueryBar(
 
     // Leaving the page with a timer armed would fire a navigate into a
     // torn-down router.
-    on_cleanup(move || clear_pending());
+    on_cleanup(clear_pending);
 
     let on_input = {
         let schedule = schedule.clone();
