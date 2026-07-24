@@ -396,20 +396,8 @@ fn UserMenu() -> impl IntoView {
 // ---- Route skeletons — each replaced by its own Stage 2/3 task. ----
 
 // `/cards/:id` graduated out of this file into `crate::cards` with the
-// card-detail task, the same way `/catalog` did.
-
-/// `/my` — the All-cards aggregate table lands with its task.
-#[component]
-pub fn MyCardsPage() -> impl IntoView {
-    view! {
-        <div class="space-y-6 p-6">
-            <h1 class="text-2xl font-bold">"All cards"</h1>
-            <div class="space-y-2">
-                {(0..6).map(|_| view! { <Skeleton class="h-8 w-full" /> }).collect_view()}
-            </div>
-        </div>
-    }
-}
+// card-detail task, the same way `/catalog` did. `/my` followed into
+// `crate::my::all_cards` with the All-cards task.
 
 /// `/my/collections/:id` — binder/deck view lands with its task.
 #[component]

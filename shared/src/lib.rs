@@ -32,9 +32,9 @@ pub use catalog::{
 };
 pub use collection::{
     default_language, AddHave, AddLine, AddWant, AllCardsRow, AllCardsView, BatchMove, Board,
-    CardRow, CollectionKind, CollectionSummary, CollectionTree, CollectionTreeRow, CollectionView,
-    Condition, DesireLine, Finish, HoldingLine, LineResult, MoveItem, MoveReceipt, MoveRequest,
-    NeedLocation, NeedRow, NeedsView, NewCollection, Page, QuickAddKind, QuickAddReceipt, Rename,
+    CardLocation, CardRow, CollectionKind, CollectionSummary, CollectionTree, CollectionTreeRow,
+    CollectionView, Condition, DesireLine, Finish, HoldingLine, LineResult, MoveItem, MoveReceipt,
+    MoveRequest, NeedRow, NeedsView, NewCollection, Page, QuickAddKind, QuickAddReceipt, Rename,
     Reorder, Reparent, SetQuantity, ShoppingList, ShoppingRow, SuggestedDestination, Teardown,
     TeardownReceipt,
 };

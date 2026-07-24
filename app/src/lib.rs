@@ -127,7 +127,7 @@ pub fn App() -> impl IntoView {
                 ssr=SsrMode::Async
             />
             <ParentRoute path=StaticSegment("my") view=shell::RequireAuth>
-                <Route path=StaticSegment("") view=shell::MyCardsPage ssr=SsrMode::Async />
+                <Route path=StaticSegment("") view=my::all_cards::AllCardsPage ssr=SsrMode::Async />
                 <Route
                     path=(StaticSegment("collections"), ParamSegment("id"))
                     view=shell::CollectionPage
@@ -418,6 +418,48 @@ pub async fn collection_tree() -> Result<shared::CollectionTree, ServerFnError<S
     }
     #[cfg(not(feature = "ssr"))]
     {
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// One keyset page of the `/my` everything-view (specs/app-ui.md → `/my`):
+/// every card across every collection, with its owned/wanted totals and the
+/// collections holding it. GET per the read-adapter exemplar
+/// ([`search_catalog`]): the page's `?q=`/`?cursor=` state *is* this call's
+/// arguments, so a shared or reloaded URL SSRs the same page.
+///
+/// `q` is the quick search — a plain name substring, deliberately not the
+/// catalog grammar (see `CollectionStore::all_cards`). It arrives as a plain
+/// `String` rather than `Option<String>` because the URL's absent-vs-empty
+/// distinction is meaningless here; the backend trims and treats empty as
+/// browse-all.
+#[server(
+    prefix = "/api",
+    endpoint = "all_cards",
+    input = leptos::server_fn::codec::GetUrl
+)]
+pub async fn all_cards(
+    q: String,
+    cursor: Option<String>,
+) -> Result<shared::AllCardsView, ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .all_cards(
+                Some(q),
+                shared::Page {
+                    cursor,
+                    limit: None,
+                },
+            )
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (q, cursor);
         Err(ServerFnError::ServerError("server-only".into()))
     }
 }

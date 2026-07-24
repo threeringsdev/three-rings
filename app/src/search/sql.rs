@@ -130,7 +130,12 @@ fn push_card_pred(qb: &mut QueryBuilder<'_, Postgres>, term: &Term) {
 
 /// `%…%` substring pattern with LIKE wildcards escaped so typed text is
 /// always literal.
-fn pattern(v: &str) -> String {
+///
+/// `pub(crate)` because `/my`'s quick search is the same substring rule against
+/// the same trgm-indexed `cards.name` — it just skips the grammar. One escaping
+/// helper, so a typed `%` can't mean one thing on `/catalog` and another on
+/// `/my`.
+pub(crate) fn pattern(v: &str) -> String {
     format!("%{}%", escape_like(v))
 }
 

@@ -692,7 +692,7 @@ fn RailTextField(
                 self_pushed.set_value(raw.clone());
                 commit(field, to_term(&raw));
             },
-            std::time::Duration::from_millis(super::SEARCH_DEBOUNCE_MS as u64),
+            std::time::Duration::from_millis(crate::components::query_bar::SEARCH_DEBOUNCE_MS),
         );
         pending.set_value(handle.ok());
     };

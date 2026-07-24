@@ -405,13 +405,19 @@ async fn teardown(user: AuthUser, Path(id): Path<Id>, Json(mode): Json<Teardown>
     )
 }
 
-/// `GET /api/all-cards?cursor=&limit=` — the virtual everything-view.
-async fn all_cards(user: AuthUser, Query(page): Query<Page>) -> Response {
+/// `GET /api/all-cards?q=&cursor=&limit=` — the virtual everything-view. `q` is
+/// the quick search (a name substring, not the catalog grammar), so this reuses
+/// [`SearchParams`] rather than the bare [`Page`].
+async fn all_cards(user: AuthUser, Query(p): Query<SearchParams>) -> Response {
+    let page = Page {
+        cursor: p.cursor,
+        limit: p.limit,
+    };
     json_result(
         async {
             HostedBackend::for_user(user.user_id)
                 .await?
-                .all_cards(page)
+                .all_cards(p.q, page)
                 .await
         }
         .await,

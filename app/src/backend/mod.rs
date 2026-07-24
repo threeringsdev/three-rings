@@ -292,9 +292,15 @@ pub trait CollectionStore {
     async fn teardown(&self, collection_id: Id, mode: Teardown) -> ApiResult<TeardownReceipt>;
 
     /// The virtual everything-view: one keyset page of per-oracle rows
-    /// aggregated across all the caller's collections (owned total + how many
-    /// collections hold it). Sorted by (name, oracle).
-    async fn all_cards(&self, page: Page) -> ApiResult<AllCardsView>;
+    /// aggregated across all the caller's collections — owned total, wanted
+    /// total, and every collection holding a copy. Sorted by (name, oracle).
+    ///
+    /// `q` is the page's **quick search**, and it is deliberately *not* the
+    /// catalog grammar (specs/catalog-search.md): a plain case-insensitive
+    /// substring of the card name, because this box filters a list you already
+    /// own rather than querying the catalog. An empty/whitespace `q` is the
+    /// same as `None` — browse everything.
+    async fn all_cards(&self, q: Option<String>, page: Page) -> ApiResult<AllCardsView>;
 
     /// A collection's needs: cards it desires beyond what it holds, each split
     /// into owned-elsewhere (with locations) and short-to-buy.
