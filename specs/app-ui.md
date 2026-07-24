@@ -1371,3 +1371,61 @@ Bordered border (width / transparency / currentcolor-fallback equality).
   observing the final token oklch values computed on-device (Chrome 145).
   No app screen uses the variants yet — the polish task's error/empty
   states are the intended consumers.
+
+### DFC back-face flip (2026-07-24)
+
+The queued defect task: `/cards/:id`, the hover preview, and the touch sheet
+rendered face 0 only, with the combined `Front // Back` heading — the back
+face was unreachable. Landed as projection + DTO + UI, no ingestion work
+(the task's own scope note held: both faces' `image_uris` were already in
+`printings.faces`, per-face oracle data in `cards.card_faces`).
+
+- **The layout allowlist widened by two.** The task named
+  `transform`/`modal_dfc`/`reversible_card`; the dev catalog shows
+  `double_faced_token` and `art_series` also carry true per-face
+  `image_uris` on every printing face (and ≥2 well-formed `card_faces`),
+  while `split`/`flip`/`adventure`/`prepare` printing faces carry **no**
+  `image_uris` at all — same defect, same fix, so all five layouts flip
+  (`shared::BACK_FACE_LAYOUTS`). One list drives the SQL gate
+  (`summary_select()` interpolates it), the server-side face build, and the
+  UI control, so the three cannot drift.
+- **Flippability is decided server-side.** `CardSummary.faces` is non-empty
+  only for allowlisted layouts (the SQL also CASE-gates `card_faces` off the
+  wire for everything else), so clients key the control off
+  `faces.len() >= 2` without re-deriving layout rules. On the detail page the
+  same gate is `CardDetail::flip_faces()` (parse fails closed → no control).
+- **The heading swaps, the combined name stays.** `card-name` shows the
+  current face; the canonical `Front // Back` identity moved to a
+  `card-combined-name` subtitle — which is also what keeps the pre-existing
+  SSR test (`html.toContain(card.name)`) honest.
+- **Two different printings can back the two surfaces.** Previews render the
+  representative printing (has-art-first, lowest id); the detail hero is the
+  oldest printing with art. The e2e therefore asserts **exact** art equality
+  in previews (same printing as the API summary) but the Scryfall
+  `/front/`↔`/back/` path segment on the detail page — pinning exact URLs
+  there would over-constrain.
+- **Codex review (step 2): zero findings** — explicitly cleared SQL
+  ordering/NULLs/injection surface, SSR/hydration init, DTO version skew
+  (`serde(default)` on both new fields), modulo/clamp safety, event
+  propagation, the face-0 fallback, and single-face regressions.
+- **Mutation pass: 6 analyzed, 4 applied, 4 killed — but only after
+  strengthening 3 tests + the Android probe.** Codex correctly showed the
+  art-pairing class survived: every art assertion checked "src changed and
+  is Scryfall", so swapping the face→art index (detail) or pinning previews
+  to the front image passed. Added the exact-equality / path-segment
+  assertions above; all four mutations (index swap, front-pinned previews,
+  `adventure` added to the allowlist, `flippable = true`) then failed their
+  test and were reverted. The allowlist and flippable mutations were
+  kill-verified live rather than taken on Codex's yes.
+- **Flake note (not this task's):** the full tier's first run failed
+  `collection-tree-manage` "drop on a row's lower edge reorders among
+  siblings" on chromium+firefox in the same run; it passed 4/4 on targeted
+  retry and the full rerun was 265/265. Looks like parallel-run contention
+  on the seeded tree, worth an eye if it recurs.
+- **Verification.** Shared unit tests 26 (7 new: allowlist, parse, zip,
+  fail-closed paths); hydration CLEAN anon + authed (DFC page, catalog
+  list/grid); bench CLEAN; SSR curls (flip control + face-0 heading +
+  combined subtitle in raw HTML); fast tier 17/17; **full three-browser
+  tier 265/265**; Android webview dev-attach `android-dfc-check.mjs`
+  **12/12 on-device** (Chrome 145) including the strengthened art-pairing
+  checks and the adventure negative; merge gate 8/8 green.
