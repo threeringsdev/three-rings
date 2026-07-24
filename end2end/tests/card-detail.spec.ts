@@ -23,12 +23,24 @@ import { AUTH_STATE, hydrated } from "./helpers";
 /// without the projection fallback.
 const DFC_QUERY = "Agadeem's Awakening";
 const SINGLE_FACE_QUERY = "Lightning Bolt";
+/// An adventure: two oracle faces, ONE image — the layout class that must NOT
+/// get a flip control. Flippability is keyed off `layout`, not face count
+/// (shared::has_back_face), and this is the card that tells the two apart.
+const ADVENTURE_QUERY = "Brazen Borrower";
+
+type FaceSummary = {
+  name: string;
+  mana_cost: string | null;
+  type_line: string | null;
+  image_uri: string | null;
+};
 
 type Summary = {
   oracle_id: string;
   name: string;
   image_uri: string | null;
   owned: number | null;
+  faces: FaceSummary[];
 };
 
 async function search(
@@ -180,6 +192,113 @@ test.describe("authed", () => {
   });
 });
 
+test.describe("DFC flip", () => {
+  test("the detail page flips both the art and the oracle block @fast", async ({
+    page,
+    request,
+  }) => {
+    const card = await firstCard(request, DFC_QUERY);
+    // The projection contract rides along: a DFC summary carries both faces,
+    // each with its own art (front/back of one printing).
+    expect(card.faces, "search projection lost the flip faces").toHaveLength(2);
+    const [front, back] = card.faces;
+    expect(front.image_uri).not.toBe(back.image_uri);
+
+    await page.goto(`/cards/${card.oracle_id}`);
+    await hydrated(page);
+
+    // The heading is the *face* name; the combined "Front // Back" identity
+    // stays on the page as a subtitle (and is what SSR/search matched on).
+    const h1 = page.getByTestId("card-name");
+    await expect(h1).toHaveText(front.name);
+    await expect(page.getByTestId("card-combined-name")).toHaveText(card.name);
+
+    const art = page.locator("img").first();
+    const frontSrc = await art.getAttribute("src");
+    // Scryfall URLs encode the face position — /front/ vs /back/ — which is
+    // what proves the art is paired with the *right* face, not merely
+    // different. (The detail hero may be a different printing than the search
+    // summary's representative one, so exact equality with the API faces
+    // would over-constrain; the path segment can't lie either way. A swapped
+    // face→art index survives a mere "src changed" assertion — Codex mutation
+    // pass.)
+    expect(frontSrc).toMatch(/\/front\//);
+    const frontOracle = await page.getByTestId("card-oracle-text").textContent();
+
+    await page.getByTestId("card-flip").click();
+
+    // Name, art, and oracle text all swapped — the whole block, not just the
+    // image (the task's acceptance criteria).
+    await expect(h1).toHaveText(back.name);
+    const backSrc = await art.getAttribute("src");
+    expect(backSrc).not.toBe(frontSrc);
+    expect(backSrc).toMatch(/^https:\/\/cards\.scryfall\.io\//);
+    expect(backSrc).toMatch(/\/back\//);
+    const backOracle = await page.getByTestId("card-oracle-text").textContent();
+    expect(backOracle).not.toBe(frontOracle);
+    // A flip is not navigation.
+    expect(new URL(page.url()).pathname).toBe(`/cards/${card.oracle_id}`);
+
+    // ...and it cycles back to the front.
+    await page.getByTestId("card-flip").click();
+    await expect(h1).toHaveText(front.name);
+    await expect(art).toHaveAttribute("src", frontSrc!);
+  });
+
+  test("an adventure gets no flip control — one image, keyed off layout @fast", async ({
+    page,
+    request,
+  }) => {
+    const card = await firstCard(request, ADVENTURE_QUERY);
+    expect(card.name).toContain("//"); // two oracle faces...
+    expect(card.faces).toHaveLength(0); // ...but the projection says no flip
+    await page.goto(`/cards/${card.oracle_id}`);
+    await hydrated(page);
+    await expect(page.getByTestId("card-flip")).toHaveCount(0);
+    // Single heading, combined name — exactly the pre-task rendering.
+    await expect(page.getByTestId("card-name")).toHaveText(card.name);
+    await expect(page.getByTestId("card-combined-name")).toHaveCount(0);
+  });
+
+  test("a single-face card gets no flip control @fast", async ({
+    page,
+    request,
+  }) => {
+    const card = await firstCard(request, SINGLE_FACE_QUERY);
+    expect(card.faces).toHaveLength(0);
+    await page.goto(`/cards/${card.oracle_id}`);
+    await hydrated(page);
+    await expect(page.getByTestId("card-flip")).toHaveCount(0);
+  });
+
+  test("the hover preview flips without closing or navigating @fast", async ({
+    page,
+    request,
+  }) => {
+    const card = await firstCard(request, DFC_QUERY);
+    await page.goto(`/catalog?q=${encodeURIComponent(DFC_QUERY)}&view=list`);
+    await hydrated(page);
+
+    await page.getByTestId("card-preview-trigger").first().hover();
+    const hover = page.locator("[data-testid=card-preview-hover]").first();
+    await expect(hover).toBeVisible();
+    await expect(hover).toContainText(card.faces[0].name);
+
+    await hover.getByTestId("card-flip").click();
+    await expect(hover).toContainText(card.faces[1].name);
+    // The preview art comes from the same representative printing as the
+    // API summary, so exact equality is safe here — and it is what catches a
+    // body that swaps the name but keeps the front art (Codex mutation pass).
+    await expect(hover.locator("img")).toHaveAttribute(
+      "src",
+      card.faces[1].image_uri!,
+    );
+    // The click stayed inside the preview: still open, still on the catalog.
+    await expect(hover).toBeVisible();
+    expect(new URL(page.url()).pathname).toBe("/catalog");
+  });
+});
+
 test("hovering a list row opens a preview without changing the URL @fast", async ({
   page,
 }) => {
@@ -274,6 +393,32 @@ test.describe("touch", () => {
     await sheet.getByTestId("card-preview-full-details").click();
     await page.waitForURL((url) => url.pathname.startsWith("/cards/"));
     await expect(page.getByTestId("card-name")).toContainText(SINGLE_FACE_QUERY);
+  });
+
+  test("the sheet flips a DFC without closing or navigating @fast", async ({
+    page,
+    request,
+  }) => {
+    const card = await firstCard(request, DFC_QUERY);
+    await page.goto(`/catalog?q=${encodeURIComponent(DFC_QUERY)}`);
+    await hydrated(page);
+
+    await page.getByTestId("card-preview-trigger").first().click();
+    const sheet = page.locator("[data-testid=card-preview-sheet][role=dialog]");
+    await expect(sheet).toHaveAttribute("data-state", "open");
+    await expect(sheet).toContainText(card.faces[0].name);
+
+    await sheet.getByTestId("card-flip").click();
+    await expect(sheet).toContainText(card.faces[1].name);
+    // Exact art equality — same reasoning as the hover test: the sheet body
+    // renders the representative printing's per-face art.
+    await expect(sheet.locator("img")).toHaveAttribute(
+      "src",
+      card.faces[1].image_uri!,
+    );
+    // The flip tap must neither close the sheet nor follow the tile link.
+    await expect(sheet).toHaveAttribute("data-state", "open");
+    expect(new URL(page.url()).pathname).toBe("/catalog");
   });
 
   test("a coarse pointer over a row never raises a hover card @fast", async ({

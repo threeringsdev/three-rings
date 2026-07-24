@@ -109,7 +109,11 @@ impl CatalogStore for HostedBackend {
             // COALESCE (specs/app-ui.md, card-detail task).
             "SELECT p.id, s.code AS set_code, s.name AS set_name, p.collector_number, p.rarity, \
                     COALESCE(p.image_uris->>'normal', p.faces->0->'image_uris'->>'normal') \
-                        AS image_uri, p.finishes::text[] AS finishes \
+                        AS image_uri, p.finishes::text[] AS finishes, \
+                    CASE WHEN p.faces IS NOT NULL THEN \
+                        (SELECT array_agg(f->'image_uris'->>'normal' ORDER BY ord) \
+                         FROM jsonb_array_elements(p.faces) WITH ORDINALITY AS t(f, ord)) \
+                    END AS face_image_uris \
              FROM printings p LEFT JOIN sets s ON s.id = p.set_id \
              WHERE p.oracle_id = $1 ORDER BY s.released_at NULLS LAST, p.collector_number",
         )
@@ -183,6 +187,7 @@ impl CatalogStore for HostedBackend {
                     rarity: p.rarity,
                     image_uri: p.image_uri,
                     finishes: p.finishes,
+                    face_image_uris: p.face_image_uris.unwrap_or_default(),
                 })
                 .collect(),
             rulings: rulings
@@ -199,12 +204,7 @@ impl CatalogStore for HostedBackend {
 
     async fn card_summary(&self, oracle_id: Id) -> ApiResult<CardSummary> {
         let card: SearchRowSql = sqlx::query_as(
-            &("SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, \
-                       rep.id AS printing_id, rep.image_uri \
-               FROM cards c"
-                .to_string()
-                + REPRESENTATIVE_PRINTING_JOIN
-                + "WHERE c.oracle_id = $1"),
+            &(summary_select() + REPRESENTATIVE_PRINTING_JOIN + "WHERE c.oracle_id = $1"),
         )
         .bind(oracle_id)
         .fetch_optional(self.pool)
@@ -226,15 +226,7 @@ impl CatalogStore for HostedBackend {
             None
         };
 
-        Ok(CardSummary {
-            oracle_id: card.oracle_id,
-            name: card.name,
-            printing_id: card.printing_id,
-            image_uri: card.image_uri,
-            mana_cost: card.mana_cost,
-            type_line: card.type_line,
-            owned,
-        })
+        Ok(card.into_summary(owned))
     }
 
     async fn search(&self, query: SearchQuery, page: Page) -> ApiResult<SearchResults> {
@@ -246,14 +238,8 @@ impl CatalogStore for HostedBackend {
             .map_err(|e| ApiError::Validation(e.to_string()))?;
         let cursor: Option<OracleCursor> = page.cursor.as_deref().map(decode_cursor).transpose()?;
         let limit = page.limit();
-        let mut qb: sqlx::QueryBuilder<'_, sqlx::Postgres> = sqlx::QueryBuilder::new(
-            "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, \
-             rep.id AS printing_id, rep.image_uri \
-             FROM cards c"
-                .to_string()
-                + REPRESENTATIVE_PRINTING_JOIN
-                + "WHERE true",
-        );
+        let mut qb: sqlx::QueryBuilder<'_, sqlx::Postgres> =
+            sqlx::QueryBuilder::new(summary_select() + REPRESENTATIVE_PRINTING_JOIN + "WHERE true");
         crate::search::sql::apply(&mut qb, &terms);
         if let Some(c) = &cursor {
             qb.push(" AND (c.name, c.oracle_id) > (");
@@ -283,18 +269,7 @@ impl CatalogStore for HostedBackend {
             })
             .flatten();
         Ok(SearchResults {
-            cards: rows
-                .into_iter()
-                .map(|r| CardSummary {
-                    oracle_id: r.oracle_id,
-                    name: r.name,
-                    printing_id: r.printing_id,
-                    image_uri: r.image_uri,
-                    mana_cost: r.mana_cost,
-                    type_line: r.type_line,
-                    owned: None,
-                })
-                .collect(),
+            cards: rows.into_iter().map(|r| r.into_summary(None)).collect(),
             next_cursor,
         })
     }
@@ -1955,6 +1930,9 @@ struct PrintingRowSql {
     rarity: String,
     image_uri: Option<String>,
     finishes: Vec<String>,
+    /// `NULL` for single-face printings; elements can be NULL individually (a
+    /// face without a `normal` image), hence the nested `Option`.
+    face_image_uris: Option<Vec<Option<String>>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -1980,6 +1958,53 @@ struct SearchRowSql {
     type_line: Option<String>,
     printing_id: Option<Uuid>,
     image_uri: Option<String>,
+    layout: Option<String>,
+    /// NULL unless the layout has a real back face (the select gates it), so
+    /// single-face rows don't drag their absent jsonb over the wire.
+    card_faces: Option<serde_json::Value>,
+    face_image_uris: Option<Vec<Option<String>>>,
+}
+
+impl SearchRowSql {
+    /// One summary shape for both per-oracle projections (search rows carry
+    /// `owned: None`; `card_summary` fills it) — including the flip faces,
+    /// which are only built for [`shared::catalog::BACK_FACE_LAYOUTS`].
+    fn into_summary(self, owned: Option<i32>) -> CardSummary {
+        let faces = shared::CardFaceSummary::build(
+            self.layout.as_deref(),
+            self.card_faces.as_ref(),
+            &self.face_image_uris.unwrap_or_default(),
+        );
+        CardSummary {
+            oracle_id: self.oracle_id,
+            name: self.name,
+            printing_id: self.printing_id,
+            image_uri: self.image_uri,
+            mana_cost: self.mana_cost,
+            type_line: self.type_line,
+            owned,
+            faces,
+        }
+    }
+}
+
+/// The shared select list of the per-oracle summary projections (search, card
+/// summary). `card_faces` ships only for layouts with a real back face — the
+/// `IN` list is generated from [`shared::catalog::BACK_FACE_LAYOUTS`] (our own
+/// compile-time constants, not user input) so SQL and the Rust-side gate in
+/// [`shared::CardFaceSummary::build`] cannot drift.
+fn summary_select() -> String {
+    let layouts = shared::catalog::BACK_FACE_LAYOUTS
+        .iter()
+        .map(|l| format!("'{l}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, c.layout, \
+         CASE WHEN c.layout IN ({layouts}) THEN c.card_faces END AS card_faces, \
+         rep.id AS printing_id, rep.image_uri, rep.face_image_uris \
+         FROM cards c"
+    )
 }
 
 /// The **representative printing** of `cards c` — one lateral shared by the
@@ -1988,9 +2013,15 @@ struct SearchRowSql {
 /// (`false` < `true`), then lowest id, so `image_uri` matches what the previous
 /// image-only subquery returned while `id` is populated even for a card whose
 /// printings all lack art — `+ Have` needs a printing id regardless.
+/// `face_image_uris` carries the same printing's per-face art for the flip
+/// control, so front and back always come from one printing.
 const REPRESENTATIVE_PRINTING_JOIN: &str = " LEFT JOIN LATERAL ( \
      SELECT p.id, \
-            COALESCE(p.image_uris->>'normal', p.faces->0->'image_uris'->>'normal') AS image_uri \
+            COALESCE(p.image_uris->>'normal', p.faces->0->'image_uris'->>'normal') AS image_uri, \
+            CASE WHEN p.faces IS NOT NULL THEN \
+                (SELECT array_agg(f->'image_uris'->>'normal' ORDER BY ord) \
+                 FROM jsonb_array_elements(p.faces) WITH ORDINALITY AS t(f, ord)) \
+            END AS face_image_uris \
      FROM printings p WHERE p.oracle_id = c.oracle_id \
      ORDER BY (COALESCE(p.image_uris->>'normal', \
                         p.faces->0->'image_uris'->>'normal') IS NULL), p.id \
