@@ -967,6 +967,26 @@ impl CollectionStore for HostedBackend {
         Ok(receipt)
     }
 
+    async fn holdings_of_oracle(&self, oracle_id: Id) -> ApiResult<Vec<HoldingLine>> {
+        // Ungrouped on purpose — see the trait doc. RLS scopes the rows to the
+        // caller, the same way every other read in this impl is scoped.
+        let mut tx = self.scoped_tx().await?;
+        let rows: Vec<HoldingRow> = sqlx::query_as(
+            "SELECT h.id, h.collection_id, h.printing_id, h.finish::text AS finish, \
+                    h.condition::text AS condition, h.language, h.board::text AS board, \
+                    h.quantity \
+             FROM holdings h JOIN printings p ON p.id = h.printing_id \
+             WHERE p.oracle_id = $1 \
+             ORDER BY h.collection_id, h.printing_id, h.board, h.finish",
+        )
+        .bind(oracle_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+        rows.into_iter().map(HoldingRow::into_line).collect()
+    }
+
     async fn suggested_destinations(&self, oracle_id: Id) -> ApiResult<Vec<SuggestedDestination>> {
         let mut tx = self.scoped_tx().await?;
         let rows: Vec<SuggestedRow> = sqlx::query_as(

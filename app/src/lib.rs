@@ -870,14 +870,21 @@ pub async fn undo_quick_add(move_id: shared::Id) -> Result<(), ServerFnError<Str
 /// tray's key is an enum precisely so a `Card { oracle }` entry cannot be piped
 /// into a [`shared::MoveItem`] — `from_collection_id: None` means *external
 /// intake*, so guessing it would conjure copies out of nothing. Each key is
-/// resolved here instead, against the caller's real holdings
-/// (`CardDetail::ownership` — the `/my` row's `locations` plus the printing it
-/// lacks). One candidate source ⇒ move; anything else ⇒ a [`SkipReason`] the
-/// caller reports by name. Same for a row the ledger cannot address: `moves`
-/// has no board, so a sideboard row is refused rather than silently taking
-/// mainboard copies.
+/// resolved here instead, against the caller's real holdings read **ungrouped**
+/// (`holdings_of_oracle`). One movable candidate source ⇒ move; anything else ⇒
+/// a [`SkipReason`] the caller reports by name.
 ///
 /// [`SkipReason`]: crate::my::move_selection::SkipReason
+///
+/// **Ungrouped is the load-bearing word.** Every rendered read model collapses
+/// the grain the write is addressed at — `collection_view` groups by
+/// `(printing, board)`, `CardDetail::ownership` by `(collection, printing)` —
+/// so a selectable row reading `present = 3` can be three foils, or copies on a
+/// sideboard. Resolved against those, such an entry looks movable, and the
+/// failure surfaces inside `holding_take` as `Conflict("no copies to move")`:
+/// `move_batch` is one transaction, so one such row kills the whole batch with
+/// an error naming no card. Every entry is now checked against the real
+/// holdings first and refused individually, so the rest of the batch moves.
 ///
 /// **Quantity is not the caller's** (the `quick_add` precedent): one copy per
 /// selected entry, fixed here. The tray counts entries, not copies, so this is
@@ -893,15 +900,17 @@ pub async fn undo_quick_add(move_id: shared::Id) -> Result<(), ServerFnError<Str
 )]
 pub async fn move_selection(
     to_collection_id: shared::Id,
-    items: Vec<crate::components::ui::selection_tray::SelectionKey>,
+    items: Vec<crate::my::move_selection::SelectionItem>,
 ) -> Result<crate::my::move_selection::MoveOutcome, ServerFnError<String>> {
     #[cfg(feature = "ssr")]
     {
-        use crate::backend::{CatalogStore, CollectionStore};
+        use crate::backend::CollectionStore;
         use crate::components::ui::selection_tray::SelectionKey;
         use crate::my::move_selection::{
-            refuse_held, resolve_card, CardSource, MoveOutcome, Skipped,
+            resolve_card, resolve_held, CardSource, MoveOutcome, Skipped,
         };
+        use std::collections::hash_map::Entry;
+        use std::collections::HashMap;
 
         if items.len() > SELECTION_MOVE_MAX {
             return Err(ServerFnError::ServerError(format!(
@@ -913,27 +922,41 @@ pub async fn move_selection(
         let mut moved: Vec<String> = Vec::new();
         let mut skipped: Vec<Skipped> = Vec::new();
         let mut lines: Vec<shared::MoveItem> = Vec::new();
-        for key in items {
-            let token = key.token();
-            let source = match key {
+        // One holdings read per distinct card, not per entry: the tray can
+        // hold the same card twice (a `/my` row and the collection row for the
+        // same copies), and both resolve off the same rows.
+        let mut owned: HashMap<shared::Id, Vec<shared::HoldingLine>> = HashMap::new();
+        for item in items {
+            let token = item.key.token();
+            let holdings = match owned.entry(item.oracle_id) {
+                Entry::Occupied(seen) => seen.into_mut(),
+                Entry::Vacant(slot) => {
+                    // Session-scoped: `collection_backend` carries the caller's
+                    // identity, and the rows come back RLS-filtered to them.
+                    let rows = backend
+                        .holdings_of_oracle(item.oracle_id)
+                        .await
+                        .map_err(api_err)?;
+                    slot.insert(rows)
+                }
+            };
+            let source = match item.key {
                 SelectionKey::Held {
                     collection_id,
                     printing_id,
                     board,
-                } => match refuse_held(collection_id, board, to_collection_id) {
-                    Some(reason) => Err(reason),
-                    None => Ok((collection_id, printing_id)),
-                },
-                SelectionKey::Card { oracle_id } => {
-                    // `ownership` is session-scoped and `collection_backend`
-                    // carries the session, so this is the caller's own copies.
-                    let detail = backend.card_detail(oracle_id).await.map_err(api_err)?;
-                    let owned = detail.ownership.unwrap_or_default();
-                    match resolve_card(&owned, to_collection_id) {
-                        CardSource::Move { from, printing_id } => Ok((from, printing_id)),
-                        CardSource::Refuse(reason) => Err(reason),
-                    }
-                }
+                } => resolve_held(
+                    holdings,
+                    collection_id,
+                    printing_id,
+                    board,
+                    to_collection_id,
+                ),
+                SelectionKey::Card { oracle_id: _ } => resolve_card(holdings, to_collection_id),
+            };
+            let source = match source {
+                CardSource::Move { from, printing_id } => Ok((from, printing_id)),
+                CardSource::Refuse(reason) => Err(reason),
             };
             match source {
                 Ok((from, printing_id)) => {
@@ -941,12 +964,12 @@ pub async fn move_selection(
                     lines.push(shared::MoveItem {
                         from_collection_id: Some(from),
                         printing_id,
-                        // The default grain, inherited: no selectable row
-                        // carries finish/condition/language today, so a move
-                        // addresses the default one and the server refuses
-                        // loudly (`Conflict`) if the row holds none — the batch
-                        // then rolls back whole rather than moving the wrong
-                        // copies. Widening this is the move-flows task's.
+                        // The default grain — and resolution has already
+                        // established that the source holds copies at exactly
+                        // this grain on the mainboard, which is what keeps a
+                        // foil-only or sideboard-only row from reaching
+                        // `holding_take` and rolling the batch back. Moving the
+                        // *other* grains is the move-flows task's.
                         finish: shared::Finish::default(),
                         condition: shared::Condition::default(),
                         language: shared::default_language(),

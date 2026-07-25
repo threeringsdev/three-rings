@@ -68,6 +68,7 @@ where
         .route(paths::MOVES_UNDO_LAST, post(undo_last_move))
         .route(paths::MOVE_UNDO_ROUTE, post(undo_move))
         .route(paths::CARD_DESTINATIONS_ROUTE, get(suggested_destinations))
+        .route(paths::CARD_HOLDINGS_ROUTE, get(holdings_of_oracle))
         .route(paths::ALL_CARDS, get(all_cards))
         .route(paths::SHOPPING_LIST, get(shopping_list))
         .route(&paths::collection_op_route(op::NEEDS), get(needs))
@@ -411,6 +412,20 @@ async fn suggested_destinations(user: AuthUser, Path(id): Path<Id>) -> Response 
             HostedBackend::for_user(user.user_id)
                 .await?
                 .suggested_destinations(id)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `GET /api/cards/{id}/holdings` — the caller's copies of a card at full
+/// grain (printing/finish/condition/language/board), ungrouped.
+async fn holdings_of_oracle(user: AuthUser, Path(id): Path<Id>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .holdings_of_oracle(id)
                 .await
         }
         .await,

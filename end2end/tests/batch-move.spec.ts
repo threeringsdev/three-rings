@@ -91,14 +91,20 @@ async function createCollection(
 const deleteCollection = (request: APIRequestContext, id: string) =>
   request.post(`/api/collections/${id}/delete`, { data: {} });
 
+/// Put copies into a collection. `grain` reaches the fields `AddHave` defaults
+/// — `finish`, `condition`, `language`, `board` — which is the whole point:
+/// a fixture that only ever writes `nonfoil/nm/en/main` cannot distinguish a
+/// move that checks the grain from one that assumes it, and every holding in
+/// this suite was written that way until the foil tests below.
 async function addHave(
   request: APIRequestContext,
   id: string,
   printingId: string,
   quantity = 1,
+  grain: { finish?: string; board?: string } = {},
 ) {
   const res = await request.post(`/api/collections/${id}/have`, {
-    data: { printing_id: printingId, quantity },
+    data: { printing_id: printingId, quantity, ...grain },
   });
   expect(res.status(), "add have").toBe(200);
 }
@@ -337,6 +343,116 @@ test("@fast a /my row held in one place resolves to that place and moves", async
     }).toPass({ timeout: 5000 });
   } finally {
     await deleteCollection(request, source.id);
+    await deleteCollection(request, dest.id);
+  }
+});
+
+// ----------------------------------- grains and boards a row cannot show ---
+//
+// Every read model the UI renders collapses the grain a move is addressed at:
+// `collection_view` groups by `(printing, board)` and `CardDetail::ownership`
+// by `(collection, printing)`. So a foil-only stack and a sideboard-only card
+// are selectable rows that look exactly like movable ones. Before the
+// resolution read they reached `holding_take`, which matches the full grain and
+// `board = 'main'`, returned `Conflict("no copies to move")`, and — because the
+// batch is one transaction — killed every *other* card in the selection with an
+// error naming none of them. These two tests are the ones that catch that.
+
+test("@fast a foil-only row is refused by name while the rest of the batch moves", async ({
+  page,
+  request,
+}) => {
+  test.slow();
+  const [plain, foil] = await unownedCards(request, 2, 10);
+  const source = await createCollection(request, "binder", "grainsrc");
+  const dest = await createCollection(request, "binder", "graindest");
+  try {
+    await addHave(request, source.id, plain.printing_id as string, 2);
+    // Foil, and *only* foil: the row still renders `present = 2` with a
+    // checkbox, because the view sums across finishes.
+    await addHave(request, source.id, foil.printing_id as string, 2, {
+      finish: "foil",
+    });
+
+    await page.goto(`/my/collections/${source.id}`);
+    await hydrated(page);
+    const foilRow = collectionRow(page, foil.printing_id as string);
+    await expect(
+      foilRow.locator('[data-testid="count-stepper-value"]'),
+      "the fixture must render the foil stack as an ordinary selectable row",
+    ).toHaveText("2");
+
+    await select(collectionRow(page, plain.printing_id as string)).click();
+    await select(foilRow).click();
+    await expect(page.locator(COUNT)).toHaveText("2 cards");
+
+    await moveTo(page, dest.name);
+
+    // The movable one moved…
+    await expect(page.locator(TOAST, { hasText: "Moved 1 card" })).toContainText(
+      `Moved 1 card (1 copy) → 🗂 ${dest.name}`,
+    );
+    // …and the other was named, with a reason, rather than taking the batch
+    // down with an error naming no card at all.
+    await expect(
+      page.locator(TOAST, { hasText: "wasn't moved" }),
+    ).toContainText(`${foil.name} has only foil, non-NM or non-English copies`);
+    // It is still checked: the refusal is work left to do, not a silent drop.
+    await expect(page.locator(COUNT)).toHaveText("1 card");
+
+    await expect(async () => {
+      expect(
+        await present(request, source.id, [
+          plain.printing_id as string,
+          foil.printing_id as string,
+        ]),
+      ).toEqual([1, 2]);
+      expect(
+        await present(request, dest.id, [
+          plain.printing_id as string,
+          foil.printing_id as string,
+        ]),
+      ).toEqual([1, 0]);
+    }).toPass({ timeout: 5000 });
+  } finally {
+    await deleteCollection(request, source.id);
+    await deleteCollection(request, dest.id);
+  }
+});
+
+test("@fast a /my row whose copies are all sideboarded is refused by board", async ({
+  page,
+  request,
+}) => {
+  const [card] = await unownedCards(request, 1, 15);
+  const deck = await createCollection(request, "deck", "sidedeck");
+  const dest = await createCollection(request, "binder", "sidedest");
+  try {
+    await addHave(request, deck.id, card.printing_id as string, 2, {
+      board: "side",
+    });
+
+    // `/my` aggregates across boards, so the row reads OWNED 2 and offers a
+    // checkbox — the board is invisible here, which is exactly the trap.
+    await page.goto(`/my?q=${encodeURIComponent(card.name)}`);
+    await hydrated(page);
+    await select(myRow(page, card.oracle_id)).click();
+
+    await moveTo(page, dest.name);
+
+    await expect(page.locator(TOAST).first()).toContainText(
+      `${card.name} sits on the side board`,
+    );
+    await expect(page.locator(COUNT)).toHaveText("1 card");
+    // Nothing was taken from the mainboard it does not have, and nothing
+    // landed in the destination.
+    const landed = await viewOf(request, dest.id);
+    expect(landed.cards).toHaveLength(0);
+    expect(
+      await present(request, deck.id, [card.printing_id as string]),
+    ).toEqual([2]);
+  } finally {
+    await deleteCollection(request, deck.id);
     await deleteCollection(request, dest.id);
   }
 });

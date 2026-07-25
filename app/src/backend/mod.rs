@@ -157,6 +157,12 @@ pub mod paths {
         format!("/api/cards/{oracle_id}/destinations")
     }
 
+    /// The caller's holdings of a card, ungrouped (by oracle id).
+    pub const CARD_HOLDINGS_ROUTE: &str = "/api/cards/{id}/holdings";
+    pub fn card_holdings(oracle_id: Id) -> String {
+        format!("/api/cards/{oracle_id}/holdings")
+    }
+
     /// The axum route template for a per-collection operation (`{id}` param).
     pub fn collection_op_route(op: &str) -> String {
         format!("/api/collections/{{id}}/{op}")
@@ -308,6 +314,21 @@ pub trait CollectionStore {
     /// Undo the caller's most recent not-yet-undone move (⌘K "undo last move").
     /// Returns the undone move id, or `None` if there is nothing to undo.
     async fn undo_last_move(&self) -> ApiResult<Option<MoveReceipt>>;
+
+    /// Every holding of a card the caller owns, **at full grain** — printing,
+    /// finish, condition, language, board, quantity — across all their
+    /// collections.
+    ///
+    /// The read models deliberately collapse that detail: `collection_view`
+    /// groups by `(printing, board)` and `CardDetail::ownership` by
+    /// `(collection, printing)`, so a row reading `present = 3` says nothing
+    /// about whether those three are foil, played, Japanese, or sideboarded.
+    /// A *move* is addressed at the full grain (`holding_take`), so anything
+    /// deciding whether a move can be made needs the ungrouped rows — otherwise
+    /// it can only find out by attempting the write and reading a `Conflict`
+    /// back, which in a batch means killing the batch. Small by construction:
+    /// one card's holdings, session-scoped.
+    async fn holdings_of_oracle(&self, oracle_id: Id) -> ApiResult<Vec<HoldingLine>>;
 
     /// Collections that desire a card more than they currently hold — the
     /// move/pull destination ranking, shortfall-first.

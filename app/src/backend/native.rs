@@ -393,6 +393,11 @@ impl CollectionStore for NativeBackend {
         self.post(super::paths::MOVES_UNDO_LAST, &()).await
     }
 
+    async fn holdings_of_oracle(&self, oracle_id: Id) -> ApiResult<Vec<HoldingLine>> {
+        self.require_session()?;
+        self.get(&super::paths::card_holdings(oracle_id)).await
+    }
+
     async fn suggested_destinations(&self, oracle_id: Id) -> ApiResult<Vec<SuggestedDestination>> {
         self.require_session()?;
         self.get(&super::paths::card_destinations(oracle_id)).await

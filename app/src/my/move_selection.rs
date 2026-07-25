@@ -1,7 +1,7 @@
 //! Batch move — the selection tray's "Move to…" (specs/app-ui.md → Selection
 //! tray; specs/collection-api.md → "Move (batch)").
 //!
-//! Five things are worth knowing before editing this file.
+//! Six things are worth knowing before editing this file.
 //!
 //! **A `/my` selection cannot be piped into a move, and this is where that is
 //! resolved.** [`SelectionKey::Card`] names an oracle card and nothing else: the
@@ -11,15 +11,25 @@
 //! Passing `from_collection_id: None` would not be "unknown" — in
 //! [`shared::MoveItem`] it means **external intake**, i.e. conjuring copies from
 //! outside the system. The resolution therefore happens **server-side against
-//! the caller's actual holdings** ([`resolve_card`], fed by
-//! `CardDetail::ownership`, which is `(collection, printing, quantity)` — the
-//! `/my` row's `locations` *plus the printing* it lacks). Exactly one candidate
+//! the caller's actual holdings** ([`resolve_card`]). Exactly one candidate
 //! source ⇒ move it; anything else ⇒ refuse, by name, with a reason.
+//!
+//! **Resolution reads holdings ungrouped, and that is load-bearing.** Every
+//! read model this feature could have used collapses the grain a move is
+//! addressed at: `collection_view` groups by `(printing, board)` and
+//! `CardDetail::ownership` by `(collection, printing)`. So a Trade Binder row
+//! reading `present = 3` can be three *foils*, and a `/my` row can be copies
+//! that sit on a sideboard — both indistinguishable from movable ones, both
+//! selectable. Resolving against those collapsed reads meant discovering the
+//! problem inside `holding_take`, as `Conflict("no copies to move")`, which in a
+//! single-transaction batch kills every other card in the selection and names
+//! none of them. `CollectionStore::holdings_of_oracle` returns the ungrouped
+//! rows so [`movable`] can be decided *before* the write, per entry.
 //!
 //! **Refusals are reported, never dropped.** Whatever the server would not move
 //! comes back as [`Skipped`] and stays checked in the tray, with a toast saying
 //! why. A batch that silently shrank would be indistinguishable from one that
-//! worked.
+//! worked — and a batch that died whole would be worse.
 //!
 //! **One copy per selected entry.** The tray counts *entries* ("2 cards"), not
 //! copies, and `SelectedCard` carries no quantity, so a move of one copy per
@@ -35,23 +45,52 @@
 //! transactions, and a failure part-way would leave the batch half-reverted
 //! behind a toast that said it was undone.
 //!
-//! **Boards are refused, not silently mainboarded.** `moves` has no board
-//! column and `holding_take` is hardcoded to `board = 'main'`, so a move issued
-//! from a sideboard row would take mainboard copies — a different card's worth
-//! of copies than the row the user checked. Those entries are refused with a
-//! stated reason until the move-flows task gives the ledger a board.
+//! **Boards and off-default grains are refused, not silently mainboarded.**
+//! `moves` has no board column and `holding_take` is hardcoded to
+//! `board = 'main'` at the default finish/condition/language, so a move issued
+//! from a sideboard row — or from a foil-only stack — would take *different
+//! copies than the row the user checked*, or none at all. Both are refused with
+//! a stated reason until the move-flows task gives the write a grain and a
+//! board. The refusal is per entry, so the rest of the batch still moves.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::{Deserialize, Serialize};
-use shared::{Board, CollectionSummary, Id, OwnershipEntry, SuggestedDestination};
+use shared::{Board, CollectionSummary, Condition, Finish, HoldingLine, Id, SuggestedDestination};
 
 use crate::catalog::destination::{
     picker_order, Destination, DestinationChoice, DestinationList, DestinationOption,
 };
 use crate::components::ui::popover::{Popover, PopoverAlign, PopoverContent, PopoverTrigger};
-use crate::components::ui::selection_tray::{SelectionKey, SelectionState};
+use crate::components::ui::selection_tray::{SelectedCard, SelectionKey, SelectionState};
 use crate::components::ui::sonner::{ToastHandle, ToastKind, ToastOptions};
+
+// ------------------------------------------------------ what a batch takes ---
+
+/// One entry of a batch move on the wire: what the row addresses, plus the
+/// oracle card it is a copy of.
+///
+/// The oracle rides along because resolution needs the caller's holdings of
+/// *that card* ungrouped, and a `Held` key names only a printing. Trusting the
+/// client for it is safe by construction rather than by politeness: it is used
+/// solely to look up the caller's own (RLS-scoped) holdings, and every
+/// resolution path then re-checks that the named collection/printing/board
+/// actually appears in what came back. A wrong oracle therefore produces a
+/// [`SkipReason::NoCopies`] refusal, never a write somewhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SelectionItem {
+    pub key: SelectionKey,
+    pub oracle_id: Id,
+}
+
+impl From<&SelectedCard> for SelectionItem {
+    fn from(card: &SelectedCard) -> Self {
+        Self {
+            key: card.key,
+            oracle_id: card.oracle_id,
+        }
+    }
+}
 
 // ------------------------------------------------ what a batch move reports ---
 
@@ -84,9 +123,14 @@ pub struct Skipped {
 pub enum SkipReason {
     /// The copies are already in the destination.
     AlreadyThere,
-    /// A deck sideboard/maybeboard row — the move ledger has no board.
+    /// A deck sideboard/maybeboard stack — the move ledger has no board.
     Board(Board),
-    /// Nothing is held any more (a selection made stale by another tab).
+    /// The copies exist but not at the grain a move is addressed at (foil, a
+    /// condition other than NM, a non-English language). `holding_take` matches
+    /// the full grain, so this write would find nothing.
+    Grain,
+    /// Nothing is held any more — the selection outlived the copies (another
+    /// tab, the stepper, or simply a tray left open a long time).
     NoCopies,
     /// A `/my` row whose copies sit in several collections: which one to take
     /// from is the user's call, not a guess this code may make.
@@ -101,8 +145,15 @@ impl SkipReason {
     pub fn phrase(self) -> String {
         match self {
             Self::AlreadyThere => "is already there".to_string(),
-            Self::Board(board) => format!("is on the {} board", board.to_pg()),
-            Self::NoCopies => "has no copies left to move".to_string(),
+            Self::Board(board) => format!(
+                "sits on the {} board, which a move can't address yet",
+                board.to_pg()
+            ),
+            Self::Grain => {
+                "has only foil, non-NM or non-English copies, which a move can't address yet"
+                    .to_string()
+            }
+            Self::NoCopies => "has no copies left to move — reload the page".to_string(),
             Self::ManyCollections(n) => {
                 format!("is in {n} collections — open one and select the row there")
             }
@@ -110,6 +161,34 @@ impl SkipReason {
                 format!("is held under {n} printings — open its collection and select the row")
             }
         }
+    }
+}
+
+/// Can this holding be moved by the write this task issues?
+///
+/// The write is `MoveItem` at `Finish::default()` / `Condition::default()` /
+/// `default_language()`, and `holding_take` additionally pins `board = 'main'`.
+/// Anything else is a *different* stack of copies, so treating it as movable
+/// either takes copies the user did not point at or fails the whole batch.
+pub fn movable(h: &HoldingLine) -> bool {
+    h.board == Board::Main && default_grain(h) && h.quantity > 0
+}
+
+/// The finish/condition/language half of [`movable`], board aside — what
+/// distinguishes "wrong board" from "wrong grain" in a refusal.
+fn default_grain(h: &HoldingLine) -> bool {
+    h.finish == Finish::default()
+        && h.condition == Condition::default()
+        && h.language == shared::default_language()
+}
+
+/// Why none of these holdings can be moved. Board first: a default-grain stack
+/// on a sideboard is a board problem the user can *see* on the page, while a
+/// foil stack is invisible in every read model we render.
+fn blocked_reason(candidates: &[&HoldingLine]) -> SkipReason {
+    match candidates.iter().find(|h| default_grain(h)) {
+        Some(h) => SkipReason::Board(h.board),
+        None => SkipReason::Grain,
     }
 }
 
@@ -129,50 +208,94 @@ pub enum CardSource {
 
 /// Resolve a `/my` row into a move source, or refuse.
 ///
-/// `entries` is `CardDetail::ownership` — every `(collection, printing)` the
-/// caller holds copies of this oracle card under. The destination is not a
-/// *candidate source*, so it is filtered out first: a card sitting in both the
-/// Trade Binder and the deck you are moving to has exactly one place it can
-/// come from, and refusing that as "ambiguous" would be needlessly useless.
+/// `holdings` is every copy of this oracle card the caller owns, **ungrouped**
+/// (`CollectionStore::holdings_of_oracle`) — which is what makes board and
+/// grain visible here at all. `CardDetail::ownership`, the obvious candidate,
+/// groups by `(collection, printing)`, so a card whose only copies are
+/// sideboarded or foil looked movable through it and blew up the batch instead.
 ///
-/// After that the rule is deliberately strict — **exactly one** candidate.
-/// Anything else is a question only the user can answer, and the enum's whole
-/// purpose is that this code cannot invent an answer.
-pub fn resolve_card(entries: &[OwnershipEntry], to: Id) -> CardSource {
-    let candidates: Vec<&OwnershipEntry> = entries
-        .iter()
-        .filter(|e| e.collection_id != to && e.quantity > 0)
-        .collect();
+/// The destination is not a *candidate source*, so it is filtered out first: a
+/// card sitting in both the Trade Binder and the deck you are moving to has
+/// exactly one place it can come from, and refusing that as "ambiguous" would
+/// be needlessly useless.
+///
+/// After that the rule is deliberately strict — **exactly one** movable
+/// candidate. Anything else is a question only the user can answer, and the
+/// enum's whole purpose is that this code cannot invent an answer.
+pub fn resolve_card(holdings: &[HoldingLine], to: Id) -> CardSource {
+    let held: Vec<&HoldingLine> = holdings.iter().filter(|h| h.quantity > 0).collect();
+    if held.is_empty() {
+        return CardSource::Refuse(SkipReason::NoCopies);
+    }
+    let elsewhere: Vec<&HoldingLine> = held.into_iter().filter(|h| h.collection_id != to).collect();
+    if elsewhere.is_empty() {
+        return CardSource::Refuse(SkipReason::AlreadyThere);
+    }
+    let candidates: Vec<&HoldingLine> = elsewhere.iter().copied().filter(|h| movable(h)).collect();
     match candidates.len() {
-        0 if entries.iter().any(|e| e.collection_id == to) => {
-            CardSource::Refuse(SkipReason::AlreadyThere)
-        }
-        0 => CardSource::Refuse(SkipReason::NoCopies),
+        0 => CardSource::Refuse(blocked_reason(&elsewhere)),
         1 => CardSource::Move {
             from: candidates[0].collection_id,
             printing_id: candidates[0].printing_id,
         },
-        n => {
-            let mut collections: Vec<Id> = candidates.iter().map(|e| e.collection_id).collect();
+        _ => {
+            let mut collections: Vec<Id> = candidates.iter().map(|h| h.collection_id).collect();
             collections.sort();
             collections.dedup();
             if collections.len() > 1 {
-                CardSource::Refuse(SkipReason::ManyCollections(collections.len()))
-            } else {
-                CardSource::Refuse(SkipReason::ManyPrintings(n))
+                return CardSource::Refuse(SkipReason::ManyCollections(collections.len()));
             }
+            // One collection, several candidates: they must be several
+            // printings, since `holdings_uniq` makes two rows of the same
+            // (collection, printing, grain, board) impossible.
+            let mut printings: Vec<Id> = candidates.iter().map(|h| h.printing_id).collect();
+            printings.sort();
+            printings.dedup();
+            CardSource::Refuse(SkipReason::ManyPrintings(printings.len()))
         }
     }
 }
 
-/// Refuse a `/my/collections/:id` row the move cannot honor, or `None` to move
-/// it. Grain-complete rows need no lookup — the only two refusals are the
-/// board the ledger cannot express and a move to where the copies already are.
-pub fn refuse_held(from: Id, board: Board, to: Id) -> Option<SkipReason> {
+/// Resolve a `/my/collections/:id` row, or refuse.
+///
+/// The row is grain-*addressed* (collection + printing + board) but not
+/// grain-*complete*: `CardRow` has no finish/condition/language, and the view's
+/// `present` sums across all of them (`GROUP BY printing_id, board`). So
+/// `present = 3` on a row whose three copies are foil is a checkbox over copies
+/// this move cannot take. The holdings read is what distinguishes those, and
+/// the refusal is what keeps one such row from killing the batch.
+pub fn resolve_held(
+    holdings: &[HoldingLine],
+    from: Id,
+    printing_id: Id,
+    board: Board,
+    to: Id,
+) -> CardSource {
     if board != Board::Main {
-        return Some(SkipReason::Board(board));
+        return CardSource::Refuse(SkipReason::Board(board));
     }
-    (from == to).then_some(SkipReason::AlreadyThere)
+    if from == to {
+        return CardSource::Refuse(SkipReason::AlreadyThere);
+    }
+    // Exactly the stack behind the row: one collection, one printing, one
+    // board — every finish/condition/language the row summed into its count.
+    let stack: Vec<&HoldingLine> = holdings
+        .iter()
+        .filter(|h| {
+            h.collection_id == from
+                && h.printing_id == printing_id
+                && h.board == board
+                && h.quantity > 0
+        })
+        .collect();
+    if stack.is_empty() {
+        return CardSource::Refuse(SkipReason::NoCopies);
+    }
+    if stack.iter().any(|h| movable(h)) {
+        CardSource::Move { from, printing_id }
+    } else {
+        CardSource::Refuse(blocked_reason(&stack))
+    }
 }
 
 /// Fold per-card destination suggestions into one ranking for the whole
@@ -372,12 +495,12 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
             .iter()
             .map(|c| (c.key.token(), c.name.clone()))
             .collect();
-        let keys: Vec<SelectionKey> = entries.iter().map(|c| c.key).collect();
+        let items: Vec<SelectionItem> = entries.iter().map(SelectionItem::from).collect();
 
         pending.set(true);
         open.set(false);
         spawn_local(async move {
-            let result = crate::move_selection(dest.id, keys).await;
+            let result = crate::move_selection(dest.id, items).await;
             pending.set(false);
             match result {
                 Ok(outcome) => {
@@ -414,9 +537,13 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
                     }
                 }
                 Err(e) => {
+                    // The batch is one transaction, so a failure here moved
+                    // nothing — say so, because the selection is still on
+                    // screen and "did some of that land?" is otherwise
+                    // unanswerable from the toast.
                     toast.show(
                         ToastOptions::message(format!(
-                            "Couldn't move: {}",
+                            "Couldn't move: {} — nothing was moved",
                             crate::my::collection::message_of(&e)
                         ))
                         .kind(ToastKind::Error),
@@ -523,12 +650,31 @@ mod tests {
         Id::from_u128(n)
     }
 
-    fn own(collection: u128, printing: u128, quantity: i32) -> OwnershipEntry {
-        OwnershipEntry {
+    /// A plain movable holding: mainboard, nonfoil, NM, English.
+    fn own(collection: u128, printing: u128, quantity: i32) -> HoldingLine {
+        HoldingLine {
+            id: Id::new_v4(),
             collection_id: id(collection),
-            collection_name: format!("Collection {collection}"),
             printing_id: id(printing),
+            finish: Finish::Nonfoil,
+            condition: Condition::Nm,
+            language: shared::default_language(),
+            board: Board::Main,
             quantity,
+        }
+    }
+
+    fn foil(collection: u128, printing: u128, quantity: i32) -> HoldingLine {
+        HoldingLine {
+            finish: Finish::Foil,
+            ..own(collection, printing, quantity)
+        }
+    }
+
+    fn on_board(board: Board, collection: u128, printing: u128, quantity: i32) -> HoldingLine {
+        HoldingLine {
+            board,
+            ..own(collection, printing, quantity)
         }
     }
 
@@ -598,17 +744,112 @@ mod tests {
         );
     }
 
+    // ---- the grain and board a rendered row cannot show ----
+
+    #[test]
+    fn a_foil_only_card_is_refused_by_name_instead_of_killing_the_batch() {
+        // `/my` shows OWNED 3 and `collection_view` shows HERE 3; neither says
+        // "foil". Moving it would reach `holding_take` at the default grain,
+        // find nothing, and roll the whole transaction back.
+        let entries = [foil(1, 100, 3)];
+        assert_eq!(
+            resolve_card(&entries, id(9)),
+            CardSource::Refuse(SkipReason::Grain)
+        );
+        assert_eq!(
+            resolve_held(&entries, id(1), id(100), Board::Main, id(9)),
+            CardSource::Refuse(SkipReason::Grain)
+        );
+    }
+
+    #[test]
+    fn a_foil_stack_beside_a_plain_one_still_moves_the_plain_one() {
+        // The row sums both (the view groups by printing+board), so what
+        // matters is that *some* copy is movable.
+        let entries = [foil(1, 100, 3), own(1, 100, 1)];
+        assert_eq!(
+            resolve_held(&entries, id(1), id(100), Board::Main, id(9)),
+            CardSource::Move {
+                from: id(1),
+                printing_id: id(100),
+            }
+        );
+    }
+
+    #[test]
+    fn a_my_row_whose_copies_are_all_sideboarded_names_the_board() {
+        // `CardDetail::ownership` groups board away, so this looked movable
+        // before the ungrouped read — and `holding_take` pins `board = 'main'`.
+        let entries = [on_board(Board::Side, 1, 100, 2)];
+        assert_eq!(
+            resolve_card(&entries, id(9)),
+            CardSource::Refuse(SkipReason::Board(Board::Side))
+        );
+    }
+
+    #[test]
+    fn board_outranks_grain_when_both_block() {
+        // A plain stack on the sideboard and a foil stack on the mainboard:
+        // the board is the one the user can actually see on the page.
+        let entries = [foil(1, 100, 1), on_board(Board::Side, 1, 100, 2)];
+        assert_eq!(
+            resolve_card(&entries, id(9)),
+            CardSource::Refuse(SkipReason::Board(Board::Side))
+        );
+    }
+
     #[test]
     fn a_sideboard_row_is_refused_rather_than_mainboarded() {
+        let entries = [own(1, 100, 2), on_board(Board::Side, 1, 100, 2)];
         assert_eq!(
-            refuse_held(id(1), Board::Side, id(9)),
-            Some(SkipReason::Board(Board::Side))
+            resolve_held(&entries, id(1), id(100), Board::Side, id(9)),
+            CardSource::Refuse(SkipReason::Board(Board::Side))
         );
-        assert_eq!(refuse_held(id(1), Board::Main, id(9)), None);
         assert_eq!(
-            refuse_held(id(1), Board::Main, id(1)),
-            Some(SkipReason::AlreadyThere)
+            resolve_held(&entries, id(1), id(100), Board::Main, id(9)),
+            CardSource::Move {
+                from: id(1),
+                printing_id: id(100),
+            }
         );
+        assert_eq!(
+            resolve_held(&entries, id(1), id(100), Board::Main, id(1)),
+            CardSource::Refuse(SkipReason::AlreadyThere)
+        );
+    }
+
+    #[test]
+    fn a_stale_selection_is_refused_rather_than_aborting_the_batch() {
+        // The copies were moved away in another tab after the row was checked.
+        // Without the read this reached `holding_take` and took the batch with
+        // it; the tray is long-lived by design, so this is not exotic.
+        assert_eq!(
+            resolve_held(&[], id(1), id(100), Board::Main, id(9)),
+            CardSource::Refuse(SkipReason::NoCopies)
+        );
+        // …and so is a row whose *printing* is gone while the card remains.
+        let entries = [own(1, 999, 2)];
+        assert_eq!(
+            resolve_held(&entries, id(1), id(100), Board::Main, id(9)),
+            CardSource::Refuse(SkipReason::NoCopies)
+        );
+    }
+
+    #[test]
+    fn every_refusal_says_what_is_wrong() {
+        // A reason with no phrase is a refusal the user cannot act on.
+        for reason in [
+            SkipReason::AlreadyThere,
+            SkipReason::Board(Board::Side),
+            SkipReason::Grain,
+            SkipReason::NoCopies,
+            SkipReason::ManyCollections(2),
+            SkipReason::ManyPrintings(2),
+        ] {
+            assert!(!reason.phrase().is_empty(), "{reason:?} has no phrase");
+        }
+        assert!(SkipReason::Grain.phrase().contains("foil"));
+        assert!(SkipReason::NoCopies.phrase().contains("reload"));
     }
 
     fn suggestion(collection: u128, name: &str, shortfall: i32) -> SuggestedDestination {
@@ -694,8 +935,8 @@ mod tests {
         ];
         assert_eq!(
             skipped_message(&many),
-            "4 cards weren't moved: Bolt is already there; \
-             Counterspell is on the side board; and 2 more"
+            "4 cards weren't moved: Bolt is already there; Counterspell sits on the side board, \
+             which a move can't address yet; and 2 more"
         );
     }
 
