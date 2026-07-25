@@ -749,22 +749,46 @@ test.describe("mobile", () => {
     );
   });
 
-  test("no collection page scrolls sideways at phone width @fast", async ({
+  test("no collection table scrolls sideways at phone width @fast", async ({
     page,
     request,
   }) => {
-    // Six numeric-ish columns in a table on a 390px screen is exactly the
-    // arrangement that overflows; the progressive columns exist to stop it.
+    // Six columns in a table on a 390px screen is exactly the arrangement that
+    // overflows; the Type and Mana columns are `hidden md:table-cell` /
+    // `hidden sm:table-cell` to stop it.
+    //
+    // **Measure the scroll container, not the document.** `TableWrapper` is
+    // `overflow-auto` (app/src/components/ui/table.rs), so a too-wide table
+    // becomes a wrapper-local scrollbar that never moves
+    // `document.documentElement` at all: the document-level version of this
+    // assertion read 0 while the table itself scrolled 92–128px, and passed
+    // with the progressive columns deleted — vacuous for the exact failure it
+    // names. The document check stays as a second, cheaper net (page chrome
+    // outside the table), but the wrapper is the one that can fail.
     for (const name of ["Depth Box", "Commander Deck", "Bulk Box"]) {
       const c = await collectionNamed(request, name);
       await page.goto(`/my/collections/${c.summary.id}`);
       await hydrated(page);
-      const overflow = await page.evaluate(
+
+      const table = page.locator('[data-testid="collection-table"]');
+      await expect(table).toHaveCount(1);
+      const wrapper = await table.evaluate((el) => {
+        const w = el.closest('[data-name="TableWrapper"]');
+        if (!w) throw new Error("the table has no TableWrapper to scroll in");
+        return { overflow: w.scrollWidth - w.clientWidth, client: w.clientWidth };
+      });
+      expect(wrapper.client, `${name} wrapper has no width`).toBeGreaterThan(0);
+      expect(
+        wrapper.overflow,
+        `${name}'s table scrolls sideways inside its wrapper`,
+      ).toBeLessThanOrEqual(1);
+
+      const doc = await page.evaluate(
         () =>
           document.documentElement.scrollWidth -
           document.documentElement.clientWidth,
       );
-      expect(overflow, `${name} overflows horizontally`).toBeLessThanOrEqual(1);
+      expect(doc, `${name} overflows the document`).toBeLessThanOrEqual(1);
     }
   });
 });
