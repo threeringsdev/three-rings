@@ -106,12 +106,20 @@ cargo tauri android dev                               # debug on emulator/device
 cargo tauri android build --apk --target aarch64      # release APK (embedded Axum SSR)
 ```
 
-## Verify — reproduce the merge gate before pushing
+## Verify — reproducing the merge gate locally
 
 The merge gate is [`.github/workflows/validate.yml`](.github/workflows/validate.yml)
-(linux, every push and PR). Branch protection on `main` requires it and
-auto-merge ships on green, so **this suite is the de facto reviewer** — a
-wrong-but-green change ships itself. Reproduce it exactly:
+(linux; every PR, plus pushes to `main`). Branch protection on `main` requires it
+and auto-merge ships on green, so **this suite is the de facto reviewer** — a
+wrong-but-green change ships itself.
+
+**CI is the gate — running this locally first is optional, and it is not the
+same check.** CI is linux with Tauri's system libs; the laptop is macOS and the
+devcontainer cannot build `three_rings` at all, so a local green is not evidence
+of the green that gates. A red gate cannot ship (auto-merge only fires on green),
+and the cloud run takes 2–3 minutes. Reproduce it locally when you want a fast
+fail on a large change, or to **debug a red CI run** whose logs don't explain
+themselves — not as a ritual before every push. Reproduce it exactly:
 
 ```bash
 mkdir -p target/site/pkg                                                # Tauri build script needs this dir

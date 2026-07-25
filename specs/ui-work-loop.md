@@ -150,7 +150,11 @@ numbers came in and showed the test matrix was never the cost (see Findings):
   orchestrator greps; the implementer reads what it is pointed at.
 - **Probes are capped** — hydration on at most four URLs, one SSR curl per
   changed surface.
-- **Steps 4 and 5 run concurrently.** They share no state.
+- **Nobody runs the gate locally as a pre-check.** CI runs it on every PR,
+  branch protection requires it, auto-merge only fires on green. The laptop is
+  macOS and the devcontainer can't build `three_rings` at all, so a local green
+  is not evidence of the green that gates. Local `validate` is a *debugging*
+  tool for a red CI run, not a ritual before pushing.
 
 ### Failure policy
 
@@ -242,12 +246,26 @@ duplication. Nothing in the dispatch prompt forbade it; a conscientious agent
 runs the gate to be safe. The fix is one paragraph in the dispatch contract, now
 in the skill and in Calibration above.
 
-Three smaller levers landed with it: required reading handed over as **line
+Two smaller levers landed with it: required reading handed over as **line
 ranges** (specs/app-ui.md is ~1,700 lines, and "read the section plus its
-`Depends on:` specs" makes an agent read most of it), a **cap of four** hydration
-URLs (agents left to choose probe eight), and **steps 4 and 5 dispatched
-concurrently** — they share no state, the gate building into `target/gate` while
-the e2e drives the watch on :3000.
+`Depends on:` specs" makes an agent read most of it), and a **cap of four**
+hydration URLs (agents left to choose probe eight).
+
+**Then step 5 went away entirely.** Checking the workflow rather than assuming
+showed `validate.yml` already runs the same eight steps on every PR, in **2–3
+minutes**, and branch protection requires it — the local run was duplicating a
+cloud run that was about to happen anyway. Worse, it is *not the same check*:
+CI is linux with Tauri's system libs, the laptop is macOS, and the devcontainer
+cannot build `three_rings` at all, so a local green was never evidence of the
+green that gates. Nothing can ship broken by dropping it, because auto-merge
+only fires on the cloud green; the only cost is finding out about a red gate
+~2 minutes later. Local `validate` is now a debugging tool for a red CI run.
+
+Found while checking: a bare `on: push` alongside `on: pull_request` fired
+**two identical runs for every push to a PR branch** — visible in the run
+history as matching `push` and `pull_request` entries on the same commit,
+2 minutes each. Scoped to `on: push: branches: [main]`, halving validate
+minutes for no loss of coverage.
 
 Not cut, deliberately: the review round. 10.5 min and 153k for an independent
 read of a write path is proportionate, and it produced 12 filed findings even at
