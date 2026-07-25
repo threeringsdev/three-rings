@@ -536,6 +536,77 @@ pub async fn set_holding_quantity(
     }
 }
 
+/// Remove a holding's copies from its collection — the collection view's
+/// committed **0** (specs/app-ui.md → `/my/collections/:id`;
+/// specs/collection-api.md → Move, `to = None`).
+///
+/// **Not `set_holding_quantity(id, 0)`, and that is the whole point.** Setting a
+/// holding to zero runs `DELETE FROM holdings`, after which nothing can put the
+/// copies back: the row's id is dead, and no other write knows what grain or
+/// board it held (`CardRow` is `(printing, board)` with finish/condition/
+/// language summed away). The count stepper offers Undo on every commit, so for
+/// two tasks the floor here was `min = 1` — the destructive commit made
+/// unreachable rather than reachable-and-lying, at the price of a binder card
+/// that could not be removed at all.
+///
+/// A removal is a **move with no destination**. The server reads the grain, the
+/// board and the owning collection off the named holding *inside the write
+/// transaction* and appends a `moves` row, so undo is the ledger's `undone_at`
+/// and puts those copies back on that board — the same undo every other move
+/// gets. Returns the move id for the toast.
+///
+/// **The whole stack, not a client-supplied count**: "remove this row" is what
+/// the user asked for, and a stale rendered count would otherwise leave copies
+/// behind. Scalar in, scalar out (the `quick_add` convention).
+#[server(prefix = "/api", endpoint = "remove_holding")]
+pub async fn remove_holding(holding_id: shared::Id) -> Result<shared::Id, ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .move_holding(
+                holding_id,
+                shared::HoldingMove {
+                    to_collection_id: None,
+                    quantity: None,
+                },
+            )
+            .await
+            .map(|r| r.move_id)
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = holding_id;
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// Undo one move by id — the toast action behind [`remove_holding`].
+///
+/// Idempotent at the trait level, so a double-clicked toast is harmless. It is
+/// the same trait call [`undo_quick_add`] makes; the two are separate adapters
+/// because each surface's endpoint names what it undoes, and collapsing them
+/// into one generic endpoint is filed as follow-up rather than done here.
+#[server(prefix = "/api", endpoint = "undo_move")]
+pub async fn undo_move(move_id: shared::Id) -> Result<(), ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .undo_move(move_id)
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = move_id;
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
 /// Empty a deck (specs/app-ui.md → the deck variant's "Empty deck…" teardown;
 /// specs/collection-api.md → Teardown). Returns how many move rows it wrote.
 ///

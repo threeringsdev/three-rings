@@ -162,3 +162,45 @@ test("a failed save reverts the optimistic count", async ({ page }) => {
     page.locator('[data-name="Toast"]', { hasText: "Couldn't save count" }),
   ).toBeVisible();
 });
+
+test("@fast a caller-reported commit raises no toast of the stepper's own", async ({
+  page,
+}) => {
+  // `caller_reports` exists for a commit whose undo is a *different operation*
+  // — a committed 0 removes the row the write is addressed at, so the stepper's
+  // built-in undo ("re-commit the old count") would post a dead id. For those
+  // commits the stepper must still write optimistically and still fire
+  // `on_commit`, and must raise nothing: two toasts, one of them promising an
+  // undo it cannot perform, is the failure this replaces.
+  await open(page);
+  const removable = "#bench-stepper-removable";
+  const rv = `${removable} [data-testid="count-stepper-value"]`;
+  const rd = `${removable} [data-testid="count-stepper-dec"]`;
+  await page.locator(rv).scrollIntoViewIfNeeded();
+  await page.locator(`${removable} [data-testid="count-stepper"]`).hover();
+
+  // 2 → 1 is an ordinary commit: the stepper reports it itself.
+  await page.locator(rd).click();
+  await page.locator(`${removable} span`, { hasText: "Counterspell" }).click();
+  await expect(
+    page.locator('[data-name="Toast"]', { hasText: "Counterspell: 2 → 1" }),
+  ).toBeVisible();
+
+  // 1 → 0 is the caller's. Exactly one toast, and it is the caller's wording —
+  // if the stepper also raised its own, "Counterspell: 1 → 0" would be here.
+  await page.locator(`${removable} [data-testid="count-stepper"]`).hover();
+  await page.locator(rd).click();
+  await page.locator(`${removable} span`, { hasText: "Counterspell" }).click();
+  const removed = page.locator('[data-name="Toast"]', {
+    hasText: "Removed Counterspell (1 copies)",
+  });
+  await expect(removed).toBeVisible();
+  await expect(
+    page.locator('[data-name="Toast"]', { hasText: "Counterspell: 1 → 0" }),
+  ).toHaveCount(0);
+  // The caller withdrew the control, because the thing it counted is gone.
+  await expect(page.locator('[data-testid="bench-stepper-removed"]')).toBeVisible();
+
+  await removed.getByRole("button", { name: "Undo" }).click();
+  await expect(page.locator(rv)).toHaveText("1");
+});
