@@ -165,6 +165,8 @@ UI work stays on the ~3K-printing POC catalog (maintainer decision
 - [ ] Black background too dark, card borders blend in
 - [ ] DFC flip should be viewable on main catalog page (and everywhere the card is rendered besides hover view)
 - [ ] No back button from card detail view to catalog page
+- [ ] Auth flow on web doesn't open another browser tab, final "you can close this tab" doesn't redirect back to the app. Works for desktop, not on web 
+
 ### Catalog updates
 
 - [ ] collection-api → keyset for needs / shopping-list (follow-up). `needs(collection)` and the global `shopping_list()` currently return full result sets — bounded in practice but unpaginated. If profiling at real scale shows them hot, add keyset paging like the other reads (specs: [collection-api](collection-api.md))
