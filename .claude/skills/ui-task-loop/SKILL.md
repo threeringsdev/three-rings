@@ -32,6 +32,12 @@ calibration below is deliberate, set by the maintainer after one task cost
 - **When in doubt, spend less.** A second look costs more than it returns at
   this stage.
 
+**The implementer is the cost, not the tests.** Measured on the quick-add task
+(2026-07-25): implementer 69 min / 680k tokens, reviewer 10.5 min / 153k, gate
+2 min / 53k, the full chromium tier **52 seconds**, Android probes ~15 s. Tuning
+the test matrix further is optimizing the 1% — every rule below that costs the
+implementer a command or a token is worth more than any e2e economy.
+
 ## The loop break — when this ends
 
 **The loop runs task after task until Stage 3 has no `[ ]` left, then stops.**
@@ -98,23 +104,45 @@ which costs tokens and leaks stale assumptions into the new one.
    this conversation):
    - the task line **verbatim** from specs/TODO.md; the branch name; that a
      watch server with `component-bench` is already serving :3000;
-   - required reading *before code*: the task's sections of specs/app-ui.md,
-     every spec in its `(specs:)` annotation, and design/wireframes.pen;
+   - required reading *before code*, **as line ranges, not section names**.
+     specs/app-ui.md is ~1,700 lines; "read the Quick-add panel section and its
+     `Depends on:` specs" makes the agent read most of the file. Grep the
+     headings and the task's keywords yourself and hand over
+     `specs/app-ui.md:131-150, 339-345, 1353-1360, 1405-1415` plus the specific
+     wireframe. Name the *files* of prior art to read (`app/src/catalog.rs`'s
+     `QuickAddButton`), not "the existing code";
    - skills to invoke: **vendor-component** for any new primitive (bench
      section, same commit), **e2e-suite** for authoring tests,
      **android-smoke** for the dev-attach recipe;
-   - the evidence it must return: unit tests green; web probes run with URLs
-     (`node end2end/hydration-check.mjs <urls…>` — **bare = checks nothing**;
-     probe every page that renders a touched component, plus a page-specific
-     SSR curl against :3000);
+   - the evidence it must return: `cargo test --workspace --exclude frontend`
+     green; a **capped** probe list — hydration on *at most four* URLs
+     (`node end2end/hydration-check.mjs <urls…>` — **bare = checks nothing**),
+     chosen as the pages that render a touched component, plus one SSR curl per
+     changed surface. Name the cap in the prompt; agents left to choose probe
+     eight;
    - that it **authors** e2e tests now but runs only
      `--project=chromium --grep @fast` while iterating — **the e2e run is
      step 4, after review fixes**, and it must not run a full pass early;
+   - **the build commands it may not run** (see below);
    - constraints: never restart the :3000 watch; `git checkout` the
      build-injected AndroidManifest.xml before committing; commit its own work
      with conventional messages; do **not** touch specs/TODO.md or spec
      Findings (orchestrator's job); report back a summary, the evidence, and
      anything the spec should record.
+
+   > #### The implementer does not run the gate
+   >
+   > State this in the dispatch prompt, in these words or stronger: **do not run
+   > `cargo leptos build --release`, `cargo fmt --all -- --check`, or the six
+   > clippy lines.** Step 5 owns them. For its own feedback the implementer gets
+   > `cargo test --workspace --exclude frontend` and a single
+   > `cargo clippy -p app --features hosted,component-bench --all-targets`.
+   >
+   > Left unsaid, a conscientious agent runs the whole gate to be safe — and the
+   > release build (full Tailwind + wasm, cold) is the most expensive command in
+   > the repo. On the quick-add task the implementer ran all eight steps and the
+   > step-5 agent then replayed every one of them from cache in under a second,
+   > which is the proof the first run was pure waste.
 
 2. **Review — exactly one round, code only** — dispatch a review subagent with:
    "Invoke the **adversarial-review** skill and follow it", the branch name,
@@ -140,10 +168,17 @@ which costs tokens and leaks stale assumptions into the new one.
    If the implementer is gone (ended/overflowed), dispatch a fresh fix agent
    with the branch, the findings, and pointers to the spec sections.
 
+**Steps 4 and 5 run concurrently.** They share no state — the gate builds into
+`target/gate`, the e2e drives the already-running watch on :3000. Dispatch the
+gate subagent *first*, then run the e2e in the main session while it works;
+collect both verdicts before step 6. Sequencing them wastes the shorter one.
+
 4. **E2E — the single run, after the fixes** — one pass, chromium only:
    `npx playwright test --project=chromium`, plus the Android webview probe
    (`node end2end/android-cdp-check.mjs`, and the task's own probe when it
    touches layout or input). This is the only full e2e execution in the task.
+   Refresh the cookie first (`--project=setup`, ~4 s) rather than debugging an
+   `unauthorized: invalid token` page later.
    - A **major** failure (a genuinely broken behavior) → back to step 3 for
      that failure only.
    - A **minor** failure or a flake → one retry; still red → quarantine with

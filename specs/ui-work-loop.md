@@ -140,6 +140,18 @@ hardened production service, and the loop is tuned to that:
 - **Minors are filed, not fixed.** Craft — naming, comment accuracy, assertion
   elegance, redundancy — is explicitly out of scope right now.
 
+Extended 2026-07-25 after the quick-add task, once the first calibration's
+numbers came in and showed the test matrix was never the cost (see Findings):
+
+- **The implementer does not run the gate.** No `cargo leptos build --release`,
+  no `cargo fmt --check`, no clippy sweep — step 5 owns all of them. The
+  implementer gets `cargo test` plus one `clippy -p app` for feedback.
+- **Required reading is handed over as line ranges**, not section names. The
+  orchestrator greps; the implementer reads what it is pointed at.
+- **Probes are capped** — hydration on at most four URLs, one SSR curl per
+  changed surface.
+- **Steps 4 and 5 run concurrently.** They share no state.
+
 ### Failure policy
 
 - A red **chromium** e2e run or a red gate means the task cannot reach `[x]`.
@@ -201,6 +213,45 @@ stay as the probe layer beneath the suite.
 ## Findings
 
 (appended per task — spike outcome, skill-building surprises, loop adjustments)
+
+### The implementer is the cost, not the test matrix (2026-07-25)
+
+The recalibration worked — the quick-add task (PR #58) ran **887k subagent
+tokens against the binder/deck task's 1.44M**, on a comparable diff. But its
+per-step timings falsify the assumption the first calibration was built on.
+Measured:
+
+| Step | Wall clock | Tokens |
+|---|---|---|
+| Implementation subagent | **69 min** (51 + 18 after an API error) | 680k |
+| Review subagent | 10.5 min | 153k |
+| Validate gate subagent | 2.0 min | 53k |
+| Full chromium tier (131 tests) | **52 s** | — |
+| Android probes + cookie refresh | ~15 s | — |
+
+The full e2e tier — the thing the first calibration spent its effort cutting
+from ~6 runs to 1 — costs **52 seconds**. The implementer is 85% of wall clock
+and 77% of tokens. Further tuning of the test matrix is optimizing the 1%.
+
+**The one large, verified waste: the implementer ran the entire eight-step merge
+gate itself**, including `CARGO_TARGET_DIR=target/gate cargo leptos build
+--release` — full Tailwind + wasm, cold, the most expensive command in the repo.
+The step-5 gate agent then replayed steps 2–6 and 8 from cargo fingerprints in
+under a second each, which is the proof the implementer's run was pure
+duplication. Nothing in the dispatch prompt forbade it; a conscientious agent
+runs the gate to be safe. The fix is one paragraph in the dispatch contract, now
+in the skill and in Calibration above.
+
+Three smaller levers landed with it: required reading handed over as **line
+ranges** (specs/app-ui.md is ~1,700 lines, and "read the section plus its
+`Depends on:` specs" makes an agent read most of it), a **cap of four** hydration
+URLs (agents left to choose probe eight), and **steps 4 and 5 dispatched
+concurrently** — they share no state, the gate building into `target/gate` while
+the e2e drives the watch on :3000.
+
+Not cut, deliberately: the review round. 10.5 min and 153k for an independent
+read of a write path is proportionate, and it produced 12 filed findings even at
+zero majors.
 
 ### Loop recalibrated for MVP cost (2026-07-25)
 
