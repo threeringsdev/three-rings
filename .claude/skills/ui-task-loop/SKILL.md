@@ -32,6 +32,38 @@ calibration below is deliberate, set by the maintainer after one task cost
 - **When in doubt, spend less.** A second look costs more than it returns at
   this stage.
 
+## The loop break — when this ends
+
+**The loop runs task after task until Stage 3 has no `[ ]` left, then stops.**
+That is the only completion condition. On finishing a task the orchestrator goes
+straight back to step 0 and starts the next one without asking; it stops early
+only if the human says so, the queue is blocked (every remaining `[ ]` gated by a
+`draft` spec), or a task cannot reach `[x]`.
+
+This terminates **only** because of the next rule, which is therefore not
+optional:
+
+> ### Never add a task to Stage 3. Ever.
+>
+> Everything discovered while working — out-of-scope bugs, review minors,
+> deferred follow-ups, quarantined tests, "we should also…" — goes into
+> **`### Phase 5 discoveries`** under `## Later / parked`. Never into Stage 3,
+> never into another stage, never into the stage list "just this once".
+>
+> This **overrides CLAUDE.md's** definition of done ("newly discovered follow-up
+> work added as new `[ ]` tasks in the right phase") for the duration of this
+> loop. During Phase 5 the right phase *is* the discoveries pen. A Stage 3 that
+> grows while being worked never empties, and the loop never breaks.
+
+The Stage 3 list is a **fixed backlog being drained**, not a living queue. Its
+length only goes down.
+
+Between tasks the orchestrator keeps its own context (queue state, host
+processes, what shipped) and **discards the subagents** — every task gets a
+fresh implementer and a fresh reviewer. Never carry a previous task's
+implementation agent into a new task: its context is full of the last feature,
+which costs tokens and leaks stale assumptions into the new one.
+
 ## Orchestrator owns (never delegate)
 
 - **Queue**: task selection per specs/README.md "Working the queue";
@@ -127,9 +159,12 @@ calibration below is deliberate, set by the maintainer after one task cost
    they resolved, disputed findings with rationale, evidence summary. **File
    every minor as a `[ ]` under Phase 5 discoveries in the same commit** — that
    is where the deferred work is preserved, so it is not optional.
-   Conventional-commit PR title; enable auto-merge; confirm green. Then loop
-   to step 0 — stop only at a phase boundary, on a blocked queue, or when the
-   human said one task.
+   Conventional-commit PR title; enable auto-merge; confirm green.
+
+   Then **go straight back to step 0** with the next Stage 3 `[ ]` — no check-in,
+   no "shall I continue?". Report the task landed in a few lines and start the
+   next. Stop only per **The loop break** above: no `[ ]` left in Stage 3, the
+   human says stop, or the queue is blocked.
 
 ## Failure policy
 

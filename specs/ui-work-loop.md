@@ -104,6 +104,25 @@ once before phase end.
    and files the round's minors as Phase 5 discoveries, all in the same commit;
    conventional-commit PR; auto-merge on green; loop to the next task.
 
+### Loop break — the termination condition
+
+The loop runs task after task and **ends when Stage 3 holds no `[ ]`**. The
+orchestrator does not check in between tasks; it lands one and starts the next.
+It stops early only when the human says so, when every remaining `[ ]` is gated
+by a `draft` spec, or when a task cannot reach `[x]`.
+
+This terminates only because **nothing is ever added to Stage 3 while it is
+being worked**. Every discovery — out-of-scope bugs, review minors, deferred
+follow-ups, quarantined tests — is filed under `### Phase 5 discoveries` in
+`## Later / parked`. For the duration of this loop that rule **overrides
+CLAUDE.md's** "newly discovered follow-up work added as new `[ ]` tasks in the
+right phase": during Phase 5 the right phase is the discoveries pen. A stage
+list that grows while being drained never empties.
+
+Between tasks the orchestrator keeps its own context and discards the
+subagents — a fresh implementer and reviewer per task, never a carried-over
+agent whose context is full of the previous feature.
+
 ### Calibration — MVP, one developer
 
 Revised 2026-07-25 after the binder/deck task cost ~2.5 h and 1.44M subagent
