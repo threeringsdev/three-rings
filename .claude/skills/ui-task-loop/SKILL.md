@@ -1,72 +1,90 @@
 ---
 name: ui-task-loop
-description: The Phase 5 per-task work loop — build → Codex adversarial review → platform verification (web + Android webview e2e) → e2e authored + mutation-checked → merge gate → PR. Use when starting any Phase 5 UI task from specs/TODO.md, when the user says "next UI task", "run the loop", or "work the queue" during Phase 5, or when resuming a [~] UI task.
+description: Use when starting any Phase 5 UI task from specs/TODO.md, when the user says "next UI task", "run the loop", or "work the queue" during Phase 5, when resuming a [~] UI task, or when asked to keep working tasks in sequence.
 ---
 
-# UI task loop — one Phase 5 task, end to end
+# UI task loop — orchestrate one Phase 5 task end to end
 
 The contract is [specs/ui-work-loop.md](../../../specs/ui-work-loop.md); this
-skill is the operational sequence. Platform matrix (fixed by the spike,
-2026-07-19): **web + Android webview e2e every task; desktop ignored in-loop;
-one Android release smoke at phase end** (the polish task).
+skill is the operational sequence. The main session is the **orchestrator**: it
+owns queue bookkeeping, git state, long-lived host processes, dispatch, and
+arbitration — and does **not** implement or review. Implementation and review
+each run in their own subagent with a clean context; context spent doing their
+work in the main session is context the loop can't spend on the next task.
+
+Platform matrix (fixed by the spike, 2026-07-19): **web + Android webview e2e
+every task; desktop ignored in-loop; one Android release smoke at phase end**
+(the polish task).
+
+## Orchestrator owns (never delegate)
+
+- **Queue**: task selection per specs/README.md "Working the queue";
+  `[ ]`→`[~]` committed alone as `start: <task summary>`; the final
+  `[~]`→`[x]` + spec Findings in the finishing commit.
+- **Git**: branch off fresh `main`; the PR (conventional-commit title — it
+  becomes the squash commit on main); auto-merge; green confirmation.
+- **Host state**: `cargo leptos watch --features component-bench` running in
+  the background (repo root; it binds :3000 after the first build — check
+  `lsof -i :3000` before assuming it's down) and the Android emulator.
+  Subagents *use* these; only the orchestrator starts or restarts them.
+- **Arbitration**: review findings route back to the implementer; the
+  orchestrator never edits code to resolve them itself.
 
 ## Sequence
 
-0. **Start** — first available Phase 5 task per specs/README.md "Working the
-   queue". Branch off fresh `main`. Flip `[ ]`→`[~]`, commit exactly that:
-   `start: <task summary>`. Read the task's spec sections *before* code.
-1. **Build** — per the task's acceptance criteria in specs/app-ui.md;
-   wireframes (design/wireframes.pen) govern detail. New primitives go through
-   the **vendor-component** skill (bench section, same commit). Keep
-   `cargo leptos watch --features component-bench` alive in the background
-   (repo root; it binds :3000 after the first build — check `lsof -i :3000`
-   before assuming it's down).
-2. **Codex adversarial review** — the `/codex:*` slash commands are human-only
-   (`disable-model-invocation: true`), so an autonomous run drives the
-   **runtime script directly**. That is the whole trick, and it is not
-   optional: `codex-rescue` dispatches a job and returns *before it finishes*,
-   and messaging it for the result gets a refusal (its own instructions forbid
-   follow-up work). **A refusal from `codex-rescue` does not mean Codex is
-   unavailable.** Dispatch via the agent, then collect via:
+0. **Start** — first available Phase 5 task per "Working the queue". Branch off
+   fresh `main`, flip `[ ]`→`[~]`, commit exactly that. Read the task line and
+   skim its `(specs:)` links only enough to write the dispatch prompt — deep
+   spec reading is the implementer's job, in its own context.
 
-   ```bash
-   R="$HOME/.claude/plugins/cache/openai-codex/codex/<ver>/scripts/codex-companion.mjs"
-   node "$R" status                 # job id + completion state
-   node "$R" result <job-id>        # the findings
-   ```
+1. **Implement** — dispatch an implementation subagent (general-purpose). The
+   dispatch prompt contains, explicitly (the subagent inherits nothing from
+   this conversation):
+   - the task line **verbatim** from specs/TODO.md; the branch name; that a
+     watch server with `component-bench` is already serving :3000;
+   - required reading *before code*: the task's sections of specs/app-ui.md,
+     every spec in its `(specs:)` annotation, and design/wireframes.pen;
+   - skills to invoke: **vendor-component** for any new primitive (bench
+     section, same commit), **e2e-suite** for authoring/running tests,
+     **android-smoke** for the dev-attach recipe;
+   - the evidence it must return: unit tests green; web probes run with URLs
+     (`node end2end/hydration-check.mjs <urls…>` — **bare = checks nothing**;
+     probe every page that renders a touched component, plus a page-specific
+     SSR curl against :3000); Android webview check
+     (`node end2end/android-cdp-check.mjs` + the task's spec against the
+     webview when it touches layout/input); e2e authored per e2e-suite, fast
+     tier while iterating, **full three-browser tier green at the end**
+     (`npx playwright test`);
+   - constraints: never restart the :3000 watch; `git checkout` the
+     build-injected AndroidManifest.xml before committing; commit its own work
+     with conventional messages; do **not** touch specs/TODO.md or spec
+     Findings (orchestrator's job); report back a summary, the evidence, and
+     anything the spec should record.
 
-   Poll `status` until the job leaves `running`. Prompt it review-only: the
-   task's acceptance criteria as focus, "return numbered findings (file:line,
-   what breaks, severity), no fixes applied". **Verify every finding before
-   acting** — never blind-apply; record disputed findings + rationale in
-   app-ui Findings. Repeat until clean or all-disputed.
-3. **Platform verification** — web: `node end2end/hydration-check.mjs <urls…>`
-   + a page-specific SSR curl against :3000 (view-source markup present).
-   **The probe takes URLs as arguments — running it bare exits 0 having checked
-   nothing.** Probe the pages you touched *and* every page that renders a
-   component you touched; a shared component means a page you didn't open can
-   regress. (The filter-rail task skipped this step entirely and a real
-   `/catalog` hydration bug went undetected for two tasks — app-ui Findings,
-   "Cross-task audit".) A warning here is a finding, not noise: chase it to
-   either a fix or a written reason it is safe.
-   Android: the **android-smoke** skill's dev-attach recipe →
-   `node end2end/android-cdp-check.mjs`, then run the task's e2e spec against
-   the webview if it touches layout/input (overlay/positioning code always).
-4. **E2E** — author specs per the **e2e-suite** skill (login fixture, tier
-   tags). Iterate with the fast tier (`npx playwright test
-   --project=chromium`), then run the **full tier at the end of the task**:
-   `npx playwright test` (chromium+firefox+webkit — webkit is the WKWebView
-   proxy). Full-tier green is a precondition for `[x]`, every task.
-5. **Codex e2e pass** — same dispatch/collect mechanics as step 2, focused on
-   the new test files: "which assertions still pass if the feature is broken;
-   propose one mutation per test." Apply accepted mutations transiently,
-   confirm the test fails, revert; note evidence in Findings. **Wait for the
-   watch server to actually rebuild before judging a mutation** — poll the
-   served wasm hash (`curl -s :3000/pkg/app_bg.wasm | md5`) until it changes,
-   or you will test the old binary and record a false survival.
-6. **Gate + land** — the **validate** skill. Final commit flips `[~]`→`[x]`
-   **and** records Findings in the same commit. Conventional-commit PR title
-   (it becomes the squash commit on main); enable auto-merge; confirm green.
+2. **Review** — dispatch a review subagent with: "Invoke the
+   **adversarial-review** skill and follow it", the branch name, and the task's
+   acceptance criteria as focus text. Both passes (implementation +
+   test-strength). Fresh agent — never the implementer, and never done in the
+   main session; the value is the independence.
+
+3. **Fix loop** — forward the findings to the implementation agent
+   (SendMessage — its context is intact) with the standing policy: **verify
+   every finding before acting, never blind-apply**; dispute with evidence
+   what doesn't hold. Then re-dispatch a *fresh* review subagent scoped to the
+   findings and the files that changed. Repeat until the verdict is CLEAN or
+   everything remaining is disputed-with-rationale. If the implementer is gone
+   (ended/overflowed), dispatch a fresh fix agent with the branch, the
+   findings, and pointers to the spec sections — not a paraphrase of the task.
+
+4. **Gate** — dispatch a subagent to run the **validate** skill and return the
+   per-step verdict table. Red → back to step 3 with the failing output.
+
+5. **Land** — finishing commit flips `[~]`→`[x]` **and** records Findings in
+   the linked spec in the same commit: surprises, review rounds + score,
+   disputed findings with rationale, evidence summary (from the subagents'
+   reports). Conventional-commit PR title; enable auto-merge; confirm green.
+   Then loop to step 0 for the next task — stop only at a phase boundary, on a
+   blocked queue, or when the human said one task.
 
 ## Failure policy (from the spec — not optional)
 
@@ -75,21 +93,23 @@ one Android release smoke at phase end** (the polish task).
   offline" + flag the maintainer. Never silently skip.
 - E2E flake → one retry, then quarantine with `@flaky` tag + Findings entry.
   Quarantined tests block the phase-final polish task.
-- Codex disagreements resolve by verification, not deference.
-- Durable state = branch + TODO checkbox + spec Findings only. Codex job IDs
-  and server PIDs are session-ephemeral — re-derive (`/codex:status`,
-  `lsof -i :3000`), never persist.
-- The Codex Stop-hook review gate stays **disabled** — the loop invokes Codex
-  explicitly at steps 2 and 5.
+- Review disagreements resolve by verification, not deference — disputed
+  findings ship only with recorded rationale.
+- Durable state = branch + TODO checkbox + spec Findings only. Subagent IDs
+  and server PIDs are session-ephemeral — re-derive (`lsof -i :3000`), never
+  persist. A resumed `[~]` task means: inspect the branch, re-dispatch from
+  whatever step the evidence shows incomplete.
 
-## Operational gotchas
+## Dispatch gotchas
 
+- Subagent prompts are self-contained — name files, branches, and skills
+  explicitly; "the task we discussed" means nothing to a clean context.
+- Subagents share the host: they can use the running watch server, adb, and
+  the emulator, but must not own their lifecycle (restart requests come back
+  to the orchestrator).
 - `cargo tauri android dev` runs from the **repo root** (its beforeDevCommand
   `cd ..` resolves against the invocation dir; from src-tauri/ it dies with
   "manifest path `Cargo.toml` does not exist").
-- The Android manifest at src-tauri/gen/android/.../AndroidManifest.xml gets a
-  deep-link intent-filter injected at build time — `git checkout` it before
-  committing; never commit the injected copy.
-- The full three-browser tier runs at the end of **every** task (step 4), not
-  at stage boundaries. A stage-boundary task additionally runs the Android
-  **release** smoke via the android-smoke skill (at phase end only).
+- The full three-browser tier runs at the end of **every** task, not at stage
+  boundaries. A stage-boundary task additionally runs the Android **release**
+  smoke via the android-smoke skill (at phase end only).
