@@ -32,7 +32,7 @@ pub enum Condition {
 
 /// Deck board — mirrors the `card_board` Postgres enum (specs/card-tagging.md).
 /// A quantity-bearing partition; meaningful only inside a deck.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Board {
     #[default]
@@ -249,6 +249,11 @@ pub enum LineResult {
 /// Grain is `(printing, board)`: present sums a card's copies across
 /// finish/condition/language within this collection; the three counts are all
 /// *in this context* except `owned` (a global aggregate).
+///
+/// A row can be **desire-only** (`present == 0`): a card this collection wants
+/// but does not hold. Those rows carry the card's *representative* printing
+/// (the has-art-first pick the catalog uses) because there is no held printing
+/// to name — see [`CollectionView`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CardRow {
     pub oracle_id: Id,
@@ -265,6 +270,8 @@ pub struct CardRow {
     /// Present here — copies of this printing/board in *this* collection.
     pub present: i32,
     /// Desired here — target count for this card/board in *this* collection.
+    /// Oracle-grained, so it repeats on every printing row of that oracle; the
+    /// UI shows it once (see `crate::CardRow` consumers).
     pub desired: i32,
     /// Owned — global aggregate of present across all the user's collections
     /// (per oracle card).
@@ -274,6 +281,56 @@ pub struct CardRow {
     pub present_rollup: i32,
     /// Deck board this row belongs to (`main` outside a deck).
     pub board: Board,
+    /// The one `holdings` row behind this cell — the in-place count stepper's
+    /// write target (`set_holding_quantity`).
+    ///
+    /// `None` when the cell is **not** addressable by a single number: either it
+    /// aggregates several finish/condition/language grains of the same
+    /// (printing, board), or it is a desire-only row with no holding at all.
+    /// The stepper renders only where this is `Some`, because a lone count
+    /// cannot say which grain it meant.
+    #[serde(default)]
+    pub holding_id: Option<Id>,
+    /// Per-face flip data for **this row's printing** (not a representative
+    /// one), so a collection row's preview flips the copy you actually hold.
+    /// Non-empty only for a layout with a real back face — the same
+    /// server-side gate as [`crate::CardSummary::faces`].
+    #[serde(default)]
+    pub faces: Vec<crate::CardFaceSummary>,
+}
+
+/// Collection-wide counts for the view header — the one thing on the page that
+/// is deliberately **not** per-page (specs/collection-api.md computes card-row
+/// aggregates for the visible page only; a header that did the same would
+/// change as you paged).
+///
+/// The wireframe's header reads
+/// `120 here (102 own + 18 rolled up) · 6 wanted` and its needs chip
+/// `6 missing — 4 owned elsewhere · 2 to buy`; these are those six numbers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectionTotals {
+    /// Copies held in this collection itself.
+    pub present: i32,
+    /// Copies held in its strict descendants (the italic/dimmed rollup).
+    pub present_rollup: i32,
+    /// Total desired here, across every card and board.
+    pub desired: i32,
+    /// Σ over cards of `max(desired − present_here, 0)` — the needs chip's
+    /// headline. Equals `owned_elsewhere + to_buy` by construction.
+    pub missing: i32,
+    /// The part of `missing` fillable from the caller's other collections
+    /// (per card, `min(gap, held elsewhere)`) — the needs view's first bucket.
+    pub owned_elsewhere: i32,
+    /// The part of `missing` nobody holds — the shopping-list bucket.
+    pub to_buy: i32,
+}
+
+impl CollectionTotals {
+    /// Copies in this collection *and* everything under it — the number the
+    /// sidebar badge shows for the same node.
+    pub fn present_total(&self) -> i32 {
+        self.present + self.present_rollup
+    }
 }
 
 /// One keyset page of a collection's card rows plus the collection's own
@@ -287,6 +344,14 @@ pub struct CollectionView {
     pub cards: Vec<CardRow>,
     /// Opaque cursor for the next page, or `None` at the end.
     pub next_cursor: Option<String>,
+    /// Whole-collection counts for the header + needs chip (not per-page).
+    #[serde(default)]
+    pub totals: CollectionTotals,
+    /// Decks only: the `commander`-tagged cards and their derived color
+    /// identity (specs/collection-api.md → "Decks additionally carry format,
+    /// commander(s)"). `None` for a binder — never queried there.
+    #[serde(default)]
+    pub commanders: Option<crate::DeckCommanders>,
 }
 
 /// Keyset page request: an opaque `cursor` from a prior page (or `None` for the

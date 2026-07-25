@@ -8,10 +8,12 @@
 //! is assumed seeded and nothing is written. Re-seeding from scratch =
 //! recreate the e2e user (`end2end/seed-e2e-user.sh` with a fresh `.env`).
 //!
-//! **Two independently-sentinelled blocks.** The tree above is one; the bulk
-//! box ([`BULK`]) is the other, added later and gated on its own name so an
-//! already-seeded user picks it up on a plain re-run rather than needing the
-//! whole fixture rebuilt. New blocks should follow that shape.
+//! **Three independently-sentinelled blocks.** The tree ([`SENTINEL`]) is one;
+//! the bulk box ([`BULK`]) and the depth box ([`DEPTH`]) were added later and
+//! are gated on their own names, so an already-seeded user picks them up on a
+//! plain re-run rather than needing the whole fixture rebuilt. New blocks
+//! should follow that shape — and each exists because some assertion could not
+//! be *falsified* against the fixture without it (see their own docs).
 
 use shared::{
     AddHave, AddLine, AddWant, ApiError, Board, CollectionKind, Finish, Id, LineResult,
@@ -26,6 +28,11 @@ const SENTINEL: &str = "Trade Binder";
 
 /// The bulk box — its own sentinel, its own block (see the module doc).
 const BULK: &str = "Bulk Box";
+
+/// The depth box — the third independently-sentinelled block (see the module
+/// doc), added for the collection view. See [`build_depth`] for what it exists
+/// to make observable.
+const DEPTH: &str = "Depth Box";
 
 /// How many distinct cards the bulk box holds.
 ///
@@ -75,6 +82,11 @@ pub async fn run(user_id: Uuid) -> Result<Stats, ApiError> {
         } else {
             build_bulk(&be, &mut roots, &mut stats).await?;
         }
+        if existing.iter().any(|c| c.name == DEPTH) {
+            println!("seed: '{DEPTH}' already present — skipping the depth box");
+        } else {
+            build_depth(&be, &mut roots, &mut stats).await?;
+        }
         Ok(())
     }
     .await;
@@ -88,6 +100,171 @@ pub async fn run(user_id: Uuid) -> Result<Stats, ApiError> {
             Err(e)
         }
     }
+}
+
+/// The depth box: the shapes `/my/collections/:id`'s own render rules describe
+/// and nothing else in the fixture has.
+///
+/// Three of that page's rules were **unfalsifiable** against the tree above —
+/// each of the mutations below survived the entire Playwright suite, because no
+/// collection in the fixture had the shape the rule is about (adversarial review
+/// of the collection-view task):
+///
+/// - *a folder row's count is rolled up, not own.* The only nested collection
+///   was a leaf, so the two were equal for it. `Depth Shelf` has a child of its
+///   own, so its row reads 4 while it holds 1.
+/// - *a card row shows its rolled-up part, and OWNED collapses against the total
+///   of the two.* No card was held in both a collection and a descendant, so
+///   `present_rollup` was 0 on every row in the database and the `+n` marker
+///   never rendered anywhere. The shared printing sits at all three depths.
+/// - *WANTED prints once per (card, board).* `desired` is oracle-grained and
+///   repeats across a card's printing rows, but no collection held two printings
+///   of one card. `Depth Box` holds two of one, and wants three.
+///
+/// Its cards are picked from oracles nothing else in the fixture owns or wants,
+/// so `owned` for them is exactly what this subtree holds — which is what makes
+/// the OWNED-collapse rule observable rather than accidentally true.
+///
+/// (The still-open "wants one card from **two** collections" gap — which makes
+/// WANTED-is-a-sum indistinguishable from WANTED-is-a-max on `/my` — is a
+/// different shape and stays its own queued task; this block does not smuggle
+/// it in.)
+async fn build_depth(
+    be: &HostedBackend,
+    roots: &mut Vec<Id>,
+    stats: &mut Stats,
+) -> Result<(), ApiError> {
+    let taken = owned_or_wanted(be).await?;
+    let (shared, multi) = depth_picks(be, &taken).await?;
+
+    let (box_id, shelf, drawer) = {
+        let b = create(be, None, CollectionKind::Binder, DEPTH, None, stats).await?;
+        roots.push(b);
+        let shelf = create(
+            be,
+            Some(b),
+            CollectionKind::Binder,
+            "Depth Shelf",
+            None,
+            stats,
+        )
+        .await?;
+        let drawer = create(
+            be,
+            Some(shelf),
+            CollectionKind::Binder,
+            "Depth Drawer",
+            None,
+            stats,
+        )
+        .await?;
+        (b, shelf, drawer)
+    };
+
+    // One printing at all three depths: 2 here, 1 + 3 below it.
+    add_have(be, box_id, shared.printing, 2, Board::Main, false, stats).await?;
+    add_have(be, shelf, shared.printing, 1, Board::Main, false, stats).await?;
+    add_have(be, drawer, shared.printing, 3, Board::Main, false, stats).await?;
+
+    // Two printings of one card in one collection, plus a desire on the card —
+    // the two rows that must show WANTED exactly once between them.
+    add_have(be, box_id, multi.printings[0], 1, Board::Main, false, stats).await?;
+    add_have(be, box_id, multi.printings[1], 1, Board::Main, false, stats).await?;
+    add_want(be, box_id, multi.oracle, 3, stats).await?;
+    Ok(())
+}
+
+/// Every oracle the fixture already owns or wants — the set this block's picks
+/// must avoid so its `owned` totals stay self-contained. Walks the whole
+/// everything-view rather than one page: it is already larger than a page.
+async fn owned_or_wanted(be: &HostedBackend) -> Result<Vec<Id>, ApiError> {
+    let mut out = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = be
+            .all_cards(
+                None,
+                Page {
+                    cursor,
+                    limit: Some(200),
+                },
+            )
+            .await?;
+        out.extend(page.cards.iter().map(|r| r.card.oracle_id));
+        match page.next_cursor {
+            Some(c) => cursor = Some(c),
+            None => return Ok(out),
+        }
+    }
+}
+
+/// A pick with every printing of its card, for the two-printings-of-one-card row.
+struct MultiPick {
+    oracle: Id,
+    printings: Vec<Id>,
+}
+
+/// Find the two cards this block needs, from oracles `taken` does not contain:
+/// any unused card, and an unused card with **two or more printings**. Walks the
+/// catalog in pages and fails loudly rather than building a partial box (the
+/// seed's convention).
+async fn depth_picks(be: &HostedBackend, taken: &[Id]) -> Result<(Pick, MultiPick), ApiError> {
+    let mut shared: Option<Pick> = None;
+    let mut multi: Option<MultiPick> = None;
+    let mut cursor = None;
+    for _ in 0..6 {
+        let page = be
+            .search(
+                SearchQuery { q: None },
+                Page {
+                    cursor,
+                    limit: Some(200),
+                },
+            )
+            .await?;
+        for card in &page.cards {
+            if taken.contains(&card.oracle_id) {
+                continue;
+            }
+            let printings: Vec<Id> = be
+                .card_detail(card.oracle_id)
+                .await?
+                .printings
+                .iter()
+                .map(|p| p.id)
+                .collect();
+            if printings.is_empty() {
+                continue;
+            }
+            if shared.is_none() {
+                shared = Some(Pick {
+                    oracle: card.oracle_id,
+                    printing: printings[0],
+                });
+                continue;
+            }
+            if multi.is_none() && printings.len() >= 2 {
+                multi = Some(MultiPick {
+                    oracle: card.oracle_id,
+                    printings,
+                });
+            }
+            // `take()` on both unconditionally would drop whichever is already
+            // set when the other is not.
+            if shared.is_some() && multi.is_some() {
+                return Ok((shared.take().unwrap(), multi.take().unwrap()));
+            }
+        }
+        match page.next_cursor {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    Err(ApiError::Validation(
+        "seed: the catalog has no unused card with two printings — is the POC \
+         catalog ingested on this branch?"
+            .into(),
+    ))
 }
 
 /// The bulk box: one flat binder holding [`BULK_CARDS`] distinct cards, so the

@@ -97,9 +97,14 @@ rolled-up child counts italic + dimmed). HERE is editable in place via the count
 stepper. Persistent in-collection quick-search/type-ahead in the header (`/`
 focus hint) that filters this collection and inline-adds catalog matches — the
 intake path. Per-row move (kebab / swipe / `m`) and select (checkbox /
-long-press / `x`) affordances. **Deck variant** adds: format + commander(s)
-rendered as a card in the header, cards grouped by type with counts, the needs
-chip (`6 missing — 4 owned elsewhere · 2 to buy`), Want-led add default (binders
+long-press / `x`) affordances. The needs chip
+(`6 missing — 4 owned elsewhere · 2 to buy`) sits on **any** collection's
+header, not only a deck's — `design/information-architecture.md` line 41, the
+authority this spec distills, puts it on "a deck **or collection** header", and
+`/my/collections/:id/needs` is a route for any collection. (This bullet
+previously listed the chip under the deck variant; corrected 2026-07-25, see
+Findings.) **Deck variant** adds: format + commander(s) rendered as a card in
+the header, cards grouped by type with counts, Want-led add default (binders
 and Inbox are Have-led), and the "Empty deck…" teardown action (single
 destination or "Return to previous locations").
 
@@ -213,6 +218,127 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
+
+### `/my/collections/:id` binder/deck view (2026-07-25)
+
+`app/src/my/collection.rs` — the binder and its deck variant on one page, over a
+reworked `CollectionStore::collection_view`. Two adversarial review rounds
+(8 findings then 6): round 1's fixes are `85ac7cc`, and round 2's single
+code-level fix rides in this task's finishing commit. Round 2's remaining
+findings were parked as Phase 5 discoveries by maintainer decision — the loop
+had already spent ~2.5 h on this task and round 2 had drifted from correctness
+to craft (see "Loop cost" below).
+
+**`collection_view` returned no desire-only rows.** It inner-joined `holdings`,
+so a card a deck *wants* and does not hold did not exist in the view at all —
+while the needs chip in the same header counted it. The same `FULL OUTER JOIN`
+correction `/my`'s `all_cards` needed; desire-only rows borrow the
+representative printing. `CardRow` also gained `holding_id` (the stepper's write
+target) and `faces` (so a collection row reuses `CardPreview` — hover card,
+touch sheet, DFC flip), and `collection_view` gained `q`.
+
+**A committed HERE of 0 is a deletion this view cannot undo — the blocker of
+round 1.** The stepper offers Undo on every commit, but `set_holding_quantity(id, 0)`
+runs `DELETE FROM holdings WHERE id = $1`, and the undo re-POSTs the now-dead
+id: HTTP 500, `not found: holding`, copies gone behind a success toast. The
+floor here is now `min=1`, which makes the destructive commit *unreachable*
+rather than reachable-and-lying. That is a scope boundary, not a preference: an
+undoable removal is a `move_cards(to = None)` addressed by **grain**, and
+`CardRow` carries no finish/condition/language while `move_cards`/`holding_take`
+are hardcoded to `board = 'main'` — a move-based write from a sideboard row
+would silently hit the mainboard. **Consequence to carry forward: there is now
+no way at all to remove a card from a binder in this view** (teardown is
+deck-only, the spec's per-row move affordance is unshipped). Filed as a Phase 5
+discovery for the move-flows task.
+
+**An optimistic delta must be scoped to the payload it corrects, not the URL.**
+`here_delta` keyed on the URL survived a same-URL `refetch()` — teardown left the
+header reading `1 here` on an emptied deck — and was cleared too early on
+navigation. Gating the reset on the resource having *landed* fixes both.
+Round 2 refuted the *rationale* recorded for it, which is worth keeping: in
+Leptos 0.8 `ArcAsyncDerived` never clears `value` on re-run, so `.get()` returns
+`Some(old)` throughout a refetch, and `<Transition>` renders **nothing** during a
+re-fetch rather than the stale payload. The guard is therefore inert as written —
+removing it survives the spec — but the commit-during-in-flight-fetch window it
+was reaching for is unreachable anyway, because nothing is on screen to click.
+
+**A tree refetch was remounting the stepper rows and silently disarming Undo.**
+Both page blocks awaited the shell's `CollectionTreeResource`; a stepper commit
+refetches it for the sidebar badges, re-running the whole `Suspend` and
+re-seeding each `CountStepper` from the stale fetched count, so `cur != from` was
+false and Undo did nothing while the header delta stayed applied. Rule:
+**nothing large awaits the tree** — breadcrumb, folder counts and teardown
+destinations each await it in their own nested `Suspense`. Kill-verified.
+
+**Three render rules were unfalsifiable against the fixture, not
+under-asserted.** No seeded collection had `present_rollup > 0`, a nested folder
+with children, or a card held under two printings, so mutations to
+`rolled_up_of`, `owned_cell` and `show_wanted` survived the whole e2e suite
+(`cargo test` caught them). Fixed in `app/src/seed.rs` with the
+`Depth Box → Depth Shelf → Depth Drawer` block, plus tests that *guard* the
+shape so a re-seed cannot quietly remove it.
+
+**An `overflow-auto` wrapper hides overflow from a document-level assertion.**
+The mobile no-horizontal-overflow test measured `document.documentElement`, but
+`TableWrapper` is `overflow-auto`, so table overflow is a wrapper-local scroll
+the document never sees: stripping the progressive-column classes produced
+92–128px of sideways scroll at 390×844 and the test stayed green. Measure the
+scroll container — the corrected test asserts on the `data-name="TableWrapper"`
+ancestor's `scrollWidth − clientWidth` and keeps the document check as a cheaper
+second net. **Caveat, recorded deliberately:** the corrected test was confirmed
+passing on unmutated source, but its kill verification (re-applying the
+class-stripping mutation and watching it fail) was **cut short by maintainer
+decision** to stop the loop. The fix is reason-verified, not kill-verified.
+
+**The needs chip is not deck-only — round 1 finding disputed and upheld.** The
+code renders it on any collection with `missing > 0`;
+`design/information-architecture.md:41` puts the chip on "a deck **or
+collection** header", and this spec distills that document and never overrides
+it. The spec's own deck-variant bullet was the line that read wrong and has been
+corrected above. The test weakness behind the finding was real and is fixed
+(`Depth Box` is a binder with wants, so the chip's presence is now pinned there;
+the absence test was retargeted at genuinely deck-only elements).
+
+**Other decisions.** `min(uuid)` avoided — `holding_id` is
+`(array_agg(id))[1]` under `CASE WHEN count(*) = 1`, so it is NULL exactly when
+the cell sums several finish/condition/language grains, and the stepper is
+withheld rather than writing to an arbitrary holding. Deck slot counts and the
+WANTED column dedupe on `(oracle, board)` because `desired` is oracle-grained and
+repeats across printings. OWNED collapses against `present + present_rollup`, not
+`present`. Folder rows take identity from `view.children` and counts from the
+tree, so a folder badge and the sidebar badge cannot disagree. `commanders_in`
+was extracted so the deck header and the standalone read cannot drift — which
+cost the commander e2e its independence, since both sides became the same query;
+the witness is now `card_tags` via `/tags` → `/tags/{id}/cards`.
+
+**Playwright treats `aria-disabled="true"` as not-enabled** and will hang on
+`.click()`. Useful: the refusal is itself evidence the control is announced
+inert, and `{ force: true }` then proves it does nothing.
+
+**A `<Suspense>` fallback inside a `<select>` is a second `<option value="">`**
+and made a strict-mode locator ambiguous. The teardown dialog also re-introduced
+the read-in-render hydration panic (`tachys` "expected a marker node") — the same
+trap the cross-task audit recorded — fixed by mounting it only for decks inside
+the resolved header and building its options inside a `Suspend`.
+
+**Loop cost, recorded deliberately.** Implementation 60 min / 454k tokens,
+review 1 30 min / 198k, fix round 26 min / 523k, review 2 36 min / 269k —
+~2.5 h and 1.44M subagent tokens for one task. Drivers: the full three-browser
+tier ran ~6 times (it grows every task — 196 → 355 → 367 tests) because
+implementer *and* reviewers each ran it; the mutation pass is uncapped at ~10–12
+mutations, each costing a rebuild cycle; and this task line bundles three
+surfaces. Round 2's findings had already drifted from correctness to craft. The
+loop needs a stopping rule — see ui-work-loop.
+
+**On-device coverage is the anonymous half again**, by the fixed matrix — the dev
+proxy strips Cookie headers, so the table is unreachable; the probe covers the new
+route's guard bounce through the redirect-swallowing shim plus the
+stepper/breadcrumb on the bench.
+
+**Deliberately not absorbed.** The quick-search box filters but does not yet
+inline-add catalog matches (the quick-add panel task owns that; `add_default(kind)`
+is exported for it), and per-row move/select affordances belong to the
+selection-tray task.
 
 ### `/my` All cards view (2026-07-24)
 

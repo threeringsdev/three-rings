@@ -340,12 +340,20 @@ impl CollectionStore for NativeBackend {
         .await
     }
 
-    async fn collection_view(&self, id: Id, page: Page) -> ApiResult<CollectionView> {
+    async fn collection_view(
+        &self,
+        id: Id,
+        q: Option<String>,
+        page: Page,
+    ) -> ApiResult<CollectionView> {
         self.require_session()?;
         // A read: GET with the keyset params in the query string. The cursor is
         // base64url (already URL-safe), so no escaping is needed.
         let mut path = super::paths::collection_op(id, super::paths::op::VIEW);
         let mut qs = Vec::new();
+        if let Some(q) = q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            qs.push(format!("q={}", urlencode(q)));
+        }
         if let Some(cursor) = &page.cursor {
             qs.push(format!("cursor={cursor}"));
         }
