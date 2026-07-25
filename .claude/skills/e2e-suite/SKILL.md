@@ -1,6 +1,6 @@
 ---
 name: e2e-suite
-description: Author and run the three-rings Playwright e2e suite — login fixture (email verification is ON; never sign up in a test), tier tags (@fast while iterating, full three-browser tier at the end of every task), Android webview project, webkit-as-WKWebView rationale, :3000 server lifecycle, quarantine policy. Use when writing, running, or debugging any e2e test, or when a UI task reaches its e2e step.
+description: Author and run the three-rings Playwright e2e suite — login fixture (email verification is ON; never sign up in a test), chromium-only tiers (@fast while iterating; one full chromium run per task after review fixes; firefox and webkit are never run), Android webview project, :3000 server lifecycle, assertions that lie, quarantine policy. Use when writing, running, or debugging any e2e test, or when a UI task reaches its e2e step.
 ---
 
 # E2E suite — Playwright against the live dev server
@@ -61,15 +61,21 @@ The login fixture drives the real `/login` form once per worker and reuses
 
 ## Tiers
 
+**Chromium only. Firefox and webkit are not run at all** (maintainer decision,
+2026-07-25 — this is an MVP with one developer; cross-browser compatibility is
+deferred wholesale, and WKWebView gets covered by desktop later). Never invoke
+a bare `npx playwright test` — it fans out across all three projects and is the
+single biggest cost sink in the loop.
+
 - `@fast` in the test title = the **iteration** tier, run as often as you like
   while building: `npx playwright test --project=chromium --grep @fast`.
-  It is a fast-feedback loop, never the evidence a task is done.
-- Full tier = **the end of every task**, before the merge gate: `npx
-  playwright test` — chromium + firefox + **webkit**. Webkit stands in for
-  WKWebView (desktop is untested in-loop); an overlay that breaks in webkit
-  will break in the macOS shell. A task is not `[x]` until this tier is green
-  — a green `@fast` run alone never clears it. (Stage boundaries add the
-  Android **release** smoke, not a different browser tier.)
+  Implementers and reviewers use **only** this.
+- The task's e2e run = **once per task, after the adversarial-review fixes are
+  in** (ui-task-loop step 4): `npx playwright test --project=chromium`. One
+  pass, not one per round. A task is not `[x]` until it is green.
+  A **major** failure goes back to the implementer; a minor failure or flake is
+  quarantined `@flaky` and filed under Phase 5 discoveries. (Stage boundaries
+  add the Android **release** smoke, not a different browser tier.)
 - Android webview project: attach per the **android-smoke** recipe, then run
   the spec against the attached page. One page, one context — Android runs
   serialize (single worker) and share state; every spec must `goto` its own
@@ -89,8 +95,19 @@ The login fixture drives the real `/login` form once per worker and reuses
   children rendered, so it cannot test lazy mounting — assert on the content
   (e.g. a name appearing exactly once) instead.
 - Both of the first two shipped as green-but-meaningless assertions and were
-  only caught by mutation testing. When an assertion protects an overlay, mutate
-  the feature and watch it fail before believing it.
+  only caught by mutation testing. **Mutation passes are switched off in the
+  loop** (maintainer decision, 2026-07-25 — assertion strength gets its own
+  sweep after the spec work lands), so these three patterns are now the
+  checklist you apply *while writing* the assertion instead of a check that
+  catches you afterward.
+- A test can only distinguish two behaviors the **fixture** distinguishes. If
+  no seeded collection has a rollup, a nested folder with children, or a
+  repeated printing, then assertions about those are green no matter what the
+  code does. Check the fixture actually contains the shape you are asserting
+  on — this produced three vacuous tests in one task.
+- Measure the **scroll container**, not the document, for overflow. An
+  `overflow-auto` wrapper (e.g. `TableWrapper`) absorbs the overflow so
+  `document.documentElement` never moves.
 
 ## Quarantine policy
 
