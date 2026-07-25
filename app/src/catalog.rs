@@ -98,7 +98,7 @@ pub(crate) fn encode_query_value(s: &str) -> String {
 /// prefix is the wire signal. Matching on the prefix is narrow, but the
 /// alternative — treating every error as a failure — would flash "search failed"
 /// under a user's fingers on every partially-typed term.
-fn describe_error(e: &ServerFnError<String>) -> (bool, String) {
+pub(crate) fn describe_error(e: &ServerFnError<String>) -> (bool, String) {
     let raw = match e {
         ServerFnError::ServerError(msg) => msg.clone(),
         other => other.to_string(),
@@ -738,14 +738,24 @@ fn QuickAddButton(
             pending.set(true);
             let name = name.clone();
             spawn_local(async move {
-                let result = crate::quick_add(dest.id, kind.wire(), oracle_id, printing_id).await;
+                let result =
+                    crate::quick_add(dest.id, kind.wire(), oracle_id, printing_id, 1).await;
                 pending.set(false);
                 match result {
                     Ok(receipt) => {
                         if let Some(t) = tree {
                             t.0.refetch();
                         }
-                        raise_add_toast(toast, tree, &name, &dest, kind, receipt.undo_move_id)
+                        raise_add_toast(AddToast {
+                            toast,
+                            tree,
+                            name,
+                            dest,
+                            kind: kind.wire(),
+                            quantity: 1,
+                            undo_move_id: receipt.undo_move_id,
+                            after_undo: None,
+                        })
                     }
                     Err(e) => {
                         toast.show(
@@ -781,22 +791,45 @@ fn QuickAddButton(
     }
 }
 
+/// Everything the confirmation toast reports. A struct rather than eight
+/// positional arguments because two surfaces raise it now — `/catalog`'s quick
+/// actions and the quick-add panel — and the toast is the one place either one
+/// tells the user *what* went *where*.
+pub(crate) struct AddToast {
+    pub toast: ToastHandle,
+    /// The shared sidebar resource, refetched after an undo lands (the caller
+    /// already refetched for the add itself).
+    pub tree: Option<crate::my::tree::CollectionTreeResource>,
+    pub name: String,
+    pub dest: destination::Destination,
+    pub kind: shared::QuickAddKind,
+    pub quantity: u32,
+    pub undo_move_id: Option<shared::Id>,
+    /// Run after a successful undo, for a surface whose own read has to move
+    /// with it (the collection view). The add-side refetch is the caller's.
+    pub after_undo: Option<Callback<()>>,
+}
+
 /// The confirmation toast, and the Undo action when there is one to offer.
-/// `tree` is the shared sidebar resource to refetch after an undo lands (the
-/// caller already refetched for the add itself).
-fn raise_add_toast(
-    toast: ToastHandle,
-    tree: Option<crate::my::tree::CollectionTreeResource>,
-    name: &str,
-    dest: &destination::Destination,
-    kind: AddKind,
-    undo_move_id: Option<shared::Id>,
-) {
+pub(crate) fn raise_add_toast(t: AddToast) {
+    let AddToast {
+        toast,
+        tree,
+        name,
+        dest,
+        kind,
+        quantity,
+        undo_move_id,
+        after_undo,
+    } = t;
     let verb = match kind {
-        AddKind::Want => "Wanted",
-        AddKind::Have => "Added",
+        shared::QuickAddKind::Want => "Wanted",
+        shared::QuickAddKind::Have => "Added",
     };
-    let message = format!("{verb} {name} → {}", dest.label());
+    // The count is always stated (the storyboard's "Added 1 Lightning Strike to
+    // Trade Binder"): with ⇧⏎ able to add a playset, "Added Lightning Bolt"
+    // would leave the user unsure whether the digits landed.
+    let message = format!("{verb} {quantity} {name} → {}", dest.label());
     let options = ToastOptions::message(message).kind(ToastKind::Success);
 
     // Undo exists only for a Have — a Want writes no move row, so there is
@@ -804,7 +837,7 @@ fn raise_add_toast(
     // would be worse than offering none.
     let options = match undo_move_id {
         Some(move_id) => {
-            let name = name.to_string();
+            let name = name.clone();
             options.action(
                 "Undo",
                 Callback::new(move |()| {
@@ -814,6 +847,9 @@ fn raise_add_toast(
                             Ok(()) => {
                                 if let Some(t) = tree {
                                     t.0.refetch();
+                                }
+                                if let Some(after) = after_undo {
+                                    after.run(());
                                 }
                                 toast.show(ToastOptions::message(format!("Removed {name} again")))
                             }

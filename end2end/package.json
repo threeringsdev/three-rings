@@ -10,7 +10,8 @@
     "probe:hydration-authed": "node hydration-check-authed.mjs",
     "probe:bench": "node bench-check.mjs",
     "probe:paging": "node all-cards-paging-check.mjs",
-    "probe:android-collection": "node android-collection-check.mjs"
+    "probe:android-collection": "node android-collection-check.mjs",
+    "probe:android-quick-add": "node android-quick-add-check.mjs"
   },
   "keywords": [],
   "author": "",

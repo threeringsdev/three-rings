@@ -22,6 +22,14 @@
 //!
 //! What differs per page is only the URL to navigate to, which is the
 //! `to_url` prop.
+//!
+//! Two optional props exist for one caller, the quick-add panel
+//! (`crate::components::quick_add`), which wraps this box in a type-ahead
+//! surface: `on_key` lets it see keys *first* (its `⏎`/`⇧⏎`/`⌥⏎` contract
+//! outranks the Enter-commits-now shortcut), and `reset` lets it clear the box
+//! after an add — through here rather than by writing `text`, because a
+//! keystroke's armed debounce would otherwise fire afterwards and put the query
+//! straight back.
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
@@ -67,6 +75,16 @@ pub fn QueryBar(
     id: String,
     #[prop(into)] placeholder: String,
     #[prop(into)] aria_label: String,
+    /// A composed surface that must see keydowns before this box does.
+    /// Returning `true` means "handled": the box does nothing further,
+    /// including its own Enter-commits-now shortcut.
+    #[prop(optional)]
+    on_key: Option<Callback<leptos::ev::KeyboardEvent, bool>>,
+    /// Bump this to clear the box *and* commit the empty query, cancelling any
+    /// armed debounce. Only the change matters, not the value — see the module
+    /// doc for why writing `text` directly is not enough.
+    #[prop(optional)]
+    reset: Option<RwSignal<u32>>,
 ) -> impl IntoView {
     let navigate = use_navigate();
     let pending = StoredValue::new(None::<leptos::leptos_dom::helpers::TimeoutHandle>);
@@ -131,10 +149,14 @@ pub fn QueryBar(
         let schedule = schedule.clone();
         move |_| schedule(text.get_untracked())
     };
-    // Enter searches now rather than waiting out the debounce.
-    let on_key = {
+    // Enter searches now rather than waiting out the debounce — unless a
+    // composed surface claimed the key first (see the module doc).
+    let on_keydown = {
         let commit = commit.clone();
         move |ev: leptos::ev::KeyboardEvent| {
+            if on_key.is_some_and(|cb| cb.run(ev.clone())) {
+                return;
+            }
             if ev.key() == "Enter" {
                 ev.prevent_default();
                 clear_pending();
@@ -142,11 +164,27 @@ pub fn QueryBar(
             }
         }
     };
-    let on_clear = move |_| {
-        clear_pending();
-        text.set(String::new());
-        commit(String::new());
+    let clear = {
+        let commit = commit.clone();
+        move || {
+            clear_pending();
+            text.set(String::new());
+            commit(String::new());
+        }
     };
+    // The caller's imperative reset. `prev.is_some()` skips the mount run, so
+    // rendering the box never clears the query a deep link put in the URL.
+    if let Some(reset) = reset {
+        let clear = clear.clone();
+        Effect::new(move |prev: Option<u32>| {
+            let now = reset.get();
+            if prev.is_some_and(|p| p != now) {
+                clear();
+            }
+            now
+        });
+    }
+    let on_clear = move |_| clear();
 
     view! {
         <search>
@@ -169,7 +207,7 @@ pub fn QueryBar(
                     // No manual `value` seed: `Input` emits the SSR attribute
                     // from `bind_value` itself (see its bind_value arm).
                     on:input=on_input
-                    on:keydown=on_key
+                    on:keydown=on_keydown
                 />
                 <InputGroupAddon align=InputGroupAddonAlign::InlineEnd>
                     <Show when=move || !text.read().is_empty()>
