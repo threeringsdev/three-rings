@@ -30,23 +30,34 @@
 //! batch-move task cannot write `MoveItem { from_collection_id: None, .. }` by
 //! accident: `None` there means *external intake* (copies appearing from
 //! outside), which is the opposite of "we don't know yet". Resolving a `Card`
-//! entry into move lines is the batch-move task's job.
+//! entry into move lines is [`crate::my::move_selection`]'s job, and it is done
+//! server-side against the caller's real holdings.
 //!
-//! **The tray is the pill, not the dock.** This component renders the
-//! wireframe's "Selection Tray" frame and nothing else; the shell wraps it in
-//! the "Tray Wrap" frame that fixes it to the bottom of the viewport, above the
-//! mobile tab bar. That split is what lets the bench render it inline.
+//! **The tray is the pill, not the dock, and it does not own its action.** This
+//! component renders the wireframe's "Selection Tray" frame and nothing else;
+//! the shell wraps it in the "Tray Wrap" frame that fixes it to the bottom of
+//! the viewport, above the mobile tab bar. That split is what lets the bench
+//! render it inline. The primary action ("Move to…") arrives as the [`action`]
+//! slot rather than being built in, so this file stays free of server calls —
+//! the shell passes [`crate::my::move_selection::MoveSelection`].
 //!
-//! No writes: "Move to…" renders and is inert (batch move is the next task).
+//! [`action`]: SelectionTray
 
 use leptos::prelude::*;
+use serde::{Deserialize, Serialize};
 use shared::{Board, Id};
 use tw_merge::tw_merge;
 
 use super::checkbox::Checkbox;
 
 /// What one tray entry addresses — see the module docs on why this is an enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Serializable because it is also the **wire** shape the batch move takes
+/// (`crate::move_selection`): the server resolves each key into a
+/// [`shared::MoveItem`] or a stated refusal, so the "which copies did you mean"
+/// question is answered once, against the database, rather than guessed by the
+/// client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SelectionKey {
     /// A `/my/collections/:id` card row: copies of one printing, on one board,
     /// held in one collection. Board is carried because two rows of the same
@@ -81,6 +92,12 @@ impl SelectionKey {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectedCard {
     pub key: SelectionKey,
+    /// The oracle card this row is a copy of. Not part of the key — two entries
+    /// can share it (the same card in two collections) — but every selectable
+    /// row knows it, and the move's destination ranking is per *oracle*
+    /// (`suggested_destinations`), so carrying it here is what lets the picker
+    /// rank without a second lookup.
+    pub oracle_id: Id,
     pub name: String,
     pub image_uri: Option<String>,
 }
@@ -131,6 +148,24 @@ impl SelectionState {
     pub fn clear(self) {
         self.items.update(Vec::clear);
     }
+
+    /// Drop exactly the entries a batch move actually moved, named by
+    /// [`SelectionKey::token`].
+    ///
+    /// Not `clear()`: a move can refuse part of the batch (a `/my` row held in
+    /// two places, a sideboard row), and clearing everything would erase the
+    /// refusals along with the successes — the user would see "some cards
+    /// weren't moved" and have nothing left on screen to act on. What is left
+    /// checked afterwards is exactly what still needs doing.
+    pub fn remove_tokens(self, tokens: &[String]) {
+        self.items.update(|v| retain_untokened(v, tokens));
+    }
+}
+
+/// The removal itself, free of the signal so it is testable without a reactive
+/// runtime (the [`toggle_in`] precedent).
+fn retain_untokened(items: &mut Vec<SelectedCard>, tokens: &[String]) {
+    items.retain(|c| !tokens.contains(&c.key.token()));
 }
 
 /// The toggle itself, free of the signal so it is testable without a reactive
@@ -187,14 +222,24 @@ pub fn SelectionCheckbox(selection: SelectionState, card: SelectedCard) -> impl 
 
 /// The wireframe's "Selection Tray" pill. Renders nothing at all when the
 /// selection is empty — an empty tray is not a state this design has.
+///
+/// `action` is the pill's primary control — the wireframe's "Move to…". It is a
+/// slot rather than a built-in button so this component stays free of server
+/// calls and page context: the shell fills it with
+/// [`crate::my::move_selection::MoveSelection`], and the bench fills it with the
+/// same component under its own selection. Omitting it renders no action at all
+/// (the honest rendering of "nothing is wired here"), never a dead button.
 #[component]
 pub fn SelectionTray(
     selection: SelectionState,
+    #[prop(optional)] action: Option<ViewFn>,
     #[prop(into, optional)] class: String,
 ) -> impl IntoView {
     let items = selection.items();
-    // `Show`'s children is a `ChildrenFn` (re-invoked on every toggle), so the
-    // merged class string cannot simply be moved into it.
+    // `Show`'s children is a `ChildrenFn` (re-invoked on every toggle), so
+    // neither the merged class string nor the action slot can simply be moved
+    // into it.
+    let action = StoredValue::new(action);
     let merged = StoredValue::new(tw_merge!(
         "bg-foreground text-background flex items-center gap-3 rounded-[10px] px-3.5 py-2.5 shadow-lg",
         class
@@ -217,20 +262,7 @@ pub fn SelectionTray(
                 >
                     {move || count_label(items.with(Vec::len))}
                 </span>
-                // Inert, deliberately: this task collects and renders a
-                // selection; the move it triggers is the batch-move task. A
-                // real `disabled` (not just `aria-disabled`) so no engine
-                // dispatches a click that would do nothing.
-                <button
-                    type="button"
-                    disabled=true
-                    aria-disabled="true"
-                    title="Moving a selection lands with the batch-move task"
-                    class="bg-background text-foreground shrink-0 rounded-md px-3 py-1.5 text-[13px] font-medium disabled:opacity-60"
-                    data-testid="tray-move"
-                >
-                    "Move to…"
-                </button>
+                {move || action.get_value().map(|a| a.run())}
                 <button
                     type="button"
                     class="text-background/70 hover:text-background shrink-0 rounded-sm p-0.5 outline-none focus-visible:ring-2 focus-visible:ring-current"
@@ -318,6 +350,10 @@ mod tests {
     fn card(key: SelectionKey, name: &str) -> SelectedCard {
         SelectedCard {
             key,
+            oracle_id: match key {
+                SelectionKey::Card { oracle_id } => oracle_id,
+                SelectionKey::Held { printing_id, .. } => printing_id,
+            },
             name: name.to_string(),
             image_uri: None,
         }
@@ -422,5 +458,47 @@ mod tests {
 
     fn names(items: &[SelectedCard]) -> Vec<&str> {
         items.iter().map(|c| c.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_move_drops_only_what_it_moved() {
+        // The refusals a batch move reports must stay checked: they are the
+        // work still to do, and clearing the tray would leave the user with a
+        // "2 weren't moved" toast and nothing on screen to act on.
+        let moved = card(SelectionKey::Card { oracle_id: id(1) }, "Ancestral");
+        let refused = card(SelectionKey::Card { oracle_id: id(2) }, "Bolt");
+        let mut items = vec![moved.clone(), refused.clone()];
+
+        retain_untokened(&mut items, &[moved.key.token()]);
+        assert_eq!(names(&items), vec!["Bolt"]);
+
+        // Idempotent: a re-fired callback (a double-clicked toast) is harmless.
+        retain_untokened(&mut items, &[moved.key.token()]);
+        assert_eq!(names(&items), vec!["Bolt"]);
+    }
+
+    #[test]
+    fn removal_is_by_grain_not_by_card() {
+        // The same printing on two boards is two entries; moving the mainboard
+        // one must not silently drop the sideboard row with it.
+        let main = card(
+            SelectionKey::Held {
+                collection_id: id(1),
+                printing_id: id(2),
+                board: Board::Main,
+            },
+            "Bolt",
+        );
+        let side = card(
+            SelectionKey::Held {
+                collection_id: id(1),
+                printing_id: id(2),
+                board: Board::Side,
+            },
+            "Bolt",
+        );
+        let mut items = vec![main.clone(), side.clone()];
+        retain_untokened(&mut items, &[main.key.token()]);
+        assert_eq!(items, vec![side]);
     }
 }

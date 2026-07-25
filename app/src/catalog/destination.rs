@@ -173,13 +173,66 @@ fn reconcile(
 /// that invariant: typing in the picker *hides* rows, it never reorders them,
 /// and a new collection list remounts the whole list. No `compareDocumentPosition`
 /// sort is needed in `command` for this consumer.
-fn picker_order(mut collections: Vec<CollectionSummary>) -> Vec<CollectionSummary> {
+pub(crate) fn picker_order(mut collections: Vec<CollectionSummary>) -> Vec<CollectionSummary> {
     collections.sort_by(|a, b| {
         b.is_inbox
             .cmp(&a.is_inbox)
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     collections
+}
+
+/// One row the picker offers: where it points, plus an optional right-hand
+/// hint. The catalog toolbar has nothing to hint; the selection tray's copy of
+/// this control shows each suggested destination's shortfall (`wants 3`), which
+/// is the whole point of ranking by `suggested_destinations`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DestinationChoice {
+    pub dest: Destination,
+    pub hint: Option<String>,
+}
+
+impl DestinationChoice {
+    /// A row with no hint — the catalog toolbar's shape.
+    pub fn plain(dest: Destination) -> Self {
+        Self { dest, hint: None }
+    }
+}
+
+/// The picker's body: a `command` combobox whose rows are the caller's.
+///
+/// Extracted from [`PickerBody`] so the selection tray's "Move to…" is *this*
+/// control rather than a second one that drifts from it — same search box, same
+/// `destination-option` rows, same ✓ marker, same close-on-pick. What the two
+/// callers do not share is where the rows come from (the whole collection list
+/// vs `suggested_destinations` ranked for the selection), so the rows are
+/// `children`.
+///
+/// **The rows are `children` rather than a `Signal<Vec<…>>` for a hydration
+/// reason, not a stylistic one.** Each caller's rows come from a `Resource`, and
+/// a resource read in plain render is unresolved during SSR but *already
+/// resolved* at hydration — so a signal-driven list renders zero items on the
+/// server and N on the client, which is the tachys "expected an HTML `<div>`"
+/// panic (observed, on `/catalog`). The `Suspense`/`Transition` boundary that
+/// keeps the two in step has to sit around the rows, and it belongs to whoever
+/// owns the resource.
+#[component]
+pub fn DestinationList(
+    /// The option rows — `DestinationOption`s, inside the caller's own
+    /// async boundary.
+    children: ChildrenFn,
+    #[prop(into, default = String::from("Search collections…"))] placeholder: String,
+    #[prop(into, default = String::from("No collection matches."))] empty: String,
+) -> impl IntoView {
+    view! {
+        <Command class="rounded-md">
+            <CommandInput placeholder=placeholder />
+            <CommandList class="max-h-64 overflow-y-auto p-1">
+                <CommandEmpty class="text-muted-foreground p-3 text-sm">{empty}</CommandEmpty>
+                {children()}
+            </CommandList>
+        </Command>
+    }
 }
 
 /// The sticky picker. Renders only for a signed-in caller — an anonymous
@@ -218,6 +271,13 @@ fn PickerBody() -> impl IntoView {
         }
     });
 
+    let chosen = Signal::derive(move || state.get().map(|d| d.id));
+    let choose = Callback::new(move |dest: Destination| {
+        let id = dest.id;
+        state.set(Some(dest));
+        remember_destination(id);
+    });
+
     view! {
         <Popover id=PICKER_ID>
             <PopoverTrigger class="h-9 gap-1.5 px-3 text-sm">
@@ -233,51 +293,54 @@ fn PickerBody() -> impl IntoView {
                 <span aria-hidden="true">"▾"</span>
             </PopoverTrigger>
             <PopoverContent class="w-[280px] p-0">
-                <Command class="rounded-md">
-                    <CommandInput placeholder="Search collections…" />
-                    <CommandList class="max-h-64 overflow-y-auto p-1">
-                        <CommandEmpty class="text-muted-foreground p-3 text-sm">
-                            "No collection matches."
-                        </CommandEmpty>
-                        <Transition fallback=|| {
-                            view! {
-                                <p class="text-muted-foreground p-3 text-sm">"Loading collections…"</p>
-                            }
-                        }>
-                            {move || Suspend::new(async move {
-                                let list = collections.await.unwrap_or_default();
-                                picker_order(list)
-                                    .into_iter()
-                                    .map(|c| view! { <DestinationOption collection=c /> })
-                                    .collect_view()
-                            })}
-                        </Transition>
-                    </CommandList>
-                </Command>
+                <DestinationList>
+                    <Transition fallback=|| {
+                        view! {
+                            <p class="text-muted-foreground p-3 text-sm">"Loading collections…"</p>
+                        }
+                    }>
+                        {move || Suspend::new(async move {
+                            let list = collections.await.unwrap_or_default();
+                            picker_order(list)
+                                .into_iter()
+                                .map(|c| {
+                                    let choice = DestinationChoice::plain(Destination {
+                                        id: c.id,
+                                        name: c.name,
+                                        is_inbox: c.is_inbox,
+                                    });
+                                    view! { <DestinationOption choice chosen on_choose=choose /> }
+                                })
+                                .collect_view()
+                        })}
+                    </Transition>
+                </DestinationList>
             </PopoverContent>
         </Popover>
     }
 }
 
+/// One row of [`DestinationList`] — `🗂 Name`, its optional hint, and the ✓ on
+/// the current choice.
 #[component]
-fn DestinationOption(collection: CollectionSummary) -> impl IntoView {
-    let state = expect_context::<DestinationState>().0;
+pub fn DestinationOption(
+    choice: DestinationChoice,
+    /// Which destination carries the ✓ (the *current* choice, a different thing
+    /// from `command`'s keyboard highlight). `None` for a picker with no
+    /// standing choice, such as the tray's.
+    #[prop(into, optional)]
+    chosen: Signal<Option<Id>>,
+    on_choose: Callback<Destination>,
+) -> impl IntoView {
     let open = use_popover_open();
-    let dest = Destination {
-        id: collection.id,
-        name: collection.name.clone(),
-        is_inbox: collection.is_inbox,
-    };
-    let value = collection.name.clone();
+    let DestinationChoice { dest, hint } = choice;
+    let value = dest.name.clone();
     let label = dest.label();
-    let selected = {
-        let dest = dest.clone();
-        Memo::new(move |_| state.get().is_some_and(|d| d.id == dest.id))
-    };
+    let id = dest.id;
+    let selected = Memo::new(move |_| chosen.get() == Some(id));
 
     let choose = Callback::new(move |()| {
-        state.set(Some(dest.clone()));
-        remember_destination(dest.id);
+        on_choose.run(dest.clone());
         // Choosing is the popover's whole purpose — leaving it open would make
         // every pick need a second dismiss.
         if let Some(open) = open {
@@ -299,6 +362,17 @@ fn DestinationOption(collection: CollectionSummary) -> impl IntoView {
             >
                 {label}
             </span>
+            {hint
+                .map(|h| {
+                    view! {
+                        <span
+                            class="text-muted-foreground shrink-0 text-xs"
+                            data-testid="destination-hint"
+                        >
+                            {h}
+                        </span>
+                    }
+                })}
             {move || selected.get().then(|| view! { <span aria-hidden="true">"✓"</span> })}
         </CommandItem>
     }

@@ -142,6 +142,9 @@ pub mod paths {
     /// Move endpoints (not per-collection: a move spans two collections).
     pub const MOVES: &str = "/api/moves";
     pub const MOVES_BATCH: &str = "/api/moves/batch";
+    /// Undo N moves in one transaction — the batch counterpart of
+    /// `{id}/undo`, and the selection tray's single Undo.
+    pub const MOVES_UNDO_BATCH: &str = "/api/moves/undo-batch";
     pub const MOVES_UNDO_LAST: &str = "/api/moves/undo-last";
     pub const MOVE_UNDO_ROUTE: &str = "/api/moves/{id}/undo";
     pub fn move_undo(move_id: Id) -> String {
@@ -290,6 +293,17 @@ pub trait CollectionStore {
     /// Undo a move: reverse its holdings effect and stamp `undone_at`. Idempotent
     /// (undoing an already-undone move is a no-op).
     async fn undo_move(&self, move_id: Id) -> ApiResult<()>;
+
+    /// Undo several moves **in one transaction** — the batch counterpart of
+    /// [`Self::undo_move`], and the symmetric partner of [`Self::move_batch`].
+    ///
+    /// It exists because a batch move writes one ledger row per item, so the
+    /// tray's single Undo has N rows to reverse: looping `undo_move` would be N
+    /// transactions, and a failure partway would leave the batch half-reverted
+    /// behind a toast that already said it undid the whole thing. Here the batch
+    /// reverts wholly or not at all, exactly as it was applied. Idempotent per
+    /// move, like `undo_move`.
+    async fn undo_moves(&self, move_ids: Vec<Id>) -> ApiResult<()>;
 
     /// Undo the caller's most recent not-yet-undone move (⌘K "undo last move").
     /// Returns the undone move id, or `None` if there is nothing to undo.

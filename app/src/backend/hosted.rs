@@ -932,6 +932,21 @@ impl CollectionStore for HostedBackend {
         Ok(())
     }
 
+    async fn undo_moves(&self, move_ids: Vec<Id>) -> ApiResult<()> {
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        // One transaction for the whole list: a batch move is applied
+        // all-or-nothing, so its undo has to revert the same way. A per-id loop
+        // of `undo_move` would commit each reversal separately and could stop
+        // half way, leaving the user with a half-undone batch behind a toast
+        // that claimed the batch was undone.
+        for move_id in move_ids {
+            undo_one(&mut tx, user_id, move_id).await?;
+        }
+        tx.commit().await.map_err(upstream)?;
+        Ok(())
+    }
+
     async fn undo_last_move(&self) -> ApiResult<Option<MoveReceipt>> {
         let user_id = self.session_id()?;
         let mut tx = self.scoped_tx().await?;

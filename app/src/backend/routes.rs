@@ -64,6 +64,7 @@ where
         .route(paths::HOLDING_QUANTITY_ROUTE, post(set_holding_quantity))
         .route(paths::MOVES, post(move_cards))
         .route(paths::MOVES_BATCH, post(move_batch))
+        .route(paths::MOVES_UNDO_BATCH, post(undo_moves))
         .route(paths::MOVES_UNDO_LAST, post(undo_last_move))
         .route(paths::MOVE_UNDO_ROUTE, post(undo_move))
         .route(paths::CARD_DESTINATIONS_ROUTE, get(suggested_destinations))
@@ -370,6 +371,20 @@ async fn undo_move(user: AuthUser, Path(id): Path<Id>) -> Response {
             HostedBackend::for_user(user.user_id)
                 .await?
                 .undo_move(id)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/moves/undo-batch` — reverse N moves in one transaction (the
+/// selection tray's single Undo over a batch move).
+async fn undo_moves(user: AuthUser, Json(ids): Json<Vec<Id>>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .undo_moves(ids)
                 .await
         }
         .await,
