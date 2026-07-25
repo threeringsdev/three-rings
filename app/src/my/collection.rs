@@ -62,6 +62,9 @@ use crate::components::ui::dialog::{
     Dialog, DialogBody, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader,
     DialogTitle,
 };
+use crate::components::ui::selection_tray::{
+    use_selection, SelectedCard, SelectionCheckbox, SelectionKey,
+};
 use crate::components::ui::skeleton::Skeleton;
 use crate::components::ui::sonner::{ToastHandle, ToastKind, ToastOptions};
 use crate::components::ui::table::{
@@ -927,6 +930,7 @@ fn CollectionTable(
     tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
 ) -> impl IntoView {
     let is_deck = view.collection.kind == CollectionKind::Deck;
+    let collection_id = view.collection.id;
     let rows = view_rows(view.cards);
     let sections = if is_deck {
         group_deck(rows.clone())
@@ -939,6 +943,9 @@ fn CollectionTable(
             <Table {..} data-testid="collection-table">
                 <TableHeader>
                     <TableRow>
+                        <TableHead class="w-8">
+                            <span class="sr-only">"Select"</span>
+                        </TableHead>
                         <TableHead>"Card"</TableHead>
                         <TableHead class="hidden md:table-cell">"Type"</TableHead>
                         <TableHead class="hidden sm:table-cell">"Mana"</TableHead>
@@ -966,7 +973,7 @@ fn CollectionTable(
                                         <TableCell
                                             class="text-muted-foreground bg-muted/40 p-2 text-xs font-semibold tracking-wide uppercase"
                                             {..}
-                                            colspan="6"
+                                            colspan="7"
                                             data-section=label_attr
                                         >
                                             {label} " · " {slots.to_string()}
@@ -975,7 +982,9 @@ fn CollectionTable(
                                     {section
                                         .rows
                                         .into_iter()
-                                        .map(|row| view! { <CardTableRow row here_delta /> })
+                                        .map(|row| {
+                                            view! { <CardTableRow row here_delta collection_id /> }
+                                        })
                                         .collect_view()}
                                 }
                             })
@@ -983,7 +992,7 @@ fn CollectionTable(
                             .into_any()
                     } else {
                         rows.into_iter()
-                            .map(|row| view! { <CardTableRow row here_delta /> })
+                            .map(|row| view! { <CardTableRow row here_delta collection_id /> })
                             .collect_view()
                             .into_any()
                     }}
@@ -1009,6 +1018,8 @@ fn FolderTableRow(
     let id = folder.id;
     view! {
         <TableRow {..} data-testid="folder-row" data-collection=id.to_string()>
+            // No checkbox: the selection tray moves cards, not collections.
+            <TableCell class="p-2">""</TableCell>
             <TableCell class="p-2">
                 <a
                     href=format!("/my/collections/{id}")
@@ -1054,7 +1065,7 @@ fn count_or_dash(n: i32) -> String {
 }
 
 #[component]
-fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>) -> impl IntoView {
+fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>, collection_id: Id) -> impl IntoView {
     let wanted = wanted_cell(&row);
     let owned = owned_cell(&row.row);
     let CardRow {
@@ -1072,6 +1083,23 @@ fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>) -> impl IntoView {
         faces,
         ..
     } = row.row;
+
+    // Selectable only where copies are actually here to move: a desire-only row
+    // (`present == 0`) holds nothing, and a rolled-up count belongs to a child
+    // collection, not to this one. This is the grain-complete surface — the
+    // key names the collection, the printing *and* the board.
+    let selection = use_selection();
+    let key = SelectionKey::Held {
+        collection_id,
+        printing_id,
+        board,
+    };
+    let selected = selection.selected(key);
+    let selectable = (present > 0).then(|| SelectedCard {
+        key,
+        name: name.clone(),
+        image_uri: image_uri.clone(),
+    });
 
     // The same preview the catalog and `/my` rows use — hover card, touch
     // sheet, DFC flip — built from this row rather than refetched. The faces
@@ -1096,7 +1124,11 @@ fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>) -> impl IntoView {
             data-oracle=oracle_id.to_string()
             data-printing=printing_id.to_string()
             data-board=board.to_pg()
+            data-state=move || selected.get().then_some("selected")
         >
+            <TableCell class="p-2">
+                {selectable.map(|card| view! { <SelectionCheckbox selection card /> })}
+            </TableCell>
             <TableCell class="p-2">
                 <CardPreview card=preview>
                     <a href=format!("/cards/{oracle_id}") class="font-medium hover:underline">

@@ -29,6 +29,7 @@ mod input_group;
 mod item;
 mod kbd;
 mod popover;
+mod selection_tray;
 mod separator;
 mod sheet;
 mod skeleton;
@@ -153,6 +154,11 @@ const SECTIONS: &[BenchSection] = &[
         id: "count-stepper",
         title: "Count stepper (custom)",
         demo: count_stepper::demo,
+    },
+    BenchSection {
+        id: "selection-tray",
+        title: "Selection tray (custom)",
+        demo: selection_tray::demo,
     },
     BenchSection {
         id: "table",

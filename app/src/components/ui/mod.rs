@@ -21,6 +21,7 @@ pub mod label;
 pub mod overlay_stack;
 pub mod popover;
 pub mod scroll_lock;
+pub mod selection_tray;
 pub mod separator;
 pub mod sheet;
 pub mod skeleton;
