@@ -168,11 +168,6 @@ which costs tokens and leaks stale assumptions into the new one.
    If the implementer is gone (ended/overflowed), dispatch a fresh fix agent
    with the branch, the findings, and pointers to the spec sections.
 
-**Steps 4 and 5 run concurrently.** They share no state — the gate builds into
-`target/gate`, the e2e drives the already-running watch on :3000. Dispatch the
-gate subagent *first*, then run the e2e in the main session while it works;
-collect both verdicts before step 6. Sequencing them wastes the shorter one.
-
 4. **E2E — the single run, after the fixes** — one pass, chromium only:
    `npx playwright test --project=chromium`, plus the Android webview probe
    (`node end2end/android-cdp-check.mjs`, and the task's own probe when it
@@ -184,10 +179,19 @@ collect both verdicts before step 6. Sequencing them wastes the shorter one.
    - A **minor** failure or a flake → one retry; still red → quarantine with
      `@flaky` and file it under Phase 5 discoveries.
 
-5. **Gate** — dispatch a subagent to run the **validate** skill and return the
-   per-step verdict table. Red → fix, then re-run the affected step only. Skip
-   the gate only when the diff since the last green run touches no compiled
-   sources (`.rs`/`.toml`/`.css`) — and say so explicitly when you skip.
+5. **Gate — CI runs it, not you.** Do **not** run the validate skill locally as
+   a pre-check. Push the branch; `.github/workflows/validate.yml` runs the same
+   eight steps on every PR, branch protection requires it, and auto-merge only
+   fires on green — so a red gate cannot ship, it just doesn't merge.
+
+   Running it locally first is worse than redundant, it is **not the same
+   check**: CI is linux with Tauri's system libs, the laptop is macOS, the
+   devcontainer can't build `three_rings` at all. A local green is not evidence
+   of the green that gates. Measured 2026-07-25: cloud run 2–3 min and zero
+   tokens, local run 2 min and ~53k tokens for a non-authoritative answer.
+
+   Run the **validate** skill locally only to *debug* a red CI run, when the
+   logs alone don't explain it — reactively, never prophylactically.
 
 6. **Land** — finishing commit flips `[~]`→`[x]` **and** records Findings in
    the linked spec in the same commit: surprises, the review's majors and how

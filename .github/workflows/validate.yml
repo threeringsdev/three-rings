@@ -1,11 +1,16 @@
 name: Validate
 
-# Merge gate: runs on every push and every PR, linux only.
+# Merge gate: every PR, plus `main` itself, linux only.
 # Branch protection on `main` requires this workflow, and auto-merge ships on
 # green — so this suite is the de facto reviewer and is deliberately strict.
+#
+# `push` is scoped to `main` on purpose: a bare `on: push` alongside
+# `on: pull_request` fires *two* identical runs for every push to a PR branch,
+# doubling the Actions minutes for no extra coverage.
 on:
-  push:
   pull_request:
+  push:
+    branches: [main]
 
 # Superseded pushes on the same ref cancel their in-flight run.
 concurrency:
