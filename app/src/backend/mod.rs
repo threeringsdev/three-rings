@@ -24,9 +24,10 @@
 use shared::{
     AddHave, AddLine, AddWant, AllCardsView, ApiResult, BatchMove, CardDetail, CardSummary,
     CatalogCount, CollectionSummary, CollectionTree, CollectionView, DeckCommanders, DesireLine,
-    HoldingLine, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection, NewTag, Page,
-    Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard, SetQuantity,
-    ShoppingList, SuggestedDestination, Tag, TagAssignment, TaggedCard, Teardown, TeardownReceipt,
+    HoldingLine, HoldingMove, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection,
+    NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard,
+    SetQuantity, ShoppingList, SuggestedDestination, Tag, TagAssignment, TaggedCard, Teardown,
+    TeardownReceipt,
 };
 
 #[cfg(feature = "hosted")]
@@ -178,6 +179,12 @@ pub mod paths {
     pub fn holding_quantity(holding_id: Id) -> String {
         format!("/api/holdings/{holding_id}/quantity")
     }
+
+    /// Move (or remove) a named holding stack — the grain-addressed write.
+    pub const HOLDING_MOVE_ROUTE: &str = "/api/holdings/{id}/move";
+    pub fn holding_move(holding_id: Id) -> String {
+        format!("/api/holdings/{holding_id}/move")
+    }
 }
 
 /// Catalog reads — anonymous-safe (the public IA routes). No session credential;
@@ -290,7 +297,34 @@ pub trait CollectionStore {
     /// holding, upsert the destination, append a `moves` row. `from = None` is an
     /// intake, `to = None` a removal. Rejects insufficient source copies
     /// (`Conflict`). Returns the move id (for Undo).
+    ///
+    /// Addressed at the full grain **and** at a board on each end
+    /// (`MoveRequest::from_board` / `to_board`): a deck's sideboard stack is a
+    /// different stack of the same printing, and a write that assumed `main`
+    /// would take copies the caller never pointed at.
     async fn move_cards(&self, req: MoveRequest) -> ApiResult<MoveReceipt>;
+
+    /// Move copies **out of one named `holdings` row** — the same write as
+    /// [`Self::move_cards`], addressed by the id of a stack instead of by a
+    /// grain the caller has to re-state. `to = None` removes them (undoably).
+    ///
+    /// Two reasons it exists rather than being folded into `move_cards`:
+    ///
+    /// - **The caller cannot state the grain.** A rendered collection row is
+    ///   `(printing, board)` with finish/condition/language summed away
+    ///   (`collection_view`'s `present` CTE), so it can name the stack it is
+    ///   showing but not the grain a move is addressed at. `CardRow::holding_id`
+    ///   is exactly that name, and is `Some` precisely when one row backs the
+    ///   cell.
+    /// - **The check belongs inside the write transaction.** Resolving a grain
+    ///   with a read and then writing it is a check-then-act across two
+    ///   transactions; here the grain, the board, the owning collection and the
+    ///   quantity are all read in the transaction that then performs the move,
+    ///   so a concurrent change cannot land between them.
+    ///
+    /// `quantity = None` moves the whole stack. `NotFound` if the holding is not
+    /// the caller's (RLS) or is already gone.
+    async fn move_holding(&self, holding_id: Id, req: HoldingMove) -> ApiResult<MoveReceipt>;
 
     /// Batch move (the selection tray): many items to one destination, all in a
     /// single transaction — all-or-nothing, so a bad item rolls the batch back.

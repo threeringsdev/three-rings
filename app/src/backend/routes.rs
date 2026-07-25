@@ -14,9 +14,9 @@ use axum::routing::{get, post};
 use axum::Json;
 use http::StatusCode;
 use shared::{
-    AddHave, AddLine, AddWant, ApiResult, BatchMove, Id, MoveRequest, NewCollection, NewTag, Page,
-    Rename, RenameTag, Reorder, Reparent, SearchQuery, SetBoard, SetQuantity, TagAssignment,
-    Teardown,
+    AddHave, AddLine, AddWant, ApiResult, BatchMove, HoldingMove, Id, MoveRequest, NewCollection,
+    NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery, SetBoard, SetQuantity,
+    TagAssignment, Teardown,
 };
 
 use super::paths;
@@ -62,6 +62,7 @@ where
         .route(&paths::collection_op_route(op::VIEW), get(collection_view))
         .route(&paths::collection_op_route(op::TEARDOWN), post(teardown))
         .route(paths::HOLDING_QUANTITY_ROUTE, post(set_holding_quantity))
+        .route(paths::HOLDING_MOVE_ROUTE, post(move_holding))
         .route(paths::MOVES, post(move_cards))
         .route(paths::MOVES_BATCH, post(move_batch))
         .route(paths::MOVES_UNDO_BATCH, post(undo_moves))
@@ -340,6 +341,25 @@ async fn collection_view(
 }
 
 /// `POST /api/moves` — move copies between collections.
+/// `POST /api/holdings/{id}/move` — move (or, with `to = null`, remove) the
+/// copies in one named holding stack. The grain and board come from the row
+/// itself, inside the write transaction.
+async fn move_holding(
+    user: AuthUser,
+    Path(id): Path<Id>,
+    Json(req): Json<HoldingMove>,
+) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .move_holding(id, req)
+                .await
+        }
+        .await,
+    )
+}
+
 async fn move_cards(user: AuthUser, Json(req): Json<MoveRequest>) -> Response {
     json_result(
         async {

@@ -418,6 +418,8 @@ async fn build(
         finish: Finish::Foil,
         condition: Default::default(),
         language: shared::collection::default_language(),
+        from_board: Default::default(),
+        to_board: Default::default(),
         quantity: 1,
     })
     .await?;

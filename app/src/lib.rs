@@ -796,6 +796,10 @@ pub async fn quick_add(
                         finish: shared::Finish::default(),
                         condition: shared::Condition::default(),
                         language: shared::default_language(),
+                        // An intake has no source board; the copies land on the
+                        // mainboard, which is where a catalog `+ Have` means.
+                        from_board: shared::Board::default(),
+                        to_board: shared::Board::default(),
                         quantity: quantity as i32,
                     })
                     .await
@@ -973,6 +977,8 @@ pub async fn move_selection(
                         finish: shared::Finish::default(),
                         condition: shared::Condition::default(),
                         language: shared::default_language(),
+                        from_board: shared::Board::default(),
+                        to_board: shared::Board::default(),
                         quantity: SELECTION_MOVE_QUANTITY,
                     });
                 }
