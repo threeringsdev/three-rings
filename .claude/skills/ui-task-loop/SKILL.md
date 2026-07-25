@@ -12,9 +12,25 @@ arbitration — and does **not** implement or review. Implementation and review
 each run in their own subagent with a clean context; context spent doing their
 work in the main session is context the loop can't spend on the next task.
 
-Platform matrix (fixed by the spike, 2026-07-19): **web + Android webview e2e
-every task; desktop ignored in-loop; one Android release smoke at phase end**
-(the polish task).
+Platform matrix: **chromium + Android webview every task; firefox and webkit
+not run at all; desktop ignored in-loop; one Android release smoke at phase
+end** (the polish task).
+
+## What this loop is for (read before tuning anything)
+
+Three-rings is an **early-stage MVP with a single developer**. It is not a
+hardened production service, and the loop must not spend like one. The
+calibration below is deliberate, set by the maintainer after one task cost
+~2.5 h and 1.44M subagent tokens (2026-07-25, specs/ui-work-loop.md Findings):
+
+- **Ship the feature working.** Correctness of what the user touches.
+- **Do not chase craft.** Naming, comment accuracy, assertion elegance,
+  redundancy, "this could be cleaner" — not now.
+- **Minors are not fixed. They are filed.** Every non-major finding becomes a
+  `[ ]` entry under **Phase 5 discoveries** in specs/TODO.md. Filing is the
+  correct outcome, not a concession.
+- **When in doubt, spend less.** A second look costs more than it returns at
+  this stage.
 
 ## Orchestrator owns (never delegate)
 
@@ -28,7 +44,9 @@ every task; desktop ignored in-loop; one Android release smoke at phase end**
   `lsof -i :3000` before assuming it's down) and the Android emulator.
   Subagents *use* these; only the orchestrator starts or restarts them.
 - **Arbitration**: review findings route back to the implementer; the
-  orchestrator never edits code to resolve them itself.
+  orchestrator never edits code to resolve them itself. The orchestrator also
+  overrides the reviewer's severity when it looks wrong — the major/minor call
+  decides whether work happens now or gets filed.
 
 ## Sequence
 
@@ -36,6 +54,12 @@ every task; desktop ignored in-loop; one Android release smoke at phase end**
    fresh `main`, flip `[ ]`→`[~]`, commit exactly that. Read the task line and
    skim its `(specs:)` links only enough to write the dispatch prompt — deep
    spec reading is the implementer's job, in its own context.
+
+   **If the task line bundles several surfaces, say so before dispatching.**
+   A line like "binder view + deck variant + stepper + teardown + mobile +
+   search + paging" is three tasks wearing one checkbox, and one agent
+   absorbing it in one context is a top cost driver. Propose the split to the
+   maintainer and wait.
 
 1. **Implement** — dispatch an implementation subagent (general-purpose). The
    dispatch prompt contains, explicitly (the subagent inherits nothing from
@@ -45,54 +69,76 @@ every task; desktop ignored in-loop; one Android release smoke at phase end**
    - required reading *before code*: the task's sections of specs/app-ui.md,
      every spec in its `(specs:)` annotation, and design/wireframes.pen;
    - skills to invoke: **vendor-component** for any new primitive (bench
-     section, same commit), **e2e-suite** for authoring/running tests,
+     section, same commit), **e2e-suite** for authoring tests,
      **android-smoke** for the dev-attach recipe;
    - the evidence it must return: unit tests green; web probes run with URLs
      (`node end2end/hydration-check.mjs <urls…>` — **bare = checks nothing**;
      probe every page that renders a touched component, plus a page-specific
-     SSR curl against :3000); Android webview check
-     (`node end2end/android-cdp-check.mjs` + the task's spec against the
-     webview when it touches layout/input); e2e authored per e2e-suite, fast
-     tier while iterating, **full three-browser tier green at the end**
-     (`npx playwright test`);
+     SSR curl against :3000);
+   - that it **authors** e2e tests now but runs only
+     `--project=chromium --grep @fast` while iterating — **the e2e run is
+     step 4, after review fixes**, and it must not run a full pass early;
    - constraints: never restart the :3000 watch; `git checkout` the
      build-injected AndroidManifest.xml before committing; commit its own work
      with conventional messages; do **not** touch specs/TODO.md or spec
      Findings (orchestrator's job); report back a summary, the evidence, and
      anything the spec should record.
 
-2. **Review** — dispatch a review subagent with: "Invoke the
-   **adversarial-review** skill and follow it", the branch name, and the task's
-   acceptance criteria as focus text. Both passes (implementation +
-   test-strength). Fresh agent — never the implementer, and never done in the
-   main session; the value is the independence.
+2. **Review — exactly one round, code only** — dispatch a review subagent with:
+   "Invoke the **adversarial-review** skill and follow it", the branch name,
+   and the task's acceptance criteria as focus text. Fresh agent — never the
+   implementer, and never done in the main session; the value is the
+   independence.
 
-3. **Fix loop** — forward the findings to the implementation agent
-   (SendMessage — its context is intact) with the standing policy: **verify
-   every finding before acting, never blind-apply**; dispute with evidence
-   what doesn't hold. Then re-dispatch a *fresh* review subagent scoped to the
-   findings and the files that changed. Repeat until the verdict is CLEAN or
-   everything remaining is disputed-with-rationale. If the implementer is gone
-   (ended/overflowed), dispatch a fresh fix agent with the branch, the
-   findings, and pointers to the spec sections — not a paraphrase of the task.
+   Hard limits, restated in the dispatch:
+   - **One round. There is no re-review.** Whatever the fixes look like, the
+     loop moves to step 3 and then step 4.
+   - **Reads code; runs no tests.** No Playwright, no mutation pass, no
+     rebuild cycles. Static reading plus, at most, a curl against the
+     already-running :3000.
+   - **Reports blockers and majors only.** A major is: wrong data, data loss,
+     a broken user-facing path, a security or auth hole, or a crash. Everything
+     else is a minor — listed separately to be filed, never fixed.
 
-4. **Gate** — dispatch a subagent to run the **validate** skill and return the
-   per-step verdict table. Red → back to step 3 with the failing output.
+3. **Fix the majors** — forward the blockers/majors to the implementation
+   agent (SendMessage — its context is intact) with the standing policy:
+   **verify every finding before acting, never blind-apply**; dispute with
+   evidence what doesn't hold. Minors go straight into the orchestrator's
+   notes for the finishing commit — they are **not** sent to the implementer.
+   If the implementer is gone (ended/overflowed), dispatch a fresh fix agent
+   with the branch, the findings, and pointers to the spec sections.
 
-5. **Land** — finishing commit flips `[~]`→`[x]` **and** records Findings in
-   the linked spec in the same commit: surprises, review rounds + score,
-   disputed findings with rationale, evidence summary (from the subagents'
-   reports). Conventional-commit PR title; enable auto-merge; confirm green.
-   Then loop to step 0 for the next task — stop only at a phase boundary, on a
-   blocked queue, or when the human said one task.
+4. **E2E — the single run, after the fixes** — one pass, chromium only:
+   `npx playwright test --project=chromium`, plus the Android webview probe
+   (`node end2end/android-cdp-check.mjs`, and the task's own probe when it
+   touches layout or input). This is the only full e2e execution in the task.
+   - A **major** failure (a genuinely broken behavior) → back to step 3 for
+     that failure only.
+   - A **minor** failure or a flake → one retry; still red → quarantine with
+     `@flaky` and file it under Phase 5 discoveries.
 
-## Failure policy (from the spec — not optional)
+5. **Gate** — dispatch a subagent to run the **validate** skill and return the
+   per-step verdict table. Red → fix, then re-run the affected step only. Skip
+   the gate only when the diff since the last green run touches no compiled
+   sources (`.rs`/`.toml`/`.css`) — and say so explicitly when you skip.
 
-- A red platform check blocks `[x]`. No exceptions.
+6. **Land** — finishing commit flips `[~]`→`[x]` **and** records Findings in
+   the linked spec in the same commit: surprises, the review's majors and how
+   they resolved, disputed findings with rationale, evidence summary. **File
+   every minor as a `[ ]` under Phase 5 discoveries in the same commit** — that
+   is where the deferred work is preserved, so it is not optional.
+   Conventional-commit PR title; enable auto-merge; confirm green. Then loop
+   to step 0 — stop only at a phase boundary, on a blocked queue, or when the
+   human said one task.
+
+## Failure policy
+
+- A red **chromium** e2e run or a red gate blocks `[x]`. Firefox and webkit are
+  not run and never block.
 - Emulator unavailable → Findings entry "Android smoke deferred: emulator
   offline" + flag the maintainer. Never silently skip.
-- E2E flake → one retry, then quarantine with `@flaky` tag + Findings entry.
-  Quarantined tests block the phase-final polish task.
+- E2E flake → one retry, then quarantine with `@flaky` + a Phase 5 discoveries
+  entry. Quarantined tests block the phase-final polish task.
 - Review disagreements resolve by verification, not deference — disputed
   findings ship only with recorded rationale.
 - Durable state = branch + TODO checkbox + spec Findings only. Subagent IDs
@@ -107,9 +153,15 @@ every task; desktop ignored in-loop; one Android release smoke at phase end**
 - Subagents share the host: they can use the running watch server, adb, and
   the emulator, but must not own their lifecycle (restart requests come back
   to the orchestrator).
+- The e2e `tr_jwt` cookie expires in ~20 minutes. The symptom is a page
+  rendering `unauthorized: invalid token`, which reads like a page bug — it is
+  an expired cookie. `npx playwright test --project=setup` refreshes it.
 - `cargo tauri android dev` runs from the **repo root** (its beforeDevCommand
   `cd ..` resolves against the invocation dir; from src-tauri/ it dies with
-  "manifest path `Cargo.toml` does not exist").
-- The full three-browser tier runs at the end of **every** task, not at stage
-  boundaries. A stage-boundary task additionally runs the Android **release**
-  smoke via the android-smoke skill (at phase end only).
+  "manifest path `Cargo.toml` does not exist"). Prefer the cheaper recipe: the
+  already-installed debug APK plus `adb reverse tcp:3000 tcp:3000` gives live
+  dev-server content in the real webview with no second watch fighting the
+  first over `target/`. Match the CDP socket to the app's **own** pid
+  (`webview_devtools_remote_$pid`), not `head -1` of the socket list.
+- If you stop a subagent mid-flight, **check `git status` before committing** —
+  a killed agent leaves its edits applied, including experimental ones.

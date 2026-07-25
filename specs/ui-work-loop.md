@@ -78,33 +78,53 @@ once before phase end.
    builds per the acceptance criteria (TDD where logic warrants), runs the
    platform verification itself — web hydration probe
    (`end2end/hydration-check.mjs` with URLs) + page-specific SSR curl;
-   Android webview check per the spike outcome — authors the e2e per
-   `e2e-suite`, iterates on the fast tier, and finishes with the full
-   three-browser tier (chromium + firefox + **webkit** — the WKWebView proxy)
-   green **at the end of every task** (revised 2026-07-20: boundary-only
-   running let cross-browser breakage land as a pile; full-tier green is a
-   precondition for `[x]`). It commits its own work and reports evidence; it
-   never touches TODO.md or spec Findings.
-2. **Adversarial review** (subagent, clean context) — a fresh reviewer invokes
-   the `adversarial-review` skill: implementation pass (acceptance criteria as
-   claims to test, repo trap list) **and** test-strength pass ("which
-   assertions still pass if the feature is broken; propose one mutation per
-   test", mutations applied transiently, confirmed to fail, reverted).
-   Review-only by contract — findings, never fixes.
-3. **Fix loop** (orchestrator arbitrates) — findings go back to the
+   Android webview check per the spike outcome — and **authors** the e2e per
+   `e2e-suite`, running only `--project=chromium --grep @fast` while
+   iterating. It does not run a full e2e pass; that is step 4. It commits its
+   own work and reports evidence; it never touches TODO.md or spec Findings.
+2. **Adversarial review** (subagent, clean context) — **exactly one round, code
+   only.** A fresh reviewer invokes the `adversarial-review` skill: acceptance
+   criteria as claims to test, plus the repo trap list. It **runs no tests** —
+   no Playwright, no mutation pass, no rebuild cycles — and reports **blockers
+   and majors only**, with everything else in a separate minors list.
+   Review-only by contract — findings, never fixes. There is no re-review.
+3. **Fix the majors** (orchestrator arbitrates) — blockers/majors go back to the
    implementation agent: verify every finding before acting — never
    blind-apply; disputed findings recorded with rationale in app-ui Findings.
-   Re-review with a fresh reviewer scoped to the findings + changed files.
-   Repeat until CLEAN or all-disputed.
-4. **Gate** (subagent) — the `validate` skill, per-step verdict table
-   required.
-5. **Land** (orchestrator) — final commit flips `[~]`→`[x]` and records
-   Findings in the same commit; conventional-commit PR; auto-merge on green;
-   loop to the next task.
+   **Minors are never sent to the implementer** — the orchestrator files each
+   as a `[ ]` under "Phase 5 discoveries" in TODO.md at landing time.
+4. **E2E** (once, after the fixes) — a single `npx playwright test
+   --project=chromium` plus the Android webview probe. A major failure returns
+   to step 3 for that failure only; a minor failure or flake is retried once,
+   then quarantined `@flaky` and filed.
+5. **Gate** (subagent) — the `validate` skill, per-step verdict table
+   required. Skippable only when the diff since the last green run touches no
+   compiled sources, stated explicitly.
+6. **Land** (orchestrator) — final commit flips `[~]`→`[x]`, records Findings,
+   and files the round's minors as Phase 5 discoveries, all in the same commit;
+   conventional-commit PR; auto-merge on green; loop to the next task.
+
+### Calibration — MVP, one developer
+
+Revised 2026-07-25 after the binder/deck task cost ~2.5 h and 1.44M subagent
+tokens. This project is an early-stage MVP with a single developer, not a
+hardened production service, and the loop is tuned to that:
+
+- **Chromium only.** Firefox and webkit are not run at all; cross-browser
+  compatibility is deferred wholesale, with WKWebView to be covered by desktop
+  later. A bare `npx playwright test` fans out across all three and is
+  forbidden.
+- **One e2e run per task**, after the review fixes — not one per round.
+- **One review round**, code-only, majors-only.
+- **No mutation passes.** Assertion strength gets its own sweep once the spec
+  work is done.
+- **Minors are filed, not fixed.** Craft — naming, comment accuracy, assertion
+  elegance, redundancy — is explicitly out of scope right now.
 
 ### Failure policy
 
-- A red platform check means the task cannot reach `[x]`.
+- A red **chromium** e2e run or a red gate means the task cannot reach `[x]`.
+  Firefox and webkit are not run and never block.
 - Emulator unavailable → record "Android smoke deferred: emulator offline" in
   Findings and flag the maintainer — never silently skip.
 - E2E flake → one retry, then quarantine with a `@flaky` tag + a Findings
@@ -122,8 +142,8 @@ once before phase end.
 | Skill | Owns |
 |---|---|
 | `ui-task-loop` | The orchestration above: what the main session owns vs. delegates, the dispatch-prompt recipes, the fix-loop/dispute policy, TODO/Findings bookkeeping |
-| `adversarial-review` | The reviewer subagent's contract: review-only discipline, the repo trap hunt list, the mutation-pass mechanics (transient apply → rebuild-wait → kill/survive → revert), the findings output format |
-| `e2e-suite` | Playwright authoring/running: the Better-Auth fixture trap (email verification is ON — a naive signup fixture hangs on OTP; use the pre-seeded verified test user, login helper captures `tr_session`/`tr_jwt`), :3000 server lifecycle, tier tags, webkit-as-WKWebView rationale, quarantine policy |
+| `adversarial-review` | The reviewer subagent's contract: review-only and run-nothing discipline, the major/minor rule, the repo trap hunt list, the findings output format |
+| `e2e-suite` | Playwright authoring/running: the Better-Auth fixture trap (email verification is ON — a naive signup fixture hangs on OTP; use the pre-seeded verified test user, login helper captures `tr_session`/`tr_jwt`), :3000 server lifecycle, chromium-only tiers, assertions that lie, quarantine policy |
 | `android-smoke` | Emulator boot (`adb devices` else `emulator -avd <AVD> &` + `wait-for-device`), debug-devUrl vs. release-embedded-Axum trap, install/launch/`adb forward` probe sequence, logcat crash grep, CDP attach recipe if the spike lands it |
 
 Plus a permission allowlist in `.claude/settings.json` so the loop doesn't stall
@@ -141,8 +161,8 @@ smoke is a separate concern).
 The current suite (`end2end/tests/example.spec.ts`) tests the counter being
 deleted. Reset: remove it; add the auth fixture (pre-seeded **verified** test
 user on the Neon dev branch — mechanism recorded in the `e2e-suite` skill when
-built); tier tags (`@fast` chromium-only while iterating; full three-browser
-tier at the end of every task — revised 2026-07-20, see the per-task loop).
+built); tier tags (`@fast` while iterating; one full **chromium** pass per task
+after the review fixes — revised 2026-07-25 to chromium-only, see Calibration).
 The ad-hoc probes (`bench-check.mjs`, `hydration-check.mjs`, `auth-e2e.mjs`)
 stay as the probe layer beneath the suite.
 
@@ -162,6 +182,53 @@ stay as the probe layer beneath the suite.
 ## Findings
 
 (appended per task — spike outcome, skill-building surprises, loop adjustments)
+
+### Loop recalibrated for MVP cost (2026-07-25)
+
+The binder/deck task (`/my/collections/:id`, PR #56) cost **~2.5 h wall and
+1.44M subagent tokens** — implementation 60 min / 454k, review 1 30 min / 198k,
+fix round 26 min / 523k, review 2 36 min / 269k — and was still returning
+findings when the maintainer stopped it. Measured drivers, in order:
+
+1. **The full three-browser tier ran ~6 times for one task.** It grows every
+   task (196 → 355 → 367 tests over three stories) and *every* actor ran it:
+   the implementer at the end of implementation and again after fixes, review 1
+   once, review 2 three times. This was the compounding cost — it worsens every
+   task regardless of story size.
+2. **The mutation pass was uncapped** — 12 mutations in round 1, 10 in round 2,
+   each an edit → rebuild → wait-for-serve → run → revert → rebuild cycle.
+3. **Review rounds were unbounded**, and returns fell off a cliff between them.
+   Round 1 found a genuine data-loss blocker (committing HERE to 0 deleted the
+   holding while the offered Undo 404'd). Round 2's best finding was a vacuous
+   test; the rest was craft — "the fix works but the comment explaining it is
+   wrong", assertion elegance, flake-proneness.
+4. **The task line bundled three surfaces** (binder + deck + stepper + teardown
+   + mobile + search + paging) into one agent's context.
+
+**Maintainer decision.** Three-rings is an early-stage MVP with a single
+developer building toward a working product, not a hardened production service.
+The loop was spending like the latter. Changes, all now in the Design section
+above and the three skills:
+
+- **Chromium only, full stop.** Firefox and webkit are not run at all.
+  Cross-browser is deferred wholesale; WKWebView will be covered by desktop
+  later. This drops the webkit-as-WKWebView rationale that had justified the
+  three-browser tier since 2026-07-20.
+- **One e2e run per task**, after the review fixes land — not per round, and
+  not by the implementer or reviewer, who use `@fast` chromium only.
+- **One review round**, reading code and running nothing, reporting blockers
+  and majors only.
+- **No mutation passes.** Assertion strength gets a dedicated sweep after the
+  spec work is done, rather than a per-task tax.
+- **Minors are filed, never fixed** — a `[ ]` under Phase 5 discoveries.
+
+The trade is accepted knowingly: fewer vacuous tests will be caught at the
+moment they are written, and cross-browser breakage will land as a pile to be
+paid down later. Both were judged cheaper than the current per-task cost.
+Two lessons from round 2 were kept as *authoring* checklist items in
+`e2e-suite` rather than as a verification pass — a test can only distinguish
+behaviors the **fixture** distinguishes, and overflow must be measured on the
+scroll container, not the document.
 
 ### Android dev-proxy limits: no authed flows over dev attach (2026-07-19)
 
