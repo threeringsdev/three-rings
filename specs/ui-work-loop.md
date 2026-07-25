@@ -31,14 +31,18 @@ promoting Playwright into CI was decided **against** 2026-07-23, see Findings).
 ### Mechanism: a repo skill, not a Workflow script
 
 `.claude/skills/ui-task-loop/SKILL.md` (mirrored in `.agents/skills/`),
-orchestrating in the **main session**. Rationale: the Codex plugin's review
-commands (`/codex:adversarial-review`, `/codex:status`, `/codex:result`) are
-main-session slash commands; the loop must hold long-lived host state (the
-`cargo leptos watch` server, the Android emulator) across steps; and durable
-checkpointing already exists (TODO states, branch, spec Findings) so a Workflow
-engine adds nothing. Repetition across tasks is the human's call (e.g.
-`/loop /ui-task-loop`), with human-in-the-loop recommended for the first few
-iterations.
+orchestrating in the **main session**. Revised 2026-07-25 (maintainer): the
+main session is now a pure **orchestrator** — implementation and adversarial
+review each run in their own subagent with a clean context, and Codex is out
+of the loop entirely (see Findings, "Loop goes fully Claude-driven"). What
+stays main-session, and why the mechanism is still a skill rather than a
+Workflow script: the loop must hold long-lived host state (the
+`cargo leptos watch` server, the Android emulator) across steps; queue
+bookkeeping and arbitration between the implementer and reviewer are
+sequential judgment calls; and durable checkpointing already exists (TODO
+states, branch, spec Findings) so a Workflow engine adds nothing. Repetition
+across tasks is the orchestrator's own loop (step 5 → step 0), with
+human-in-the-loop recommended for the first few iterations.
 
 ### Platform matrix — fixed by the Android-e2e spike (first task)
 
@@ -62,40 +66,41 @@ webview e2e exercises real Android rendering/input over the same server the web
 tests hit — embedded-Axum coverage still needs the release-smoke check at least
 once before phase end.
 
-### The per-task loop
+### The per-task loop (revised 2026-07-25 — subagent split; Codex removed)
 
-0. **Start** — pick the first available Phase 5 task per "Working the queue";
-   `[ ]`→`[~]`, commit `start: <summary>`; work on a branch.
-1. **Build** — implement per the task's acceptance criteria in
-   [app-ui](app-ui.md) (wireframes govern detail). TDD where logic warrants;
-   any new primitive goes through the `vendor-component` skill (bench section,
-   same commit). Keep `cargo leptos watch --features component-bench` alive in
-   the background for live verification.
-2. **Codex adversarial review** — `/codex:adversarial-review --background`,
-   focus text = the task's acceptance criteria; poll status, read result.
-   Verify every finding before acting — never blind-apply; disputed findings
-   recorded with rationale in app-ui Findings. Heavy mechanical fixes may be
-   delegated to the `codex-rescue` agent. Repeat until clean or all-disputed.
-3. **Local build verification** — web: hydration probe
-   (`end2end/hydration-check.mjs`) + a page-specific SSR curl against :3000;
-   Android: per the spike outcome (webview e2e, or `android-smoke` at stage
-   boundaries). Desktop: none in-loop.
-4. **E2E** — author specs per the `e2e-suite` skill (auth fixture, tier tags);
-   iterate with the fast tier (`npx playwright test --project=chromium`), then
-   run the full three-browser tier (chromium + firefox + **webkit** — webkit is
-   the WKWebView proxy since desktop is untested in-loop) **at the end of every
-   task**. Revised 2026-07-20 (maintainer): the tier was originally scoped to
-   stage boundaries, but the filter-rail task showed boundary-only running lets
-   cross-browser breakage sit undetected across several tasks and then land as
-   a pile — the shell task's full tier surfaced 8 pre-existing firefox/webkit
-   failures at once. Full-tier green is now a precondition for `[x]`.
-5. **Codex e2e adversarial pass** — `/codex:adversarial-review` focused on the
-   new test files: "which assertions still pass if the feature is broken;
-   propose one mutation per test." Accepted mutations are applied transiently,
-   the test confirmed to fail, then reverted; evidence noted in Findings.
-6. **Gate + land** — the `validate` skill; final commit flips `[~]`→`[x]` and
-   records Findings in the same commit; conventional-commit PR; auto-merge on
-   green.
+0. **Start** (orchestrator) — pick the first available Phase 5 task per
+   "Working the queue"; `[ ]`→`[~]`, commit `start: <summary>`; work on a
+   branch. The orchestrator reads only enough to write the dispatch prompt.
+1. **Implement** (subagent, clean context) — one implementation subagent
+   receives the task line, the branch, the required spec reading
+   ([app-ui](app-ui.md) sections + `(specs:)` links + wireframes), and the
+   skills to invoke (`vendor-component`, `e2e-suite`, `android-smoke`). It
+   builds per the acceptance criteria (TDD where logic warrants), runs the
+   platform verification itself — web hydration probe
+   (`end2end/hydration-check.mjs` with URLs) + page-specific SSR curl;
+   Android webview check per the spike outcome — authors the e2e per
+   `e2e-suite`, iterates on the fast tier, and finishes with the full
+   three-browser tier (chromium + firefox + **webkit** — the WKWebView proxy)
+   green **at the end of every task** (revised 2026-07-20: boundary-only
+   running let cross-browser breakage land as a pile; full-tier green is a
+   precondition for `[x]`). It commits its own work and reports evidence; it
+   never touches TODO.md or spec Findings.
+2. **Adversarial review** (subagent, clean context) — a fresh reviewer invokes
+   the `adversarial-review` skill: implementation pass (acceptance criteria as
+   claims to test, repo trap list) **and** test-strength pass ("which
+   assertions still pass if the feature is broken; propose one mutation per
+   test", mutations applied transiently, confirmed to fail, reverted).
+   Review-only by contract — findings, never fixes.
+3. **Fix loop** (orchestrator arbitrates) — findings go back to the
+   implementation agent: verify every finding before acting — never
+   blind-apply; disputed findings recorded with rationale in app-ui Findings.
+   Re-review with a fresh reviewer scoped to the findings + changed files.
+   Repeat until CLEAN or all-disputed.
+4. **Gate** (subagent) — the `validate` skill, per-step verdict table
+   required.
+5. **Land** (orchestrator) — final commit flips `[~]`→`[x]` and records
+   Findings in the same commit; conventional-commit PR; auto-merge on green;
+   loop to the next task.
 
 ### Failure policy
 
@@ -104,19 +109,20 @@ once before phase end.
   Findings and flag the maintainer — never silently skip.
 - E2E flake → one retry, then quarantine with a `@flaky` tag + a Findings
   entry. Quarantined tests block the phase-final polish task.
-- Codex review disagreements are resolved by verification, not deference —
-  disputed findings ship only with recorded rationale.
+- Review disagreements are resolved by verification, not deference — disputed
+  findings ship only with recorded rationale.
 - Durable state is only: the branch, the TODO checkbox, and spec Findings.
-  Codex job IDs and server PIDs are session-ephemeral — re-derive
-  (`/codex:status`, `lsof -i :3000`), never persist.
-- The Codex Stop-hook review gate stays **disabled** — the loop invokes Codex
-  explicitly at the two points it belongs.
+  Subagent IDs and server PIDs are session-ephemeral — re-derive
+  (`lsof -i :3000`), never persist.
+- The Codex plugin stays installed for human-invoked use but is out of the
+  loop (2026-07-25); its Stop-hook review gate stays **disabled**.
 
 ### Supporting skills (each earns its place with operational gotchas, not doc duplication)
 
 | Skill | Owns |
 |---|---|
-| `ui-task-loop` | The loop above: Codex invocation split (slash commands vs. rescue agent), background polling, dispute policy, TODO/Findings bookkeeping |
+| `ui-task-loop` | The orchestration above: what the main session owns vs. delegates, the dispatch-prompt recipes, the fix-loop/dispute policy, TODO/Findings bookkeeping |
+| `adversarial-review` | The reviewer subagent's contract: review-only discipline, the repo trap hunt list, the mutation-pass mechanics (transient apply → rebuild-wait → kill/survive → revert), the findings output format |
 | `e2e-suite` | Playwright authoring/running: the Better-Auth fixture trap (email verification is ON — a naive signup fixture hangs on OTP; use the pre-seeded verified test user, login helper captures `tr_session`/`tr_jwt`), :3000 server lifecycle, tier tags, webkit-as-WKWebView rationale, quarantine policy |
 | `android-smoke` | Emulator boot (`adb devices` else `emulator -avd <AVD> &` + `wait-for-device`), debug-devUrl vs. release-embedded-Axum trap, install/launch/`adb forward` probe sequence, logcat crash grep, CDP attach recipe if the spike lands it |
 
@@ -442,3 +448,52 @@ no watch restart** — the exact verify-after-gating scenario that used to force
 one. Docs updated in lockstep: the validate skill (+`.agents` mirror),
 CLAUDE.md/AGENTS.md Verify section, and the e2e-suite clobber-trap note (which
 now flags that a *bare* `cargo leptos build --release` still clobbers).
+
+### Loop goes fully Claude-driven — Codex removed, orchestrator + subagents (2026-07-25)
+
+Maintainer decision, restructuring the loop's mechanism (steps unchanged in
+*what* they prove, changed in *who* runs them). Grounds:
+
+1. **The Codex review path forced implementation-level work into the main
+   session.** The `/codex:*` review commands are human-only
+   (`disable-model-invocation`), and the `codex-rescue` agent is a
+   fire-and-forget forwarder that refuses to poll — so autonomous runs had the
+   orchestrator driving `codex-companion.mjs status/result` itself and holding
+   the whole task's context besides. The card-detail task already recorded the
+   failure mode: Codex step-2 output could not be read in an autonomous run
+   and a substitute reviewer was used.
+2. **Clean contexts per role.** Implementation and review now each get a fresh
+   subagent (the reviewer via the new `adversarial-review` skill, dispatched
+   with the acceptance criteria as focus). The main session only orchestrates:
+   queue/git bookkeeping, host-process lifecycle, the fix-loop arbitration —
+   so one session can span many tasks without accumulating each task's build
+   context.
+3. **The review discipline is preserved, not relaxed**: review-only (findings,
+   never fixes), verify-before-acting, disputes recorded with rationale, and
+   the mutation pass with its rebuild-wait mechanics all moved verbatim into
+   `adversarial-review`. Fresh reviewer every round keeps the independence the
+   Codex step provided.
+
+Drive-by fix while porting: the old skill's mutation rebuild-wait polled
+`:3000/pkg/app_bg.wasm`, a file that does not exist in `target/site/pkg` (the
+served binary is `app.wasm`) — the poll could never see a hash change. The
+`adversarial-review` skill polls `/pkg/app.wasm`.
+
+The Codex plugin remains installed for human-invoked use (`/codex:*`); the
+permission allowlist is unchanged. TODO.md's Phase 5 intro updated to describe
+the new loop shape.
+
+Skill shakedown (same day, before landing): two subagent reviews of the
+DFC-flip commit (`c088006` — the task whose Codex review scored **zero**
+findings). The skill-dispatched reviewer invoked `adversarial-review` through
+the **Skill tool** (the mechanism the loop depends on — confirmed available to
+subagents), followed the output contract exactly (numbered file:line findings
+with severities, hunted-and-cleared evidence, verdict, tree-state check), and
+returned 4 verified minor findings. A second reviewer dispatched *bare*
+converged on the same contract shape — not a clean baseline, the skill file
+was visible in the working tree — and additionally executed the unit-level
+mutation pass, exposing one kill-verified vacuous test (a surviving mutation
+in `CardFaceSummary::build`'s fail-closed guard). Both respected review-only:
+every mutation reverted byte-identical, neither touched the orchestrator's
+server. The six distinct findings across the two runs are queued as a Phase 5
+follow-up task.
