@@ -9,6 +9,13 @@
 //!   is a per-item `Memo`; ↑↓/⏎ navigation is a Leptos item registry driven
 //!   from `CommandInput`. This is what lets features layer ⇧⏎/⌥⏎/count entry
 //!   on top by reading key modifiers in their own handlers.
+//! - **[`use_command_nav`]** publishes those same registry operations so a
+//!   *foreign* input — one the feature renders itself — can drive the list.
+//!   Quick-add needs it: `CommandInput`'s handler swallows Enter and the arrows
+//!   without ever seeing a modifier, so a surface whose contract is
+//!   `↑↓ ⏎ ⇧⏎ ⌥⏎` plus digit entry has to own its own `on:keydown`.
+//!   `CommandInput` now goes through the same three operations, so the two
+//!   paths cannot drift.
 //! - `use_random_id` / counter IDs are gone: `CommandDialog` takes a
 //!   deterministic caller `id` (it already did upstream) and drives open
 //!   state through the vendored [`super::dialog`] instead of an inline script.
@@ -55,11 +62,18 @@ struct CommandContext {
 
 impl CommandContext {
     /// Visible item ids in registration order — which equals DOM order for
-    /// this component's consumers (all append-only: static client-filtered
-    /// lists for quick-add / destination-picker / ⌘K, and full remounts on
-    /// new server result sets). In-place keyed *reorder* of persistent items
-    /// would diverge from DOM order and want a `compareDocumentPosition` sort
-    /// here; no consumer does that, so it's deferred (noted in app-ui).
+    /// every consumer so far, each for its own checked reason:
+    ///
+    /// * **destination picker** — sorts its *data* before any item mounts and
+    ///   only ever hides rows while typing (never reorders them);
+    /// * **quick-add panel** — its candidate list is rebuilt inside a `Suspend`
+    ///   per query, so each server result set is a full remount in document
+    ///   order and the registry is rebuilt with it;
+    /// * **⌘K** — a preloaded index, client-filtered the picker's way.
+    ///
+    /// In-place keyed *reorder* of persistent items would diverge from DOM
+    /// order and want a `compareDocumentPosition` sort here; no consumer does
+    /// that, so it's deferred (noted in app-ui).
     fn visible_ids(&self) -> Vec<usize> {
         self.items
             .get()
@@ -67,6 +81,105 @@ impl CommandContext {
             .filter(|i| i.visible.get())
             .map(|i| i.id)
             .collect()
+    }
+
+    /// Move the highlight one row down, clamped at the last visible item.
+    fn next(&self) {
+        let len = self.visible_ids().len();
+        if len == 0 {
+            return;
+        }
+        self.highlight.update(|h| *h = (*h + 1).min(len - 1));
+    }
+
+    /// Move the highlight one row up, clamped at the first visible item.
+    fn prev(&self) {
+        if self.visible_ids().is_empty() {
+            return;
+        }
+        self.highlight.update(|h| *h = h.saturating_sub(1));
+    }
+
+    /// Run the highlighted item's `on_select`; `false` when nothing is visible.
+    fn activate_highlighted(&self) -> bool {
+        let visible = self.visible_ids();
+        if visible.is_empty() {
+            return false;
+        }
+        let target = visible[self.highlight.get().min(visible.len() - 1)];
+        match self
+            .items
+            .get_untracked()
+            .into_iter()
+            .find(|i| i.id == target)
+        {
+            Some(item) => {
+                item.activate.run(());
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Keyboard navigation over a [`Command`]'s item registry, for an input the
+/// *feature* renders instead of [`CommandInput`] — see the module doc.
+///
+/// Obtained with [`use_command_nav`] from anywhere inside a [`Command`], so a
+/// composite whose field is a sibling of its list still has to nest both under
+/// the `Command` that owns the registry.
+#[derive(Clone, Copy)]
+pub struct CommandNav(CommandContext);
+
+/// The [`CommandNav`] of the enclosing [`Command`], or `None` outside one.
+pub fn use_command_nav() -> Option<CommandNav> {
+    use_context::<CommandContext>().map(CommandNav)
+}
+
+impl CommandNav {
+    /// Publish the query the foreign input holds. Filters the items when the
+    /// `Command` filters, and — either way — resets the highlight to the first
+    /// row, which is what makes "best match pre-highlighted" true after every
+    /// keystroke rather than only the first.
+    pub fn set_query(&self, query: impl Into<String>) {
+        self.0.query.set(query.into());
+    }
+
+    pub fn next(&self) {
+        self.0.next();
+    }
+
+    pub fn prev(&self) {
+        self.0.prev();
+    }
+
+    /// Run the highlighted item's `on_select`. `false` when there is nothing
+    /// visible to activate, so the caller can fall through to its own Enter
+    /// behavior instead of swallowing the key.
+    pub fn activate(&self) -> bool {
+        self.0.activate_highlighted()
+    }
+
+    /// The highlighted row's index *among the visible items*, clamped to the
+    /// last one — the same index [`CommandItem`] highlights itself by, so a
+    /// caller rendering per-row affordances off it cannot disagree with the
+    /// `aria-selected` the primitive emits.
+    pub fn highlighted(&self) -> Signal<usize> {
+        let ctx = self.0;
+        Signal::derive(move || {
+            let len = ctx.visible_ids().len();
+            if len == 0 {
+                0
+            } else {
+                ctx.highlight.get().min(len - 1)
+            }
+        })
+    }
+
+    /// How many items are currently visible.
+    pub fn visible_count(&self) -> Signal<usize> {
+        let ctx = self.0;
+        Signal::derive(move || ctx.visible_ids().len())
     }
 }
 
@@ -121,32 +234,21 @@ pub fn CommandInput(
     );
 
     let on_keydown = move |ev: leptos::ev::KeyboardEvent| {
-        let visible = ctx.visible_ids();
-        if visible.is_empty() {
+        if ctx.visible_ids().is_empty() {
             return;
         }
         match ev.key().as_str() {
             "ArrowDown" => {
                 ev.prevent_default();
-                ctx.highlight
-                    .update(|h| *h = (*h + 1).min(visible.len() - 1));
+                ctx.next();
             }
             "ArrowUp" => {
                 ev.prevent_default();
-                ctx.highlight.update(|h| *h = h.saturating_sub(1));
+                ctx.prev();
             }
             "Enter" => {
                 ev.prevent_default();
-                let h = ctx.highlight.get().min(visible.len() - 1);
-                let target = visible[h];
-                if let Some(item) = ctx
-                    .items
-                    .get_untracked()
-                    .into_iter()
-                    .find(|i| i.id == target)
-                {
-                    item.activate.run(());
-                }
+                ctx.activate_highlighted();
             }
             _ => {}
         }

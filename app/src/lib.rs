@@ -755,23 +755,32 @@ async fn collection_backend() -> Result<crate::backend::NativeBackend, ServerFnE
 ///
 /// **The arguments are scalars, and the `AddLine` is built here.** An earlier
 /// shape took the caller's whole `AddLine`, which let anything holding a
-/// session POST `quantity: 20`, a printing-pinned Want, or a non-default board
-/// at an endpoint whose entire contract is "one copy, default grain". That is
-/// not a privilege escalation — the same caller can already reach
+/// session POST a printing-pinned Want or a non-default board at an endpoint
+/// whose entire contract is "one card, default grain". That is not a privilege
+/// escalation — the same caller can already reach
 /// `POST /api/collections/{id}/have` with any quantity on their *own*
 /// collections — but an adapter whose wire contract is wider than its name is
-/// a trap for the next caller. Quantity 1 is now true by construction.
+/// a trap for the next caller. The grain is still true by construction; only
+/// `quantity` is the caller's, because the quick-add panel's `⇧⏎ set count`
+/// (specs/app-ui.md → Quick-add panel) is a keystroke of the shipped contract
+/// and a playset cannot be four separate adds — undo targets one move row, so
+/// four rows would need four undos.
 #[server(prefix = "/api", endpoint = "quick_add")]
 pub async fn quick_add(
     collection_id: shared::Id,
     kind: shared::QuickAddKind,
     oracle_id: shared::Id,
     printing_id: Option<shared::Id>,
+    /// Copies to add, clamped server-side to `1..=`[`QUICK_ADD_MAX`] — a
+    /// mistyped or hostile count can't write an absurd holding through a
+    /// one-keystroke surface.
+    quantity: u32,
 ) -> Result<shared::QuickAddReceipt, ServerFnError<String>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
         let backend = collection_backend().await?;
+        let quantity = clamp_quick_add_quantity(quantity);
         match kind {
             shared::QuickAddKind::Have => {
                 // Holdings are per-printing; a card whose oracle row resolved
@@ -787,7 +796,7 @@ pub async fn quick_add(
                         finish: shared::Finish::default(),
                         condition: shared::Condition::default(),
                         language: shared::default_language(),
-                        quantity: 1,
+                        quantity: quantity as i32,
                     })
                     .await
                     .map_err(api_err)?;
@@ -806,7 +815,7 @@ pub async fn quick_add(
                             // surface's job, not a catalog row's.
                             printing_id: None,
                             board: shared::Board::default(),
-                            quantity: 1,
+                            quantity: quantity as i32,
                         },
                     )
                     .await
@@ -817,9 +826,20 @@ pub async fn quick_add(
     }
     #[cfg(not(feature = "ssr"))]
     {
-        let _ = (collection_id, kind, oracle_id, printing_id);
+        let _ = (collection_id, kind, oracle_id, printing_id, quantity);
         Err(ServerFnError::ServerError("server-only".into()))
     }
+}
+
+/// The most copies one quick-add may write. A `⇧⏎` count is four digits away
+/// from a typo, and the surface exists to add a playset (4), not a shipment.
+pub const QUICK_ADD_MAX: u32 = 99;
+
+/// Clamp a caller's count into `1..=`[`QUICK_ADD_MAX`]. Clamping rather than
+/// rejecting: the count comes from a keystroke stream, and a 422 in the middle
+/// of the metric path would cost more than capping the number.
+pub fn clamp_quick_add_quantity(quantity: u32) -> u32 {
+    quantity.clamp(1, QUICK_ADD_MAX)
 }
 
 /// Undo one quick-add, from its toast's action. Idempotent at the trait level,

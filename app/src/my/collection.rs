@@ -51,7 +51,7 @@ use std::collections::HashSet;
 
 use super::tree::{assemble, CollectionTreeResource, TreeNode};
 use crate::cards::CardPreview;
-use crate::components::query_bar::QueryBar;
+use crate::components::quick_add::QuickAddPanel;
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::breadcrumb::{
     Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator,
@@ -153,6 +153,38 @@ pub fn CollectionPage() -> impl IntoView {
     let paged = Memo::new(move |_| !url_cursor.read().is_empty());
     let teardown_open = RwSignal::new(false);
 
+    // ---- what the quick-add panel needs from this page's payload ----
+    //
+    // All three come from `view_res`, so the panel adds *here*, names this
+    // collection in its toast, and lists what is already here — none of it
+    // re-derived or re-fetched, so none of it can disagree with the header and
+    // the table. Memos, not raw reads: the panel re-renders on every keystroke.
+    let resolved = Memo::new(move |_| view_res.get().and_then(|r| r.ok()));
+    let quick_add_destination = Memo::new(move |_| {
+        resolved
+            .get()
+            .map(|v| crate::catalog::destination::Destination {
+                id: v.collection.id,
+                name: v.collection.name.clone(),
+                is_inbox: v.collection.is_inbox,
+            })
+    });
+    // Have until the payload lands. Nothing can be added before then either
+    // (the destination is `None` too), so the footer's hint is the only thing
+    // briefly generic.
+    let quick_add_kind = Memo::new(move |_| {
+        resolved
+            .get()
+            .map(|v| add_default(v.collection.kind))
+            .unwrap_or(QuickAddKind::Have)
+    });
+    let quick_add_present = Memo::new(move |_| {
+        resolved
+            .get()
+            .map(|v| crate::components::quick_add::present_matches(&v.cards))
+            .unwrap_or_default()
+    });
+
     view! {
         <div class="flex min-w-0 flex-col gap-4 p-4 md:p-6" data-testid="collection-page">
             // Header and body await the same resource in two blocks so the
@@ -194,7 +226,13 @@ pub fn CollectionPage() -> impl IntoView {
 
             <div class="flex items-center gap-2">
                 <div class="min-w-0 flex-1">
-                    <QueryBar
+                    // The wireframe's one field: it filters this collection
+                    // *and* opens the quick-add type-ahead over the catalog
+                    // (specs/app-ui.md → Quick-add panel). Both halves answer
+                    // the same `?q=`, so the panel's IN THIS COLLECTION rows and
+                    // the table behind it can't describe different queries.
+                    <QuickAddPanel
+                        field_id="collection-query"
                         text=query_text
                         url_q
                         // A new search starts at page one: carrying the old
@@ -202,9 +240,12 @@ pub fn CollectionPage() -> impl IntoView {
                         to_url=Callback::new(move |q: String| {
                             collection_url(&url_id.get_untracked(), &q, None)
                         })
-                        id="collection-query"
-                        placeholder="Search this collection or add cards…"
-                        aria_label="Search this collection"
+                        placeholder="Add or find cards…"
+                        aria_label="Search this collection or add cards"
+                        destination=quick_add_destination
+                        default_kind=quick_add_kind
+                        present=quick_add_present
+                        on_undo=Callback::new(move |()| view_res.refetch())
                     />
                 </div>
                 <SlashHint />

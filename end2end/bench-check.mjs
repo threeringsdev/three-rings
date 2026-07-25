@@ -292,11 +292,16 @@ if ((await page.evaluate(() => document.body.style.overflow)) === 'hidden') {
 }
 
 // command: type-to-filter is reactive, ↑↓ moves the highlight, ⏎ activates.
-const cmdInput = page.locator('[data-name="CommandInput"]').first();
+// Scoped to #bench-command-classic — the section mounts a second, unfiltered
+// list next to it (the foreign-nav demo below), so a page-wide CommandItem
+// query would mix the two.
+const cmdInput = page.locator('#bench-command-classic [data-name="CommandInput"]');
 await cmdInput.scrollIntoViewIfNeeded();
 await cmdInput.fill('bind'); // matches "Trade Binder" only
 await page.waitForTimeout(200);
-const visibleItems = await page.locator('[data-name="CommandItem"]:visible').allTextContents();
+const visibleItems = await page
+  .locator('#bench-command-classic [data-name="CommandItem"]:visible')
+  .allTextContents();
 if (!(visibleItems.length === 1 && /Binder/.test(visibleItems[0]))) {
   failures.push(`command filter wrong: visible=${JSON.stringify(visibleItems)}`);
 }
@@ -305,8 +310,43 @@ await page.waitForTimeout(150);
 await cmdInput.press('ArrowDown'); // highlight 2nd item
 await cmdInput.press('Enter');
 await page.waitForTimeout(150);
-if (!(await page.textContent('body')).includes('picked: Trade Binder')) {
+if (!(await page.textContent('#bench-command-classic')).includes('picked: Trade Binder')) {
   failures.push('command ↑↓/⏎ keyboard selection did not pick the 2nd item');
+}
+
+// command / use_command_nav: an input the *feature* owns drives the same item
+// registry, and sees a modifier CommandInput's own handler never does. This is
+// the deviation the quick-add panel is built on — its ↑↓/⏎/⌥⏎ contract is this
+// mechanism plus the panel's own decode.
+const navInput = page.locator('#bench-command-foreign');
+await navInput.scrollIntoViewIfNeeded();
+await navInput.click();
+await navInput.press('ArrowDown');
+await navInput.press('ArrowDown');
+await page.waitForTimeout(150);
+const navState = () => page.textContent('[data-testid="bench-command-foreign-state"]');
+if (!(await navState()).includes('row 2')) {
+  failures.push(`foreign-input ↑↓ did not move the highlight: ${await navState()}`);
+}
+await navInput.press('ArrowUp');
+await page.waitForTimeout(100);
+if (!(await navState()).includes('row 1')) {
+  failures.push(`foreign-input ↑ did not move back: ${await navState()}`);
+}
+// aria-selected is the primitive's own view of the highlight — it has to agree
+// with the index the caller renders per-row affordances from.
+const navSelected = await page
+  .locator('#bench-command-nav [data-name="CommandItem"][aria-selected="true"]')
+  .allTextContents();
+if (!(navSelected.length === 1 && /Trade Binder/.test(navSelected[0]))) {
+  failures.push(`foreign-input highlight disagrees with aria-selected: ${JSON.stringify(navSelected)}`);
+}
+// ⌥⏎ activates the highlighted row *and* the caller's modifier reaches its
+// on_select — the shape ⌥⏎ "want instead" needs.
+await navInput.press('Alt+Enter');
+await page.waitForTimeout(150);
+if (!(await navState()).includes('picked: TRADE BINDER')) {
+  failures.push(`foreign-input ⌥⏎ did not carry the modifier: ${await navState()}`);
 }
 
 // sonner: firing a toast with an undo action appears, undo dismisses it.

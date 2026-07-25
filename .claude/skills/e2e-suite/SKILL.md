@@ -18,6 +18,7 @@ rather than folklore:
 | `npm run probe:bench` | `/dev/components` SSR + hydration + tokens |
 | `npm run probe:paging [limit]` | `/my` keyset paging walked at a small page size |
 | `npm run probe:android-collection` | `/my/collections/:id` on the real Android webview (needs the android-smoke attach) |
+| `npm run probe:android-quick-add` | quick-add's ↑↓/⏎/⌥⏎ registry navigation on the real Android webview, via the bench (the panel itself is authed, so unreachable through the dev proxy) |
 
 **A probe covers what the browser tier structurally cannot.** `probe:paging`
 exists because page size is fixed in the UI, so only the JSON route can ask for
