@@ -5,7 +5,7 @@
 
 use leptos::prelude::*;
 use leptos_router::components::{Outlet, Redirect};
-use leptos_router::hooks::{use_location, use_params_map};
+use leptos_router::hooks::use_location;
 
 use crate::account::{fetch_current_user, CurrentUser, SignOut};
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
@@ -397,23 +397,8 @@ fn UserMenu() -> impl IntoView {
 
 // `/cards/:id` graduated out of this file into `crate::cards` with the
 // card-detail task, the same way `/catalog` did. `/my` followed into
-// `crate::my::all_cards` with the All-cards task.
-
-/// `/my/collections/:id` — binder/deck view lands with its task.
-#[component]
-pub fn CollectionPage() -> impl IntoView {
-    let params = use_params_map();
-    let id = move || params.read().get("id").unwrap_or_default();
-    view! {
-        <div class="space-y-6 p-6">
-            <h1 class="text-2xl font-bold">"Collection"</h1>
-            <p class="text-muted-foreground text-sm">{id}</p>
-            <div class="space-y-2">
-                {(0..6).map(|_| view! { <Skeleton class="h-8 w-full" /> }).collect_view()}
-            </div>
-        </div>
-    }
-}
+// `crate::my::all_cards` with the All-cards task, and `/my/collections/:id`
+// into `crate::my::collection` with the binder/deck task.
 
 /// `/my/collections/:id/needs` — needs buckets + pick list land with their task.
 #[component]

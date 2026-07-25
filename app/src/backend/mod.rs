@@ -257,12 +257,25 @@ pub trait CollectionStore {
     async fn batch_add(&self, collection_id: Id, lines: Vec<AddLine>)
         -> ApiResult<Vec<LineResult>>;
 
-    /// One keyset page of a collection's card rows, with its metadata and
-    /// immediate children. Counts (present / desired / owned / rolled-up) are
+    /// One keyset page of a collection's card rows, with its metadata,
+    /// immediate children, whole-collection totals and (for a deck) its
+    /// commanders. Per-row counts (present / desired / owned / rolled-up) are
     /// computed for the visible page — the discipline that keeps a 100K-card
-    /// view bounded (specs/collection-api.md → Read models). Sorted by
+    /// view bounded (specs/collection-api.md → Read models); the header
+    /// `totals` deliberately are not, since a header that changed as you paged
+    /// would be describing the page rather than the collection. Rows include
+    /// cards this collection only *wants* (see the hosted impl). Sorted by
     /// (name, printing, board); the cursor is opaque.
-    async fn collection_view(&self, id: Id, page: Page) -> ApiResult<CollectionView>;
+    ///
+    /// `q` is the in-collection quick search — a plain card-name substring, not
+    /// the catalog grammar (design/information-architecture.md → "Two search
+    /// surfaces"), same as [`Self::all_cards`]'s.
+    async fn collection_view(
+        &self,
+        id: Id,
+        q: Option<String>,
+        page: Page,
+    ) -> ApiResult<CollectionView>;
 
     /// Move copies between collections in one transaction: decrement the source
     /// holding, upsert the destination, append a `moves` row. `from = None` is an

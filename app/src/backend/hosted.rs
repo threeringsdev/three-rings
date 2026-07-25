@@ -645,7 +645,12 @@ impl CollectionStore for HostedBackend {
         Ok(results)
     }
 
-    async fn collection_view(&self, id: Id, page: Page) -> ApiResult<CollectionView> {
+    async fn collection_view(
+        &self,
+        id: Id,
+        q: Option<String>,
+        page: Page,
+    ) -> ApiResult<CollectionView> {
         let mut tx = self.scoped_tx().await?;
 
         // Metadata (owned check via RLS) + immediate children.
@@ -670,65 +675,119 @@ impl CollectionStore for HostedBackend {
         // THIS collection; `owned` is the global per-oracle aggregate (the
         // security-invoker `owned_by_card` view, RLS-scoped to the user);
         // `present_rollup` sums holdings in the strict descendant collections.
+        //
+        // `lines` is `held` **plus the desire-only rows** — the same correction
+        // `all_cards` needed (specs/app-ui.md Findings, `/my`): a deck's whole
+        // point is the cards it wants and does not have, and an inner join on
+        // `holdings` made those invisible in the very view whose needs chip
+        // counts them. A desire-only row has no held printing, so it borrows the
+        // catalog's representative printing (has-art-first, lowest id) for its
+        // art and identity; a card with no printings at all cannot be pictured
+        // and drops out (the lateral is an inner join).
+        //
+        // `holding_id` is deliberately NULL unless exactly one `holdings` row
+        // backs the cell: the stepper writes an absolute quantity, and a cell
+        // summing a foil playset and a nonfoil single cannot say which grain a
+        // typed `3` meant.
         let cursor: Option<CardCursor> = page.cursor.as_deref().map(decode_cursor).transpose()?;
         let limit = page.limit();
-        let base = "WITH RECURSIVE descendants AS ( \
-               SELECT id FROM collections WHERE parent_id = $1 \
+        let layouts = back_face_layout_list();
+        let mut qb: sqlx::QueryBuilder<'_, sqlx::Postgres> =
+            sqlx::QueryBuilder::new("WITH RECURSIVE me AS (SELECT ");
+        qb.push_bind(id);
+        qb.push(
+            "::uuid AS cid), \
+             descendants AS ( \
+               SELECT id FROM collections WHERE parent_id = (SELECT cid FROM me) \
                UNION ALL \
                SELECT c.id FROM collections c JOIN descendants d ON c.parent_id = d.id \
              ), \
              present AS ( \
-               SELECT printing_id, board, sum(quantity)::int AS present \
-               FROM holdings WHERE collection_id = $1 GROUP BY printing_id, board \
+               SELECT printing_id, board, sum(quantity)::int AS present, \
+                      CASE WHEN count(*) = 1 THEN (array_agg(id))[1] END AS holding_id \
+               FROM holdings WHERE collection_id = (SELECT cid FROM me) \
+               GROUP BY printing_id, board \
              ), \
              want AS ( \
                SELECT oracle_id, board, sum(quantity)::int AS desired \
-               FROM desires WHERE collection_id = $1 GROUP BY oracle_id, board \
+               FROM desires WHERE collection_id = (SELECT cid FROM me) \
+               GROUP BY oracle_id, board \
              ), \
              rollup AS ( \
                SELECT printing_id, sum(quantity)::int AS present_rollup \
                FROM holdings WHERE collection_id IN (SELECT id FROM descendants) \
                GROUP BY printing_id \
+             ), \
+             held AS ( \
+               SELECT p.oracle_id, pr.printing_id, pr.board, pr.present, pr.holding_id \
+               FROM present pr JOIN printings p ON p.id = pr.printing_id \
+             ), \
+             lines AS ( \
+               SELECT oracle_id, printing_id, board, present, holding_id FROM held \
+               UNION ALL \
+               SELECT w.oracle_id, rep.id, w.board, 0, NULL::uuid \
+               FROM want w \
+               JOIN LATERAL ( \
+                 SELECT p.id FROM printings p WHERE p.oracle_id = w.oracle_id \
+                 ORDER BY (COALESCE(p.image_uris->>'normal', \
+                                    p.faces->0->'image_uris'->>'normal') IS NULL), p.id \
+                 LIMIT 1 ) rep ON true \
+               WHERE NOT EXISTS ( \
+                 SELECT 1 FROM held h \
+                 WHERE h.oracle_id = w.oracle_id AND h.board = w.board ) \
              ) \
-             SELECT p.oracle_id, pr.printing_id, ca.name, s.code AS set_code, \
+             SELECT l.oracle_id, l.printing_id, ca.name, s.code AS set_code, \
                     p.collector_number, \
                     COALESCE(p.image_uris->>'normal', p.faces->0->'image_uris'->>'normal') \
                         AS image_uri, \
-                    ca.mana_cost, ca.type_line, ca.colors, pr.present, \
+                    ca.mana_cost, ca.type_line, ca.colors, l.present, \
                     COALESCE(w.desired, 0) AS desired, COALESCE(o.owned, 0) AS owned, \
                     COALESCE(ro.present_rollup, 0) AS present_rollup, \
-                    pr.board::text AS board \
-             FROM present pr \
-             JOIN printings p ON p.id = pr.printing_id \
-             JOIN cards ca ON ca.oracle_id = p.oracle_id \
+                    l.board::text AS board, l.holding_id, ca.layout, ",
+        );
+        qb.push(format!(
+            "CASE WHEN ca.layout IN ({layouts}) THEN ca.card_faces END AS card_faces, "
+        ));
+        qb.push(
+            "CASE WHEN p.faces IS NOT NULL THEN \
+                 (SELECT array_agg(f->'image_uris'->>'normal' ORDER BY ord) \
+                  FROM jsonb_array_elements(p.faces) WITH ORDINALITY AS t(f, ord)) \
+             END AS face_image_uris \
+             FROM lines l \
+             JOIN printings p ON p.id = l.printing_id \
+             JOIN cards ca ON ca.oracle_id = l.oracle_id \
              LEFT JOIN sets s ON s.id = p.set_id \
-             LEFT JOIN owned_by_card o ON o.oracle_id = p.oracle_id \
-             LEFT JOIN want w ON w.oracle_id = p.oracle_id AND w.board = pr.board \
-             LEFT JOIN rollup ro ON ro.printing_id = pr.printing_id";
-        let keyset = if cursor.is_some() {
-            " WHERE (ca.name, pr.printing_id, pr.board) > ($2, $3, $4::card_board)"
-        } else {
-            ""
-        };
-        let order = if cursor.is_some() {
-            " ORDER BY ca.name, pr.printing_id, pr.board LIMIT $5"
-        } else {
-            " ORDER BY ca.name, pr.printing_id, pr.board LIMIT $2"
-        };
-        let sql = format!("{base}{keyset}{order}");
-
-        let mut q = sqlx::query_as::<_, CardRowSql>(&sql).bind(id);
+             LEFT JOIN owned_by_card o ON o.oracle_id = l.oracle_id \
+             LEFT JOIN want w ON w.oracle_id = l.oracle_id AND w.board = l.board \
+             LEFT JOIN rollup ro ON ro.printing_id = l.printing_id \
+             WHERE true",
+        );
+        // The in-collection quick search: a plain name substring, not the
+        // catalog grammar (design/information-architecture.md → "Two search
+        // surfaces"), through the same escaping helper `/catalog` and `/my` use
+        // so a typed `%` is literal in all three.
+        if let Some(needle) = q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            qb.push(" AND ca.name ILIKE ");
+            qb.push_bind(crate::search::sql::pattern(needle));
+        }
         if let Some(c) = &cursor {
-            q = q.bind(&c.name).bind(c.printing_id).bind(&c.board);
+            qb.push(" AND (ca.name, l.printing_id, l.board) > (");
+            qb.push_bind(c.name.clone());
+            qb.push(", ");
+            qb.push_bind(c.printing_id);
+            qb.push(", ");
+            qb.push_bind(c.board.clone());
+            qb.push("::card_board)");
         }
         // Fetch one extra row to know whether a next page exists without a
         // phantom empty final fetch.
-        let mut rows: Vec<CardRowSql> = q
-            .bind(limit + 1)
+        qb.push(" ORDER BY ca.name, l.printing_id, l.board LIMIT ");
+        qb.push_bind(limit + 1);
+        let mut rows: Vec<CardRowSql> = qb
+            .build_query_as()
             .fetch_all(&mut *tx)
             .await
             .map_err(upstream)?;
-        tx.commit().await.map_err(upstream)?;
 
         let has_more = rows.len() as i64 > limit;
         rows.truncate(limit as usize);
@@ -740,14 +799,74 @@ impl CollectionStore for HostedBackend {
             .map(CardRowSql::into_row)
             .collect::<ApiResult<Vec<_>>>()?;
 
+        // Whole-collection counts for the header + needs chip. Deliberately not
+        // page-scoped (the card rows are): a header that changed as you paged
+        // would be lying about the collection. Same tx as the page, so the two
+        // cannot straddle a concurrent move. The needs halves reuse `needs`'
+        // arithmetic exactly — gap = desired − present here, of which
+        // `min(gap, held elsewhere)` is pullable — so the chip and the page it
+        // links to cannot disagree.
+        let totals: TotalsSql = sqlx::query_as(
+            "WITH RECURSIVE descendants AS ( \
+               SELECT id FROM collections WHERE parent_id = $1 \
+               UNION ALL \
+               SELECT c.id FROM collections c JOIN descendants d ON c.parent_id = d.id \
+             ), \
+             d AS ( \
+               SELECT oracle_id, sum(quantity)::int AS desired \
+               FROM desires WHERE collection_id = $1 GROUP BY oracle_id \
+             ), \
+             ph AS ( \
+               SELECT p.oracle_id, sum(h.quantity)::int AS present_here \
+               FROM holdings h JOIN printings p ON p.id = h.printing_id \
+               WHERE h.collection_id = $1 GROUP BY p.oracle_id \
+             ), \
+             pe AS ( \
+               SELECT p.oracle_id, sum(h.quantity)::int AS elsewhere \
+               FROM holdings h JOIN printings p ON p.id = h.printing_id \
+               WHERE h.collection_id <> $1 GROUP BY p.oracle_id \
+             ), \
+             gap AS ( \
+               SELECT (d.desired - COALESCE(ph.present_here, 0)) AS gap, \
+                      COALESCE(pe.elsewhere, 0) AS elsewhere \
+               FROM d LEFT JOIN ph ON ph.oracle_id = d.oracle_id \
+               LEFT JOIN pe ON pe.oracle_id = d.oracle_id \
+               WHERE d.desired > COALESCE(ph.present_here, 0) \
+             ) \
+             SELECT \
+               (SELECT COALESCE(sum(quantity), 0)::int FROM holdings \
+                WHERE collection_id = $1) AS present, \
+               (SELECT COALESCE(sum(quantity), 0)::int FROM holdings \
+                WHERE collection_id IN (SELECT id FROM descendants)) AS present_rollup, \
+               (SELECT COALESCE(sum(quantity), 0)::int FROM desires \
+                WHERE collection_id = $1) AS desired, \
+               (SELECT COALESCE(sum(gap), 0)::int FROM gap) AS missing, \
+               (SELECT COALESCE(sum(LEAST(gap, elsewhere)), 0)::int FROM gap) AS owned_elsewhere",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(upstream)?;
+
+        let collection = collection.into_summary()?;
+        // Decks carry their commanders in the same round trip (the header
+        // renders them as a card); a binder never asks.
+        let commanders = match collection.kind {
+            CollectionKind::Deck => Some(commanders_in(&mut tx, id).await?),
+            CollectionKind::Binder => None,
+        };
+        tx.commit().await.map_err(upstream)?;
+
         Ok(CollectionView {
-            collection: collection.into_summary()?,
+            collection,
             children: children
                 .into_iter()
                 .map(CollectionRow::into_summary)
                 .collect::<ApiResult<Vec<_>>>()?,
             cards,
             next_cursor,
+            totals: totals.into_totals(),
+            commanders,
         })
     }
 
@@ -1390,32 +1509,9 @@ impl CollectionStore for HostedBackend {
     async fn deck_commanders(&self, collection_id: Id) -> ApiResult<DeckCommanders> {
         let mut tx = self.scoped_tx().await?;
         require_owned_collection(&mut tx, collection_id).await?;
-        let rows: Vec<TaggedCardSql> = sqlx::query_as(
-            "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, c.color_identity, \
-                    (SELECT COALESCE(image_uris->>'normal', \
-                                     faces->0->'image_uris'->>'normal') FROM printings \
-                     WHERE oracle_id = c.oracle_id \
-                       AND COALESCE(image_uris->>'normal', \
-                                    faces->0->'image_uris'->>'normal') IS NOT NULL \
-                     ORDER BY id LIMIT 1) AS image_uri \
-             FROM card_tags ct JOIN tags t ON t.id = ct.tag_id \
-             JOIN cards c ON c.oracle_id = ct.oracle_id \
-             WHERE ct.collection_id = $1 AND t.builtin = 'commander' ORDER BY c.name",
-        )
-        .bind(collection_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(upstream)?;
+        let out = commanders_in(&mut tx, collection_id).await?;
         tx.commit().await.map_err(upstream)?;
-        let commanders: Vec<TaggedCard> = rows.into_iter().map(TaggedCardSql::into_card).collect();
-        // Color identity is derived, never stored — the WUBRG union of the
-        // commanders' identities, so it is always current after an assignment.
-        let color_identity =
-            union_color_identity(commanders.iter().map(|c| c.color_identity.as_slice()));
-        Ok(DeckCommanders {
-            commanders,
-            color_identity,
-        })
+        Ok(out)
     }
 
     async fn set_holding_board(&self, holding_id: Id, req: SetBoard) -> ApiResult<()> {
@@ -2062,17 +2158,59 @@ fn summary_select() -> String {
 /// owned/wanted totals). `extra_cols` is our own SQL fragment, never user input,
 /// and must start with its own comma.
 fn summary_select_with(extra_cols: &str) -> String {
-    let layouts = shared::catalog::BACK_FACE_LAYOUTS
-        .iter()
-        .map(|l| format!("'{l}'"))
-        .collect::<Vec<_>>()
-        .join(",");
+    let layouts = back_face_layout_list();
     format!(
         "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, c.layout, \
          CASE WHEN c.layout IN ({layouts}) THEN c.card_faces END AS card_faces, \
          rep.id AS printing_id, rep.image_uri, rep.face_image_uris{extra_cols} \
          FROM cards c"
     )
+}
+
+/// A deck's `commander`-tagged cards + their derived color identity, inside a
+/// caller-owned transaction. Extracted so the deck header (`collection_view`,
+/// which carries commanders per specs/collection-api.md) and the standalone
+/// `deck_commanders` read cannot drift on what a commander *is*.
+async fn commanders_in(
+    tx: &mut Transaction<'static, Postgres>,
+    collection_id: Id,
+) -> ApiResult<DeckCommanders> {
+    let rows: Vec<TaggedCardSql> = sqlx::query_as(
+        "SELECT c.oracle_id, c.name, c.mana_cost, c.type_line, c.color_identity, \
+                (SELECT COALESCE(image_uris->>'normal', \
+                                 faces->0->'image_uris'->>'normal') FROM printings \
+                 WHERE oracle_id = c.oracle_id \
+                   AND COALESCE(image_uris->>'normal', \
+                                faces->0->'image_uris'->>'normal') IS NOT NULL \
+                 ORDER BY id LIMIT 1) AS image_uri \
+         FROM card_tags ct JOIN tags t ON t.id = ct.tag_id \
+         JOIN cards c ON c.oracle_id = ct.oracle_id \
+         WHERE ct.collection_id = $1 AND t.builtin = 'commander' ORDER BY c.name",
+    )
+    .bind(collection_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(upstream)?;
+    let commanders: Vec<TaggedCard> = rows.into_iter().map(TaggedCardSql::into_card).collect();
+    // Color identity is derived, never stored — the WUBRG union of the
+    // commanders' identities, so it is always current after an assignment.
+    let color_identity =
+        union_color_identity(commanders.iter().map(|c| c.color_identity.as_slice()));
+    Ok(DeckCommanders {
+        commanders,
+        color_identity,
+    })
+}
+
+/// The SQL `IN` list of layouts that carry a real back face — generated from
+/// [`shared::catalog::BACK_FACE_LAYOUTS`] (our own compile-time constants, never
+/// user input) so every projection that gates `card_faces` uses one list.
+fn back_face_layout_list() -> String {
+    shared::catalog::BACK_FACE_LAYOUTS
+        .iter()
+        .map(|l| format!("'{l}'"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// The **representative printing** of `cards c` — one lateral shared by the
@@ -2314,6 +2452,12 @@ struct CardRowSql {
     owned: i32,
     present_rollup: i32,
     board: String,
+    /// NULL when the cell aggregates several grains, or is desire-only.
+    holding_id: Option<Uuid>,
+    layout: Option<String>,
+    /// NULL unless the layout has a real back face (the select gates it).
+    card_faces: Option<serde_json::Value>,
+    face_image_uris: Option<Vec<Option<String>>>,
 }
 
 impl CardRowSql {
@@ -2326,6 +2470,13 @@ impl CardRowSql {
     }
 
     fn into_row(self) -> ApiResult<CardRow> {
+        // The flip faces come from *this row's* printing, not a representative
+        // one: in a collection you are looking at the copy you hold.
+        let faces = shared::CardFaceSummary::build(
+            self.layout.as_deref(),
+            self.card_faces.as_ref(),
+            &self.face_image_uris.unwrap_or_default(),
+        );
         Ok(CardRow {
             oracle_id: self.oracle_id,
             printing_id: self.printing_id,
@@ -2342,7 +2493,34 @@ impl CardRowSql {
             present_rollup: self.present_rollup,
             board: Board::from_pg(&self.board)
                 .ok_or_else(|| ApiError::Upstream(format!("bad board '{}'", self.board)))?,
+            holding_id: self.holding_id,
+            faces,
         })
+    }
+}
+
+/// The collection-wide header counts. `to_buy` is derived rather than selected —
+/// `missing = owned_elsewhere + to_buy` is the definition, and a second SQL
+/// expression for it could drift from the two it is the remainder of.
+#[derive(sqlx::FromRow)]
+struct TotalsSql {
+    present: i32,
+    present_rollup: i32,
+    desired: i32,
+    missing: i32,
+    owned_elsewhere: i32,
+}
+
+impl TotalsSql {
+    fn into_totals(self) -> shared::CollectionTotals {
+        shared::CollectionTotals {
+            present: self.present,
+            present_rollup: self.present_rollup,
+            desired: self.desired,
+            missing: self.missing,
+            owned_elsewhere: self.owned_elsewhere,
+            to_buy: self.missing - self.owned_elsewhere,
+        }
     }
 }
 

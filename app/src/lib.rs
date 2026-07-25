@@ -130,7 +130,7 @@ pub fn App() -> impl IntoView {
                 <Route path=StaticSegment("") view=my::all_cards::AllCardsPage ssr=SsrMode::Async />
                 <Route
                     path=(StaticSegment("collections"), ParamSegment("id"))
-                    view=shell::CollectionPage
+                    view=my::collection::CollectionPage
                     ssr=SsrMode::Async
                 />
                 <Route
@@ -460,6 +460,111 @@ pub async fn all_cards(
     #[cfg(not(feature = "ssr"))]
     {
         let _ = (q, cursor);
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// One keyset page of a collection's binder/deck view (specs/app-ui.md →
+/// `/my/collections/:id`): its metadata, immediate children, card rows,
+/// whole-collection totals and — on a deck — its commanders. GET per the
+/// read-adapter exemplar ([`search_catalog`]), so `?q=`/`?cursor=` on the page
+/// are literally this call's arguments and a shared URL SSRs the same page.
+///
+/// `q` is the in-collection quick search (a name substring, not the catalog
+/// grammar), and a plain `String` for the same reason [`all_cards`]'s is.
+#[server(
+    prefix = "/api",
+    endpoint = "collection_view",
+    input = leptos::server_fn::codec::GetUrl
+)]
+pub async fn collection_view(
+    id: shared::Id,
+    q: String,
+    cursor: Option<String>,
+) -> Result<shared::CollectionView, ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .collection_view(
+                id,
+                Some(q),
+                shared::Page {
+                    cursor,
+                    limit: None,
+                },
+            )
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (id, q, cursor);
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// Set a holding's absolute quantity — the collection view's in-place count
+/// stepper (specs/app-ui.md → "HERE is editable in place via the count
+/// stepper"). `0` deletes the holding row, which is the component's documented
+/// meaning for a committed zero.
+///
+/// Addressed by **holding id**, not by (collection, printing, board): a cell
+/// that sums several finish/condition/language grains has no single row a lone
+/// number could mean, so `CardRow::holding_id` is `None` there and the stepper
+/// is not offered. POST, necessarily — it writes.
+#[server(prefix = "/api", endpoint = "set_holding_quantity")]
+pub async fn set_holding_quantity(
+    holding_id: shared::Id,
+    quantity: i32,
+) -> Result<(), ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .set_holding_quantity(holding_id, shared::SetQuantity { quantity })
+            .await
+            .map(|_| ())
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (holding_id, quantity);
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// Empty a deck (specs/app-ui.md → the deck variant's "Empty deck…" teardown;
+/// specs/collection-api.md → Teardown). Returns how many move rows it wrote.
+///
+/// **Scalar, not the [`shared::Teardown`] enum** (the quick_add convention, and
+/// the server-fn POST codec mangles nested/tagged DTOs anyway — app-ui
+/// Findings): `to_collection_id = Some(dest)` is "empty to here",
+/// `None` is "return each card to the collection it last came from, Inbox where
+/// there is no history".
+#[server(prefix = "/api", endpoint = "teardown_collection")]
+pub async fn teardown_collection(
+    collection_id: shared::Id,
+    to_collection_id: Option<shared::Id>,
+) -> Result<shared::TeardownReceipt, ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        let mode = match to_collection_id {
+            Some(to_collection_id) => shared::Teardown::EmptyTo { to_collection_id },
+            None => shared::Teardown::ReturnToPrevious,
+        };
+        collection_backend()
+            .await?
+            .teardown(collection_id, mode)
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (collection_id, to_collection_id);
         Err(ServerFnError::ServerError("server-only".into()))
     }
 }

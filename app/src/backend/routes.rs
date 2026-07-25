@@ -313,14 +313,24 @@ async fn set_holding_quantity(
     )
 }
 
-/// `GET /api/collections/{id}/view?cursor=&limit=` — one keyset page of the
-/// collection's card rows plus metadata and children.
-async fn collection_view(user: AuthUser, Path(id): Path<Id>, Query(page): Query<Page>) -> Response {
+/// `GET /api/collections/{id}/view?q=&cursor=&limit=` — one keyset page of the
+/// collection's card rows plus metadata, children, totals and commanders. `q` is
+/// the in-collection quick search (a name substring, not the catalog grammar),
+/// so this reuses [`SearchParams`] rather than the bare [`Page`].
+async fn collection_view(
+    user: AuthUser,
+    Path(id): Path<Id>,
+    Query(p): Query<SearchParams>,
+) -> Response {
+    let page = Page {
+        cursor: p.cursor,
+        limit: p.limit,
+    };
     json_result(
         async {
             HostedBackend::for_user(user.user_id)
                 .await?
-                .collection_view(id, page)
+                .collection_view(id, p.q, page)
                 .await
         }
         .await,
