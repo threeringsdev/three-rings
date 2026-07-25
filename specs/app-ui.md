@@ -219,6 +219,95 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Selection tray, read-only (2026-07-25)
+
+`app/src/components/ui/selection_tray.rs` — custom gap component №3, built on
+the `count_stepper.rs` precedent (a custom component, not a vendored port, but
+carrying a bench section like any other). First of three split tasks; the batch
+move and the undoable removal follow it.
+
+**The tray is the pill; the shell owns the dock.** `SelectionTray` renders the
+wireframe's pill (thumbnail stack capped at 3, count, inert "Move to…", clear)
+and nothing at all at zero selection — `Show`, so it is absent from the DOM
+rather than transparent. `shell::SelectionTrayDock` is the fixed positioning
+(`bottom-16 md:bottom-0`, above the mobile tab bar). That split mirrors the
+wireframe's own Tray Wrap / Selection Tray frames and is what lets the bench
+render the pill inline.
+
+**The selection key is an enum, and that is the load-bearing decision:**
+
+```rust
+Held { collection_id, printing_id, board }   // /my/collections/:id rows
+Card { oracle_id }                            // /my rows
+```
+
+A `/my` row genuinely cannot be `Held`-shaped: it aggregates every collection
+per *oracle* card, and `CardSummary::printing_id` is the has-art-first
+**representative** printing, which the user may own zero of. So neither "from
+where" nor "which printing" is answerable from that row.
+
+The enum was chosen over `from_collection_id: Option<Id>` deliberately. `None`
+in `shared::MoveItem` means *external intake* — copies appearing from outside
+the system. A struct-with-`Option` key would let the batch-move task pipe `None`
+straight through and silently conjure copies; the enum makes that a compile
+error and forces an explicit resolution step. **The batch-move task inherits
+that resolution: it cannot pipe a `/my` selection into `move_cards`.**
+
+`board` rides in the key even though `move_cards`/`holding_take` are hardcoded
+to `board = 'main'`, because a deck's mainboard and sideboard rows for the same
+printing are two rows on screen and must be two checkboxes or one lies about the
+other. The move that consumes it cannot honor board yet — same constraint
+already recorded at the `CountStepper` call site.
+
+Selectability is `present > 0` on collection rows and `owned > 0` on `/my`;
+desire-only rows render no checkbox, since offering to move copies that do not
+exist is a lying control. Review confirmed this matches what the rows render:
+`CardRow::present` counts *this collection's* holdings only and `present_rollup`
+is a separate column, so a rollup-only row correctly gets the dimmed `+n` and no
+checkbox.
+
+**Cross-view survival was verified structurally, not just behaviorally.**
+`provide_selection()` is called exactly once, in `AppShell`, which is a single
+`ParentRoute` view above `/catalog`, `/cards/:id` and the whole `/my` subtree —
+so no navigation among them re-runs it, including the `/my/collections/:id`
+route's ~800 ms DOM detach/re-attach. `Checkbox` is fully controlled, so a
+re-mounted row re-derives its checked state from the shell signal. Sign-out is a
+`hard_navigate`, so a selection cannot outlive a session. The selection is
+in-memory only: it survives every SPA navigation and mode switch but not a
+document load, which the spec does not require.
+
+**Review: CLEAN — zero majors.** Nine minors filed under Phase 5 discoveries.
+Three were checked by the orchestrator rather than accepted on the reviewer's
+severity call, since the major/minor line decides whether work happens now:
+
+- *16×16 px checkbox tap target on mobile* — confirmed real (`size-4` on the
+  control, padding on the `<td>`, adjacent to the card-detail link) and the
+  closest to promotion. Held at minor because a mis-tap lands somewhere
+  recoverable and the selection survives the navigation.
+- *A toast covers the tray's clear "×"* — geometry confirmed (sonner `z-[200]`
+  at `bottom-6 right-6` vs the dock's `z-50`; ~44 px overlap at 1440 px). Held
+  at minor: transient, and rows can still be unchecked.
+- *The count reads entries, not copies* — "1 card" for a selected row holding 4.
+  Internally consistent today (one entry, one thumbnail); filed because it is
+  the minor that most constrains the batch-move task's quantity semantics.
+
+**A reported test-infrastructure failure did not reproduce.** The implementer
+reported `smoke.spec.ts:92` timing out reproducibly at the default worker count
+once the seven new tests were added, passing only at `--workers=3`, and proposed
+either lowering the suite's local worker count or rewriting that test's
+`waitForURL`. The task's single full chromium run went **138/138 in 52.3 s at
+the default workers** (`workers: undefined` locally = half the cores), with that
+exact test green. No config change made and none warranted; treated as a
+suspected load flake and filed as such. One green run does not prove it never
+flakes — but it does refute "reproducible", which is what the proposed fix
+rested on.
+
+**Evidence.** `cargo test --workspace --exclude frontend` green; full chromium
+e2e 138/138 (52.3 s); hydration CLEAN on four authed URLs; SSR curl non-empty on
+`/my`, a collection, and `/dev/components`, with collection rows keying e.g.
+`held:<collection>:<printing>:main`; Android webview 12/12 on the new
+`probe:android-selection-tray` plus the baseline CDP check.
+
 ### Quick-add panel (2026-07-25)
 
 `app/src/components/quick_add.rs` — the intake composite on

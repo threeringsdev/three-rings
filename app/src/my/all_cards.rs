@@ -29,6 +29,9 @@ use shared::{AllCardsRow, CardLocation};
 use crate::cards::CardPreview;
 use crate::components::query_bar::QueryBar;
 use crate::components::ui::collapsible::{Collapsible, CollapsibleContent, CollapsibleTrigger};
+use crate::components::ui::selection_tray::{
+    use_selection, SelectedCard, SelectionCheckbox, SelectionKey,
+};
 use crate::components::ui::skeleton::Skeleton;
 use crate::components::ui::table::{
     Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableWrapper,
@@ -198,9 +201,9 @@ fn EmptyState(searching: bool, paged: Memo<bool>) -> impl IntoView {
     }
 }
 
-/// One keyset page. Six columns: the card, its type and mana (both progressive
-/// — they drop out on narrow screens rather than squeezing the numbers), then
-/// the three the spec calls for.
+/// One keyset page. Seven columns: the select checkbox, the card, its type and
+/// mana (both progressive — they drop out on narrow screens rather than
+/// squeezing the numbers), then the three the spec calls for.
 #[component]
 fn CardsTable(rows: Vec<AllCardsRow>) -> impl IntoView {
     view! {
@@ -208,6 +211,9 @@ fn CardsTable(rows: Vec<AllCardsRow>) -> impl IntoView {
             <Table {..} data-testid="all-cards-table">
                 <TableHeader>
                     <TableRow>
+                        <TableHead class="w-8">
+                            <span class="sr-only">"Select"</span>
+                        </TableHead>
                         <TableHead>"Card"</TableHead>
                         <TableHead class="hidden md:table-cell">"Type"</TableHead>
                         <TableHead class="hidden sm:table-cell">"Mana"</TableHead>
@@ -240,8 +246,35 @@ fn CardsRow(row: AllCardsRow) -> impl IntoView {
     let type_line = card.type_line.clone().unwrap_or_default();
     let mana_cost = card.mana_cost.clone().unwrap_or_default();
 
+    // Selectable only where there is something to move. A row here can be
+    // desire-only (`owned == 0`, held nowhere) — the FULL OUTER JOIN correction
+    // this view needed — and a selection tray that offered to move copies that
+    // do not exist would be lying about what the checkbox does.
+    //
+    // The key is `Card { oracle }`, not a printing: this view aggregates every
+    // collection per oracle card and `card.printing_id` is only the
+    // *representative* printing (the has-art-first pick), so neither the source
+    // collection nor the held printing is answerable from the row. See
+    // `SelectionKey`.
+    let selection = use_selection();
+    let key = SelectionKey::Card { oracle_id };
+    let selected = selection.selected(key);
+    let selectable = (owned > 0).then(|| SelectedCard {
+        key,
+        name: card.name.clone(),
+        image_uri: card.image_uri.clone(),
+    });
+
     view! {
-        <TableRow {..} data-testid="all-cards-row" data-oracle=oracle_id.to_string()>
+        <TableRow
+            {..}
+            data-testid="all-cards-row"
+            data-oracle=oracle_id.to_string()
+            data-state=move || selected.get().then_some("selected")
+        >
+            <TableCell class="p-2">
+                {selectable.map(|card| view! { <SelectionCheckbox selection card /> })}
+            </TableCell>
             <TableCell class="p-2">
                 <CardPreview card=preview>
                     <a href=format!("/cards/{oracle_id}") class="font-medium hover:underline">

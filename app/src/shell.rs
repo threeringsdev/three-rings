@@ -11,6 +11,7 @@ use crate::account::{fetch_current_user, CurrentUser, SignOut};
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::ui::popover::{Popover, PopoverAlign, PopoverContent, PopoverTrigger};
+use crate::components::ui::selection_tray::{provide_selection, SelectionState, SelectionTray};
 use crate::components::ui::separator::Separator;
 use crate::components::ui::skeleton::Skeleton;
 use crate::components::ui::sonner::Toaster;
@@ -170,6 +171,11 @@ pub fn AppShell() -> impl IntoView {
     // Also shell-level: the desktop rail's tree and the mobile tab badge read
     // one fetch, and quick-add refetches it after a successful add/undo.
     crate::my::tree::provide_collection_tree();
+    // Shell-level for the strongest reason of the three: the tray's selection
+    // must survive a Catalog ⇄ My-cards mode switch, `/my` ⇄ collection
+    // navigation, *and* `/my/collections/:id` detaching its whole DOM subtree
+    // after a `?q=` navigation. A page-owned signal is disposed by all three.
+    let selection = provide_selection();
 
     view! {
         <div class="bg-background text-foreground flex min-h-screen flex-col">
@@ -185,16 +191,49 @@ pub fn AppShell() -> impl IntoView {
             </header>
             <div class="flex flex-1">
                 <SidebarRail my_mode />
-                // Mobile: pad past the fixed bottom tab bar.
-                <main class="min-w-0 flex-1 pb-16 md:pb-0">
+                // Mobile: pad past the fixed bottom tab bar — and past the
+                // tray too when it is up, since a fixed element cannot push
+                // the page it docks over (the pager is the bottom-most thing
+                // on both selectable views).
+                <main class=move || {
+                    if selection.is_empty() {
+                        "min-w-0 flex-1 pb-16 md:pb-0"
+                    } else {
+                        "min-w-0 flex-1 pb-32 md:pb-16"
+                    }
+                }>
                     <Outlet />
                 </main>
             </div>
             <BottomTabs my_mode />
+            <SelectionTrayDock selection />
             // Mounted once, at the root: a toast outlives the row that raised
             // it (an undo toast must survive the search that scrolls its card
             // away), so it cannot live inside the page it was raised from.
             <Toaster />
+        </div>
+    }
+}
+
+/// The wireframe's "Tray Wrap" frame: the fixed dock the selection tray sits
+/// in. Separate from the tray itself so the component stays position-agnostic
+/// (and the bench can render it inline).
+///
+/// `bottom-16` on mobile is the bottom tab bar's height — the wireframe puts
+/// the tray *above* the tabs, not over them; `md:bottom-0` docks it to the
+/// viewport floor on desktop, where there are no tabs. `pointer-events-none`
+/// on the wrapper matters: with an empty selection the tray renders nothing at
+/// all, and a full-width invisible strip would still swallow clicks.
+#[component]
+fn SelectionTrayDock(selection: SelectionState) -> impl IntoView {
+    view! {
+        <div
+            class="pointer-events-none fixed inset-x-0 bottom-16 z-50 px-2.5 pb-2.5 md:bottom-0"
+            data-testid="selection-tray-dock"
+        >
+            <div class="pointer-events-auto mx-auto max-w-3xl">
+                <SelectionTray selection />
+            </div>
         </div>
     }
 }
