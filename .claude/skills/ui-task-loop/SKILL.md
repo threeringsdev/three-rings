@@ -141,10 +141,15 @@ which costs tokens and leaks stale assumptions into the new one.
    > #### The implementer does not run the gate
    >
    > State this in the dispatch prompt, in these words or stronger: **do not run
-   > `cargo leptos build --release`, `cargo fmt --all -- --check`, or the six
-   > clippy lines.** Step 5 owns them. For its own feedback the implementer gets
+   > `cargo leptos build --release` or the six clippy lines.** CI owns the gate
+   > (step 5). For its own feedback the implementer gets
    > `cargo test --workspace --exclude frontend` and a single
    > `cargo clippy -p app --features hosted,component-bench --all-targets`.
+   >
+   > One exception, and it is the *formatter*, not the check: tell it to run
+   > `cargo fmt --all` (write mode) before its final commit. That costs
+   > milliseconds and removes the cheapest way to burn a whole 2–3 min CI cycle.
+   > `cargo fmt --all -- --check` remains CI's.
    >
    > Left unsaid, a conscientious agent runs the whole gate to be safe — and the
    > release build (full Tailwind + wasm, cold) is the most expensive command in
