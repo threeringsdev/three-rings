@@ -176,6 +176,10 @@ pub fn AppShell() -> impl IntoView {
     // navigation, *and* `/my/collections/:id` detaching its whole DOM subtree
     // after a `?q=` navigation. A page-owned signal is disposed by all three.
     let selection = provide_selection();
+    // Bumped by the tray's batch move (and its undo); every page whose table
+    // renders holdings takes it as a resource *source*, so a move refetches
+    // what it invalidated instead of leaving stale counts on screen.
+    crate::my::move_selection::provide_holdings_revision();
 
     view! {
         <div class="bg-background text-foreground flex min-h-screen flex-col">
@@ -206,11 +210,16 @@ pub fn AppShell() -> impl IntoView {
                 </main>
             </div>
             <BottomTabs my_mode />
-            <SelectionTrayDock selection />
             // Mounted once, at the root: a toast outlives the row that raised
             // it (an undo toast must survive the search that scrolls its card
             // away), so it cannot live inside the page it was raised from.
+            //
+            // Before the tray, deliberately: the tray's move action reads this
+            // `ToastHandle` out of context, and a context is only there for
+            // things built after the `provide_context` that put it there.
+            // Position is `fixed` on both, so the swap is invisible.
             <Toaster />
+            <SelectionTrayDock selection />
         </div>
     }
 }
@@ -232,7 +241,15 @@ fn SelectionTrayDock(selection: SelectionState) -> impl IntoView {
             data-testid="selection-tray-dock"
         >
             <div class="pointer-events-auto mx-auto max-w-3xl">
-                <SelectionTray selection />
+                // The pill's primary action is a slot (see `SelectionTray`), so
+                // the component itself stays free of server calls: this is
+                // where the batch move is actually wired in.
+                <SelectionTray
+                    selection
+                    action=ViewFn::from(move || {
+                        view! { <crate::my::move_selection::MoveSelection selection /> }
+                    })
+                />
             </div>
         </div>
     }

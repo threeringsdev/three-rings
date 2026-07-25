@@ -932,6 +932,21 @@ impl CollectionStore for HostedBackend {
         Ok(())
     }
 
+    async fn undo_moves(&self, move_ids: Vec<Id>) -> ApiResult<()> {
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        // One transaction for the whole list: a batch move is applied
+        // all-or-nothing, so its undo has to revert the same way. A per-id loop
+        // of `undo_move` would commit each reversal separately and could stop
+        // half way, leaving the user with a half-undone batch behind a toast
+        // that claimed the batch was undone.
+        for move_id in move_ids {
+            undo_one(&mut tx, user_id, move_id).await?;
+        }
+        tx.commit().await.map_err(upstream)?;
+        Ok(())
+    }
+
     async fn undo_last_move(&self) -> ApiResult<Option<MoveReceipt>> {
         let user_id = self.session_id()?;
         let mut tx = self.scoped_tx().await?;
@@ -950,6 +965,26 @@ impl CollectionStore for HostedBackend {
         };
         tx.commit().await.map_err(upstream)?;
         Ok(receipt)
+    }
+
+    async fn holdings_of_oracle(&self, oracle_id: Id) -> ApiResult<Vec<HoldingLine>> {
+        // Ungrouped on purpose — see the trait doc. RLS scopes the rows to the
+        // caller, the same way every other read in this impl is scoped.
+        let mut tx = self.scoped_tx().await?;
+        let rows: Vec<HoldingRow> = sqlx::query_as(
+            "SELECT h.id, h.collection_id, h.printing_id, h.finish::text AS finish, \
+                    h.condition::text AS condition, h.language, h.board::text AS board, \
+                    h.quantity \
+             FROM holdings h JOIN printings p ON p.id = h.printing_id \
+             WHERE p.oracle_id = $1 \
+             ORDER BY h.collection_id, h.printing_id, h.board, h.finish",
+        )
+        .bind(oracle_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+        rows.into_iter().map(HoldingRow::into_line).collect()
     }
 
     async fn suggested_destinations(&self, oracle_id: Id) -> ApiResult<Vec<SuggestedDestination>> {

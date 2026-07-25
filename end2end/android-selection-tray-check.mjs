@@ -83,16 +83,49 @@ if (box && Math.round(box.width) === 22 && Math.round(box.height) === 30)
   ok("thumbnail lays out at 22×30");
 else fail(`thumbnail box wrong: ${JSON.stringify(box)}`);
 
-// "Move to…" is inert on this engine too — announced disabled, and a forced
-// click changes nothing.
+// "Move to…" opens the destination picker — a `popover` positioned with CSS
+// anchor positioning, which is exactly the vendoring checklist's
+// native-webview item. What is proved here is that the panel opens and lands
+// **on screen** on the real WebView engine; what it lists is a session read
+// the dev proxy cannot make (it strips Cookie headers), so the honest
+// on-device rendering is the empty state.
 const move = page.locator('[data-testid="tray-move"]');
-if (await move.isDisabled()) ok("“Move to…” is disabled on-device");
-else fail("“Move to…” was not disabled on-device");
-await move.click({ force: true });
-await page.waitForTimeout(150);
+if (!(await move.isDisabled())) ok("“Move to…” is live on-device");
+else fail("“Move to…” is still disabled on-device");
+await move.click();
+await page.waitForTimeout(400);
+const picker = page.locator("#popover-tray-destination");
+if (await picker.evaluate((el) => el.matches(":popover-open")))
+  ok("the picker opens on the WebView engine");
+else fail("the picker did not open on-device");
+if ((await picker.locator('[data-name="CommandInput"]').count()) === 1)
+  ok("the picker brings the catalog control's search box with it");
+else fail("no CommandInput inside the on-device picker");
+if ((await picker.textContent())?.includes("No collection to move to."))
+  ok("anonymous on-device picker shows its empty state");
+else fail(`unexpected picker content: ${await picker.textContent()}`);
+const panel = await picker.boundingBox();
+const viewport = page.viewportSize() ?? (await page.evaluate(() => ({
+  width: window.innerWidth,
+  height: window.innerHeight,
+})));
+if (
+  panel &&
+  panel.x >= 0 &&
+  panel.y >= 0 &&
+  panel.x + panel.width <= viewport.width + 1 &&
+  panel.height > 0
+)
+  ok("the picker lands on screen (anchor positioning / JS fallback)");
+else
+  fail(
+    `picker off screen: ${JSON.stringify(panel)} vs ${JSON.stringify(viewport)}`,
+  );
+await page.keyboard.press("Escape");
+await page.waitForTimeout(200);
 if ((await count.textContent()) === "4 cards")
-  ok("forced click on “Move to…” did nothing");
-else fail("forced click on “Move to…” changed the selection");
+  ok("opening and dismissing the picker left the selection alone");
+else fail("the picker changed the selection");
 
 // Clear empties it and un-checks every row.
 await page.locator('[data-testid="tray-clear"]').click();

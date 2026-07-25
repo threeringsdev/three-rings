@@ -120,9 +120,15 @@ pub fn CollectionPage() -> impl IntoView {
     let query_text = RwSignal::new(url_q.get_untracked());
     let tree = expect_context::<CollectionTreeResource>().0;
 
+    // The selection tray's batch move writes to *this* collection's rows from
+    // the shell, where it has no handle on this resource. Taking the revision
+    // as a source makes the refetch structural: a move bumps it, the resource
+    // re-runs, HERE and the totals move with the database.
+    let revision = crate::my::move_selection::holdings_revision();
+
     let view_res = Resource::new(
-        move || (url_id.get(), url_q.get(), url_cursor.get()),
-        |(id, q, cursor)| async move {
+        move || (url_id.get(), url_q.get(), url_cursor.get(), revision.get()),
+        |(id, q, cursor, _revision)| async move {
             let id = Id::parse_str(&id).map_err(|_| {
                 ServerFnError::<String>::ServerError("that is not a collection id".into())
             })?;
@@ -313,7 +319,7 @@ fn assembled_roots(
 
 /// The human-facing half of a server-fn error (the transport only carries
 /// `ApiError`'s `Display` string).
-fn message_of(e: &ServerFnError<String>) -> String {
+pub(crate) fn message_of(e: &ServerFnError<String>) -> String {
     match e {
         ServerFnError::ServerError(msg) => msg.clone(),
         other => other.to_string(),
@@ -1097,6 +1103,7 @@ fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>, collection_id: Id) -> i
     let selected = selection.selected(key);
     let selectable = (present > 0).then(|| SelectedCard {
         key,
+        oracle_id,
         name: name.clone(),
         image_uri: image_uri.clone(),
     });

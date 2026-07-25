@@ -382,9 +382,20 @@ impl CollectionStore for NativeBackend {
         self.post_unit(&super::paths::move_undo(move_id), &()).await
     }
 
+    async fn undo_moves(&self, move_ids: Vec<Id>) -> ApiResult<()> {
+        self.require_session()?;
+        self.post_unit(super::paths::MOVES_UNDO_BATCH, &move_ids)
+            .await
+    }
+
     async fn undo_last_move(&self) -> ApiResult<Option<MoveReceipt>> {
         self.require_session()?;
         self.post(super::paths::MOVES_UNDO_LAST, &()).await
+    }
+
+    async fn holdings_of_oracle(&self, oracle_id: Id) -> ApiResult<Vec<HoldingLine>> {
+        self.require_session()?;
+        self.get(&super::paths::card_holdings(oracle_id)).await
     }
 
     async fn suggested_destinations(&self, oracle_id: Id) -> ApiResult<Vec<SuggestedDestination>> {

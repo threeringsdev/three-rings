@@ -74,9 +74,14 @@ pub fn AllCardsPage() -> impl IntoView {
     // The text in the box; the URL⇄field sync lives inside `QueryBar`.
     let query_text = RwSignal::new(url_q.get_untracked());
 
+    // See `collection.rs`: the tray's batch move lives in the shell and cannot
+    // refetch this resource directly, so the revision it bumps is one of the
+    // resource's sources.
+    let revision = crate::my::move_selection::holdings_revision();
+
     let rows = Resource::new(
-        move || (url_q.get(), url_cursor.get()),
-        |(q, cursor)| async move {
+        move || (url_q.get(), url_cursor.get(), revision.get()),
+        |(q, cursor, _revision)| async move {
             let cursor = (!cursor.is_empty()).then_some(cursor);
             crate::all_cards(q, cursor).await
         },
@@ -261,6 +266,7 @@ fn CardsRow(row: AllCardsRow) -> impl IntoView {
     let selected = selection.selected(key);
     let selectable = (owned > 0).then(|| SelectedCard {
         key,
+        oracle_id,
         name: card.name.clone(),
         image_uri: card.image_uri.clone(),
     });

@@ -862,6 +862,232 @@ pub async fn undo_quick_add(move_id: shared::Id) -> Result<(), ServerFnError<Str
     }
 }
 
+/// The selection tray's **batch move** (specs/app-ui.md → Selection tray;
+/// specs/collection-api.md → "Move (batch)"): N selected rows → one
+/// destination, one transaction, N ledger rows.
+///
+/// **This adapter is where a `/my` selection stops being un-moveable.** The
+/// tray's key is an enum precisely so a `Card { oracle }` entry cannot be piped
+/// into a [`shared::MoveItem`] — `from_collection_id: None` means *external
+/// intake*, so guessing it would conjure copies out of nothing. Each key is
+/// resolved here instead, against the caller's real holdings read **ungrouped**
+/// (`holdings_of_oracle`). One movable candidate source ⇒ move; anything else ⇒
+/// a [`SkipReason`] the caller reports by name.
+///
+/// [`SkipReason`]: crate::my::move_selection::SkipReason
+///
+/// **Ungrouped is the load-bearing word.** Every rendered read model collapses
+/// the grain the write is addressed at — `collection_view` groups by
+/// `(printing, board)`, `CardDetail::ownership` by `(collection, printing)` —
+/// so a selectable row reading `present = 3` can be three foils, or copies on a
+/// sideboard. Resolved against those, such an entry looks movable, and the
+/// failure surfaces inside `holding_take` as `Conflict("no copies to move")`:
+/// `move_batch` is one transaction, so one such row kills the whole batch with
+/// an error naming no card. Every entry is now checked against the real
+/// holdings first and refused individually, so the rest of the batch moves.
+///
+/// **Quantity is not the caller's** (the `quick_add` precedent): one copy per
+/// selected entry, fixed here. The tray counts entries, not copies, so this is
+/// the only quantity the pill does not lie about.
+///
+/// `input = Json` because the argument is a list of enums — the server-fn POST
+/// default is URL-encoded and flattens nested DTOs to strings
+/// (specs/app-ui.md Findings).
+#[server(
+    prefix = "/api",
+    endpoint = "move_selection",
+    input = leptos::server_fn::codec::Json
+)]
+pub async fn move_selection(
+    to_collection_id: shared::Id,
+    items: Vec<crate::my::move_selection::SelectionItem>,
+) -> Result<crate::my::move_selection::MoveOutcome, ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        use crate::components::ui::selection_tray::SelectionKey;
+        use crate::my::move_selection::{
+            resolve_card, resolve_held, CardSource, MoveOutcome, Skipped,
+        };
+        use std::collections::hash_map::Entry;
+        use std::collections::HashMap;
+
+        if items.len() > SELECTION_MOVE_MAX {
+            return Err(ServerFnError::ServerError(format!(
+                "a move can carry at most {SELECTION_MOVE_MAX} cards"
+            )));
+        }
+        let backend = collection_backend().await?;
+
+        let mut moved: Vec<String> = Vec::new();
+        let mut skipped: Vec<Skipped> = Vec::new();
+        let mut lines: Vec<shared::MoveItem> = Vec::new();
+        // One holdings read per distinct card, not per entry: the tray can
+        // hold the same card twice (a `/my` row and the collection row for the
+        // same copies), and both resolve off the same rows.
+        let mut owned: HashMap<shared::Id, Vec<shared::HoldingLine>> = HashMap::new();
+        for item in items {
+            let token = item.key.token();
+            let holdings = match owned.entry(item.oracle_id) {
+                Entry::Occupied(seen) => seen.into_mut(),
+                Entry::Vacant(slot) => {
+                    // Session-scoped: `collection_backend` carries the caller's
+                    // identity, and the rows come back RLS-filtered to them.
+                    let rows = backend
+                        .holdings_of_oracle(item.oracle_id)
+                        .await
+                        .map_err(api_err)?;
+                    slot.insert(rows)
+                }
+            };
+            let source = match item.key {
+                SelectionKey::Held {
+                    collection_id,
+                    printing_id,
+                    board,
+                } => resolve_held(
+                    holdings,
+                    collection_id,
+                    printing_id,
+                    board,
+                    to_collection_id,
+                ),
+                SelectionKey::Card { oracle_id: _ } => resolve_card(holdings, to_collection_id),
+            };
+            let source = match source {
+                CardSource::Move { from, printing_id } => Ok((from, printing_id)),
+                CardSource::Refuse(reason) => Err(reason),
+            };
+            match source {
+                Ok((from, printing_id)) => {
+                    moved.push(token);
+                    lines.push(shared::MoveItem {
+                        from_collection_id: Some(from),
+                        printing_id,
+                        // The default grain — and resolution has already
+                        // established that the source holds copies at exactly
+                        // this grain on the mainboard, which is what keeps a
+                        // foil-only or sideboard-only row from reaching
+                        // `holding_take` and rolling the batch back. Moving the
+                        // *other* grains is the move-flows task's.
+                        finish: shared::Finish::default(),
+                        condition: shared::Condition::default(),
+                        language: shared::default_language(),
+                        quantity: SELECTION_MOVE_QUANTITY,
+                    });
+                }
+                Err(reason) => skipped.push(Skipped { token, reason }),
+            }
+        }
+
+        // No write at all when everything was refused: an empty batch would
+        // still open a transaction and report a "successful" move of nothing.
+        let move_ids = if lines.is_empty() {
+            Vec::new()
+        } else {
+            backend
+                .move_batch(shared::BatchMove {
+                    to_collection_id: Some(to_collection_id),
+                    items: lines,
+                })
+                .await
+                .map_err(api_err)?
+                .into_iter()
+                .map(|r| r.move_id)
+                .collect()
+        };
+
+        Ok(MoveOutcome {
+            move_ids,
+            moved,
+            skipped,
+        })
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (to_collection_id, items);
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// Copies one selected row contributes to a batch move. Fixed, not the
+/// caller's — see [`move_selection`].
+#[cfg(feature = "ssr")]
+const SELECTION_MOVE_QUANTITY: i32 = 1;
+
+/// The most rows one batch move (or one destination-ranking read) may carry. A
+/// tray selection is a hand of cards, not a shipment; the cap keeps a hostile
+/// caller from making the server walk an unbounded list of per-card queries.
+pub const SELECTION_MOVE_MAX: usize = 100;
+
+/// Undo a whole batch move from its toast — one call, **one transaction**
+/// (`CollectionStore::undo_moves`).
+///
+/// A batch writes one `moves` row per item and the ledger has no batch id, so
+/// the single Undo the tray offers has N rows to reverse. Firing N single-move
+/// undos would be N transactions, and a failure part-way would leave the batch
+/// half-reverted behind a toast that already claimed it was undone — the shape
+/// of the defect this repo has hit before. Idempotent per move, so a
+/// double-clicked toast is harmless.
+#[server(
+    prefix = "/api",
+    endpoint = "undo_selection_move",
+    input = leptos::server_fn::codec::Json
+)]
+pub async fn undo_selection_move(move_ids: Vec<shared::Id>) -> Result<(), ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .undo_moves(move_ids)
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = move_ids;
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// The destination ranking for a whole selection: `suggested_destinations` per
+/// card, folded into one shortfall-ordered list
+/// (`my::move_selection::merge_suggestions`).
+///
+/// The loop lives here because the trait's read is per-oracle by contract
+/// (collection-api's "suggested-destinations… for the card") while the tray
+/// picks one destination for many cards. It is a fold of reads, not new policy.
+#[server(
+    prefix = "/api",
+    endpoint = "selection_destinations",
+    input = leptos::server_fn::codec::Json
+)]
+pub async fn selection_destinations(
+    oracle_ids: Vec<shared::Id>,
+) -> Result<Vec<shared::SuggestedDestination>, ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        let backend = collection_backend().await?;
+        let mut per_card = Vec::new();
+        for oracle_id in oracle_ids.into_iter().take(SELECTION_MOVE_MAX) {
+            per_card.push(
+                backend
+                    .suggested_destinations(oracle_id)
+                    .await
+                    .map_err(api_err)?,
+            );
+        }
+        Ok(crate::my::move_selection::merge_suggestions(per_card))
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = oracle_ids;
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
 /// Probe endpoint proving JWT auth end-to-end: verifies the bearer token and
 /// echoes the caller's user id. 401 without a valid token. Superseded by real
 /// `/my/*` routes once the data model lands; kept minimal until then.

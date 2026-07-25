@@ -142,6 +142,9 @@ pub mod paths {
     /// Move endpoints (not per-collection: a move spans two collections).
     pub const MOVES: &str = "/api/moves";
     pub const MOVES_BATCH: &str = "/api/moves/batch";
+    /// Undo N moves in one transaction — the batch counterpart of
+    /// `{id}/undo`, and the selection tray's single Undo.
+    pub const MOVES_UNDO_BATCH: &str = "/api/moves/undo-batch";
     pub const MOVES_UNDO_LAST: &str = "/api/moves/undo-last";
     pub const MOVE_UNDO_ROUTE: &str = "/api/moves/{id}/undo";
     pub fn move_undo(move_id: Id) -> String {
@@ -152,6 +155,12 @@ pub mod paths {
     pub const CARD_DESTINATIONS_ROUTE: &str = "/api/cards/{id}/destinations";
     pub fn card_destinations(oracle_id: Id) -> String {
         format!("/api/cards/{oracle_id}/destinations")
+    }
+
+    /// The caller's holdings of a card, ungrouped (by oracle id).
+    pub const CARD_HOLDINGS_ROUTE: &str = "/api/cards/{id}/holdings";
+    pub fn card_holdings(oracle_id: Id) -> String {
+        format!("/api/cards/{oracle_id}/holdings")
     }
 
     /// The axum route template for a per-collection operation (`{id}` param).
@@ -291,9 +300,35 @@ pub trait CollectionStore {
     /// (undoing an already-undone move is a no-op).
     async fn undo_move(&self, move_id: Id) -> ApiResult<()>;
 
+    /// Undo several moves **in one transaction** — the batch counterpart of
+    /// [`Self::undo_move`], and the symmetric partner of [`Self::move_batch`].
+    ///
+    /// It exists because a batch move writes one ledger row per item, so the
+    /// tray's single Undo has N rows to reverse: looping `undo_move` would be N
+    /// transactions, and a failure partway would leave the batch half-reverted
+    /// behind a toast that already said it undid the whole thing. Here the batch
+    /// reverts wholly or not at all, exactly as it was applied. Idempotent per
+    /// move, like `undo_move`.
+    async fn undo_moves(&self, move_ids: Vec<Id>) -> ApiResult<()>;
+
     /// Undo the caller's most recent not-yet-undone move (⌘K "undo last move").
     /// Returns the undone move id, or `None` if there is nothing to undo.
     async fn undo_last_move(&self) -> ApiResult<Option<MoveReceipt>>;
+
+    /// Every holding of a card the caller owns, **at full grain** — printing,
+    /// finish, condition, language, board, quantity — across all their
+    /// collections.
+    ///
+    /// The read models deliberately collapse that detail: `collection_view`
+    /// groups by `(printing, board)` and `CardDetail::ownership` by
+    /// `(collection, printing)`, so a row reading `present = 3` says nothing
+    /// about whether those three are foil, played, Japanese, or sideboarded.
+    /// A *move* is addressed at the full grain (`holding_take`), so anything
+    /// deciding whether a move can be made needs the ungrouped rows — otherwise
+    /// it can only find out by attempting the write and reading a `Conflict`
+    /// back, which in a batch means killing the batch. Small by construction:
+    /// one card's holdings, session-scoped.
+    async fn holdings_of_oracle(&self, oracle_id: Id) -> ApiResult<Vec<HoldingLine>>;
 
     /// Collections that desire a card more than they currently hold — the
     /// move/pull destination ranking, shortfall-first.

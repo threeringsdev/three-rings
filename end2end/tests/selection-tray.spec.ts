@@ -101,22 +101,25 @@ test.describe("bench", () => {
     }
   });
 
-  test('@fast "Move to…" renders and is inert', async ({ page }) => {
+  test('@fast "Move to…" opens the destination picker', async ({ page }) => {
     await open(page);
     await page.locator(BENCH_SELECT).first().click();
     const move = page.locator(MOVE);
     await expect(move).toHaveText("Move to…");
-    // Announced inert *and* actually inert: forcing a click past the disabled
-    // state must change nothing — no overlay opens, the selection is untouched.
-    await expect(move).toBeDisabled();
-    await move.click({ force: true });
+
+    // The picker is the *catalog's* control (`DestinationList`), so it brings
+    // that control's search box with it. On the bench the collection list is a
+    // session read the anonymous page cannot make, so the honest rendering is
+    // the empty state — asserted on the content, never on a visibility flag
+    // (a closed popover is in the DOM either way; e2e-suite skill).
+    await move.click();
+    const picker = page.locator("#popover-tray-destination");
+    await expect(
+      picker.locator('[data-name="CommandInput"]'),
+    ).toHaveAttribute("placeholder", "Search collections…");
+    await expect(picker).toContainText("No collection to move to.");
+    // Nothing was moved and nothing was deselected by merely opening it.
     await expect(page.locator(COUNT)).toHaveText("1 card");
-    // Bare `[role=dialog]` would be useless: the bench's dialog and sheet
-    // sections are in the DOM at all times, closed (e2e-suite skill,
-    // "assertions that lie"), so the state attribute is the only real signal.
-    await expect(page.locator('[role="dialog"][data-state="open"]')).toHaveCount(
-      0,
-    );
   });
 });
 

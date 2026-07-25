@@ -11,6 +11,16 @@
 //! (`shell::SelectionTrayDock`), so this section renders the pill inline. The
 //! above-the-tab-bar docking is asserted in `end2end/tests/selection-tray.spec.ts`
 //! against the real pages.
+//!
+//! The pill's `action` slot is filled with the **real**
+//! [`MoveSelection`](crate::my::move_selection::MoveSelection) — the picker is
+//! the thing worth looking at, and a stand-in button would bench the slot
+//! rather than the control. Two consequences, both deliberate: the section
+//! mounts its own `Toaster` (the count-stepper precedent, since the app's lives
+//! in the shell), and the picker on an anonymous bench shows its
+//! "No collection to move to." empty state, because the collection list is
+//! session-scoped. The bench's ids are synthetic, so a pick from an authed
+//! browser is refused by the server rather than moving anything real.
 
 use leptos::prelude::*;
 use shared::{Board, Id};
@@ -18,9 +28,18 @@ use shared::{Board, Id};
 use crate::components::ui::selection_tray::{
     SelectedCard, SelectionCheckbox, SelectionKey, SelectionState, SelectionTray,
 };
+use crate::components::ui::sonner::Toaster;
+use crate::my::move_selection::MoveSelection;
 
 pub fn demo() -> AnyView {
-    view! { <TrayDemo /> }.into_any()
+    view! {
+        // The Toaster is normally mounted once at the app root; the bench
+        // section brings its own so the move's confirmation/refusal toasts
+        // have somewhere to land.
+        <Toaster />
+        <TrayDemo />
+    }
+    .into_any()
 }
 
 /// A 22×30 placeholder "card back", as a self-contained `data:` URI — the
@@ -41,6 +60,7 @@ fn TrayDemo() -> impl IntoView {
             "Lightning Bolt — /my row (oracle grain)",
             SelectedCard {
                 key: SelectionKey::Card { oracle_id: id(1) },
+                oracle_id: id(1),
                 name: "Lightning Bolt".into(),
                 image_uri: Some(ART.into()),
             },
@@ -53,6 +73,7 @@ fn TrayDemo() -> impl IntoView {
                     printing_id: id(100),
                     board: Board::Main,
                 },
+                oracle_id: id(1),
                 name: "Lightning Bolt".into(),
                 image_uri: Some(ART.into()),
             },
@@ -65,6 +86,7 @@ fn TrayDemo() -> impl IntoView {
                     printing_id: id(100),
                     board: Board::Side,
                 },
+                oracle_id: id(1),
                 name: "Lightning Bolt".into(),
                 image_uri: None,
             },
@@ -77,6 +99,7 @@ fn TrayDemo() -> impl IntoView {
                     printing_id: id(101),
                     board: Board::Main,
                 },
+                oracle_id: id(2),
                 name: "Counterspell".into(),
                 image_uri: None,
             },
@@ -110,7 +133,10 @@ fn TrayDemo() -> impl IntoView {
             </p>
             // Inline, not docked — see the module docs.
             <div id="bench-tray">
-                <SelectionTray selection />
+                <SelectionTray
+                    selection
+                    action=ViewFn::from(move || view! { <MoveSelection selection /> })
+                />
             </div>
         </div>
     }
