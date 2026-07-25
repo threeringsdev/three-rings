@@ -73,8 +73,21 @@ single biggest cost sink in the loop.
   while building: `npx playwright test --project=chromium --grep @fast`.
   Implementers and reviewers use **only** this.
 - The task's e2e run = **once per task, after the adversarial-review fixes are
-  in** (ui-task-loop step 4): `npx playwright test --project=chromium`. One
-  pass, not one per round. A task is not `[x]` until it is green.
+  in** (ui-task-loop step 4):
+  `npx playwright test --project=chromium --workers=1`. One pass, not one per
+  round. A task is not `[x]` until it is green.
+
+  **`--workers=1` is deliberate, not caution.** `hydrated(page)` waits on the
+  global `<html data-hydrated>` stamp, which does not imply a *streamed*
+  Suspense island is interactive; under worker pressure a click lands before
+  the island is wired and is silently swallowed. Four tests flake on this —
+  `smoke.spec.ts:92` and `:114`, `collection-tree.spec.ts:65`,
+  `selection-tray.spec.ts:239` — a different subset each run, all passing in
+  isolation. Measured 2026-07-25: default workers 2 failed / 141 passed in
+  1.4 min, then 143/143 in 3.8 min single-worker. Since the parallel run needs
+  a retry to be believed, it is not actually faster, and it costs a real
+  signal. Revert this when the hydration-aware click helper lands (filed under
+  Phase 5 discoveries).
   A **major** failure goes back to the implementer; a minor failure or flake is
   quarantined `@flaky` and filed under Phase 5 discoveries. (Stage boundaries
   add the Android **release** smoke, not a different browser tier.)

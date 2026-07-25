@@ -219,6 +219,95 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Batch move (2026-07-25)
+
+`app/src/my/move_selection.rs` — the tray's "Move to…" wired to a real write.
+Second of the three split move-flow tasks.
+
+**The generalizable rule, and the round's one major:** *anything deciding
+whether a write is possible cannot use a read model that groups away the
+write's addressing.*
+
+The collection view's `present` CTE is `GROUP BY printing_id, board`, so finish,
+condition and language are collapsed; a row holding only foils reports
+`present = 3` and gets a checkbox. `holding_take` matches the **full** grain
+plus `board = 'main'`. Every `MoveItem` was built at the default grain and
+nothing checked that the source actually held it, so such a row returned
+`Conflict("no copies to move")` — and because `move_batch` is one transaction,
+that rolled back the *entire* batch behind an error naming no card. A 20-card
+batch died to one entry, diagnosable only by bisecting the selection.
+
+Reachable on real data: Trade Binder's `Aatchik, Emerald Radian` is foil-only
+(qty 3) and renders as an ordinary selectable row. The same blindness hit
+boards on the `/my` path — `CardDetail::ownership` groups by
+`(collection_id, printing_id)`, so `resolve_card` saw neither grain nor board,
+making the module's own "boards are refused, not silently mainboarded" true
+only for `SelectionKey::Held`.
+
+The implementer filed this itself as a follow-up ("loud, never wrong — but
+annoying"); the orchestrator **promoted it to major**, on the grounds that it is
+loud but *unattributable*, fires on data present today, and breaks the feature's
+primary path. That call was accepted on re-verification: "never wrong" held,
+"loud" did not survive the fact that the failure isn't scoped to the bad entry.
+
+**The fix refuses; it does not widen the write.** New read
+`CollectionStore::holdings_of_oracle -> Vec<HoldingLine>` (trait + hosted +
+native + `GET /api/cards/{id}/holdings`) returns holdings **ungrouped**, and
+resolution became two pure functions over `&[HoldingLine]` that decide
+*movable* — mainboard, default grain, quantity > 0 — before any `MoveItem`
+exists. It also superseded the `card_detail` call resolution previously made,
+so the path got cheaper while getting correct. New per-entry refusals `Grain`,
+`Board` (now reachable on the `/my` path) and `NoCopies` (the stale-tray gap,
+previously a batch abort) are named in the toast and stay checked in the tray,
+so the rest of the batch still moves. `MoveItem`, `CardRow`, `holding_take` and
+the ledger are untouched — the third task's fence held.
+
+**The residual TOCTOU case is deliberate.** If another tab moves the copies
+between the resolution read and `move_batch`, `holding_take` still returns
+`Conflict` and still rolls back with an unattributable error. Pre-judging it is
+impossible from outside the write transaction; closing it means a grain-aware
+batch write, which is the third task. Mitigations: the window shrank from
+"however long the tray sat open" to microseconds inside one server fn, the
+pre-judgeable stale case now refuses as `NoCopies`, and the toast says nothing
+was moved so the intact selection can be retried.
+
+**Other decisions.** `move_batch` (already trait/hosted/native/route-complete)
+was used rather than a new `move_cards` path — it is collection-api's actual
+"Move (batch)" and is what makes the write atomic. A true batch undo needed a
+new `undo_moves(Vec<Id>)` trait method: the ledger has no batch id, so N writes
+mean N `moves` rows, and looping the per-move undo would be N transactions with
+a partial-revert failure mode — the exact defect shape this repo already hit
+(committing 0 ran `DELETE FROM holdings` behind a success toast). Quantity is
+server-fixed at one copy per entry, and the toast says "(1 copy each)", because
+the tray's pill counts entries and one copy each is the only quantity it does
+not lie about. The destination picker was *extracted* for sharing
+(`DestinationList`/`DestinationOption`/`DestinationChoice`), not forked.
+`HoldingsRevision` is provided by the shell and consumed as a resource *source*
+by both holdings-rendering pages, so a move made from the shell invalidates the
+page it affected by construction.
+
+**Authorization was checked and is sound.** `moves`, `holdings` and
+`collections` all carry `ENABLE` + `FORCE ROW LEVEL SECURITY` keyed on
+`app.user_id`; `scoped_tx` binds that GUC transaction-locally; `undo_one`'s
+lookup therefore returns no row for another user's move id. The
+client-supplied `oracle_id` on `SelectionItem` is safe by construction, not by
+trust: it only selects which of the caller's own RLS-scoped holdings to read,
+and every path re-checks the named collection/printing/board, so a wrong oracle
+yields `NoCopies` rather than a write elsewhere.
+
+**A fixture that cannot express a distinction cannot test code that depends on
+it.** The grain path was untestable across the whole suite by construction:
+`addHave` posted only `{printing_id, quantity}`, so every fixture holding was
+`nonfoil/nm/en/main`. `addHave` now takes a grain. The fix is mutation-verified
+— reverting `movable` to the pre-fix `quantity > 0` fails both new tests, the
+foil one with the whole-batch death that was originally reported.
+
+**Evidence.** `cargo test --workspace --exclude frontend` 136 + 26 green; full
+chromium e2e **143/143** at `--workers=1` (3.8 min); hydration CLEAN; Android
+webview 16/16. The reviewer's exact row driven through the real UI: rendered
+`present=3 board=main` with a checkbox, refused by name, tray retains it,
+Trade Binder still 3, destination still 0 rows.
+
 ### Selection tray, read-only (2026-07-25)
 
 `app/src/components/ui/selection_tray.rs` — custom gap component №3, built on
