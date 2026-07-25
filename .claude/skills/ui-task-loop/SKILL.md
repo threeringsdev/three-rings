@@ -64,6 +64,14 @@ optional:
 The Stage 3 list is a **fixed backlog being drained**, not a living queue. Its
 length only goes down.
 
+**One exemption: splitting a bundled line.** Re-partitioning scope that is
+already in Stage 3 into two or three lines is not "adding a task" — no new work
+enters the queue, the same work is divided so one agent doesn't absorb three
+surfaces in one context. The line count ticks up; the *scope* does not, so the
+loop still terminates. This requires the maintainer's approval per step 0, and
+the split must replace the original line, never sit alongside it. Anything
+genuinely *discovered* still goes to Phase 5 discoveries — no exceptions.
+
 Between tasks the orchestrator keeps its own context (queue state, host
 processes, what shipped) and **discards the subagents** — every task gets a
 fresh implementer and a fresh reviewer. Never carry a previous task's
