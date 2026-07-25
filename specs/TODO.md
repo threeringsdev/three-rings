@@ -155,6 +155,13 @@ UI work stays on the ~3K-printing POC catalog (maintainer decision
 
 ## Later / parked (not in the queue — promote to a phase before working)
 
+### UI / Performance issues noted during testing
+
+- [ ] Catalog first load is slow
+- [ ] Catalog card size adjustment (resizes with window, but default largest size should be capped, cards get too big currently)
+- [ ] Black background too dark, card borders blend in
+- [ ] DFC flip should be viewable on main catalog page (and everywhere the card is rendered besides hover view)
+- [ ] No back button from card detail view to catalog page
 ### Catalog updates
 
 - [ ] collection-api → keyset for needs / shopping-list (follow-up). `needs(collection)` and the global `shopping_list()` currently return full result sets — bounded in practice but unpaginated. If profiling at real scale shows them hot, add keyset paging like the other reads (specs: [collection-api](collection-api.md))
