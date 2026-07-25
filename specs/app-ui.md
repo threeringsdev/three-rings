@@ -219,6 +219,96 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Quick-add panel (2026-07-25)
+
+`app/src/components/quick_add.rs` — the intake composite on
+`/my/collections/:id`, wrapping the page's existing `QueryBar` in a `Command`
+whose candidates come from `search_catalog` keyed on the committed `?q=`. The
+keystroke contract is a pure `decode(key, shift, alt, rows, counting) -> Action`
+(12 unit tests); `command` gained a `use_command_nav()` / `CommandNav` seam so a
+*foreign* input can drive its item registry, `query_bar` gained `on_key` and
+`reset` props, and `quick_add` gained a server-clamped `quantity`
+(`clamp_quick_add_quantity`, `QUICK_ADD_MAX = 99`).
+
+**Deviation: the panel is not the vendored `popover`,** though the task line
+names it in the composite. Two measured browser behaviors defeat it for a
+field-anchored surface on a page that navigates as you type: (a) `popover="auto"`
+light-dismisses on the same `pointerup` that focuses the field — `showPopover`
+returns `Ok`, then `toggle → closed`; (b) the router removes and re-inserts this
+page's whole subtree on every `?q=` change, and removing a *showing* popover
+hides it **without** firing `toggle` (the HTML removing steps pass
+`fireEvents=false`), so the Rust `open` signal stayed `true` while the panel was
+gone. An absolutely-positioned panel has neither problem; Escape and
+outside-`pointerdown` are handled in the panel instead. The destination picker
+keeps using `popover` (button trigger, no navigation) — this is not a retreat
+from the primitive.
+
+**The router churns this route's DOM.** Measured on `/my/collections/:id`:
+~800 ms after each `?q=` navigation the page subtree is detached for ~400 ms and
+re-attached (same nodes), blurring the field — without mitigation the keystroke
+loop dies after the first card. `/catalog` and `/my` do **not** do this. The
+panel holds the caret with a 120 ms interval gated on *panel open* and on focus
+having landed on `<body>` rather than a real element. That is a workaround at one
+call site; the cause is upstream and is filed.
+
+**`command`'s ordering caveat needed no fix here** — the candidate list is
+rebuilt inside a `Suspend` per query, so every result set is a full remount in
+document order, which is the case the caveat explicitly exempts. The
+`visible_ids` comment was rewritten per-consumer rather than sorted.
+
+**`quick_add` taking a quantity** deliberately narrows the earlier "quantity 1 by
+construction" finding: `⇧⏎ set count` is a shipped keystroke, and four separate
+adds would need four undos. Clamped `1..=99` server-side; the UI caps entry at
+two digits, so the clamp is unreachable by typing. Undo reverses the full move
+quantity, so a playset undoes as a playset.
+
+**`IN THIS COLLECTION` rows are context, not targets** — storyboard S2
+pre-highlights the best *catalog* match with the present row above it
+unhighlighted. They render as links to `/cards/:id`; adding more copies of a card
+you already own goes through the catalog section.
+
+**time-to-enter-50, recorded:** scripted run into a scratch binder, 60 ms per
+keystroke, 6-character prefixes, `⏎` on the pre-highlighted match — **50 cards /
+50 copies verified in the collection, 350 keystrokes (7.0 per card), 1 pointer
+action for the whole session, 97.3 s (1.95 s/card)**. Typing is 0.36 s of that;
+the remaining ~1.6 s/card is the 250 ms debounce plus the catalog and add round
+trips.
+
+**POC-catalog realism — confirmed deferred, now quantified.** Of 30 six-character
+probes, one ("shock") returns *zero* matches in the ~3K-printing subset and
+several return the 10-row page cap, so real ↓ disambiguation cost is unmeasurable
+here. The metric run used verified prefixes and spent zero disambiguation
+keystrokes; a full catalog will move that number.
+
+**Deliberately deferred:** the storyboard's in-field `esc` chip (the footer
+carries the contract and Escape works); the post-add per-row `✓ wanted 1`
+confirmation (the toast covers it); set codes in the candidate meta line
+(`CardSummary` carries no set — mana cost with a type-line fallback instead);
+`aria-activedescendant` (`CommandItem` emits no ids). **No bench section for the
+panel itself** — it is a Composite in the gap analysis, not one of the three
+custom gap components, following `QueryBar`'s precedent; the *primitive* it
+depends on got the bench coverage instead, which is what made the Android probe
+possible at all.
+
+**Review: one round, zero majors.** The reviewer verified all six flagged claims
+end-to-end — the popover replacement's dismissal/escape/stacking/focus, the focus
+keeper's lifecycle (cleared on unmount, no-ops when closed, cannot take focus
+from a real element), the quantity clamp and undo path, the Want-vs-Have memo
+sharing `add_default` with the page's own quick-action row so the two cannot
+drift, `use_command_nav` being purely additive for the destination picker and
+bench, and `decode` against the contract. Twelve minors were filed rather than
+fixed, per the loop's calibration. Two were re-checked by the orchestrator before
+accepting the severity: the stale-count-after-a-failed-add path renders a visible
+`× 4` chip and any keystroke clears the count, and the Escape-with-zero-rows gap
+retains outside-click dismissal — neither reaches the major bar.
+
+**Verified:** merge gate all 8 steps green (135 tests); hydration CLEAN on 3 anon
++ 5 authed URLs; bench probe CLEAN including the new foreign-nav assertions; SSR
+curls on binder (`Adding here: ⏎ Have`) and deck (`Adding here: ⏎ Want`), both
+with a server-side panel count of 0; full chromium tier **131/131** (8 new, 0
+regressions); Android CDP probe PASS and `android-quick-add-check` CLEAN on the
+live webview.
+
 ### `/my/collections/:id` binder/deck view (2026-07-25)
 
 `app/src/my/collection.rs` — the binder and its deck variant on one page, over a
