@@ -27,8 +27,14 @@
 //! commit does **not** refetch the view: remounting the row would dispose the
 //! stepper the undo toast is about to call back into. The optimistic value is
 //! already right, the sidebar tree is refetched for its badges, and the
-//! header's own count follows a page-level delta so the two never disagree
-//! on screen.
+//! header's own count follows a delta so the two never disagree on screen —
+//! a delta that belongs to the rendered payload and is zeroed by the next one,
+//! never by the URL (see [`CollectionPage`]).
+//!
+//! **The stepper's floor here is 1, not the component's 0.** A committed 0 is a
+//! deletion, and the deletion is not undoable through this write path — the
+//! reasoning is at the `CountStepper` call site, and removing the last copy
+//! belongs to the move flows.
 //!
 //! **A deck is the same page with three differences** (spec): a header card
 //! for format + commanders, cards grouped by board and type with slot counts,
@@ -122,15 +128,26 @@ pub fn CollectionPage() -> impl IntoView {
         },
     );
 
-    // Copies committed through the steppers since this page loaded. The header
-    // adds it so HERE and "N here" cannot disagree without a reload (see the
-    // module doc on why a commit does not refetch the view).
+    // Copies committed through the steppers that the *currently rendered*
+    // totals do not yet include. The header adds it so HERE and "N here" cannot
+    // disagree without a reload (see the module doc on why a commit does not
+    // refetch the view).
     let here_delta = RwSignal::new(0);
-    // A new page load (or a re-search) starts the delta over — the freshly
-    // fetched totals already include everything committed before it.
+    // The delta belongs to a payload, so it is zeroed by a payload — every new
+    // one (a navigation, a re-search, or the teardown's refetch) already
+    // contains everything committed before it. Keying this on the *URL*
+    // instead was wrong twice over: a `view_res.refetch()` at the same URL left
+    // the delta applied on top of fresh totals (teardown emptied a deck to zero
+    // and the header read "1 here"), and a navigation zeroed it while the
+    // `Transition` was still showing the pre-commit totals it belonged to.
+    //
+    // `is_some()` is the load-bearing half: a resource in flight reads `None`,
+    // and that is exactly the window where the old totals — and so the old
+    // delta — are still what's on screen.
     Effect::new(move |_| {
-        let _ = (url_id.get(), url_q.get(), url_cursor.get());
-        here_delta.set(0);
+        if view_res.get().is_some() {
+            here_delta.set(0);
+        }
     });
 
     let paged = Memo::new(move |_| !url_cursor.read().is_empty());
@@ -1135,12 +1152,27 @@ fn HereCount(
     });
 
     view! {
-        <CountStepper
-            value
-            label=name
-            on_commit
-            class="justify-end"
-        />
+        // `min = 1`, deliberately, and it is the one place this view diverges
+        // from the stepper's own default.
+        //
+        // `CountStepper` documents a committed 0 as "delete the holding row",
+        // and `set_holding_quantity(id, 0)` does exactly that — after which the
+        // undo the stepper *always* offers re-POSTs the now-deleted holding id
+        // and 404s. The user is shown a success toast with an Undo, presses it,
+        // gets "not found: holding", and the copies are gone. Every card in a
+        // binder was one `−` and one blur away from that.
+        //
+        // Making the deletion undoable needs a write addressed by grain rather
+        // than by row id (holdings are recreated by `add_holding`/`move_cards`,
+        // neither of which the row can address: `move_cards` is board-blind and
+        // `CardRow` carries no finish/condition/language). That is a widening of
+        // collection-api's surface, and removing the last copy is a **move**
+        // (`to = None`) in this app's model — the selection-tray + move-flows
+        // task's job, where undo is the ledger's `undone_at` and works. Until
+        // then the floor is 1: the ± button announces `aria-disabled` there and
+        // a typed 0 clamps, so the destructive commit is unreachable rather
+        // than reachable-and-lying.
+        <CountStepper value label=name on_commit min=1 class="justify-end" />
     }
     .into_any()
 }
@@ -1253,7 +1285,9 @@ fn TeardownDialog(
                                 }
                                 prop:value=move || destination.get()
                             >
-                                <option value="">"Their previous locations"</option>
+                                <option value="" data-testid="teardown-previous">
+                                    "Their previous locations"
+                                </option>
                                 // Awaited, not read in render: a resource read
                                 // outside a `Suspend` renders one thing during
                                 // SSR and another after hydration — the

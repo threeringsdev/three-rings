@@ -240,12 +240,37 @@ test("the three columns agree with the collection read @fast", async ({
   page,
   request,
 }) => {
-  const trade = await collectionNamed(request, "Trade Binder");
+  // Two collections, and the second one is the point. Against Trade Binder
+  // alone this test was **vacuous for three of the rules it looks like it
+  // covers**: no row anywhere in the fixture had `present_rollup > 0`, so the
+  // `+n` marker and the OWNED-collapses-against-the-total rule were never
+  // exercised, and no collection held two printings of one card, so
+  // "WANTED prints once" was unfalsifiable. `Depth Box` (app/src/seed.rs
+  // `build_depth`) exists for exactly those shapes; the guards below fail loudly
+  // if a re-seed ever loses them, rather than letting the test go quiet again.
+  const names = ["Trade Binder", "Depth Box"];
   await expect(async () => {
-    const view = await viewOf(request, trade.summary.id);
-    await page.goto(`/my/collections/${trade.summary.id}`);
-    await hydrated(page);
-    expect(await renderedCells(page)).toEqual(expectedCells(view.cards));
+    let sawRollup = false;
+    let sawRepeatedOracle = false;
+    for (const name of names) {
+      const c = await collectionNamed(request, name);
+      const view = await viewOf(request, c.summary.id);
+      sawRollup ||= view.cards.some((r) => r.present_rollup > 0);
+      const keys = view.cards.map((r) => `${r.oracle_id}/${r.board}`);
+      sawRepeatedOracle ||= new Set(keys).size < keys.length;
+
+      await page.goto(`/my/collections/${c.summary.id}`);
+      await hydrated(page);
+      expect(await renderedCells(page), name).toEqual(expectedCells(view.cards));
+    }
+    expect(
+      sawRollup,
+      "dev seed must hold a card in both a collection and a descendant (build_depth)",
+    ).toBe(true);
+    expect(
+      sawRepeatedOracle,
+      "dev seed must hold two printings of one card in one collection (build_depth)",
+    ).toBe(true);
   }).toPass({ timeout: 30_000, intervals: [500, 1_000, 2_000] });
 });
 
@@ -281,22 +306,29 @@ test("a card the deck only wants is still a row @fast", async ({
   }).toPass({ timeout: 30_000, intervals: [500, 1_000, 2_000] });
 });
 
-test("child collections are folder rows above the cards @fast", async ({
+test("child collections are folder rows above the cards, counted rolled-up @fast", async ({
   page,
   request,
 }) => {
-  const shoebox = await collectionNamed(request, "Shoebox");
+  // `Depth Box`, not `Shoebox`: Shoebox's only child is a leaf, so its
+  // rolled-up count equals its own and this test could not tell the two apart
+  // — a folder row rendering `present` instead of the rollup passed. `Depth
+  // Shelf` has a child of its own (app/src/seed.rs `build_depth`), so the two
+  // numbers differ and the guard below keeps it that way.
+  const parent = await collectionNamed(request, "Depth Box");
   await expect(async () => {
     const rows = await tree(request);
-    const kids = rows.filter(
-      (r) => r.summary.parent_id === shoebox.summary.id,
-    );
+    const kids = rows.filter((r) => r.summary.parent_id === parent.summary.id);
     expect(
       kids.length,
-      "dev seed should nest a collection under Shoebox",
+      "dev seed should nest a collection under Depth Box",
     ).toBeGreaterThan(0);
+    expect(
+      kids.some((k) => rolledUp(rows, k.summary.id) !== k.present),
+      "dev seed's folder row must have descendants of its own (build_depth)",
+    ).toBe(true);
 
-    await page.goto(`/my/collections/${shoebox.summary.id}`);
+    await page.goto(`/my/collections/${parent.summary.id}`);
     await hydrated(page);
 
     for (const kid of kids) {
@@ -394,22 +426,58 @@ test("the needs chip says what the collection's needs say @fast", async ({
   }).toPass({ timeout: 30_000, intervals: [500, 1_000, 2_000] });
 });
 
-test("a binder has no needs chip, no commander card and no teardown @fast", async ({
+test("the deck-only header parts are absent from a binder @fast", async ({
   page,
   request,
 }) => {
   // The deck-only half of the variant, asserted by its absence — otherwise
   // "the deck shows X" passes for a page that shows X everywhere.
+  //
+  // The needs chip is deliberately NOT in this list. It is deck-only in
+  // specs/app-ui.md's distilled bullet, but the design authority that bullet
+  // distills says otherwise — design/information-architecture.md: "Needs views
+  // and pick lists are contextual only: reached from the needs chip on a deck
+  // **or collection** header" — and `/my/collections/:id/needs` is a route for
+  // any collection, so gating the chip on decks would strand it. The
+  // binder-with-wants case below pins that reading.
   const trade = await collectionNamed(request, "Trade Binder");
   await page.goto(`/my/collections/${trade.summary.id}`);
   await hydrated(page);
   await expect(page.locator('[data-testid="collection-kind"]')).toHaveText(
     "Binder",
   );
+  await expect(page.locator('[data-testid="collection-format"]')).toHaveCount(0);
   await expect(page.locator('[data-testid="deck-commanders"]')).toHaveCount(0);
   await expect(page.locator('[data-testid="teardown-open"]')).toHaveCount(0);
   await expect(page.locator('[data-testid="deck-section"]')).toHaveCount(0);
-  await expect(page.locator('[data-testid="needs-chip"]')).toHaveCount(0);
+});
+
+test("a binder that wants cards gets the needs chip too @fast", async ({
+  page,
+  request,
+}) => {
+  // The other side of the rule above, and the reason it needs its own test: the
+  // absence assertion against Trade Binder passes for free (it has no desires
+  // at all), so no chip-related mutation could ever kill it. `Depth Box` wants
+  // more copies than it holds, so its chip is a real render.
+  const box = await collectionNamed(request, "Depth Box");
+  await expect(async () => {
+    const view = await viewOf(request, box.summary.id);
+    expect(
+      view.totals.missing,
+      "dev seed's Depth Box should want more than it holds (build_depth)",
+    ).toBeGreaterThan(0);
+    expect(view.collection.kind).toBe("binder");
+
+    await page.goto(`/my/collections/${box.summary.id}`);
+    await hydrated(page);
+    const chip = page.locator('[data-testid="needs-chip"]');
+    await quick(chip).toContainText(`${view.totals.missing} missing`);
+    await quick(chip).toHaveAttribute(
+      "href",
+      `/my/collections/${box.summary.id}/needs`,
+    );
+  }).toPass({ timeout: 30_000, intervals: [500, 1_000, 2_000] });
 });
 
 test("the deck header carries its format and commander @fast", async ({
@@ -420,8 +488,6 @@ test("the deck header carries its format and commander @fast", async ({
   await expect(async () => {
     const view = await viewOf(request, deck.summary.id);
     expect(view.collection.format).toBeTruthy();
-    // Cross-checked against the standalone commander read, which computes the
-    // colour identity through the same helper but its own request.
     const cmd = (await (
       await request.get(`/api/collections/${deck.summary.id}/commanders`)
     ).json()) as {
@@ -432,6 +498,28 @@ test("the deck header carries its format and commander @fast", async ({
       cmd.commanders.length,
       "dev seed should tag a commander",
     ).toBeGreaterThan(0);
+
+    // The independent witness. `/commanders` stopped being one in this change:
+    // it was refactored to call the same `commanders_in` helper `collection_view`
+    // uses, so a mutation there moves both sides together. `cards_with_tag` is a
+    // genuinely different query over `card_tags`, reached by resolving the
+    // built-in tag by slug rather than by trusting either commander read.
+    const tags = (await (
+      await request.get(`/api/collections/${deck.summary.id}/tags`)
+    ).json()) as { id: string; builtin: string | null }[];
+    const commanderTag = tags.find((t) => t.builtin === "commander");
+    expect(commanderTag, "the commander built-in tag should be in scope").toBeTruthy();
+    const tagged = (await (
+      await request.get(
+        `/api/collections/${deck.summary.id}/tags/${commanderTag!.id}/cards`,
+      )
+    ).json()) as { name: string }[];
+    expect(tagged.map((c) => c.name).sort()).toEqual(
+      cmd.commanders.map((c) => c.name).sort(),
+    );
+    expect(view.commanders!.commanders.map((c) => c.name).sort()).toEqual(
+      tagged.map((c) => c.name).sort(),
+    );
 
     await page.goto(`/my/collections/${deck.summary.id}`);
     await hydrated(page);
@@ -592,12 +680,14 @@ test("`/` focuses the in-collection search, but not while typing @fast", async (
   await expect(box).toHaveValue("fire /");
 });
 
-test("the mobile back link walks up the tree @fast", async ({
+test("the back link targets the parent collection @fast", async ({
   page,
   request,
 }) => {
   // Drill-down, not history: `back` targets the *parent collection*, which is
   // what "back walks up the tree" means (design/information-architecture.md).
+  // This runs at desktop width and so only pins the `href`; the mobile block
+  // below is what proves the affordance is the one you actually get on a phone.
   const rares = await collectionNamed(request, "Rares");
   const shoebox = await collectionNamed(request, "Shoebox");
   expect(rares.summary.parent_id).toBe(shoebox.summary.id);
@@ -618,6 +708,65 @@ test("the mobile back link walks up the tree @fast", async ({
     "href",
     "/my",
   );
+});
+
+test.describe("mobile", () => {
+  // The acceptance criterion is "mobile drill-down", and asserting an `href` at
+  // desktop width does not test it: `collection-back` is in the DOM at every
+  // width (it is `md:hidden`, a CSS concern), and the breadcrumb it replaces is
+  // in the DOM too. Only a narrow viewport can tell which of the two a phone
+  // user is actually offered.
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test("drill-down replaces the breadcrumb and walks back up @fast", async ({
+    page,
+    request,
+  }) => {
+    const box = await collectionNamed(request, "Depth Box");
+    const shelf = await collectionNamed(request, "Depth Shelf");
+
+    await page.goto(`/my/collections/${box.summary.id}`);
+    await hydrated(page);
+    await expect(page.locator('nav[aria-label="Breadcrumb"]')).toBeHidden();
+    await expect(page.locator('[data-testid="collection-back"]')).toBeVisible();
+
+    // Tapping a folder row drills in…
+    await page
+      .locator(`[data-testid="folder-row"][data-collection="${shelf.summary.id}"] a`)
+      .click();
+    await page.waitForURL(`/my/collections/${shelf.summary.id}`);
+    await hydrated(page);
+    await expect(page.locator('[data-testid="collection-title"]')).toHaveText(
+      shelf.summary.name,
+    );
+
+    // …and back walks up to the parent, not to wherever history was.
+    await page.locator('[data-testid="collection-back"]').click();
+    await page.waitForURL(`/my/collections/${box.summary.id}`);
+    await hydrated(page);
+    await expect(page.locator('[data-testid="collection-title"]')).toHaveText(
+      box.summary.name,
+    );
+  });
+
+  test("no collection page scrolls sideways at phone width @fast", async ({
+    page,
+    request,
+  }) => {
+    // Six numeric-ish columns in a table on a 390px screen is exactly the
+    // arrangement that overflows; the progressive columns exist to stop it.
+    for (const name of ["Depth Box", "Commander Deck", "Bulk Box"]) {
+      const c = await collectionNamed(request, name);
+      await page.goto(`/my/collections/${c.summary.id}`);
+      await hydrated(page);
+      const overflow = await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth -
+          document.documentElement.clientWidth,
+      );
+      expect(overflow, `${name} overflows horizontally`).toBeLessThanOrEqual(1);
+    }
+  });
 });
 
 test("quick search filters this collection and rides the URL @fast", async ({
@@ -828,6 +977,55 @@ test("the stepper edits HERE in place, and the header follows it @fast", async (
   }
 });
 
+test("the stepper will not commit a count of zero @fast", async ({
+  page,
+  request,
+}) => {
+  // The floor is 1, and this is why. `set_holding_quantity(id, 0)` DELETES the
+  // holdings row, and the undo the stepper always offers re-POSTs the same,
+  // now-deleted id — 404, error toast, copies gone. A success toast with a
+  // dead Undo is worse than no zero at all, so `min=1` makes the destructive
+  // commit unreachable until the move flows can make it undoable.
+  const card = await somePrinting(request);
+  const scratch = await createCollection(request, "binder", scratchName("floor"));
+  try {
+    await addHave(request, scratch, card.printing_id, 1);
+    await page.goto(`/my/collections/${scratch}`);
+    await hydrated(page);
+
+    const tr = rowFor(page, card.oracle_id);
+    const dec = tr.locator('[data-testid="count-stepper-dec"]');
+    await expect(dec).toHaveAttribute("aria-disabled", "true");
+
+    // `force`, because Playwright's own actionability check refuses to click an
+    // `aria-disabled="true"` control — which is itself the assertion that the
+    // floor is announced, not merely enforced. Forcing it dispatches a real
+    // click anyway, so the "and it does nothing" half below is genuine.
+    await dec.click({ force: true });
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(tr.locator('[data-testid="count-stepper-value"]')).toHaveText(
+      "1",
+    );
+    // …and no commit happened, so no toast offered an Undo that could not work.
+    await expect(page.locator('[data-name="Toast"]')).toHaveCount(0);
+
+    // …nor by typing a zero into it, which clamps.
+    await tr.locator('[data-testid="count-stepper-value"]').click();
+    const field = tr.locator('[data-testid="count-stepper-input"]');
+    await field.fill("0");
+    await field.press("Enter");
+    await expect(tr.locator('[data-testid="count-stepper-value"]')).toHaveText(
+      "1",
+    );
+
+    const after = await viewOf(request, scratch);
+    expect(after.cards.length, "the holding must still exist").toBe(1);
+    expect(after.cards[0].present).toBe(1);
+  } finally {
+    await deleteCollection(request, scratch);
+  }
+});
+
 test("emptying a deck moves its cards to the chosen destination", async ({
   page,
   request,
@@ -849,13 +1047,28 @@ test("emptying a deck moves its cards to the chosen destination", async ({
     await page.goto(`/my/collections/${deck}`);
     await hydrated(page);
 
+    // Commit a stepper edit *first*, so the teardown below happens with a
+    // pending header delta on the page. The delta is zeroed by each new view
+    // payload rather than by URL changes; keyed on the URL, the teardown's
+    // same-URL refetch left it applied on top of fresh totals and the emptied
+    // deck's header read "1 here".
+    const tr = rowFor(page, card.oracle_id);
+    await tr.locator('[data-testid="count-stepper-inc"]').click();
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "3 here",
+    );
+    await expect(async () => {
+      expect((await viewOf(request, deck)).totals.present).toBe(3);
+    }).toPass({ timeout: 10_000 });
+
     await page.locator('[data-testid="teardown-open"]').click();
     const picker = page.locator('[data-testid="teardown-destination"]');
     await expect(picker).toBeVisible();
     // The default mode needs no picker; the deck itself is never a destination.
-    await expect(picker.locator("option[value='']")).toHaveText(
-      "Their previous locations",
-    );
+    await expect(
+      picker.locator('[data-testid="teardown-previous"]'),
+    ).toHaveText("Their previous locations");
     await expect(picker.locator(`option[value="${deck}"]`)).toHaveCount(0);
 
     await picker.selectOption(dest);
@@ -863,6 +1076,11 @@ test("emptying a deck moves its cards to the chosen destination", async ({
 
     // The deck empties and the destination gains exactly what left.
     await expect(page.locator('[data-testid="collection-empty"]')).toBeVisible();
+    // …and the header says so. The refetched totals are 0, and the stepper
+    // delta that produced "3 here" a moment ago must not survive them.
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "0 here",
+    );
     await expect(async () => {
       const emptied = await viewOf(request, deck);
       expect(emptied.cards).toEqual([]);
@@ -871,7 +1089,7 @@ test("emptying a deck moves its cards to the chosen destination", async ({
       expect(landed.cards.map((r) => r.printing_id)).toEqual([
         card.printing_id,
       ]);
-      expect(landed.cards[0].present).toBe(2);
+      expect(landed.cards[0].present).toBe(3);
     }).toPass({ timeout: 15_000 });
   } finally {
     await deleteCollection(request, deck);

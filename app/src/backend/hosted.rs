@@ -806,6 +806,17 @@ impl CollectionStore for HostedBackend {
         // arithmetic exactly — gap = desired − present here, of which
         // `min(gap, held elsewhere)` is pullable — so the chip and the page it
         // links to cannot disagree.
+        //
+        // **Known limitation, inherited from `needs()` and deliberately kept
+        // identical to it: this arithmetic is board-blind.** `d`/`ph` group by
+        // oracle alone, while the card rows above group by `(oracle, board)`.
+        // A deck holding a card on `main` and wanting it on `side` therefore
+        // renders a Sideboard row reading WANTED 1 while the chip counts
+        // nothing missing. Fixing it in this query alone would make the chip
+        // disagree with the `/needs` page it links to, which is worse; the
+        // honest fix is a board-aware `needs()` + a `board` on `NeedRow`, which
+        // is collection-api's read model rather than this page's. Filed rather
+        // than half-done here.
         let totals: TotalsSql = sqlx::query_as(
             "WITH RECURSIVE descendants AS ( \
                SELECT id FROM collections WHERE parent_id = $1 \
