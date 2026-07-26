@@ -155,6 +155,22 @@ pub fn gap_of(row: &NeedRow) -> i32 {
     (row.desired - row.present_here).max(0)
 }
 
+/// Collapse a pull request to **one line per (card, source)** — the shape
+/// [`allocate`] produces, enforced rather than assumed.
+///
+/// Repeating a line is the one way a caller could smuggle a quantity through an
+/// API that deliberately takes none. The server's plan is a fixed per-pair
+/// number and the holdings it reads are not consumed between lines, so two
+/// identical items would each plan the whole gap and move it twice — four copies
+/// into a gap of two. A duplicate is a no-op, not a multiplier.
+pub fn dedupe(items: Vec<PullItem>) -> Vec<PullItem> {
+    let mut seen: HashSet<(Id, Id)> = HashSet::new();
+    items
+        .into_iter()
+        .filter(|i| seen.insert((i.oracle_id, i.from_collection_id)))
+        .collect()
+}
+
 /// One stack a pull draws copies from, and how many.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullLine {
@@ -429,8 +445,13 @@ fn NeedsBody(view: NeedsView, picks: RwSignal<Option<Vec<PickGroup>>>) -> impl I
 
     if rows.is_empty() {
         return view! {
+            // Stated in **copies**, because copies are all this page can see.
+            // "Nothing missing" was an unqualified claim it has no basis for: a
+            // deck whose only unmet slots are board-level reads it as "your deck
+            // is complete", and the arithmetic behind it never looked at a board
+            // (module doc). The second clause is what keeps the first one true.
             <p class="text-muted-foreground py-12 text-center text-sm" data-testid="needs-empty">
-                "Nothing missing — every card this collection wants is already here."
+                "Nothing to pull or buy — this collection holds every copy it wants. Unfilled board slots aren't counted here."
             </p>
         }
         .into_any();
@@ -1080,6 +1101,44 @@ mod tests {
         // The board comes off the stack that was found, so undo puts the copy
         // back on the sideboard it left.
         assert_eq!(plan[0].source.board, Board::Side);
+    }
+
+    #[test]
+    fn a_duplicated_pull_line_does_not_multiply_the_move() {
+        // The invariant this whole design rests on is that the caller never
+        // supplies a quantity — and repetition was a way to supply one anyway.
+        // Modelled as the adapter composes it: one `plan_pull` per line, against
+        // a per-pair allocation that is *not* decremented between lines.
+        let src = Uuid::from_u128(20);
+        let holdings = vec![holding(src, 4, Finish::Nonfoil, Board::Main)];
+        let item = PullItem {
+            oracle_id: Uuid::from_u128(1),
+            from_collection_id: src,
+        };
+        let want = 2; // the gap, as `allocate` planned it for this pair
+        let copies = |lines: &[PullItem]| -> i32 {
+            lines
+                .iter()
+                .flat_map(|i| plan_pull(&holdings, i.from_collection_id, want))
+                .map(|l| l.quantity)
+                .sum()
+        };
+
+        assert_eq!(
+            copies(&dedupe(vec![item, item])),
+            2,
+            "a duplicated line must move the gap once"
+        );
+        // And the hole is real, not hypothetical: the same composition without
+        // the dedupe moves four copies into a gap of two.
+        assert_eq!(copies(&[item, item]), 4);
+        // Two *different* sources of the same card are not duplicates — that is
+        // the ordinary multi-source pull and it must survive.
+        let other = PullItem {
+            from_collection_id: Uuid::from_u128(21),
+            ..item
+        };
+        assert_eq!(dedupe(vec![item, other, item]), vec![item, other]);
     }
 
     #[test]

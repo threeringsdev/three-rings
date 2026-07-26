@@ -453,7 +453,13 @@ test("@fast a want on the sideboard of a card held on the mainboard is not a nee
 
     await page.goto(`/my/collections/${deck.id}/needs`);
     await hydrated(page);
-    await expect(page.locator('[data-testid="needs-empty"]')).toBeVisible();
+    // The empty state is the *only* thing this user reads, so it must not claim
+    // more than the page can see. "Nothing missing" would tell this deck it is
+    // complete; it has an unfilled sideboard slot the arithmetic never looked
+    // for. The text has to be about copies, and it has to say so.
+    const empty = page.locator('[data-testid="needs-empty"]');
+    await expect(empty).toContainText("holds every copy it wants");
+    await expect(empty).toContainText("Unfilled board slots aren't counted here");
     expect(await needsOf(request, deck.id)).toEqual([]);
   } finally {
     await deleteCollection(request, deck.id);

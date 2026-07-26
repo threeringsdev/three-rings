@@ -1275,7 +1275,7 @@ pub async fn pull_needs(
     {
         use crate::backend::CollectionStore;
         use crate::my::move_selection::{SkipReason, Skipped};
-        use crate::my::needs::{allocate, gap_of, plan_pull, PullOutcome, Pulled};
+        use crate::my::needs::{allocate, dedupe, gap_of, plan_pull, PullOutcome, Pulled};
         use std::collections::hash_map::Entry;
         use std::collections::HashMap;
 
@@ -1302,7 +1302,12 @@ pub async fn pull_needs(
         // One holdings read per distinct card: a pull of the same card from two
         // collections is two lines off one read.
         let mut owned: HashMap<shared::Id, Vec<shared::HoldingLine>> = HashMap::new();
-        for item in items {
+        // One line per (card, source). `planned` is a fixed per-pair number and
+        // `owned` is not consumed between lines, so a repeated item would plan
+        // the whole gap twice and move it twice — a quantity supplied by
+        // repetition through an API that takes none. The cap above is checked
+        // against what the caller *sent*, so duplicates cannot buy headroom.
+        for item in dedupe(items) {
             let token = item.token();
             if item.from_collection_id == to_collection_id {
                 skipped.push(Skipped {
