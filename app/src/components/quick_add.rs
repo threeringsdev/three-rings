@@ -311,6 +311,8 @@ fn QuickAddSurface(
     // The sidebar badges count what an add changes (the shell-level resource,
     // per specs/app-ui.md Findings).
     let tree = use_context::<crate::my::tree::CollectionTreeResource>();
+    // ⌘K's `Undo last move` remembers what this panel adds (see `palette`).
+    let last_move = use_context::<super::palette::LastMoveState>();
 
     let open = RwSignal::new(false);
     // `Some("")` = count entry started, no digits yet; `Some("4")` = ×4 pending.
@@ -464,6 +466,7 @@ fn QuickAddSurface(
                         quantity,
                         undo_move_id: receipt.undo_move_id,
                         after_undo: on_undo,
+                        last_move,
                     });
                 }
                 Err(e) => {

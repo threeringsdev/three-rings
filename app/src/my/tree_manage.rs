@@ -113,6 +113,11 @@ pub struct TreeManage {
     error: RwSignal<Option<String>>,
 }
 
+/// Provided by the **app shell**, not by the tree. ⌘K's `New binder…` /
+/// `New deck…` open the create dialog below from anywhere — including Catalog
+/// mode, where `CollectionTreeNav` isn't mounted — so the state has to outlive
+/// the sidebar. (`TreeDialogs` still renders beside the tree, so the dialog
+/// appears when My-cards mode mounts it.)
 pub fn provide_tree_manage() {
     provide_context(TreeManage {
         menu_target: RwSignal::new(None),

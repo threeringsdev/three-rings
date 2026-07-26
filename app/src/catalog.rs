@@ -896,6 +896,7 @@ fn QuickAddButton(
     // Captured at setup, not looked up in the async block (no owner there).
     // The sidebar tree's badges count what this button changes.
     let tree = use_context::<crate::my::tree::CollectionTreeResource>();
+    let last_move = use_context::<crate::components::palette::LastMoveState>();
     let pending = RwSignal::new(false);
 
     // A Have is stored per *printing*, so a card whose oracle row resolved no
@@ -936,6 +937,7 @@ fn QuickAddButton(
                             quantity: 1,
                             undo_move_id: receipt.undo_move_id,
                             after_undo: None,
+                            last_move,
                         })
                     }
                     Err(e) => {
@@ -989,6 +991,11 @@ pub(crate) struct AddToast {
     /// Run after a successful undo, for a surface whose own read has to move
     /// with it (the collection view). The add-side refetch is the caller's.
     pub after_undo: Option<Callback<()>>,
+    /// Where ⌘K's `Undo last move` remembers this add, so the palette command
+    /// and this toast's button reverse the same thing. Passed in rather than
+    /// read from context here: this is a free function, and its callers reach it
+    /// from inside a `spawn_local` where the reactive owner is long gone.
+    pub last_move: Option<crate::components::palette::LastMoveState>,
 }
 
 /// The confirmation toast, and the Undo action when there is one to offer.
@@ -1002,6 +1009,7 @@ pub(crate) fn raise_add_toast(t: AddToast) {
         quantity,
         undo_move_id,
         after_undo,
+        last_move,
     } = t;
     let verb = match kind {
         shared::QuickAddKind::Want => "Wanted",
@@ -1018,6 +1026,7 @@ pub(crate) fn raise_add_toast(t: AddToast) {
     // would be worse than offering none.
     let options = match undo_move_id {
         Some(move_id) => {
+            crate::components::palette::note_last_move(last_move, vec![move_id]);
             let name = name.clone();
             options.action(
                 "Undo",

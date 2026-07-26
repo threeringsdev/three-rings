@@ -19,6 +19,12 @@
 //! - `use_random_id` / counter IDs are gone: `CommandDialog` takes a
 //!   deterministic caller `id` (it already did upstream) and drives open
 //!   state through the vendored [`super::dialog`] instead of an inline script.
+//! - **`CommandInput` takes an optional `id`** and `CommandDialog` forwards
+//!   `should_filter`. Both are additive and exist for ⌘K: the palette focuses
+//!   its field programmatically when the dialog opens (so the field needs a
+//!   deterministic handle), and it ranks its own rows, so the primitive's
+//!   substring filter has to be off — `Command` already had the knob and
+//!   `CommandDialog` was simply hiding it.
 //! - `leptos_ui`'s `clx!` swapped for the vendored clx.rs; the `icons` `Check`
 //!   inlined (Lucide, ISC).
 
@@ -69,11 +75,20 @@ impl CommandContext {
     /// * **quick-add panel** — its candidate list is rebuilt inside a `Suspend`
     ///   per query, so each server result set is a full remount in document
     ///   order and the registry is rebuilt with it;
-    /// * **⌘K** — a preloaded index, client-filtered the picker's way.
+    /// * **⌘K palette** — it *ranks* its rows, so its order genuinely changes
+    ///   per query. It keeps registration order equal to document order by
+    ///   forcing a real remount: its whole list is one `<For>` item keyed on the
+    ///   row set's identity, so any change to the rows disposes them and mounts
+    ///   the new order. Note what does **not** work, measured there: a plain
+    ///   dynamic closure returning the rows leaves the DOM nodes in place (an
+    ///   unkeyed positional diff) while re-running the item registrations.
+    ///   `command-palette.spec.ts` pins the remount by node identity.
     ///
     /// In-place keyed *reorder* of persistent items would diverge from DOM
-    /// order and want a `compareDocumentPosition` sort here; no consumer does
-    /// that, so it's deferred (noted in app-ui).
+    /// order and want a `compareDocumentPosition` sort here. No consumer does
+    /// that — the palette is the one that ranks, and it remounts instead — so
+    /// the sort is still deferred (noted in app-ui). Anything that starts
+    /// reordering rows without remounting them needs it.
     fn visible_ids(&self) -> Vec<usize> {
         self.items
             .get()
@@ -223,6 +238,11 @@ pub fn Command(
 pub fn CommandInput(
     #[prop(into, optional)] class: String,
     #[prop(into, optional)] placeholder: String,
+    /// Deterministic DOM id, for a caller that focuses the field itself (⌘K
+    /// focuses it when the dialog opens). Omitted = no `id` attribute at all,
+    /// rather than an empty one.
+    #[prop(into, optional)]
+    id: Option<String>,
     /// Fired on every keystroke — use for server-side search.
     #[prop(optional)]
     on_search_change: Option<Callback<String>>,
@@ -257,6 +277,7 @@ pub fn CommandInput(
     view! {
         <input
             data-name="CommandInput"
+            id=id
             class=merged_class
             autocomplete="off"
             spellcheck="false"
@@ -391,6 +412,10 @@ pub fn CommandDialog(
     #[prop(into)] id: String,
     open: RwSignal<bool>,
     #[prop(optional, into)] class: String,
+    /// Forwarded to [`Command`] — off for a caller that ranks and filters its
+    /// own rows (⌘K), on for a plain client-filtered list.
+    #[prop(default = true)]
+    should_filter: bool,
 ) -> impl IntoView {
     use super::dialog::{Dialog, DialogContent};
 
@@ -399,7 +424,9 @@ pub fn CommandDialog(
     view! {
         <Dialog id=id open=open>
             <DialogContent class=merged_class show_close_button=false aria_label="Command palette">
-                <Command class="min-h-80">{children()}</Command>
+                <Command class="min-h-80" should_filter=should_filter>
+                    {children()}
+                </Command>
             </DialogContent>
         </Dialog>
     }

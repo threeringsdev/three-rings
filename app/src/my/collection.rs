@@ -1223,6 +1223,9 @@ fn HereCount(
     // sources), which is how the row gets a *new* `holding_id` after an undo —
     // reversing a removal re-inserts the holding, so the old id stays dead.
     let revision = use_context::<crate::my::move_selection::HoldingsRevision>();
+    // A removal is a move with no destination, so ⌘K's `Undo last move`
+    // reverses it too (see `crate::components::palette`).
+    let last_move = use_context::<crate::components::palette::LastMoveState>();
 
     let label = StoredValue::new(name.clone());
 
@@ -1271,6 +1274,7 @@ fn HereCount(
                     // unmount this row and take the Undo below with it. The
                     // sidebar badges are a different read, so they refresh.
                     tree.refetch();
+                    crate::components::palette::note_last_move(last_move, vec![move_id]);
                     let copies_label = if copies == 1 {
                         "1 copy".to_string()
                     } else {

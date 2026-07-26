@@ -28,6 +28,7 @@ mod input;
 mod input_group;
 mod item;
 mod kbd;
+mod palette;
 mod popover;
 mod selection_tray;
 mod separator;
@@ -134,6 +135,14 @@ const SECTIONS: &[BenchSection] = &[
         id: "command",
         title: "Command",
         demo: command::demo,
+    },
+    BenchSection {
+        // NB: not "command-palette" — the palette's own dialog already owns
+        // that DOM id, and two elements with it would be invalid HTML and make
+        // every `#command-palette` selector ambiguous (caught by an SSR dump).
+        id: "command-dialog",
+        title: "Command dialog (⌘K palette)",
+        demo: palette::demo,
     },
     BenchSection {
         id: "context-menu",

@@ -525,6 +525,7 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
     // Optional, both of them: the bench hosts this control outside the shell.
     let tree = use_context::<crate::my::tree::CollectionTreeResource>();
     let revision = use_context::<HoldingsRevision>();
+    let last_move = use_context::<crate::components::palette::LastMoveState>();
 
     let open = RwSignal::new(false);
     let pending = RwSignal::new(false);
@@ -585,6 +586,8 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
                             r.bump();
                         }
                         let move_ids = outcome.move_ids.clone();
+                        // The whole batch is one undo, for ⌘K as for the toast.
+                        crate::components::palette::note_last_move(last_move, move_ids.clone());
                         toast.show(
                             ToastOptions::message(moved_message(
                                 outcome.moved.len(),
