@@ -15,7 +15,8 @@
     "probe:android-selection-tray": "node android-selection-tray-check.mjs",
     "probe:android-rail": "node android-rail-check.mjs",
     "probe:android-needs": "node android-needs-check.mjs",
-    "probe:android-palette": "node android-palette-check.mjs"
+    "probe:android-palette": "node android-palette-check.mjs",
+    "probe:android-tree-move": "node android-tree-move-check.mjs"
   },
   "keywords": [],
   "author": "",

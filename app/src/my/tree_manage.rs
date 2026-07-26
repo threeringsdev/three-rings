@@ -1,21 +1,32 @@
 //! Collection-tree management (specs/app-ui.md → Collection tree; the
 //! "management" half of the two-task split): one shared context menu over
-//! every tree row (create / rename / delete, each confirmed in a dialog)
-//! and the commit half of the drag layer (reparent by dropping *onto* a
+//! every tree row (create / rename / **move** / delete, each confirmed in a
+//! dialog) and the commit half of the drag layer (reparent by dropping *onto* a
 //! row, reorder by dropping on a row's edge band — fractional `position`
 //! midpoints, specs/collection-api.md → Tree CRUD).
 //!
 //! The client pre-checks cycles only to paint drop targets; the API is the
 //! cycle-guard terminus, and its rejections (409 on a cycle, on the Inbox)
 //! surface as an error toast rather than being silently swallowed.
+//!
+//! **`Move to…` is the mouse-free half of the drag layer** (IA → My cards:
+//! "create / rename / delete / move happens in place via context menus"). HTML5
+//! drag fires on neither touch nor the keyboard, so without it a collection
+//! cannot be moved at all on a phone or from the keyboard. It is a destination
+//! picker over the same `command` list the catalog toolbar and the selection
+//! tray use, and it commits through the very same
+//! `reparent_collection` + `reorder_collection` adapters the drop does — see
+//! [`plan_move`] for what it covers and [`move_destinations`] for the cycle
+//! guard being enforced at the *source* rather than left to the server's 409.
 
 use std::collections::HashSet;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use shared::{CollectionKind, CollectionTreeRow, Id};
+use shared::{CollectionKind, CollectionSummary, CollectionTreeRow, Id};
 
 use super::tree::CollectionTreeResource;
+use crate::catalog::destination::{picker_order, Destination, DestinationList, DestinationRow};
 use crate::components::ui::button::{Button, ButtonVariant};
 use crate::components::ui::context_menu::{ContextMenuContent, ContextMenuItem};
 use crate::components::ui::dialog::{
@@ -26,6 +37,11 @@ use crate::components::ui::input::Input;
 use crate::components::ui::separator::Separator;
 use crate::components::ui::sonner::{ToastHandle, ToastKind, ToastOptions};
 
+/// The move picker's search field — a deterministic handle so the dialog can
+/// put the caret in it on open. Without that the keyboard path dead-ends at an
+/// opened dialog nothing is focused in.
+pub const MOVE_INPUT_ID: &str = "tree-move-input";
+
 /// What the shared context menu is aimed at: one row, or the rail
 /// background (top-level create).
 #[derive(Clone, PartialEq)]
@@ -34,8 +50,14 @@ pub enum MenuTarget {
         id: Id,
         name: String,
         is_inbox: bool,
-        /// Descendant collections (for the delete confirm).
-        descendants: usize,
+        /// Its current parent — `None` at the top level. The move picker marks
+        /// this one ✓ and refuses it as a destination (it is where the row
+        /// already is).
+        parent_id: Option<Id>,
+        /// Self + every descendant: the drop targets this row may not take and
+        /// the destinations the move picker may not offer (the client-side
+        /// cycle guard). Its `len() - 1` is the delete confirm's subtree count.
+        forbidden: HashSet<Id>,
         /// Rolled-up present copies (for the delete confirm).
         cards: i64,
     },
@@ -61,6 +83,39 @@ pub struct DeleteReq {
     pub descendants: usize,
     /// Rolled-up present copies that cascade with it.
     pub cards: i64,
+}
+
+/// A move request — snapshotted when the picker opens, for the same reason
+/// [`DeleteReq`] is: the shared `menu_target` keeps moving as the user
+/// right-clicks around, and a picker that re-read it at commit time could move
+/// a *different* collection than the one it named.
+#[derive(Clone, PartialEq)]
+pub struct MoveReq {
+    pub id: Id,
+    pub name: String,
+    /// Where it lives now — marked ✓ in the picker, and a no-op if picked.
+    pub parent_id: Option<Id>,
+    /// Self + every descendant: the destinations the picker must not offer.
+    pub forbidden: HashSet<Id>,
+}
+
+/// Where a `Move to…` pick puts the collection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoveTarget {
+    /// Out to the top level (`parent_id = None`) — the one destination that is
+    /// not a collection, and the reason the picker rows are [`DestinationRow`]s
+    /// rather than `DestinationOption`s.
+    TopLevel,
+    Into(Id),
+}
+
+impl MoveTarget {
+    fn parent(self) -> Option<Id> {
+        match self {
+            MoveTarget::TopLevel => None,
+            MoveTarget::Into(id) => Some(id),
+        }
+    }
 }
 
 /// A live drag: the moved node plus the ids a drop may not target (itself
@@ -107,6 +162,8 @@ pub struct TreeManage {
     rename_name: RwSignal<String>,
     delete_req: RwSignal<Option<DeleteReq>>,
     delete_open: RwSignal<bool>,
+    move_req: RwSignal<Option<MoveReq>>,
+    pub move_open: RwSignal<bool>,
     /// An op in flight (disables dialog submits).
     busy: RwSignal<bool>,
     /// Inline dialog error (server message) — cleared on open/submit.
@@ -116,8 +173,9 @@ pub struct TreeManage {
 /// Provided by the **app shell**, not by the tree. ⌘K's `New binder…` /
 /// `New deck…` open the create dialog below from anywhere — including Catalog
 /// mode, where `CollectionTreeNav` isn't mounted — so the state has to outlive
-/// the sidebar. (`TreeDialogs` still renders beside the tree, so the dialog
-/// appears when My-cards mode mounts it.)
+/// the sidebar. [`TreeDialogs`] is mounted at the shell for the same reason
+/// plus a sharper one: the sidebar is off-screen below `md`, and a dialog
+/// cannot be shown from inside a hidden subtree.
 pub fn provide_tree_manage() {
     provide_context(TreeManage {
         menu_target: RwSignal::new(None),
@@ -131,6 +189,8 @@ pub fn provide_tree_manage() {
         rename_name: RwSignal::new(String::new()),
         delete_req: RwSignal::new(None),
         delete_open: RwSignal::new(false),
+        move_req: RwSignal::new(None),
+        move_open: RwSignal::new(false),
         busy: RwSignal::new(false),
         error: RwSignal::new(None),
     })
@@ -160,13 +220,14 @@ impl TreeManage {
             Some(MenuTarget::Row {
                 id,
                 name,
-                descendants,
+                forbidden,
                 cards,
                 ..
             }) => DeleteReq {
                 id,
                 name,
-                descendants,
+                // Self is in the set; the confirm counts the *nested* ones.
+                descendants: forbidden.len().saturating_sub(1),
                 cards,
             },
             _ => return,
@@ -174,6 +235,32 @@ impl TreeManage {
         self.delete_req.set(Some(subject));
         self.error.set(None);
         self.delete_open.set(true);
+    }
+
+    /// Open the move picker, snapshotting its subject the same way
+    /// [`Self::open_delete`] does. A no-op off a row, and a no-op on the Inbox
+    /// — the API refuses to reparent it at all (`AND NOT is_inbox`), so
+    /// offering the action would only ever produce a 409.
+    pub fn open_move(&self) {
+        let subject = match self.menu_target.get_untracked() {
+            Some(MenuTarget::Row {
+                id,
+                name,
+                is_inbox: false,
+                parent_id,
+                forbidden,
+                ..
+            }) => MoveReq {
+                id,
+                name,
+                parent_id,
+                forbidden,
+            },
+            _ => return,
+        };
+        self.move_req.set(Some(subject));
+        self.error.set(None);
+        self.move_open.set(true);
     }
 }
 
@@ -212,6 +299,12 @@ pub fn TreeMenu() -> impl IntoView {
                             .then(|| {
                                 view! {
                                     <Separator class="my-1" />
+                                    // The mouse-free half of the drag layer
+                                    // (module doc). Above Rename because it is
+                                    // the action drag *also* offers.
+                                    <ContextMenuItem on_select=Callback::new(move |()| {
+                                        manage.open_move()
+                                    })>"Move to…"</ContextMenuItem>
                                     <ContextMenuItem on_select=Callback::new(move |()| {
                                         manage.open_rename(id, rename_name.clone())
                                     })>"Rename…"</ContextMenuItem>
@@ -241,11 +334,19 @@ pub fn TreeMenu() -> impl IntoView {
     }
 }
 
-/// The three management dialogs, mounted once beside the tree.
+/// The four management dialogs, mounted once — **by the app shell**, not by
+/// the tree (see [`provide_tree_manage`]).
 #[component]
 pub fn TreeDialogs() -> impl IntoView {
     let manage = expect_context::<TreeManage>();
-    let tree = expect_context::<CollectionTreeResource>().0;
+    let tree_res = expect_context::<CollectionTreeResource>();
+    let tree = tree_res.0;
+    // Read in the component body, not inside the move picker's `Suspend`.
+    // Contexts do reach into a resolved async view here, but the tree already
+    // paid for learning that the rule is subtle (a `Provider` *above* a
+    // `Suspense` does not reach `use_context_menu()` inside it), and a body
+    // read is unconditionally correct.
+    let toast = expect_context::<ToastHandle>();
 
     let submit_create = move || {
         let Some(req) = manage.create_req.get_untracked() else {
@@ -345,6 +446,31 @@ pub fn TreeDialogs() -> impl IntoView {
             .get()
             .map(|r| (r.name, r.descendants, r.cards))
     };
+
+    // Put the caret in the move picker's field when it opens. Without this the
+    // keyboard path dead-ends: the menu item opens a dialog nothing is focused
+    // in, so ↑↓/⏎ reach no row. Same shape (and same fallback timeout) as the
+    // ⌘K palette's, because the field only exists on the mount that just
+    // happened.
+    Effect::new(move |_| {
+        if manage.move_open.get() {
+            #[cfg(feature = "hydrate")]
+            {
+                focus_move_field();
+                // …and again a macrotask later, unconditionally. The field may
+                // not be in the document yet on this pass (the `Show` below
+                // renders in the same flush), and the context menu that
+                // launched this dialog is also settling its own focus in that
+                // flush. A later pass is the one that has to win.
+                set_timeout(
+                    || {
+                        focus_move_field();
+                    },
+                    std::time::Duration::from_millis(0),
+                );
+            }
+        }
+    });
 
     view! {
         <Dialog id="tree-create" open=manage.create_open>
@@ -485,7 +611,147 @@ pub fn TreeDialogs() -> impl IntoView {
                 </DialogBody>
             </DialogContent>
         </Dialog>
+
+        <Dialog id="tree-move" open=manage.move_open>
+            <DialogContent aria_label="Move collection">
+                <DialogBody>
+                    <DialogHeader>
+                        <DialogTitle>
+                            {move || {
+                                manage
+                                    .move_req
+                                    .get()
+                                    .map(|r| format!("Move {}", r.name))
+                                    .unwrap_or_else(|| "Move".to_string())
+                            }}
+                        </DialogTitle>
+                        <DialogDescription>
+                            "Choose where it lives. Anything inside it moves along, and it lands last among its new siblings."
+                        </DialogDescription>
+                    </DialogHeader>
+                    // Mounted only while open, for the reason the palette's rows
+                    // are: a closed dialog keeps its box in the DOM, so leaving
+                    // the rows mounted would register N `command` items (and
+                    // duplicate the `destination-option` seam) behind a closed
+                    // overlay on every My-cards page.
+                    <Show when=move || manage.move_open.get()>
+                        <div class="overflow-hidden rounded-md border" data-testid="tree-move-list">
+                            <DestinationList
+                                placeholder="Search collections…"
+                                empty="No collection to move into."
+                                input_id=Some(MOVE_INPUT_ID.to_string())
+                            >
+                                // Same boundary the catalog picker and the tray
+                                // use: the rows come off a resource, and only a
+                                // suspense boundary keeps SSR and hydration in
+                                // step with it.
+                                <Transition fallback=|| {
+                                    view! {
+                                        <p class="text-muted-foreground p-3 text-sm">
+                                            "Loading collections…"
+                                        </p>
+                                    }
+                                }>
+                                    {move || {
+                                        // Read the snapshot *outside* the async
+                                        // block so a second `Move to…` on a
+                                        // different row rebuilds these rows.
+                                        let req = manage.move_req.get();
+                                        Suspend::new(async move {
+                                            let Some(req) = req else {
+                                                return ().into_any();
+                                            };
+                                            let rows = match tree.await {
+                                                Some(Ok(dto)) => dto.collections,
+                                                _ => Vec::new(),
+                                            };
+                                            move_rows(manage, tree_res, toast, req, rows).into_any()
+                                        })
+                                    }}
+                                </Transition>
+                            </DestinationList>
+                        </div>
+                    </Show>
+                    {error_line}
+                    <DialogFooter>
+                        <DialogClose>"Cancel"</DialogClose>
+                    </DialogFooter>
+                </DialogBody>
+            </DialogContent>
+        </Dialog>
     }
+}
+
+/// The move picker's rows: `Top level` first, then every offerable collection.
+///
+/// **Built in one pass, in the order they are drawn, off data that was already
+/// sorted** — which is what keeps `command`'s registry honest here.
+/// `CommandItem` registers from its component body (view *construction*), and
+/// `visible_ids()` returns registration order, so a consumer is safe exactly
+/// when construction order equals document order. This one is: the `Top level`
+/// row is unconditional and always first, the rest come out of
+/// [`move_destinations`] pre-sorted, and typing only *hides* rows (the
+/// primitive's per-item `is_visible` memo) — it never reorders them. Same
+/// standing as the destination picker, unlike ⌘K which ranks and therefore has
+/// to remount.
+fn move_rows(
+    manage: TreeManage,
+    tree: CollectionTreeResource,
+    toast: ToastHandle,
+    req: MoveReq,
+    rows: Vec<CollectionTreeRow>,
+) -> impl IntoView {
+    let at_top = req.parent_id.is_none();
+    let current = req.parent_id;
+    let pick =
+        move |target: MoveTarget| Callback::new(move |()| commit_move(tree, toast, manage, target));
+
+    view! {
+        <DestinationRow
+            label="⬆ Top level"
+            value="Top level"
+            chosen=Signal::derive(move || at_top)
+            on_select=pick(MoveTarget::TopLevel)
+        />
+        {move_destinations(&rows, &req.forbidden)
+            .into_iter()
+            .map(|c| {
+                let is_current = current == Some(c.id);
+                let value = c.name.clone();
+                // The same `📥`/`🗂` label the other two pickers show — one
+                // rule for what a destination reads as.
+                let label = Destination {
+                    id: c.id,
+                    name: c.name,
+                    is_inbox: c.is_inbox,
+                }
+                    .label();
+                view! {
+                    <DestinationRow
+                        label=label
+                        value=value
+                        chosen=Signal::derive(move || is_current)
+                        on_select=pick(MoveTarget::Into(c.id))
+                    />
+                }
+            })
+            .collect_view()}
+    }
+}
+
+/// Focus the move picker's search field; `false` when the node isn't in the
+/// document yet.
+#[cfg(feature = "hydrate")]
+fn focus_move_field() -> bool {
+    use leptos::wasm_bindgen::JsCast;
+    document()
+        .get_element_by_id(MOVE_INPUT_ID)
+        .and_then(|el| el.dyn_into::<leptos::web_sys::HtmlElement>().ok())
+        .map(|el| {
+            let _ = el.focus();
+            true
+        })
+        .unwrap_or(false)
 }
 
 /// Commit a drop: `Into` reparents; an edge band reorders among the target's
@@ -589,10 +855,144 @@ fn plan_drop(
     }
 }
 
+/// The collections `Move to…` may offer as a destination, in the picker's
+/// order (Inbox pinned, then by name — [`picker_order`], the same order the
+/// catalog toolbar and the tray use).
+///
+/// **The cycle guard is enforced here, at the source.** `forbidden` is the
+/// moved node plus every descendant, so its own subtree is never on the list
+/// and the picker cannot produce a request the server would 409. That mirrors
+/// the drag path's client-first rule rather than leaning on the backstop: a
+/// list that offers a destination and then errors is a worse answer than one
+/// that never offers it.
+///
+/// The **Inbox is offerable**, and deliberately: the server rejects the Inbox
+/// as a reparent *subject* (`AND NOT is_inbox` on the id), never as a *target*,
+/// and dropping a collection *into* the Inbox is already legal by drag
+/// (`drop_intent` collapses the Inbox's bands to `Into`). Withholding it here
+/// would make the two paths disagree.
+pub fn move_destinations(
+    rows: &[CollectionTreeRow],
+    forbidden: &HashSet<Id>,
+) -> Vec<CollectionSummary> {
+    picker_order(
+        rows.iter()
+            .filter(|r| !forbidden.contains(&r.summary.id))
+            .map(|r| r.summary.clone())
+            .collect(),
+    )
+}
+
+/// Pure planner behind [`commit_move`]: the writes a `Move to…` pick makes, or
+/// `None` for a no-op.
+///
+/// **It covers reparenting, and it lands the collection *last* among its new
+/// siblings** — which is why it uses `reorder_collection` as well as
+/// `reparent_collection`. A bare reparent carries the node's old `position`
+/// into the new sibling group, where it lands wherever that number happens to
+/// fall (or ties, broken by name); the drag path's `Into` has that same
+/// ambiguity. Naming the landing spot is what makes the picker's outcome
+/// predictable without a second "and where?" step.
+///
+/// **What it does not cover: reordering among siblings you are already among.**
+/// Picking the parent a collection is already in is a no-op here, so moving a
+/// row up or down within one group is still drag-only. Queued as follow-up
+/// rather than guessed at — an ordering UI is a design question (a second
+/// picker step? per-row up/down?) this task has no wireframe for.
+fn plan_move(
+    rows: &[CollectionTreeRow],
+    req: &MoveReq,
+    target: MoveTarget,
+) -> Option<(Option<Id>, Option<f64>)> {
+    let new_parent = target.parent();
+    if let Some(parent) = new_parent {
+        // The picker never offers these; refused again here because the
+        // snapshot outlives the list it was built from (a refetch can land
+        // while the dialog is open).
+        if req.forbidden.contains(&parent) {
+            return None;
+        }
+        rows.iter().find(|r| r.summary.id == parent)?;
+    }
+    if new_parent == req.parent_id {
+        return None; // Already there.
+    }
+    // Last among the new siblings — the moved node itself excluded, since a
+    // reparent within the same group is not a case that reaches here but a
+    // stale row set could still contain it.
+    let last = rows
+        .iter()
+        .filter(|r| r.summary.parent_id == new_parent && r.summary.id != req.id)
+        .map(|r| r.summary.position)
+        .fold(None::<f64>, |acc, p| Some(acc.map_or(p, |a| a.max(p))));
+    Some((new_parent, Some(last.map_or(1.0, |p| p + 1.0))))
+}
+
+/// Commit a `Move to…` pick through the same two adapters the drop uses.
+///
+/// The failure wording follows [`commit_drop`]'s, and for its reason: the two
+/// writes are not one transaction, so a reparent that lands and an order write
+/// that doesn't must not be reported as "couldn't move" — it *did* move.
+/// Success and that partial case both close the dialog (the collection is where
+/// the user asked); an outright failure keeps it open with the server's message
+/// inline, like the other three dialogs.
+pub fn commit_move(
+    tree: CollectionTreeResource,
+    toast: ToastHandle,
+    manage: TreeManage,
+    target: MoveTarget,
+) {
+    let Some(req) = manage.move_req.get_untracked() else {
+        return;
+    };
+    let Some(Some(Ok(dto))) = tree.0.get_untracked() else {
+        return;
+    };
+    let Some((new_parent, position)) = plan_move(&dto.collections, &req, target) else {
+        // Picking where it already lives is a legitimate "never mind".
+        manage.move_open.set(false);
+        return;
+    };
+    if manage.busy.get_untracked() {
+        return;
+    }
+    manage.busy.set(true);
+    manage.error.set(None);
+    spawn_local(async move {
+        let mut reparented = false;
+        let mut result = crate::reparent_collection(req.id, new_parent).await;
+        if result.is_ok() {
+            reparented = true;
+            if let Some(position) = position {
+                result = crate::reorder_collection(req.id, position).await;
+            }
+        }
+        manage.busy.set(false);
+        match (result, reparented) {
+            (Ok(()), _) => manage.move_open.set(false),
+            (Err(e), true) => {
+                // The move landed; only the ordering write failed.
+                manage.move_open.set(false);
+                toast.show(
+                    ToastOptions::message(format!(
+                        "Moved, but couldn't set its order: {}",
+                        user_msg(&e)
+                    ))
+                    .kind(ToastKind::Error),
+                );
+            }
+            (Err(e), false) => manage.error.set(Some(user_msg(&e))),
+        }
+        // Refetch either way — on failure the tree may have changed under us,
+        // and the sidebar must show the server's truth.
+        tree.0.refetch();
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::{CollectionKind, CollectionSummary};
+    use shared::CollectionKind;
 
     fn row(id: u128, parent: Option<u128>, name: &str, position: f64) -> CollectionTreeRow {
         CollectionTreeRow {
@@ -726,6 +1126,137 @@ mod tests {
                 DropIntent::Into
             ),
             None
+        );
+    }
+
+    // ------------------------------------------------- Move to… (picker) --
+
+    fn named(id: u128, parent: Option<u128>, name: &str, position: f64) -> CollectionTreeRow {
+        row(id, parent, name, position)
+    }
+
+    fn inbox(id: u128) -> CollectionTreeRow {
+        let mut r = row(id, None, "Inbox", 0.0);
+        r.summary.is_inbox = true;
+        r
+    }
+
+    fn req(id: u128, parent: Option<u128>, forbidden: &[u128]) -> MoveReq {
+        MoveReq {
+            id: Id::from_u128(id),
+            name: "Moved".into(),
+            parent_id: parent.map(Id::from_u128),
+            forbidden: forbidden.iter().map(|&i| Id::from_u128(i)).collect(),
+        }
+    }
+
+    fn offered(rows: &[CollectionTreeRow], forbidden: &[u128]) -> Vec<String> {
+        let set: HashSet<Id> = forbidden.iter().map(|&i| Id::from_u128(i)).collect();
+        move_destinations(rows, &set)
+            .into_iter()
+            .map(|c| c.name)
+            .collect()
+    }
+
+    /// Inbox, Shoebox > Rares, Trade, plus the node being moved (9) under Trade.
+    fn nested() -> Vec<CollectionTreeRow> {
+        vec![
+            inbox(4),
+            named(1, None, "Shoebox", 1.0),
+            named(2, Some(1), "Rares", 1.0),
+            named(3, None, "Trade", 2.0),
+            named(9, Some(3), "Moved", 1.0),
+            named(10, Some(9), "Inside Moved", 1.0),
+        ]
+    }
+
+    #[test]
+    fn the_picker_never_offers_the_moved_nodes_own_subtree() {
+        // The cycle guard at the *source*: 9 and its child 10 are gone from the
+        // list, so no pick can produce the 409 the server would answer.
+        let names = offered(&nested(), &[9, 10]);
+        assert!(!names.iter().any(|n| n == "Moved" || n == "Inside Moved"));
+        // …and the positive control: everything else is still on offer, so the
+        // exclusion is the subtree and not the whole list.
+        assert_eq!(names, ["Inbox", "Rares", "Shoebox", "Trade"]);
+    }
+
+    #[test]
+    fn the_inbox_is_an_offerable_destination() {
+        // The API's `AND NOT is_inbox` guards the reparent *subject*, never the
+        // target, and dropping *into* the Inbox is already legal by drag — so
+        // withholding it here would make the two paths disagree. Pinned first,
+        // per `picker_order`.
+        assert_eq!(offered(&nested(), &[9, 10])[0], "Inbox");
+    }
+
+    #[test]
+    fn a_move_lands_last_among_its_new_siblings() {
+        // Shoebox already holds Rares(1.0); 9 lands after it.
+        let plan = plan_move(
+            &nested(),
+            &req(9, Some(3), &[9, 10]),
+            MoveTarget::Into(Id::from_u128(1)),
+        );
+        assert_eq!(plan, Some((Some(Id::from_u128(1)), Some(2.0))));
+    }
+
+    #[test]
+    fn a_move_into_an_empty_collection_seeds_position_one() {
+        let plan = plan_move(
+            &nested(),
+            &req(9, Some(3), &[9, 10]),
+            MoveTarget::Into(Id::from_u128(2)),
+        );
+        assert_eq!(plan, Some((Some(Id::from_u128(2)), Some(1.0))));
+    }
+
+    #[test]
+    fn a_move_to_top_level_lands_after_the_last_root() {
+        // Roots are Inbox(0.0), Shoebox(1.0), Trade(2.0) → 3.0.
+        let plan = plan_move(&nested(), &req(9, Some(3), &[9, 10]), MoveTarget::TopLevel);
+        assert_eq!(plan, Some((None, Some(3.0))));
+    }
+
+    #[test]
+    fn picking_the_parent_it_already_has_is_a_no_op() {
+        // Both directions of "already there" — the ✓ row is pickable, and it
+        // must not fire two writes that change nothing.
+        assert_eq!(
+            plan_move(
+                &nested(),
+                &req(9, Some(3), &[9, 10]),
+                MoveTarget::Into(Id::from_u128(3))
+            ),
+            None
+        );
+        assert_eq!(
+            plan_move(&nested(), &req(1, None, &[1, 2]), MoveTarget::TopLevel),
+            None
+        );
+    }
+
+    #[test]
+    fn a_forbidden_or_unknown_destination_plans_nothing() {
+        // The picker never offers these, but the snapshot outlives the list it
+        // was built from — a refetch can land while the dialog is open.
+        assert_eq!(
+            plan_move(
+                &nested(),
+                &req(9, Some(3), &[9, 10]),
+                MoveTarget::Into(Id::from_u128(10))
+            ),
+            None,
+            "its own descendant"
+        );
+        assert_eq!(
+            plan_move(
+                &nested(),
+                &req(9, Some(3), &[9, 10]),
+                MoveTarget::Into(Id::from_u128(404))
+            ),
+            None,
+            "a collection that is no longer there"
         );
     }
 

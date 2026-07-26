@@ -7,18 +7,18 @@
 //! not a tree node) above a delimiter, **Inbox** first inside the tree,
 //! **Shopping list** below a delimiter at the bottom.
 //!
-//! Management (context-menu create/rename/delete with dialog confirms, drag
-//! reparent/reorder) lives in [`super::tree_manage`]; this file wires its
-//! handlers onto the rows.
+//! Management (context-menu create/rename/**move**/delete with dialog
+//! confirms, drag reparent/reorder) lives in [`super::tree_manage`]; this file
+//! wires its handlers onto the rows — and owns the three ways *into* that menu
+//! (right-click, the row's `⋯` button, the keyboard's menu key; see
+//! [`RowShell`]), since drag alone is mouse-only.
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_location;
 use shared::{CollectionTreeRow, Id};
 use std::collections::{HashMap, HashSet};
 
-use super::tree_manage::{
-    commit_drop, DragState, DropIntent, MenuTarget, TreeDialogs, TreeManage, TreeMenu,
-};
+use super::tree_manage::{commit_drop, DragState, DropIntent, MenuTarget, TreeManage, TreeMenu};
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::collapsible::{Collapsible, CollapsibleContent, CollapsibleTrigger};
 use crate::components::ui::context_menu::{use_context_menu, ContextMenu};
@@ -141,7 +141,11 @@ pub fn CollectionTreeNav() -> impl IntoView {
     let pathname = use_location().pathname;
     // NB: `TreeManage` is provided by the app shell, not here — ⌘K's
     // `New binder…` opens this same create dialog from Catalog mode, where this
-    // component isn't mounted.
+    // component isn't mounted. `TreeDialogs` is mounted by the shell for the
+    // same family of reason plus one more: this nav lives in an `aside` that is
+    // off-screen below `md`, and a dialog cannot be shown from inside a hidden
+    // subtree — mounting the dialogs here made every tree action invisible on a
+    // phone.
 
     view! {
         <nav aria-label="Collections">
@@ -161,7 +165,6 @@ pub fn CollectionTreeNav() -> impl IntoView {
                     }
                 })}
             </Suspense>
-            <TreeDialogs />
         </nav>
     }
 }
@@ -345,9 +348,25 @@ fn TreeRow(node: TreeNode, depth: usize, pathname: Memo<String>) -> AnyView {
 }
 
 /// The row container: indentation plus the management wiring shared by leaf
-/// and parent rows — right-click aims the shared context menu, and the drag
-/// handlers implement reparent (drop into) / reorder (drop on an edge band)
-/// with the drop hint painted via `data-drop-hint`.
+/// and parent rows — right-click (or the row's `⋯` button, or the keyboard's
+/// menu key) aims the shared context menu, and the drag handlers implement
+/// reparent (drop into) / reorder (drop on an edge band) with the drop hint
+/// painted via `data-drop-hint`.
+///
+/// **Three ways in, because right-click is only one of them.** Right-click is
+/// the desktop-mouse gesture; the `⋯` button is the tab-reachable and
+/// tap-reachable one (a real `<button>`, revealed on hover at `md` and up so
+/// the at-rest row still reads as the wireframe's `Tree Item`, always shown
+/// below it where there is no hover); and `ContextMenu`/`Shift+F10` from
+/// anywhere in the row is the platform keyboard contract for opening a context
+/// menu. All three set the same `menu_target` and open the same shared panel —
+/// the only difference is where it is anchored.
+///
+/// The `⋯` button is not a convenience. A held touch does **not** produce a
+/// `contextmenu` on the Android webview — measured, against a comment in this
+/// repo that had claimed otherwise since the menu was vendored
+/// (`end2end/android-tree-move-check.mjs`) — so without an explicit trigger a
+/// phone has no way into this menu at all.
 #[component]
 fn RowShell(
     id: Id,
@@ -364,7 +383,20 @@ fn RowShell(
     let toast = expect_context::<ToastHandle>();
     let tree = expect_context::<CollectionTreeResource>();
 
-    let descendants = forbidden.len() - 1;
+    // Shared by three handlers, so stored once rather than cloned per closure.
+    let row_name = StoredValue::new(name);
+    let row_forbidden = StoredValue::new(forbidden.clone());
+    let aim = move || {
+        manage.menu_target.set(Some(MenuTarget::Row {
+            id,
+            name: row_name.get_value(),
+            is_inbox,
+            parent_id,
+            forbidden: row_forbidden.get_value(),
+            cards,
+        }));
+    };
+
     let hint = move || {
         manage
             .drop_hint
@@ -379,26 +411,35 @@ fn RowShell(
         // also contains descendant heads. Tests and drag both target the head.
         <div
             data-tree-row-head=id.to_string()
-            class="data-[drop-hint=into]:bg-accent/60 data-[drop-hint=into]:rounded-md data-[drop-hint=before]:shadow-[inset_0_2px_0_0_var(--color-ring)] data-[drop-hint=after]:shadow-[inset_0_-2px_0_0_var(--color-ring)] flex items-center"
+            class="group/row data-[drop-hint=into]:bg-accent/60 data-[drop-hint=into]:rounded-md data-[drop-hint=before]:shadow-[inset_0_2px_0_0_var(--color-ring)] data-[drop-hint=after]:shadow-[inset_0_-2px_0_0_var(--color-ring)] flex items-center"
             style:padding-left=indent
             draggable=(!is_inbox).then_some("true")
             data-drop-hint=hint
             on:contextmenu=move |ev| {
                 ev.prevent_default();
                 ev.stop_propagation();
-                manage
-                    .menu_target
-                    .set(
-                        Some(MenuTarget::Row {
-                            id,
-                            name: name.clone(),
-                            is_inbox,
-                            descendants,
-                            cards,
-                        }),
-                    );
+                aim();
                 if let Some(menu) = menu {
                     menu.open_at(f64::from(ev.client_x()), f64::from(ev.client_y()));
+                }
+            }
+            on:keydown=move |ev| {
+                // The platform's own keyboard route to a context menu. Browsers
+                // *do* synthesize `contextmenu` from these, but at coordinates
+                // that are 0,0 on a keyboard activation — handling the keys
+                // ourselves (and `prevent_default`ing the synthesized event
+                // away) is what lets the panel be anchored to the row instead of
+                // the viewport corner.
+                let key = ev.key();
+                if key != "ContextMenu" && !(key == "F10" && ev.shift_key()) {
+                    return;
+                }
+                ev.prevent_default();
+                ev.stop_propagation();
+                aim();
+                if let Some(menu) = menu {
+                    let (x, y) = element_anchor(ev.as_ref()).unwrap_or((0.0, 0.0));
+                    menu.open_at(x, y);
                 }
             }
             on:dragstart=move |ev| {
@@ -455,8 +496,55 @@ fn RowShell(
             }
         >
             {children()}
+            // The mouse-free trigger. `opacity-0` and not `hidden` at `md` and
+            // up: a hidden button is not tab-reachable, and being reachable by
+            // Tab is the entire point of it — `focus-visible` brings it back
+            // into view for whoever got here without a pointer.
+            <button
+                type="button"
+                data-tree-row-actions=id.to_string()
+                aria-haspopup="menu"
+                aria-label=format!("Actions for {}", row_name.get_value())
+                class="text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:ring-ring mr-1 w-5 shrink-0 rounded-sm text-center text-sm leading-5 focus-visible:ring-1 focus-visible:outline-none md:opacity-0 md:group-hover/row:opacity-100 md:focus-visible:opacity-100"
+                on:click=move |ev| {
+                    // The row is a link; a click on its actions button is not a
+                    // navigation.
+                    ev.prevent_default();
+                    ev.stop_propagation();
+                    aim();
+                    if let Some(menu) = menu {
+                        // The button's own rect, never `client_x/y`: a keyboard
+                        // activation (⏎/space on the focused button) fires a
+                        // click whose coordinates are 0,0, which would park the
+                        // panel in the viewport corner.
+                        let (x, y) = element_anchor(ev.as_ref()).unwrap_or((0.0, 0.0));
+                        menu.open_at(x, y);
+                    }
+                }
+            >
+                <span aria-hidden="true">"⋯"</span>
+            </button>
         </div>
     }
+}
+
+/// Viewport coordinates to anchor the shared context menu at: the bottom-left
+/// of whatever element the handler is bound to. Hydrate-only — the measurement
+/// API exists client-side, and so does every gesture that calls this.
+#[cfg(feature = "hydrate")]
+fn element_anchor(ev: &leptos::web_sys::Event) -> Option<(f64, f64)> {
+    use leptos::wasm_bindgen::JsCast;
+    let el = ev
+        .current_target()?
+        .dyn_into::<leptos::web_sys::HtmlElement>()
+        .ok()?;
+    let rect = el.get_bounding_client_rect();
+    Some((rect.left(), rect.bottom()))
+}
+
+#[cfg(not(feature = "hydrate"))]
+fn element_anchor(_ev: &leptos::web_sys::Event) -> Option<(f64, f64)> {
+    None
 }
 
 /// Collect a node's id plus every descendant's.

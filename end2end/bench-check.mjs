@@ -590,6 +590,43 @@ await page.mouse.click(3, 3);
 await page.waitForTimeout(150);
 if (await ctxOpen()) failures.push('context_menu did not close on outside click');
 
+// Keyboard: the menu key opens it from the focused trigger, focus lands on the
+// first item, ↑↓ rove and wrap, and ESC hands focus back to the opener. Added
+// with the tree's `Move to…`, which exists to be reachable without a mouse —
+// a menu the keyboard can open but never reach a row in is not a keyboard path.
+const focusedText = () =>
+  page.evaluate(() => (document.activeElement?.textContent ?? '').trim());
+const focusedIsOpener = () =>
+  page.evaluate(() =>
+    document.activeElement?.hasAttribute('data-bench-context-opener') ?? false,
+  );
+await page.locator('[data-bench-context-opener]').focus();
+await page.keyboard.press('Shift+F10');
+await page.waitForTimeout(150);
+if (!(await ctxOpen())) failures.push('context_menu did not open on Shift+F10');
+if ((await focusedText()) !== 'New binder inside…') {
+  failures.push('context_menu did not focus its first item on open');
+}
+await page.keyboard.press('ArrowDown');
+if ((await focusedText()) !== 'Rename…') {
+  failures.push('context_menu ArrowDown did not move to the next item');
+}
+await page.keyboard.press('ArrowUp');
+if ((await focusedText()) !== 'New binder inside…') {
+  failures.push('context_menu ArrowUp did not move back');
+}
+// Wrapping is what makes ↑ from the top reach the destructive last item.
+await page.keyboard.press('ArrowUp');
+if ((await focusedText()) !== 'Delete…') {
+  failures.push('context_menu ArrowUp did not wrap to the last item');
+}
+await page.keyboard.press('Escape');
+await page.waitForTimeout(150);
+if (await ctxOpen()) failures.push('context_menu did not close on ESC (keyboard)');
+if (!(await focusedIsOpener())) {
+  failures.push('context_menu did not restore focus to its opener on ESC');
+}
+
 // ID stability: two fresh SSR renders must serve identical overlay id wiring
 // (deterministic caller IDs — the use_random_id class of bug).
 const raw2 = await (await page.request.get(url)).text();

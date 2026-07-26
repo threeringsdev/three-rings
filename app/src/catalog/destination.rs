@@ -223,10 +223,20 @@ pub fn DestinationList(
     children: ChildrenFn,
     #[prop(into, default = String::from("Search collections…"))] placeholder: String,
     #[prop(into, default = String::from("No collection matches."))] empty: String,
+    /// Deterministic DOM id for the search field, for a caller that focuses it
+    /// itself. The tree's `Move to…` does: it opens in a dialog, and a dialog
+    /// that focuses nothing leaves the keyboard path dead-ended. Omitted = no
+    /// `id` attribute at all, matching `CommandInput`'s own contract.
+    #[prop(optional_no_strip)]
+    input_id: Option<String>,
 ) -> impl IntoView {
     view! {
         <Command class="rounded-md">
-            <CommandInput placeholder=placeholder />
+            {match input_id {
+                Some(id) => view! { <CommandInput id=id placeholder=placeholder.clone() /> }
+                    .into_any(),
+                None => view! { <CommandInput placeholder=placeholder.clone() /> }.into_any(),
+            }}
             <CommandList class="max-h-64 overflow-y-auto p-1">
                 <CommandEmpty class="text-muted-foreground p-3 text-sm">{empty}</CommandEmpty>
                 {children()}
@@ -320,8 +330,64 @@ fn PickerBody() -> impl IntoView {
     }
 }
 
-/// One row of [`DestinationList`] — `🗂 Name`, its optional hint, and the ✓ on
-/// the current choice.
+/// One row of [`DestinationList`] — its label, an optional right-hand hint, and
+/// the ✓ that marks the standing choice.
+///
+/// Split out from [`DestinationOption`] for the tree's `Move to…`, whose list
+/// has one row that is **not a collection** (`Top level`, i.e. `parent_id =
+/// None`) and so has no [`Destination`] to carry. Everything a picker row *is*
+/// — the `CommandItem`, the `destination-option` test seam, the ✓, the hint —
+/// lives here, so the third consumer composes this markup instead of growing a
+/// second copy of it that drifts.
+#[component]
+pub fn DestinationRow(
+    /// What the row reads: `🗂 Shoebox`.
+    #[prop(into)]
+    label: String,
+    /// The text `command`'s filter matches the typed query against.
+    #[prop(into)]
+    value: String,
+    /// Right-hand hint (`wants 3`), or nothing.
+    #[prop(optional_no_strip)]
+    hint: Option<String>,
+    /// Whether this row is the *current* choice (the ✓) — a different thing
+    /// from `command`'s keyboard highlight, which is its `aria-selected`.
+    #[prop(into, default = Signal::derive(|| false))]
+    chosen: Signal<bool>,
+    on_select: Callback<()>,
+) -> impl IntoView {
+    // The test seam and the chosen-marker ride an inner element, not the
+    // `CommandItem` itself: it takes no attribute spread, and its own
+    // `aria-selected` already means "keyboard-highlighted" — a different thing
+    // from "this is the current destination". Overloading it would make the
+    // primitive lie to a screen reader.
+    view! {
+        <CommandItem value=value on_select=on_select class="cursor-pointer justify-between">
+            <span
+                class="truncate"
+                data-testid="destination-option"
+                data-chosen=move || chosen.get().then_some("true")
+            >
+                {label}
+            </span>
+            {hint
+                .map(|h| {
+                    view! {
+                        <span
+                            class="text-muted-foreground shrink-0 text-xs"
+                            data-testid="destination-hint"
+                        >
+                            {h}
+                        </span>
+                    }
+                })}
+            {move || chosen.get().then(|| view! { <span aria-hidden="true">"✓"</span> })}
+        </CommandItem>
+    }
+}
+
+/// One row of [`DestinationList`] that points at a **collection** — the shape
+/// the catalog toolbar and the selection tray both use.
 #[component]
 pub fn DestinationOption(
     choice: DestinationChoice,
@@ -348,33 +414,14 @@ pub fn DestinationOption(
         }
     });
 
-    // The test seam and the chosen-marker ride an inner element, not the
-    // `CommandItem` itself: it takes no attribute spread, and its own
-    // `aria-selected` already means "keyboard-highlighted" — a different thing
-    // from "this is the current destination". Overloading it would make the
-    // primitive lie to a screen reader.
     view! {
-        <CommandItem value=value on_select=choose class="cursor-pointer justify-between">
-            <span
-                class="truncate"
-                data-testid="destination-option"
-                data-chosen=move || selected.get().then_some("true")
-            >
-                {label}
-            </span>
-            {hint
-                .map(|h| {
-                    view! {
-                        <span
-                            class="text-muted-foreground shrink-0 text-xs"
-                            data-testid="destination-hint"
-                        >
-                            {h}
-                        </span>
-                    }
-                })}
-            {move || selected.get().then(|| view! { <span aria-hidden="true">"✓"</span> })}
-        </CommandItem>
+        <DestinationRow
+            label=label
+            value=value
+            hint=hint
+            chosen=Signal::derive(move || selected.get())
+            on_select=choose
+        />
     }
 }
 
