@@ -219,6 +219,140 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### ⌘K command palette (2026-07-26)
+
+`app/src/components/palette.rs` — mounted once in `AppShell`, rendering nothing
+unless **desktop and signed in**. `PaletteBody` owns the chord listener, the
+recent ring, the place index and each row's action; `PaletteSurface`/
+`PaletteContents` are the `CommandDialog` + field + grouped rows + footer, split
+out so the bench can drive them (`command-dialog` — `CommandDialog` had no bench
+coverage at all before this task).
+
+**The ordering caveat is live on this surface, and it is discharged by
+remounting — but the first two attempts to remount did not.** This is the
+sharpest new fact about the caveat and it generalizes past this page:
+
+1. The palette genuinely reorders the same rows as the query grows
+   (`ranking_reorders_as_the_query_grows`: `e` → `[Shoebox, Depth Box]`,
+   `eb` → `[Depth Box, Shoebox]`), so the exemption for "fully remounts" is the
+   only thing standing between it and the bug.
+2. **A plain dynamic closure is not a remount.** Rendering the rows from
+   `{move || …}` left `document.contains(firstRow)` **true** after a keystroke:
+   tachys diffs an unkeyed view collection *positionally* and reuses the DOM
+   nodes while re-running the item registrations, so `command`'s registry grew
+   while the nodes stayed put. Measured, not reasoned. The shape that actually
+   remounts is `<For each=move || [rows.get()] key=RowSet::key>` — a `<For>` of
+   **one** item keyed on the whole row set's identity — and the guard test pins
+   a DOM-node reference with the `CommandInput` node as a positive control, so
+   regressing to a positional diff (or to a per-row keyed `<For>`) fails it.
+3. **Remounting was still not sufficient**, which the review caught: `CommandItem`
+   registers into `CommandContext::items` from its *component body*
+   (`command.rs:348-361`), which Leptos runs at **view-construction** time, not at
+   DOM mount. `group_views` built both groups at their `let` bindings and only
+   *then* chose DOM order, so places always registered first however they were
+   drawn. Typing a single `n` (`New binder…` scores 11 at a prefix, `Inbox` 1
+   mid-word) drew COMMANDS on top while `visible_ids()[0]` was `Inbox` — the
+   highlight landing in the second group, `↑` clamping immediately, and the
+   top-drawn rows unreachable upward. Verbatim the caveat's own failure. Fixed by
+   deciding the order *before* constructing either group (a `[Option<AnyView>; 2]`
+   built inside the `commands_first` branches), so construction order is
+   structurally the mount order. **The `compareDocumentPosition` sort stays
+   deferred**, now for a second reason beyond the original: `visible_ids()` is an
+   already-measured O(n²) hot path and a DOM-ordering pass per call would put
+   layout reads inside it. The construction-vs-insertion fact is recorded at the
+   top of `visible_ids`'s doc, because it applies to any consumer building
+   sections conditionally.
+
+**Deviations from `design/command-palette.md`, each forced:**
+
+- **`should_filter=false` with a hand-written fuzzy ranker.** The primitive's
+  filter is a lowercase `contains` — it cannot match `trabin` → `Trade Binder`
+  and cannot *rank*, while the design asks for fuzzy matching with the best match
+  pre-selected. `score()` is subsequence matching with an anchor rule (each char
+  after the first must be contiguous or at a word start), which keeps
+  `cd` → `Commander Deck` while refusing `de` → `Undo last move`.
+- **Groups are ranked by their top match** rather than fixed COLLECTIONS-then-
+  COMMANDS. The design asserts both "grouped" and "best match pre-selected", and
+  under a fixed order those conflict. Found by the e2e, whose scratch binder was
+  named `zz-e2e-palette-undo-…`: typing `undo` pre-selected the collection over
+  the command. `tra` still puts COLLECTIONS first, so the wireframe is unchanged.
+  **This deviation is what exposed finding 3 above** — it is the only thing that
+  makes DOM order variable.
+- **Cold start is unspecified in the design.** With no history the group is
+  labelled PLACES and offers All cards / Inbox / Shopping list; without it a
+  first-ever `⌘K ⏎` would run `New binder…`.
+- **Recents live in `localStorage`, not a cookie.** `tr_dest`/`tr_theme` are
+  cookies *because* they must be SSR-readable; this list is read only by a
+  surface that does not exist on the server.
+- **Inbox is not added as a system place** — it is a tree row, so the flatten
+  already produced it and adding it again would show two `Inbox` rows. `All cards`
+  and `Go to My cards` both target `/my` and both are kept per the design, but
+  only `All cards` is a recent-ring key so `/my` cannot appear twice in RECENT.
+- Desktop is `(min-width: 768px) and (pointer: fine)`, resolved in an `Effect` and
+  then **listened** on one `MediaQueryList` per document — deliberately unlike
+  `CardPreview`'s per-card unlistened sample (already filed as a discovery).
+  The same client-only gate is the hydration contract: `false` during SSR *and*
+  during the hydration render, so the palette is absent from SSR markup for
+  everyone.
+
+**`Undo last move` is session memory, not an endpoint.** There is no
+`undo_last_move` server fn and `lib.rs` records why (it races a second tab), so a
+shell-level `LastMoveState` is written by every surface that already raises an
+undo toast. **The review's two promoted majors were both this invariant** —
+`LastMoveState` must name the most recent reversible move, or nothing:
+
+- **Teardown recorded nothing**, so after emptying a deck `⌘K → Undo last move`
+  reversed an *older, unrelated* move (a binder add from minutes earlier) and left
+  the teardown standing — an unintended write to different data from a labelled
+  global shortcut. `TeardownReceipt` now carries `move_ids: Vec<Id>` instead of
+  `moves: i64`; the count is `len()`, not a second field that could disagree.
+- **A toast's Undo did not clear the record**, so a later palette undo replayed a
+  dead id, got an idempotent `Ok(())` from `undo_one` and raised a **false success
+  toast over a no-op**. New `LastMoveState::forget(&[Id])` at all four toast-undo
+  sites, **id-matched** via a pure `forgets()` — a toast outlives the row that
+  raised it, so an older toast's Undo must not wipe a newer move's record.
+
+An audit of every UI-reachable `moves`-row writer (quick-add Have, removal, batch
+move, pull, teardown) found no third offender: `set_holding_quantity` writes no
+ledger row (its undo is a re-commit, correctly excluded), tree reparent/reorder
+write none, and `add_holding` has no UI caller. One judgement call recorded on the
+method: `forget` runs when the reversal is **dispatched**, not when it succeeds —
+the failure modes are asymmetric, and a stale record claiming success over a no-op
+is worse than an over-eager forget saying "nothing to undo" while the toast that
+started the reversal is still on screen.
+
+Two other traps worth carrying: **reading a resource outside
+Suspense/Transition/effect fails `hydration-check.mjs`** (the first version read
+`CurrentUserResource` and the tree resource directly and the probe warned of a
+hydration mismatch — both now go through `Effect`s), and the bench page grew a
+**duplicate `id="command-palette"`** (section anchor + dialog) that only the SSR
+curl dump exposed; the section is now `command-dialog`.
+
+`provide_tree_manage` was hoisted from `CollectionTreeNav` to `AppShell` so
+`New binder…` can open the tree's own create dialog from Catalog mode, where the
+sidebar is not mounted; `TreeDialogs` still lives beside the tree, so a create
+opened from Catalog mode appears when `/my` mounts. `CommandInput` gained an
+optional `id` and `CommandDialog` now forwards `should_filter` — both additive,
+documented in the vendored module doc.
+
+Review: **one major** (finding 3), plus **two minors promoted to majors by the
+orchestrator** (the `LastMoveState` pair — an unintended write from a labelled
+shortcut clears the wrong-data bar). Eight minors filed under Phase 5 discoveries.
+The Major-1 regression test was confirmed **failing before the fix** (the highlight
+sat on the registered-first row while the premise assertions about draw order all
+passed, so the failure is the bug and not a vacuous setup) and passing after; the
+`forget` fix was mutation-checked by replacing its call with `let _ = last_move;`,
+which made the test fail with the false success toast, then restored.
+
+Verified: gate **8/8 green** on macOS incl. `three_rings` (app 195 tests + shared
+28), full chromium tier **190/190** at `--workers=1` (5.9 min), hydration CLEAN
+anonymous ×4 and authed ×5, bench CLEAN, SSR curls showing **zero** palette markup
+authed, anonymous and on the bench with `id="tree-create"` and `Trade Binder` as
+positive controls, Android CDP PASS + `probe:android-palette` CLEAN at 540 px
+(`pointer: fine = false`, the desktop gate reads false, and `CommandDialog` itself
+ranks `tra` → `[Trade Binder, Trade duplicates]` on the real webview as the
+negative check's positive control).
+
 ### `CardSummary::owned` on catalog search (2026-07-26)
 
 `HostedBackend::search` finished with `into_summary(None)`, so the tile's
