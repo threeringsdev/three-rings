@@ -17,8 +17,7 @@ use shared::{CollectionTreeRow, Id};
 use std::collections::{HashMap, HashSet};
 
 use super::tree_manage::{
-    commit_drop, provide_tree_manage, DragState, DropIntent, MenuTarget, TreeDialogs, TreeManage,
-    TreeMenu,
+    commit_drop, DragState, DropIntent, MenuTarget, TreeDialogs, TreeManage, TreeMenu,
 };
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::collapsible::{Collapsible, CollapsibleContent, CollapsibleTrigger};
@@ -140,7 +139,9 @@ pub fn assemble(dto: shared::CollectionTree) -> AssembledTree {
 pub fn CollectionTreeNav() -> impl IntoView {
     let tree = expect_context::<CollectionTreeResource>().0;
     let pathname = use_location().pathname;
-    provide_tree_manage();
+    // NB: `TreeManage` is provided by the app shell, not here — ⌘K's
+    // `New binder…` opens this same create dialog from Catalog mode, where this
+    // component isn't mounted.
 
     view! {
         <nav aria-label="Collections">

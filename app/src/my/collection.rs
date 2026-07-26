@@ -1223,6 +1223,9 @@ fn HereCount(
     // sources), which is how the row gets a *new* `holding_id` after an undo —
     // reversing a removal re-inserts the holding, so the old id stays dead.
     let revision = use_context::<crate::my::move_selection::HoldingsRevision>();
+    // A removal is a move with no destination, so ⌘K's `Undo last move`
+    // reverses it too (see `crate::components::palette`).
+    let last_move = use_context::<crate::components::palette::LastMoveState>();
 
     let label = StoredValue::new(name.clone());
 
@@ -1230,6 +1233,8 @@ fn HereCount(
     // grain and on the board they left, which is the whole reason the removal is
     // a move rather than a delete.
     let undo_removal = move |move_id: Id, copies: i32| {
+        // The palette must stop offering the same reversal (`forget`'s doc).
+        crate::components::palette::forget_last_move(last_move, &[move_id]);
         spawn_local(async move {
             match crate::undo_move(move_id).await {
                 Ok(()) => {
@@ -1271,6 +1276,7 @@ fn HereCount(
                     // unmount this row and take the Undo below with it. The
                     // sidebar badges are a different read, so they refresh.
                     tree.refetch();
+                    crate::components::palette::note_last_move(last_move, vec![move_id]);
                     let copies_label = if copies == 1 {
                         "1 copy".to_string()
                     } else {
@@ -1411,6 +1417,11 @@ fn TeardownDialog(
     tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
 ) -> impl IntoView {
     let toast = expect_context::<ToastHandle>();
+    // A teardown is N ledger rows and nothing else records them, so without this
+    // ⌘K's `Undo last move` would reach past it and reverse an older, unrelated
+    // move — the confirm below promises "every move is in the history", and this
+    // is what makes that promise reachable.
+    let last_move = use_context::<crate::components::palette::LastMoveState>();
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     // "" = return to previous locations; otherwise a collection id.
@@ -1439,10 +1450,11 @@ fn TeardownDialog(
                 Ok(receipt) => {
                     busy.set(false);
                     open.set(false);
+                    let moved = receipt.move_ids.len();
+                    crate::components::palette::note_last_move(last_move, receipt.move_ids);
                     toast.show(ToastOptions::message(format!(
-                        "Emptied — {} card{} moved",
-                        receipt.moves,
-                        if receipt.moves == 1 { "" } else { "s" },
+                        "Emptied — {moved} card{} moved",
+                        if moved == 1 { "" } else { "s" },
                     )));
                     view_res.refetch();
                     tree.refetch();

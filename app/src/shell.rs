@@ -179,6 +179,15 @@ pub fn AppShell() -> impl IntoView {
     // renders holdings takes it as a resource *source*, so a move refetches
     // what it invalidated instead of leaving stale counts on screen.
     crate::my::move_selection::provide_holdings_revision();
+    // Shell-level so ⌘K's `New binder…` / `New deck…` can open the tree's own
+    // create dialog from anywhere — including Catalog mode, where the sidebar
+    // tree (which used to provide this) isn't mounted at all. `TreeDialogs`
+    // still renders beside the tree, so the flag is set here and the dialog
+    // comes up when My-cards mode mounts it.
+    crate::my::tree_manage::provide_tree_manage();
+    // Also shell-level, and for the palette specifically: the page that made a
+    // move is long gone by the time `Undo last move` runs.
+    crate::components::palette::provide_last_move();
 
     view! {
         <div class="bg-background text-foreground flex min-h-screen flex-col">
@@ -219,6 +228,11 @@ pub fn AppShell() -> impl IntoView {
             // Position is `fixed` on both, so the swap is invisible.
             <Toaster />
             <SelectionTrayDock selection />
+            // The ⌘K palette (design/command-palette.md). Global by nature —
+            // the chord works from every page in both modes — so it is mounted
+            // here and gates itself on desktop-plus-signed-in. After the
+            // `Toaster`, because its `Undo last move` reads that handle.
+            <crate::components::palette::CommandPalette />
         </div>
     }
 }

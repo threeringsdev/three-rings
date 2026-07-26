@@ -22,6 +22,7 @@ rather than folklore:
 | `npm run probe:android-selection-tray` | selection tray + row checkbox on the real Android webview, via the bench (both hosting pages are authed) |
 | `npm run probe:android-rail` | the filter sheet on the real Android webview — badge, facet click, scroll lock, and the Set picker's search + multi-select pick (the rail is only a sheet at phone width) |
 | `npm run probe:android-needs` | `/my/collections/:id/needs` + `/my/shopping` route guards through the redirect shim, and the pick list's checkbox tap, on the real Android webview |
+| `npm run probe:android-palette` | the ⌘K desktop gate reads `false` at phone width on the real Android webview, with `CommandDialog` itself proven working there (the negative check's positive control) |
 
 **A probe covers what the browser tier structurally cannot.** `probe:paging`
 exists because page size is fixed in the UI, so only the JSON route can ask for

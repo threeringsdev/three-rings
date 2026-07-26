@@ -531,6 +531,7 @@ fn ElsewhereRow(row: NeedRow, collection_id: Id, pending: RwSignal<bool>) -> imp
     let toast = expect_context::<ToastHandle>();
     let tree = expect_context::<CollectionTreeResource>().0;
     let revision = use_context::<super::move_selection::HoldingsRevision>();
+    let last_move = use_context::<crate::components::palette::LastMoveState>();
     let oracle_id = row.oracle_id;
     let name = row.name.clone();
     let gap = gap_of(&row);
@@ -564,7 +565,15 @@ fn ElsewhereRow(row: NeedRow, collection_id: Id, pending: RwSignal<bool>) -> imp
                 // database is structural rather than a call someone has to
                 // remember to add (the rule `/my` and the collection view
                 // already follow).
-                Ok(outcome) => report(&outcome, &label.get_value(), toast, tree, revision, None),
+                Ok(outcome) => report(
+                    &outcome,
+                    &label.get_value(),
+                    toast,
+                    tree,
+                    revision,
+                    last_move,
+                    None,
+                ),
                 Err(e) => {
                     toast.show(
                         ToastOptions::message(format!("Couldn't pull: {}", message_of(&e)))
@@ -723,6 +732,7 @@ fn PickRowView(
 ) -> impl IntoView {
     let toast = expect_context::<ToastHandle>();
     let revision = use_context::<super::move_selection::HoldingsRevision>();
+    let last_move = use_context::<crate::components::palette::LastMoveState>();
     let busy = RwSignal::new(false);
     let token = StoredValue::new(row.item.token());
     let label = StoredValue::new(row.name.clone());
@@ -755,6 +765,7 @@ fn PickRowView(
                         toast,
                         tree,
                         revision,
+                        last_move,
                         Some(Callback::new(move |()| {
                             let undo_token = undo_token.clone();
                             done.update(|d| {
@@ -809,6 +820,7 @@ fn report(
     toast: ToastHandle,
     tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
     revision: Option<super::move_selection::HoldingsRevision>,
+    last_move: Option<crate::components::palette::LastMoveState>,
     on_undo: Option<Callback<()>>,
 ) {
     if !outcome.move_ids.is_empty() {
@@ -818,6 +830,8 @@ fn report(
         }
         let copies = outcome.copies();
         let move_ids = outcome.move_ids.clone();
+        // A pull is a batch of moves — one Undo for the toast, one for ⌘K.
+        crate::components::palette::note_last_move(last_move, move_ids.clone());
         let copies_label = if copies == 1 {
             "1 copy".to_string()
         } else {
@@ -830,6 +844,9 @@ fn report(
                     "Undo",
                     Callback::new(move |()| {
                         let move_ids = move_ids.clone();
+                        // The palette must stop offering the same reversal
+                        // (`LastMoveState::forget`'s doc).
+                        crate::components::palette::forget_last_move(last_move, &move_ids);
                         spawn_local(async move {
                             match crate::undo_selection_move(move_ids).await {
                                 Ok(()) => {
