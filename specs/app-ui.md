@@ -219,6 +219,84 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### `CardSummary::owned` on catalog search (2026-07-26)
+
+`HostedBackend::search` finished with `into_summary(None)`, so the tile's
+"N owned" badge was dead code and **an authed catalog looked identical to an
+anonymous one**. New `owned_by_oracle(&[Uuid]) -> Option<HashMap<Uuid, i32>>`:
+`None` with no session, otherwise one
+`SELECT oracle_id, owned FROM owned_by_card WHERE oracle_id = ANY($1)` inside
+`scoped_tx`. `card_summary` was rewritten onto the same helper.
+
+**The scoped and unscoped reads were kept separate, deliberately.** Folding a
+`LEFT JOIN owned_by_card` into the paging query would force the *public,
+cacheable, hottest* read into a transaction for a column anonymous callers never
+see — or else duplicate the grammar/keyset/cursor construction across two paths.
+Keeping them separate also means the tile and the detail page read ownership
+through **one** helper and cannot drift, which was the binding constraint. Round
+trips are a wash (join = begin/set/select/commit; separate = select +
+begin/set/select/commit), and ownership stays out of the paging query so it
+structurally cannot influence which rows a search returns.
+
+`native.rs` needed no change, verified rather than assumed: `NativeBackend::search`
+GETs `/api/catalog/search` with the caller's bearer token, that route resolves its
+backend via the opportunistic `routes::catalog_backend`, and `owned` round-trips
+as JSON. The native shell inherits the fix from the hosted terminus — which is
+the point of the seam.
+
+**Tenancy was verified against real multi-tenant data**, not from the code
+comment. `migrations/0003_collections.sql:89` declares the view
+`WITH (security_invoker = true)` (confirmed live in `pg_class.reloptions`); both
+underlying tables carry `relrowsecurity` **and** `relforcerowsecurity`; the
+policies are `USING (user_id = current_setting('app.user_id', true)::uuid)` on
+role `public`; the pool role has `rolbypassrls = false`; and `scoped_tx` binds
+the GUC transaction-locally with a bound parameter. Batching by `ANY($1)` does
+not widen scope — neither the old single-id lookup nor the new one filters
+`user_id`, both relying identically on RLS. The dev branch happens to hold two
+oracle_ids owned by two different users, and for both the authed API returned
+this user's count — not the other user's, not the cross-user sum.
+
+**`Some(0)` and `None` render identically**, because the badge hides at zero. So
+the authed/anonymous distinction is only observable **on the wire**, and a
+page-only test cannot protect it. That is not a stylistic point: the mutation
+making anonymous return `Some(0)` was killed *only* by the JSON-route assertion.
+
+**The card-detail "Your copies" total is computed independently** — summed from
+`card_detail`'s per-collection ownership rows, a different query from
+`owned_by_card` — which makes it the only assertion that pins the actual count.
+The mutation returning `n + 2` was killed only by that cross-check; comparing the
+badge to the API's own `owned` would have survived, since both come from the
+mutated helper. Review confirmed the two cannot diverge structurally: same inner
+join under the same GUC, differing only in `GROUP BY` grain, and
+`holdings.printing_id` is `NOT NULL` so the join to `printings` drops nothing.
+
+**Both mutations were killed only by assertions that read as redundant.** That is
+the reusable lesson, and it generalizes: an assertion with *independent
+provenance* is the one with authority, even when it looks duplicative next to a
+cheaper one.
+
+**Two environment findings worth more than the fix.** `cargo leptos watch`
+silently dropped a save that landed while a rebuild was in flight, and `touch`
+did not retrigger it (it appears to hash content) — only a genuinely different
+edit forced the rebuild. Any mutation pass that trusts a green run without
+confirming the mutation actually compiled is measuring nothing. And the `{..}`
+spread trap bit again: a component prop ending in a bare path immediately before
+`{..}` parses as struct-update syntax (`E0797`), so the testid rides a wrapper
+`<span>` in both views.
+
+**Review: CLEAN, zero majors**, seven minors filed. Notable among them: `search`
+now opens an RLS transaction it previously never needed, so a failure in the
+ownership read turns a working catalog search into a 500 **for signed-in users
+only**, with no fallback degrading `owned` to `None` while still serving results.
+
+**Evidence.** `cargo test --workspace --exclude frontend` 138 + 26 green; full
+chromium e2e **153/153** at `--workers=1` (4.2 min); hydration CLEAN on three
+authed URLs plus one anonymous; SSR curl on the same card shows `7 owned` in both
+grid and list for an authed session and **zero** occurrences anonymously, with
+`/cards/<id>` reading `Your copies · 7`; Android webview probe covers the
+anonymous half (the dev proxy strips Cookie headers) and confirms 50 tiles, zero
+badges, `owned: null` on all ten API hits.
+
 ### Catalog paging via `?cursor=` (2026-07-25)
 
 `app/src/catalog.rs` + `app/src/catalog/rail.rs` — the slice deferred from the

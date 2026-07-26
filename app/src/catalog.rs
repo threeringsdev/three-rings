@@ -676,12 +676,22 @@ fn CardTile(card: CardSummary) -> impl IntoView {
                             />
                         }
                     })}
-                {(owned.unwrap_or(0) > 0)
-                    .then(|| {
+                // Authed-only: `owned` is `None` for an anonymous caller
+                // (unknown, not zero), so the badge never renders there.
+                {owned
+                    .filter(|n| *n > 0)
+                    .map(|n| {
                         view! {
-                            <span class="absolute right-1.5 top-1.5">
+                            // The testid rides the wrapper, not the `Badge`: a
+                            // component prop ending in a bare path (`size=…::Sm`)
+                            // immediately before `{..}` is parsed as
+                            // struct-update syntax (see cards.rs).
+                            <span
+                                class="absolute right-1.5 top-1.5"
+                                data-testid="owned-badge"
+                            >
                                 <Badge variant=BadgeVariant::Secondary size=BadgeSize::Sm>
-                                    {format!("{} owned", owned.unwrap_or(0))}
+                                    {format!("{n} owned")}
                                 </Badge>
                             </span>
                         }
@@ -741,16 +751,20 @@ fn ResultsList(cards: Vec<CardSummary>) -> impl IntoView {
                                                 {link_name}
                                             </a>
                                         </CardPreview>
-                                        {(owned.unwrap_or(0) > 0)
-                                            .then(|| {
+                                        // Authed-only, and the testid rides the
+                                        // wrapper — same two notes as the tile.
+                                        {owned
+                                            .filter(|n| *n > 0)
+                                            .map(|n| {
                                                 view! {
-                                                    <Badge
-                                                        variant=BadgeVariant::Secondary
-                                                        size=BadgeSize::Sm
-                                                        class="ml-2"
-                                                    >
-                                                        {format!("{} owned", owned.unwrap_or(0))}
-                                                    </Badge>
+                                                    <span class="ml-2" data-testid="owned-badge">
+                                                        <Badge
+                                                            variant=BadgeVariant::Secondary
+                                                            size=BadgeSize::Sm
+                                                        >
+                                                            {format!("{n} owned")}
+                                                        </Badge>
+                                                    </span>
                                                 }
                                             })}
                                     </TableCell>
