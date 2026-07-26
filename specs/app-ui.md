@@ -455,6 +455,91 @@ page two's first card present and page one's absent, both pager controls in the
 raw HTML; Android webview probe 11/11 including a 34 px tap target and a
 deep-linked cursored page.
 
+### Needs view + pick list + `/my/shopping` (2026-07-25)
+
+`app/src/my/needs.rs` + `app/src/my/shopping.rs` — the two remaining unrouted
+`/my` pages.
+
+**The task line's composition was wrong, and the spec is corrected rather than
+the code.** The queue said the pick list is client-composed from `move_cards` +
+`suggested_destinations`. `suggested_destinations` ranks *destinations* for a
+card; on this page the destination **is** the page, so the read actually needed
+is source-side. The shipped composition is `needs` + `holdings_of_oracle` +
+`move_batch`, and review confirmed it is complete for both Pull and Pull-all.
+The spec line predates `NeedRow.locations` existing.
+
+**Quantity is never the caller's.** `PullItem` carries only `oracle_id` +
+`from_collection_id` — there is no quantity on the wire at all. `pull_needs`
+re-reads `needs()` (itself behind `require_owned_collection`), re-runs the same
+`allocate` over that fresh read, and accepts only *which* (card, source) lines
+to apply. A source the user does not own cannot appear, because
+`needs().locations` is built from RLS-scoped `holdings ⋈ collections`. A gap
+closed since the page rendered yields no key and refuses as the new
+`SkipReason::NoLongerNeeded` — the destination-side twin of `NoCopies`.
+
+**The pick-list walk is order-independent**, which review proved rather than
+assumed: `locations` is sorted quantity-desc, so draining any one line leaves
+the others' greedy shares unchanged (a reordering would need `q_i > gap`,
+contradicting the sort). Ticking rows in any order reproduces the same `want`
+for the rest.
+
+**The two buckets cannot diverge from the chip.** `needs()` and
+`collection_view`'s totals use identical CTEs and both derive
+`to_buy = missing − owned_elsewhere`; the headline reuses
+`collection::needs_chip` directly. `sum(locations) == pe.elsewhere` under the
+same RLS scope, so `sum(allocate(gap, locations)) == owned_elsewhere` is an
+identity rather than a hope. A row appears in **both** buckets when part of its
+gap is fillable and part is not — the split is per copy.
+
+**Needs stays board-blind, deliberately, and the page says so.** `desires`
+gained a `board` column in migration 0006, so the sideboard-want case is real:
+a deck holding a card on `main` and wanting it on `side` produces no need row.
+Keeping the blindness was chosen over fixing it because **a board-aware need
+would manufacture rows whose Pull cannot work** — `apply_move`/`move_holding`
+always land `to_board = main` (board relabel is card-tagging's operation), so a
+sideboard need would survive every pull aimed at it, forever. "Unfilled deck
+slot" and "missing copy" are different concepts and only the second is shipped.
+Pinned by an e2e that **fails if `needs()` is made board-aware**, so the
+decision cannot be silently reversed.
+
+The empty state was the honesty gap and was fixed in review: it read "Nothing
+missing — every card this collection wants is already here", an unqualified
+claim about *slots* from a page that counts *copies*. It now reads "Nothing to
+pull or buy — this collection holds every copy it wants. Unfilled board slots
+aren't counted here." The module doc and subtitle are not what a user reads when
+the table is empty.
+
+**Review: CLEAN, zero majors**, twelve minors, ten filed. Two were fixed rather
+than filed: the empty-state wording above (an unmet requirement of the board
+decision, not a discovered defect), and a hole in the quantity invariant —
+duplicate `PullItem`s multiplied the pull, because `planned` is read per item
+and the cached holdings were never decremented between items, so
+`[{o,src},{o,src}]` against a gap of 2 moved 4 copies. Not UI-reachable
+(`allocate` yields one item per source), but the whole point of the design is
+that a caller cannot supply a quantity, and repetition supplied one. Deduped on
+entry, with `SELECTION_MOVE_MAX` still counted against the **raw** list so
+duplicates cannot buy headroom.
+
+**A recorded test limitation, stated rather than papered over:** the dedupe unit
+test pins the `dedupe` helper, not the `pull_needs` call site — deleting the
+`dedupe(...)` call would leave it green. The adapter was bound by direct
+evidence instead (`POST /api/pull_needs` with a line sent twice, gap 2, source
+holding 4 → one ledger row, `copies: 2`, read back as destination 2 / source 2).
+A standing guard needs an API-level e2e.
+
+**Other shape notes.** The pick list mounts **outside** the `Transition`: a
+control inside a resource-driven body dies when its own writes empty that
+resource. The export is a read-only SSR'd `<textarea>` plus an `execCommand`
+Copy (not `navigator.clipboard`, which prompts for permission in a webview), and
+its content is the **shortfall**, not the desired total.
+
+**Evidence.** `cargo test --workspace --exclude frontend` 149 + 28 green; full
+chromium e2e **154/154** at `--workers=1` (4.8 min); hydration CLEAN on four
+authed URLs; SSR 200 on both new routes with real rows and the export text in
+the markup; Android webview probe green including a real tap on the pick-list
+checkbox. Five mutations, five deaths — including `needs()` made board-aware,
+which killed the decision-pin.
+
 ### Undoable removal + deck teardown (2026-07-25)
 
 The third of the three split move-flow tasks, and the one carrying the

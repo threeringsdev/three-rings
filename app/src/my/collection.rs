@@ -312,7 +312,7 @@ pub fn CollectionPage() -> impl IntoView {
 /// The assembled tree's roots, or an empty forest when the shell has no tree
 /// (anonymous, or the read failed). Every consumer here degrades to "no
 /// breadcrumb / no folder counts" rather than failing the page.
-fn assembled_roots(
+pub(crate) fn assembled_roots(
     dto: Option<Result<shared::CollectionTree, ServerFnError<String>>>,
 ) -> Vec<TreeNode> {
     match dto {
@@ -412,16 +412,16 @@ fn SlashHint() -> impl IntoView {
 
 /// One breadcrumb hop.
 #[derive(Debug, Clone, PartialEq)]
-struct Crumb {
-    id: Id,
-    name: String,
+pub(crate) struct Crumb {
+    pub(crate) id: Id,
+    pub(crate) name: String,
 }
 
 /// The chain of collections from the top level down to `id`, inclusive.
 /// `None` when the tree does not contain the node (a fresh collection the
 /// cached tree predates, or no tree at all) — callers fall back to the
 /// collection's own name rather than rendering half a path.
-fn ancestor_path(nodes: &[TreeNode], id: Id) -> Option<Vec<Crumb>> {
+pub(crate) fn ancestor_path(nodes: &[TreeNode], id: Id) -> Option<Vec<Crumb>> {
     for node in nodes {
         if node.row.summary.id == id {
             return Some(vec![Crumb {
@@ -505,7 +505,11 @@ fn counts_summary(totals: &shared::CollectionTotals, delta: i32) -> String {
 /// The needs chip, per the storyboard: `7 missing — 4 owned elsewhere · 3 to
 /// buy`. `None` when nothing is missing — a deck that is complete has no chip
 /// rather than a chip reading zero.
-fn needs_chip(totals: &shared::CollectionTotals) -> Option<String> {
+///
+/// Shared with `/my/collections/:id/needs` (`super::needs`), which folds the
+/// same sentence out of the rows it is showing: one formatter, so the chip and
+/// the page it links to cannot word the same numbers differently.
+pub(crate) fn needs_chip(totals: &shared::CollectionTotals) -> Option<String> {
     if totals.missing <= 0 {
         return None;
     }
