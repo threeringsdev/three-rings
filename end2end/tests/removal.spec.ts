@@ -196,6 +196,11 @@ test("@fast a card can be removed from a binder, and Undo brings the copies back
     // The row stops offering a stepper: the holding it wrote to is gone, so a
     // control that kept accepting numbers would be addressing a dead id.
     await expect(row.locator(HERE)).toHaveText("—");
+    // The header follows the same delta, or the two disagree on screen — and it
+    // is the *removal* that has to move it, since the view is not refetched.
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "0 here",
+    );
     const toast = page.locator(TOAST, { hasText: "Removed" });
     await expect(toast).toContainText(`Removed ${card.name} (3 copies)`);
 
@@ -213,8 +218,12 @@ test("@fast a card can be removed from a binder, and Undo brings the copies back
         "binder: nonfoil/nm/en/main x3",
       ]);
     }).toPass({ timeout: 5000 });
-    // The page followed the database rather than waiting for a reload.
+    // The page followed the database rather than waiting for a reload — the
+    // undo refetches the view, so the row is back with a live holding id.
     await expect(row.locator(STEPPER_VALUE)).toHaveText("3");
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "3 here",
+    );
   } finally {
     await deleteCollection(request, binder.id);
   }

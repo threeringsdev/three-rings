@@ -78,6 +78,28 @@ if ((await input.count()) > 0) {
   fail("tap-to-type mounted no Input");
 }
 
+// `caller_reports`: a committed 0 is the caller's to announce, because its undo
+// is a different operation (the collection view's removal reverses a ledger row,
+// not the count). The stepper must raise nothing for it — on-device too, where
+// the commit path runs through tap-focus and blur rather than mouse focus.
+const rem = "#bench-stepper-removable";
+const remValue = page.locator(`${rem} [data-testid="count-stepper-value"]`);
+await remValue.scrollIntoViewIfNeeded();
+await page.locator(`${rem} [data-testid="count-stepper-dec"]`).click();
+await page.locator(`${rem} [data-testid="count-stepper-dec"]`).click();
+await page.locator(`${rem} span`, { hasText: "Counterspell" }).click();
+await page.waitForTimeout(400);
+const toasts = await page.locator('[data-name="Toast"]').allTextContents();
+if (toasts.some((t) => t.includes("Removed Counterspell")))
+  ok("caller-reported removal raised the caller's toast");
+else fail(`no caller toast on-device (toasts: ${JSON.stringify(toasts)})`);
+if (!toasts.some((t) => t.includes("Counterspell: 1 → 0")))
+  ok("the stepper raised none of its own for that commit");
+else fail("the stepper toasted a commit the caller had claimed");
+if ((await page.locator('[data-testid="bench-stepper-removed"]').count()) > 0)
+  ok("the caller withdrew the control");
+else fail("the removed state did not render");
+
 if (pageErrors.length) fail(`pageerrors: ${pageErrors.join(" | ")}`);
 await browser.close();
 console.log(process.exitCode ? "ANDROID STEPPER CHECK FAIL" : "ANDROID STEPPER CHECK PASS");
