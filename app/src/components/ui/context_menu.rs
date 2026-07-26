@@ -28,6 +28,12 @@
 //! - ESC and outside-pointerdown dismissal are our own `window` listeners
 //!   (a manual popover gets neither for free), removed on `on_cleanup`. ESC
 //!   is not overlay-stack-coordinated — same known caveat as `popover`.
+//! - **the panel is keyboard-operable** (added for the tree's `Move to…`, which
+//!   exists to be reachable without a mouse): opening it moves focus to the
+//!   first `role="menuitem"`, ↑↓/Home/End rove between items, and closing puts
+//!   focus back where it came from. Upstream had none of this — the panel was
+//!   right-click-only, so a keyboard could at best *open* a menu it could never
+//!   reach a row in (Tab from the opener walks the document, not the panel).
 
 use leptos::prelude::*;
 use tw_merge::tw_merge;
@@ -49,6 +55,15 @@ struct ContextMenuContext {
     /// Bumped on every open/close so a *pending* deferred open (see `open_at`)
     /// that a `close` raced can tell it is stale and skip.
     generation: RwSignal<u32>,
+    /// Should the next close hand focus back to whatever opened the menu?
+    ///
+    /// True for a dismissal (ESC, an outside click) — the user is going back to
+    /// where they were. **False when an item was activated**, because the item's
+    /// action decides where focus goes next: the tree's `Move to…` opens a
+    /// dialog and focuses its search field, and a restore racing that in the
+    /// same effect flush would yank focus back to the row and dead-end the
+    /// keyboard path this whole feature exists for.
+    restore_focus: RwSignal<bool>,
 }
 
 /// Programmatic handle for composites that open one shared menu from many
@@ -114,6 +129,7 @@ pub fn ContextMenu(
         open: RwSignal::new(false),
         pos: RwSignal::new((0.0, 0.0)),
         generation: RwSignal::new(0),
+        restore_focus: RwSignal::new(true),
     };
 
     view! {
@@ -148,10 +164,46 @@ pub fn ContextMenuTrigger(
                 ev.prevent_default();
                 handle.open_at(f64::from(ev.client_x()), f64::from(ev.client_y()));
             }
+            on:keydown=move |ev| {
+                // The platform keyboard route into a context menu. Engines do
+                // synthesize `contextmenu` from these keys, but at 0,0 — and
+                // not at all through some automation transports — so the chord
+                // is handled here and the synthesized event prevented, which
+                // also lets the panel be anchored to the focused element rather
+                // than the viewport corner.
+                let key = ev.key();
+                if key != "ContextMenu" && !(key == "F10" && ev.shift_key()) {
+                    return;
+                }
+                ev.prevent_default();
+                let (x, y) = focused_anchor(&ev).unwrap_or((0.0, 0.0));
+                handle.open_at(x, y);
+            }
         >
             {children()}
         </div>
     }
+}
+
+/// Bottom-left of the element the key event landed on, in viewport
+/// coordinates. `target`, not `current_target`: [`ContextMenuTrigger`] is a
+/// `display: contents` wrapper, which has no box to measure. Hydrate-only —
+/// the measurement API and the gesture both exist only client-side.
+#[cfg(feature = "hydrate")]
+fn focused_anchor(ev: &leptos::ev::KeyboardEvent) -> Option<(f64, f64)> {
+    use leptos::wasm_bindgen::JsCast;
+    let el = ev
+        .target()?
+        .dyn_into::<web_sys::HtmlElement>()
+        .ok()
+        .or_else(active_element)?;
+    let rect = el.get_bounding_client_rect();
+    Some((rect.left(), rect.bottom()))
+}
+
+#[cfg(not(feature = "hydrate"))]
+fn focused_anchor(_ev: &leptos::ev::KeyboardEvent) -> Option<(f64, f64)> {
+    None
 }
 
 #[component]
@@ -162,6 +214,8 @@ pub fn ContextMenuContent(
     let ctx = expect_context::<ContextMenuContext>();
     let open = ctx.open;
     let pos = ctx.pos;
+    #[cfg_attr(not(feature = "hydrate"), allow(unused_variables))]
+    let restore_focus = ctx.restore_focus;
 
     let class = tw_merge!(
         "z-50 p-1 rounded-md border bg-popover text-popover-foreground shadow-md w-[200px] m-0",
@@ -169,6 +223,15 @@ pub fn ContextMenuContent(
     );
 
     let node_ref: NodeRef<leptos::html::Div> = NodeRef::new();
+
+    // What had focus when the menu opened, so closing can hand it back. A menu
+    // that takes focus and then drops it on `<body>` costs a keyboard user
+    // their place in the list they opened it from — the exact user this
+    // component's keyboard support exists for. `new_local` because a DOM node
+    // is neither `Send` nor `Sync`.
+    #[cfg(feature = "hydrate")]
+    let opener: StoredValue<Option<web_sys::HtmlElement>, leptos::prelude::LocalStorage> =
+        StoredValue::new_local(None);
 
     // Signal → native popover, then clamp to the viewport (upstream's
     // `updatePosition`: flip to the other side of the pointer rather than
@@ -187,7 +250,12 @@ pub fn ContextMenuContent(
         if let Some(el) = node_ref.get() {
             let is_open = el.matches(":popover-open").unwrap_or(false);
             if want_open {
-                if !is_open && el.show_popover().is_err() {
+                let opening = !is_open;
+                #[cfg(feature = "hydrate")]
+                if opening {
+                    opener.set_value(active_element());
+                }
+                if opening && el.show_popover().is_err() {
                     open.set(el.matches(":popover-open").unwrap_or(false));
                     return;
                 }
@@ -195,8 +263,25 @@ pub fn ContextMenuContent(
                 position_at_pointer(&el, x, y);
                 #[cfg(not(feature = "hydrate"))]
                 let _ = (x, y);
+                // Focus goes in on the *opening* transition only — the effect
+                // also re-runs on a reposition, and stealing focus back to the
+                // first item then would undo the user's own ↑↓.
+                #[cfg(feature = "hydrate")]
+                if opening {
+                    focus_menu_item(&el, MenuStep::First);
+                }
             } else if is_open {
                 let _ = el.hide_popover();
+                #[cfg(feature = "hydrate")]
+                {
+                    let prev = opener.try_update_value(Option::take).flatten();
+                    if restore_focus.get_untracked() {
+                        if let Some(prev) = prev {
+                            let _ = prev.focus();
+                        }
+                    }
+                    restore_focus.set(true);
+                }
             }
         }
     });
@@ -243,10 +328,79 @@ pub fn ContextMenuContent(
                     open.set(el.matches(":popover-open").unwrap_or(false));
                 }
             }
+            on:keydown=move |ev| {
+                // Roving focus between the items. ⏎/space need nothing here —
+                // the items are real `<button>`s and activate themselves — and
+                // ESC is handled on `window` above, where it also serves a menu
+                // whose focus never made it in.
+                let step = match ev.key().as_str() {
+                    "ArrowDown" => MenuStep::Next,
+                    "ArrowUp" => MenuStep::Prev,
+                    "Home" => MenuStep::First,
+                    "End" => MenuStep::Last,
+                    _ => return,
+                };
+                ev.prevent_default();
+                #[cfg(feature = "hydrate")]
+                if let Some(el) = node_ref.get_untracked() {
+                    focus_menu_item(&el, step);
+                }
+                #[cfg(not(feature = "hydrate"))]
+                let _ = step;
+            }
         >
             {children()}
         </div>
     }
+}
+
+/// Which item [`focus_menu_item`] should land on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MenuStep {
+    First,
+    Last,
+    Next,
+    Prev,
+}
+
+/// The document's focused element, if it is one.
+#[cfg(feature = "hydrate")]
+fn active_element() -> Option<web_sys::HtmlElement> {
+    use leptos::wasm_bindgen::JsCast;
+    document()
+        .active_element()
+        .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+}
+
+/// Move focus among the panel's `role="menuitem"` buttons, wrapping at both
+/// ends the way a menu is expected to. Hydrate-only: focus and the DOM query
+/// are client-side, and so is every gesture that reaches this.
+#[cfg(feature = "hydrate")]
+fn focus_menu_item(panel: &web_sys::HtmlDivElement, step: MenuStep) {
+    use leptos::wasm_bindgen::JsCast;
+    let Ok(list) = panel.query_selector_all("[role=menuitem]") else {
+        return;
+    };
+    let items: Vec<web_sys::HtmlElement> = (0..list.length())
+        .filter_map(|i| list.item(i))
+        .filter_map(|n| n.dyn_into::<web_sys::HtmlElement>().ok())
+        .collect();
+    if items.is_empty() {
+        return;
+    }
+    let current =
+        active_element().and_then(|a| items.iter().position(|i| i.is_same_node(Some(a.as_ref()))));
+    let next = match (step, current) {
+        (MenuStep::First, _) => 0,
+        (MenuStep::Last, _) => items.len() - 1,
+        // No item focused yet (the menu was opened by pointer, which leaves
+        // focus outside): the first arrow press enters at the near end.
+        (MenuStep::Next, None) => 0,
+        (MenuStep::Prev, None) => items.len() - 1,
+        (MenuStep::Next, Some(i)) => (i + 1) % items.len(),
+        (MenuStep::Prev, Some(i)) => (i + items.len() - 1) % items.len(),
+    };
+    let _ = items[next].focus();
 }
 
 /// Whether a pointerdown landed outside the panel (so it should dismiss).
@@ -304,6 +458,7 @@ pub fn ContextMenuItem(
 ) -> impl IntoView {
     let ctx = expect_context::<ContextMenuContext>();
     let open = ctx.open;
+    let restore_focus = ctx.restore_focus;
 
     let class = tw_merge!(
         "inline-flex gap-2 items-center w-full rounded-sm px-2 py-1.5 text-sm text-left no-underline transition-colors duration-200 text-popover-foreground hover:bg-accent hover:text-accent-foreground focus:outline-none focus-visible:bg-accent focus-visible:text-accent-foreground [&_svg:not([class*='size-'])]:size-4",
@@ -317,6 +472,9 @@ pub fn ContextMenuItem(
             data-name="ContextMenuItem"
             class=class
             on:click=move |_| {
+                // The action owns focus from here (see `restore_focus`), so
+                // this close must not put it back on the opener.
+                restore_focus.set(false);
                 on_select.run(());
                 open.set(false);
             }

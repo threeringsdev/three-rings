@@ -1,6 +1,13 @@
 //! Bench section for the vendored `context_menu` (right-click → native
-//! `popover="auto"` panel at the pointer; long-press on the Android webview
+//! `popover="manual"` panel at the pointer; long-press on the Android webview
 //! synthesizes `contextmenu`, so this section is the on-device check).
+//!
+//! It also exercises the **keyboard** half added for the tree's `Move to…`:
+//! `Shift+F10` / the Menu key on the focused trigger opens the panel, opening
+//! moves focus to the first item, ↑↓/Home/End rove, and ESC closes and hands
+//! focus back. `data-bench-context-opener` is the focus-return target the
+//! bench check asserts against — without a named opener, "focus went back"
+//! cannot be told from "focus fell to `<body>`".
 
 use leptos::prelude::*;
 
@@ -17,12 +24,17 @@ pub fn demo() -> AnyView {
         <div class="space-y-3">
             <ContextMenu id="bench-context-menu">
                 <ContextMenuTrigger>
-                    <div
+                    // A `<button>`, not a bare div: the keyboard route needs a
+                    // focusable opener, and it doubles as the focus-return
+                    // target ESC must restore.
+                    <button
+                        type="button"
                         data-bench-context-target
-                        class="border-input text-muted-foreground flex h-24 w-full max-w-sm items-center justify-center rounded-md border border-dashed text-sm"
+                        data-bench-context-opener
+                        class="border-input text-muted-foreground focus-visible:ring-ring flex h-24 w-full max-w-sm items-center justify-center rounded-md border border-dashed text-sm focus-visible:ring-1 focus-visible:outline-none"
                     >
-                        "Right-click (or long-press) here"
-                    </div>
+                        "Right-click, long-press, or focus me and press Shift+F10"
+                    </button>
                 </ContextMenuTrigger>
                 <ContextMenuContent>
                     <ContextMenuLabel>"Collection"</ContextMenuLabel>

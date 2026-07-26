@@ -189,9 +189,39 @@ pub fn AppShell() -> impl IntoView {
     // move is long gone by the time `Undo last move` runs.
     crate::components::palette::provide_last_move();
 
+    // The rail's drawer state below `md` (see `SidebarRail`). Shell-level
+    // because the toggle lives in the top bar and the panel is in the body.
+    let rail_open = RwSignal::new(false);
+    // A navigation is a dismissal: tapping a tree row in the drawer is a
+    // "go there", and leaving the drawer over the page you just opened would
+    // make every tap need a second one to see the result.
+    Effect::new(move |_| {
+        location.pathname.track();
+        rail_open.set(false);
+    });
+
     view! {
         <div class="bg-background text-foreground flex min-h-screen flex-col">
             <header class="bg-background sticky top-0 z-40 flex h-14 shrink-0 items-center gap-4 border-b px-4">
+                // My-cards mode only, and deliberately: Catalog mode already
+                // has its own designed mobile story for the rail — the
+                // `FilterSheet` button in the results toolbar (wireframes →
+                // "Mobile — Catalog filter sheet") — and a second way in would
+                // be two controls opening two copies of the same filters. The
+                // tree has no such sheet, which is the gap this fills.
+                <Show when=move || my_mode.get()>
+                    <button
+                        type="button"
+                        class="text-muted-foreground hover:text-foreground -ml-1 rounded-md px-1.5 py-1 text-lg leading-none md:hidden"
+                        aria-label="Collections"
+                        aria-controls="sidebar-rail"
+                        aria-expanded=move || rail_open.get().to_string()
+                        data-testid="rail-toggle"
+                        on:click=move |_| rail_open.update(|o| *o = !*o)
+                    >
+                        <span aria-hidden="true">"☰"</span>
+                    </button>
+                </Show>
                 <a href="/" class="text-sm font-semibold tracking-tight">
                     "Three Rings"
                 </a>
@@ -202,7 +232,7 @@ pub fn AppShell() -> impl IntoView {
                 </div>
             </header>
             <div class="flex flex-1">
-                <SidebarRail my_mode />
+                <SidebarRail my_mode rail_open />
                 // Mobile: pad past the fixed bottom tab bar — and past the
                 // tray too when it is up, since a fixed element cannot push
                 // the page it docks over (the pager is the bottom-most thing
@@ -228,6 +258,14 @@ pub fn AppShell() -> impl IntoView {
             // Position is `fixed` on both, so the swap is invisible.
             <Toaster />
             <SelectionTrayDock selection />
+            // The tree's four management dialogs, mounted at the shell rather
+            // than beside the tree. Two reasons, and the second is a bug fix:
+            // ⌘K's `New binder…` opens the create dialog from Catalog mode,
+            // where the sidebar isn't rendered at all; and the rail is
+            // off-screen below `md`, so a dialog mounted inside it could not be
+            // shown on a phone — which made *every* tree action (create,
+            // rename, move, delete) silently do nothing there.
+            <crate::my::tree_manage::TreeDialogs />
             // The ⌘K palette (design/command-palette.md). Global by nature —
             // the chord works from every page in both modes — so it is mounted
             // here and gates itself on desktop-plus-signed-in. After the
@@ -301,18 +339,48 @@ fn ModeSwitch(my_mode: Memo<bool>) -> impl IntoView {
     }
 }
 
-/// Desktop sidebar rail — mode-filled (specs/app-ui.md): Catalog mode gets the
-/// filter rail, My cards mode the collection tree.
+/// Sidebar rail — mode-filled (specs/app-ui.md): Catalog mode gets the filter
+/// rail, My cards mode the collection tree.
 ///
 /// The rail is rendered for the whole Catalog mode rather than only on
 /// `/catalog`, which is what "mode-filled" means: it reads and writes the same
 /// `?q=` the catalog page does, so touching a filter from `/cards/:id` lands
 /// you back on the catalog carrying that filter.
+///
+/// **Below `md` it is a slide-over drawer, not `display: none`.** It used to be
+/// `hidden md:block`, which meant a phone had no collection tree at all — and
+/// therefore no way to reach the tree's own management menu, which is where the
+/// IA puts create / rename / **move** / delete.
+///
+/// One instance at every width, unlike Catalog's mobile story: `FilterSheet`
+/// mounts a *second* `RailBody` (which is why that body takes a `heading_id`),
+/// and a second `CollectionTreeNav` would duplicate the `id`s its context menu
+/// and its collapsibles key off. The switch is therefore pure CSS — no media
+/// query resolved in JS, so the markup the server renders is the markup that
+/// hydrates, at every width. The closed drawer is `invisible`, not merely
+/// off-screen: off-screen alone would leave every tree link Tab-reachable
+/// behind the page.
 #[component]
-fn SidebarRail(my_mode: Memo<bool>) -> impl IntoView {
+fn SidebarRail(my_mode: Memo<bool>, rail_open: RwSignal<bool>) -> impl IntoView {
     view! {
-        <aside aria-label="Sidebar" class="hidden w-60 shrink-0 border-r md:block">
-            <div class="sticky top-14 space-y-4 p-4">
+        // Below `md`: a fixed panel under the top bar, slid in by `left`
+        // rather than `translate-x` — a transformed ancestor is a containing
+        // block, and the tree's context menu is a top-layer popover positioned
+        // in viewport coordinates.
+        <Show when=move || rail_open.get()>
+            <div
+                class="fixed inset-x-0 top-14 bottom-0 z-40 bg-black/50 md:hidden"
+                data-testid="rail-scrim"
+                on:click=move |_| rail_open.set(false)
+            />
+        </Show>
+        <aside
+            id="sidebar-rail"
+            aria-label="Sidebar"
+            data-open=move || rail_open.get().then_some("true")
+            class="bg-background invisible fixed top-14 bottom-0 -left-60 z-50 w-60 shrink-0 overflow-y-auto border-r transition-[left] duration-200 data-[open=true]:visible data-[open=true]:left-0 md:visible md:static md:z-auto md:overflow-visible"
+        >
+            <div class="space-y-4 p-4 md:sticky md:top-14">
                 <Show
                     when=move || my_mode.get()
                     fallback=|| view! { <crate::catalog::rail::FilterRail /> }
