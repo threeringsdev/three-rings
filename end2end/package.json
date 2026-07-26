@@ -12,7 +12,8 @@
     "probe:paging": "node all-cards-paging-check.mjs",
     "probe:android-collection": "node android-collection-check.mjs",
     "probe:android-quick-add": "node android-quick-add-check.mjs",
-    "probe:android-selection-tray": "node android-selection-tray-check.mjs"
+    "probe:android-selection-tray": "node android-selection-tray-check.mjs",
+    "probe:android-rail": "node android-rail-check.mjs"
   },
   "keywords": [],
   "author": "",
