@@ -597,7 +597,7 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
                             .action(
                                 "Undo",
                                 Callback::new(move |()| {
-                                    undo(toast, tree, revision, move_ids.clone())
+                                    undo(toast, tree, revision, last_move, move_ids.clone())
                                 }),
                             ),
                         );
@@ -670,9 +670,12 @@ fn undo(
     toast: ToastHandle,
     tree: Option<crate::my::tree::CollectionTreeResource>,
     revision: Option<HoldingsRevision>,
+    last_move: Option<crate::components::palette::LastMoveState>,
     move_ids: Vec<Id>,
 ) {
     let count = move_ids.len();
+    // The palette must stop offering the same reversal (`forget`'s doc).
+    crate::components::palette::forget_last_move(last_move, &move_ids);
     spawn_local(async move {
         match crate::undo_selection_move(move_ids).await {
             Ok(()) => {

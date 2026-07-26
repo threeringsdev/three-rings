@@ -43,6 +43,14 @@
 //! file. That test is the guard — it asserts the first row's DOM node does *not*
 //! survive a keystroke, so regressing to a positional diff fails it.
 //!
+//! **And remounting is not sufficient either: the groups must be *built* in the
+//! order they are *drawn*.** `CommandItem` registers from its component body,
+//! which runs at view **construction**, so within one rebuild the construction
+//! order is the registry order. Building both groups and only then choosing
+//! which to mount first put the registry and the DOM in opposite orders whenever
+//! a command outranked every place — see [`group_views`], which is why the order
+//! is decided before anything is constructed.
+//!
 //! **It filters itself.** `should_filter=false`, because the primitive's filter
 //! is a lowercase `contains` that can neither match across word boundaries
 //! (`trabin` → `Trade Binder`) nor *rank*, and the design asks for a fuzzy
@@ -128,6 +136,18 @@ pub fn provide_last_move() {
     provide_context(LastMoveState(RwSignal::new(None)));
 }
 
+/// Should a record be dropped because `undone` was just reversed elsewhere?
+///
+/// Only when it is *exactly* that set: a surface whose undo toast is still on
+/// screen may have been overtaken by a newer move, and forgetting on any overlap
+/// would leave the newest move unreachable from ⌘K.
+///
+/// Split out and pure so the rule is testable — [`LastMoveState`] lives in a
+/// reactive signal, which a unit test has no runtime for.
+pub fn forgets(current: Option<&LastMove>, undone: &[Id]) -> bool {
+    current.is_some_and(|c| c.move_ids == undone)
+}
+
 impl LastMoveState {
     /// Record an undoable move. Called by every surface that already raises an
     /// undo toast, right where it raises it, so the palette command and the
@@ -138,6 +158,23 @@ impl LastMoveState {
         }
         self.0.set(Some(LastMove { move_ids }));
     }
+
+    /// Drop the record because these ids are being reversed somewhere else —
+    /// the toast's own Undo button.
+    ///
+    /// **Called when the reversal is *dispatched*, not when it succeeds.** Undo
+    /// is idempotent server-side, so a stale record does not corrupt anything;
+    /// what it does is make ⌘K raise "Undid the last move" over a no-op, which
+    /// is a lie. The two ways to be wrong here are not symmetric: naming a move
+    /// that is already reversed makes a labelled command report success falsely,
+    /// while naming nothing makes it say there is nothing to undo — and if that
+    /// dispatch fails, the toast that started it is still on screen with its own
+    /// button. Silence in the safe direction beats a false success.
+    pub fn forget(&self, move_ids: &[Id]) {
+        if forgets(self.0.get_untracked().as_ref(), move_ids) {
+            self.0.set(None);
+        }
+    }
 }
 
 /// Record a move where the caller may not have the context (the bench renders
@@ -145,6 +182,13 @@ impl LastMoveState {
 pub fn note_last_move(state: Option<LastMoveState>, move_ids: Vec<Id>) {
     if let Some(state) = state {
         state.note(move_ids);
+    }
+}
+
+/// [`LastMoveState::forget`] for a caller that may not have the context.
+pub fn forget_last_move(state: Option<LastMoveState>, move_ids: &[Id]) {
+    if let Some(state) = state {
+        state.forget(move_ids);
     }
 }
 
@@ -977,15 +1021,71 @@ fn group_views(set: RowSet, on_run: Callback<PaletteAction>) -> AnyView {
         commands,
         commands_first,
     } = set;
-    let places_group = (!places.is_empty()).then(|| {
+    // **Build the groups in the order they are drawn — construction order is
+    // what the registry records.**
+    //
+    // `CommandItem` registers itself in `CommandContext::items` from its
+    // component *body*, which Leptos runs when the view is **constructed**, not
+    // when it is inserted into the document. So remounting the list per query is
+    // necessary but not sufficient: within one build, the order the two groups
+    // are constructed in *is* `visible_ids()`'s order.
+    //
+    // An earlier version built both groups into `let` bindings and only then
+    // chose which to mount first. With a command outranking every place (type a
+    // single `n`) the registry read places-then-commands while the DOM read
+    // commands-then-places, so `⏎` committed a row in the second group and `↑`
+    // clamped without ever reaching the top ones — verbatim the caveat in
+    // `command.rs`'s `visible_ids`. Deciding the order *before* constructing
+    // anything is the fix; `command-palette.spec.ts`'s `n` case is the guard.
+    //
+    // The alternative — a `compareDocumentPosition` sort inside `visible_ids()`
+    // — stays deferred, and now for a second reason: that function is already a
+    // measured O(n²) hot path (specs/app-ui.md), and a DOM-ordering pass per call
+    // would put layout reads inside it.
+    let blocks: [Option<AnyView>; 2] = if commands_first {
+        [
+            commands_block(commands, on_run),
+            places_block(places_label, places, on_run),
+        ]
+    } else {
+        [
+            places_block(places_label, places, on_run),
+            commands_block(commands, on_run),
+        ]
+    };
+    blocks.into_iter().flatten().collect_view().into_any()
+}
+
+/// The places group (RECENT / PLACES / COLLECTIONS), or `None` when nothing
+/// matched — an empty group drops out entirely, label included, per P2.
+fn places_block(
+    label: &'static str,
+    places: Vec<Place>,
+    on_run: Callback<PaletteAction>,
+) -> Option<AnyView> {
+    if places.is_empty() {
+        return None;
+    }
+    Some(
         view! {
             <CommandGroup>
-                <CommandGroupLabel class="tracking-wide uppercase">{places_label}</CommandGroupLabel>
+                <CommandGroupLabel class="tracking-wide uppercase">{label}</CommandGroupLabel>
                 {places.into_iter().map(|place| view! { <PlaceRow place on_run /> }).collect_view()}
             </CommandGroup>
         }
-    });
-    let commands_group = (!commands.is_empty()).then(|| {
+        .into_any(),
+    )
+}
+
+/// The commands group, or `None` when no command label matched.
+fn commands_block(
+    commands: Vec<PaletteCommand>,
+    on_run: Callback<PaletteAction>,
+) -> Option<AnyView> {
+    if commands.is_empty() {
+        return None;
+    }
+    Some(
         view! {
             <CommandGroup>
                 <CommandGroupLabel class="tracking-wide uppercase">"Commands"</CommandGroupLabel>
@@ -995,22 +1095,8 @@ fn group_views(set: RowSet, on_run: Callback<PaletteAction>) -> AnyView {
                     .collect_view()}
             </CommandGroup>
         }
-    });
-    // Two arms rather than one ordered pair: the groups are different view types,
-    // and swapping them has to change the *DOM* order, not just a class.
-    if commands_first {
-        view! {
-            {commands_group}
-            {places_group}
-        }
-        .into_any()
-    } else {
-        view! {
-            {places_group}
-            {commands_group}
-        }
-        .into_any()
-    }
+        .into_any(),
+    )
 }
 
 #[component]
@@ -1187,6 +1273,51 @@ mod tests {
         ] {
             assert!(!is_palette_chord("/", meta, ctrl, mac));
         }
+    }
+
+    // ---------------------------------------------------------- last move --
+
+    fn last(ids: &[u128]) -> LastMove {
+        LastMove {
+            move_ids: ids.iter().map(|&i| Id::from_u128(i)).collect(),
+        }
+    }
+
+    fn ids(ids: &[u128]) -> Vec<Id> {
+        ids.iter().map(|&i| Id::from_u128(i)).collect()
+    }
+
+    #[test]
+    fn a_reversal_elsewhere_drops_exactly_its_own_record() {
+        // The toast's Undo ran, so ⌘K must stop offering the same reversal —
+        // undo is idempotent, so a second one would succeed over a no-op and
+        // claim it undid something.
+        assert!(forgets(Some(&last(&[1])), &ids(&[1])));
+        assert!(forgets(Some(&last(&[1, 2, 3])), &ids(&[1, 2, 3])));
+    }
+
+    #[test]
+    fn a_newer_move_survives_an_older_toasts_undo() {
+        // Toasts outlive the row that raised them, so an *older* toast's Undo
+        // can fire after a newer move was recorded. Forgetting on any overlap
+        // would leave the newest move unreachable from ⌘K.
+        assert!(!forgets(Some(&last(&[9])), &ids(&[1])));
+        assert!(
+            !forgets(Some(&last(&[1, 2])), &ids(&[1])),
+            "a subset is a different move set, not this one"
+        );
+        assert!(
+            !forgets(Some(&last(&[1])), &ids(&[1, 2])),
+            "and neither is a superset"
+        );
+    }
+
+    #[test]
+    fn order_is_part_of_the_identity_and_nothing_forgets_nothing() {
+        // A batch is reversed as the exact list it was recorded as.
+        assert!(!forgets(Some(&last(&[1, 2])), &ids(&[2, 1])));
+        assert!(!forgets(None, &ids(&[1])));
+        assert!(!forgets(None, &[]));
     }
 
     // ------------------------------------------------------------ scoring --

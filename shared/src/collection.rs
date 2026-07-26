@@ -537,10 +537,18 @@ pub enum Teardown {
     ReturnToPrevious,
 }
 
-/// Result of a teardown — how many move rows it wrote.
+/// Result of a teardown — **the ledger rows it wrote**, in write order.
+///
+/// The ids, not a count, and the count is `move_ids.len()` rather than a second
+/// field that could disagree with it. A teardown is the most destructive action
+/// in the app and it is made entirely of reversible moves — the confirm dialog
+/// says so ("every move is in the history") — so the caller needs handles, not a
+/// number. ⌘K's `Undo last move` reverses the whole set through `undo_moves`;
+/// without them it would find an *older, unrelated* move as "the last one" and
+/// reverse that instead.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TeardownReceipt {
-    pub moves: i64,
+    pub move_ids: Vec<Id>,
 }
 
 /// A row of the virtual "All cards" view (specs/collection-api.md → AllCardsView):

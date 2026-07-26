@@ -844,6 +844,9 @@ fn report(
                     "Undo",
                     Callback::new(move |()| {
                         let move_ids = move_ids.clone();
+                        // The palette must stop offering the same reversal
+                        // (`LastMoveState::forget`'s doc).
+                        crate::components::palette::forget_last_move(last_move, &move_ids);
                         spawn_local(async move {
                             match crate::undo_selection_move(move_ids).await {
                                 Ok(()) => {

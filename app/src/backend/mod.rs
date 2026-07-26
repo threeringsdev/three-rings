@@ -387,7 +387,9 @@ pub trait CollectionStore {
 
     /// Empty a collection — move every holding to a chosen destination, or back
     /// to each card's previous location (most-recent move *into* here, else
-    /// Inbox). One transaction; returns how many move rows it wrote.
+    /// Inbox). One transaction; returns **the ids of the move rows it wrote**,
+    /// so the caller can reverse the whole teardown through [`Self::undo_moves`]
+    /// (⌘K's `Undo last move`) instead of guessing which move was last.
     async fn teardown(&self, collection_id: Id, mode: Teardown) -> ApiResult<TeardownReceipt>;
 
     /// The virtual everything-view: one keyset page of per-oracle rows

@@ -1,4 +1,9 @@
-import { expect, test, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Page,
+} from "@playwright/test";
 import { AUTH_STATE, hydrated } from "./helpers";
 
 // The global ⌘K command palette (design/command-palette.md; wireframes.pen
@@ -40,6 +45,101 @@ const rows = (page: Page) =>
 /** Group labels, in document order (RECENT/PLACES/COLLECTIONS, COMMANDS). */
 const groupLabels = (page: Page) =>
   page.locator("#command-palette [data-name=CommandGroupLabel]");
+
+// ------------------------------------------------- fixture helpers (mutating) --
+//
+// The three `Undo last move` tests below write to the Neon dev branch, so each
+// creates its own uniquely-named `zz-e2e-*` scratch collections and deletes them
+// in a `finally` (delete cascades holdings and desires). Every database
+// assertion reads `/api/cards/{id}/holdings` — the one read that does not group
+// the grain away; a toast is evidence a message was raised, not that rows moved.
+
+type Scratch = { id: string; name: string };
+type Holding = { collection_id: string; quantity: number; board: string };
+
+let scratchSeq = 0;
+const scratchName = (what: string) =>
+  `zz-e2e-plt-${what}-w${test.info().workerIndex}-${++scratchSeq}-` +
+  Math.random().toString(36).slice(2, 7);
+
+async function createCollection(
+  request: APIRequestContext,
+  kind: "binder" | "deck",
+  what: string,
+): Promise<Scratch> {
+  const name = scratchName(what);
+  const res = await request.post("/api/collections", {
+    data: { parent_id: null, kind, name, format: null },
+  });
+  expect(res.status(), `create ${name}`).toBe(200);
+  return (await res.json()) as Scratch;
+}
+
+const deleteCollection = (request: APIRequestContext, id: string) =>
+  request.post(`/api/collections/${id}/delete`, { data: {} });
+
+/// Catalog cards the signed-in user owns nowhere, so a holdings read for one of
+/// them is exactly what a test wrote and nothing else.
+async function unownedCards(
+  request: APIRequestContext,
+  n: number,
+): Promise<{ oracle_id: string; printing_id: string }[]> {
+  const mine = await request.get("/api/all-cards?limit=200");
+  expect(mine.status(), "all cards").toBe(200);
+  const taken = new Set(
+    ((await mine.json()) as { cards: { card: { oracle_id: string } }[] }).cards.map(
+      (r) => r.card.oracle_id,
+    ),
+  );
+  const res = await request.get("/api/catalog/search?q=z&limit=60");
+  expect(res.status(), "catalog search").toBe(200);
+  const free = (
+    (await res.json()) as { cards: { oracle_id: string; printing_id: string | null }[] }
+  ).cards
+    .filter((c) => c.printing_id && !taken.has(c.oracle_id))
+    .slice(0, n);
+  expect(free.length, `the fixture has fewer than ${n} unowned catalog cards`).toBe(n);
+  return free as { oracle_id: string; printing_id: string }[];
+}
+
+async function addHave(
+  request: APIRequestContext,
+  id: string,
+  printingId: string,
+  quantity = 1,
+) {
+  const res = await request.post(`/api/collections/${id}/have`, {
+    data: {
+      printing_id: printingId,
+      quantity,
+      finish: "nonfoil",
+      condition: "nm",
+      language: "en",
+      board: "main",
+    },
+  });
+  expect(res.status(), "add have").toBe(200);
+}
+
+const holdingsOf = async (
+  request: APIRequestContext,
+  oracleId: string,
+): Promise<Holding[]> =>
+  (await (await request.get(`/api/cards/${oracleId}/holdings`)).json()) as Holding[];
+
+/// Remove a whole stack the way a user does — type 0 into the stepper, commit.
+async function removeStack(page: Page, printingId: string, from: number) {
+  const row = page.locator(
+    `[data-testid=collection-row][data-printing="${printingId}"][data-board="main"]`,
+  );
+  // Wait for the *stepper* to read its count, not just for `data-hydrated`: the
+  // global stamp does not mean this streamed island is wired yet, and a click
+  // that lands early is silently swallowed (the documented flake in the skill).
+  await expect(row.locator("[data-testid=count-stepper-value]")).toHaveText(String(from));
+  await row.locator("[data-testid=count-stepper-value]").click();
+  await row.locator("[data-testid=count-stepper-input]").fill("0");
+  await row.locator("[data-testid=count-stepper-input]").press("Enter");
+}
 
 async function openPalette(page: Page) {
   // ControlOrMeta maps to ⌘ on macOS and Ctrl elsewhere — the same split
@@ -141,6 +241,49 @@ test("@fast typing ranks places and commands into groups, and ↑↓ follows the
   await page.keyboard.type("depth");
   await expect(groupLabels(page)).toHaveCount(1);
   await expect(groupLabels(page).first()).toHaveText("Collections");
+});
+
+test("@fast ↑↓ still follows the drawn order when COMMANDS ranks above COLLECTIONS", async ({
+  page,
+}) => {
+  // The other half of the ordering caveat, and the one the `de` case above
+  // cannot reach: `command`'s registry is filled by `CommandItem`'s component
+  // *body*, which Leptos runs when the view is **constructed**, not when it is
+  // inserted. So it is not enough for the palette to remount per query — the two
+  // groups have to be *built* in the order they are *drawn*. An earlier version
+  // built both into `let` bindings and only then chose which to put first, and
+  // with a command outranking every place the registry said places-then-commands
+  // while the DOM said the opposite.
+  //
+  // A single `n` is the trigger: `New binder…`/`New deck…` match at a prefix
+  // (score 11) while `Inbox`, `Trade Binder`, `Shopping list` and
+  // `Commander Deck` only match mid-word (score 1), so `commands_first` is true
+  // and both groups are non-empty. Every other test in this file types either a
+  // query where places win or a full phrase that leaves no place matching at all.
+  await page.goto("/my");
+  await hydrated(page);
+  await openPalette(page);
+  await page.keyboard.type("n");
+
+  // The premise: COMMANDS really is drawn first, and COLLECTIONS really is still
+  // there. Without both, everything below would pass vacuously.
+  await expect(groupLabels(page).first()).toHaveText("Commands");
+  await expect(groupLabels(page).nth(1)).toHaveText("Collections");
+  const drawn = await rows(page).allInnerTexts();
+  expect(drawn.length).toBeGreaterThan(3);
+  expect(drawn[0]).toContain("New binder…");
+
+  // The pre-selected row is the one drawn first, not the one registered first.
+  await expect(rows(page).first()).toHaveAttribute("aria-selected", "true");
+
+  // …and ↑↓ walks the drawn order across the group boundary rather than jumping
+  // into the second group and clamping there.
+  for (let i = 1; i < Math.min(drawn.length, 5); i += 1) {
+    await page.keyboard.press("ArrowDown");
+    await expect(rows(page).nth(i)).toHaveAttribute("aria-selected", "true");
+  }
+  await page.keyboard.press("ArrowUp");
+  await expect(rows(page).nth(3)).toHaveAttribute("aria-selected", "true");
 });
 
 test("@fast every keystroke rebuilds the rows rather than reordering them", async ({
@@ -300,97 +443,141 @@ test("@fast `Undo last move` reverses the move another surface just made", async
   page,
   request,
 }) => {
-  // The happy path, and the only proof that the cross-cutting `LastMoveState`
-  // wiring works: the palette's command has to reverse a move that a *different*
-  // surface (here the collection view's removal) recorded. Asserted through
-  // `/api/cards/{id}/holdings`, the one read that does not group the grain away —
-  // a toast is evidence a message was raised, not that rows moved.
-  // Deliberately *not* named after the command: an earlier version called it
-  // `zz-e2e-palette-undo-…`, which matched the query and exposed the group-order
-  // bug fixed in `ranked`. That bug now has its own unit test, and this test
+  // The happy path, and the proof that the cross-cutting `LastMoveState` wiring
+  // works: the palette's command reverses a move a *different* surface (the
+  // collection view's removal) recorded.
+  //
+  // The scratch name is deliberately *not* the command's: an earlier version
+  // called it `zz-e2e-palette-undo-…`, which matched the query and exposed the
+  // group-order bug now fixed in `ranked`. That bug has its own tests; this one
   // should exercise the undo rather than the ranking.
-  const name = `zz-e2e-plt-w${test.info().workerIndex}`;
-  const created = await request.post("/api/collections", {
-    data: { parent_id: null, kind: "binder", format: null, name },
-  });
-  expect(created.ok(), `create ${name}`).toBeTruthy();
-  const scratch = (await created.json()) as { id: string };
-
+  const [card] = await unownedCards(request, 1);
+  const binder = await createCollection(request, "binder", "undo");
   try {
-    // A card the dev user owns nowhere, so the holdings read below is this
-    // test's writes and nothing else's.
-    const mine = await request.get("/api/all-cards?limit=200");
-    const owned = new Set(
-      ((await mine.json()) as { cards: { card: { oracle_id: string } }[] }).cards.map(
-        (r) => r.card.oracle_id,
-      ),
-    );
-    const found = await request.get("/api/catalog/search?q=z&limit=60");
-    const card = (
-      (await found.json()) as {
-        cards: { oracle_id: string; printing_id: string | null }[];
-      }
-    ).cards.find((c) => c.printing_id && !owned.has(c.oracle_id));
-    expect(card, "the fixture has no unowned catalog card with a printing").toBeTruthy();
-    const oracle = card!.oracle_id;
-
-    const added = await request.post(`/api/collections/${scratch.id}/have`, {
-      data: {
-        printing_id: card!.printing_id,
-        quantity: 3,
-        finish: "nonfoil",
-        condition: "nm",
-        language: "en",
-        board: "main",
-      },
-    });
-    expect(added.ok(), "seed the scratch binder").toBeTruthy();
-
-    await page.goto(`/my/collections/${scratch.id}`);
+    await addHave(request, binder.id, card.printing_id, 3);
+    await page.goto(`/my/collections/${binder.id}`);
     await hydrated(page);
-
-    // Remove the stack the way a user does — type 0 into the stepper and commit.
-    const row = page.locator(
-      `[data-testid=collection-row][data-printing="${card!.printing_id}"][data-board="main"]`,
-    );
-    // Wait for the *stepper* to read 3, not just for `data-hydrated`: the global
-    // stamp does not mean this streamed island is wired yet, and a click that
-    // lands early is silently swallowed (the documented flake in the e2e skill).
-    await expect(row.locator("[data-testid=count-stepper-value]")).toHaveText("3");
-    await row.locator("[data-testid=count-stepper-value]").click();
-    await row.locator("[data-testid=count-stepper-input]").fill("0");
-    await row.locator("[data-testid=count-stepper-input]").press("Enter");
+    await removeStack(page, card.printing_id, 3);
     await expect
-      .poll(async () =>
-        ((await (await request.get(`/api/cards/${oracle}/holdings`)).json()) as unknown[]).length,
-      )
+      .poll(async () => (await holdingsOf(request, card.oracle_id)).length)
       .toBe(0);
 
-    // Now undo it from the palette — not from the toast, which is a different
-    // button wired to a different closure.
+    // Undo from the palette — not from the toast, which is a different button
+    // wired to a different closure.
     await openPalette(page);
     await page.keyboard.type("undo");
     await expect(rows(page).first()).toContainText("Undo last move");
     await page.keyboard.press("Enter");
     await expect(page.getByText("Undid the last move")).toBeVisible();
 
-    // The copies are back, in the collection they left, at the grain they were
-    // held — undo is the move ledger's reversal, not a re-add.
-    const back = (await (
-      await request.get(`/api/cards/${oracle}/holdings`)
-    ).json()) as {
-      collection_id: string;
-      quantity: number;
-      finish: string;
-      board: string;
-    }[];
+    // The copies are back, in the collection they left, as the stack they were —
+    // undo is the move ledger's reversal, not a re-add.
+    const back = await holdingsOf(request, card.oracle_id);
     expect(back).toHaveLength(1);
-    expect(back[0].collection_id).toBe(scratch.id);
+    expect(back[0].collection_id).toBe(binder.id);
     expect(back[0].quantity).toBe(3);
-    expect(back[0].finish).toBe("nonfoil");
-    expect(back[0].board).toBe("main");
   } finally {
-    await request.post(`/api/collections/${scratch.id}/delete`);
+    await deleteCollection(request, binder.id);
+  }
+});
+
+test("@fast a move already undone from its toast is no longer `the last move`", async ({
+  page,
+  request,
+}) => {
+  // `LastMoveState` names the most recent *reversible* move, or nothing. Undo is
+  // idempotent server-side, so replaying an already-undone id returns `Ok(())` —
+  // which means a stale record makes ⌘K raise "Undid the last move" over a
+  // no-op. A labelled command must not claim success for nothing.
+  const [card] = await unownedCards(request, 1);
+  const binder = await createCollection(request, "binder", "stale");
+  try {
+    await addHave(request, binder.id, card.printing_id, 2);
+    await page.goto(`/my/collections/${binder.id}`);
+    await hydrated(page);
+    await removeStack(page, card.printing_id, 2);
+
+    // Reverse it from the *toast*, and confirm that actually landed — this is
+    // the positive control for the silence asserted below.
+    const toast = page.locator('[data-name="Toast"]', { hasText: "Removed" });
+    await toast.getByRole("button", { name: "Undo" }).click();
+    await expect
+      .poll(async () => (await holdingsOf(request, card.oracle_id)).length)
+      .toBe(1);
+
+    await openPalette(page);
+    await page.keyboard.type("undo");
+    await expect(rows(page).first()).toContainText("Undo last move");
+    await page.keyboard.press("Enter");
+    await expect(page.getByText(/Nothing to undo yet/)).toBeVisible();
+    await expect(page.getByText("Undid the last move")).toHaveCount(0);
+
+    // …and nothing moved a second time.
+    const after = await holdingsOf(request, card.oracle_id);
+    expect(after).toHaveLength(1);
+    expect(after[0].quantity).toBe(2);
+  } finally {
+    await deleteCollection(request, binder.id);
+  }
+});
+
+test("@fast `Undo last move` after Empty deck reverses the teardown, not an older move", async ({
+  page,
+  request,
+}) => {
+  // A teardown writes N ledger rows. Before it recorded them, ⌘K reached *past*
+  // the teardown and reversed whatever unrelated move happened to be last —
+  // silently moving different copies somewhere else while the teardown stood.
+  // Two writes here, in order, so the test can tell those two outcomes apart.
+  const [kept, emptied] = await unownedCards(request, 2);
+  const binder = await createCollection(request, "binder", "older");
+  const deck = await createCollection(request, "deck", "td");
+  try {
+    await addHave(request, binder.id, kept.printing_id, 3);
+    await addHave(request, deck.id, emptied.printing_id, 2);
+
+    // Write 1 — the older move: remove the binder's stack.
+    await page.goto(`/my/collections/${binder.id}`);
+    await hydrated(page);
+    await removeStack(page, kept.printing_id, 3);
+    await expect
+      .poll(async () => (await holdingsOf(request, kept.oracle_id)).length)
+      .toBe(0);
+
+    // Write 2 — the teardown: empty the deck into the binder.
+    await page.goto(`/my/collections/${deck.id}`);
+    await hydrated(page);
+    await page.locator('[data-testid="teardown-open"]').click();
+    await page
+      .locator('[data-testid="teardown-destination"]')
+      .selectOption({ label: binder.name });
+    await page.locator('[data-testid="teardown-confirm"]').click();
+    await expect(
+      page.locator('[data-name="Toast"]', { hasText: "Emptied" }),
+    ).toContainText("1 card moved");
+    await expect
+      .poll(async () =>
+        (await holdingsOf(request, emptied.oracle_id)).map((h) => h.collection_id),
+      )
+      .toEqual([binder.id]);
+
+    await openPalette(page);
+    await page.keyboard.type("undo");
+    await page.keyboard.press("Enter");
+    await expect(page.getByText("Undid the last move")).toBeVisible();
+
+    // The teardown is what came back…
+    await expect
+      .poll(async () =>
+        (await holdingsOf(request, emptied.oracle_id)).map((h) => h.collection_id),
+      )
+      .toEqual([deck.id]);
+    // …and the older removal is untouched. Without this the test would pass
+    // just as well against the bug, which reversed exactly this one.
+    expect(await holdingsOf(request, kept.oracle_id)).toHaveLength(0);
+  } finally {
+    await deleteCollection(request, deck.id);
+    await deleteCollection(request, binder.id);
   }
 });
 

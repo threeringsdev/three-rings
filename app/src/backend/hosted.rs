@@ -1219,7 +1219,7 @@ impl CollectionStore for HostedBackend {
             Teardown::EmptyTo { .. } => None,
         };
 
-        let mut moves = 0i64;
+        let mut move_ids: Vec<Id> = Vec::with_capacity(holdings.len());
         for h in &holdings {
             let grain = Grain {
                 printing_id: h.printing_id,
@@ -1241,7 +1241,7 @@ impl CollectionStore for HostedBackend {
             };
             holding_take(&mut tx, collection_id, &grain, board, h.quantity).await?;
             holding_add(&mut tx, user_id, dest, &grain, Board::Main, h.quantity).await?;
-            append_move(
+            let move_id = append_move(
                 &mut tx,
                 user_id,
                 Some(collection_id),
@@ -1251,10 +1251,10 @@ impl CollectionStore for HostedBackend {
                 h.quantity,
             )
             .await?;
-            moves += 1;
+            move_ids.push(move_id);
         }
         tx.commit().await.map_err(upstream)?;
-        Ok(TeardownReceipt { moves })
+        Ok(TeardownReceipt { move_ids })
     }
 
     async fn all_cards(&self, q: Option<String>, page: Page) -> ApiResult<AllCardsView> {

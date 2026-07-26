@@ -1032,6 +1032,10 @@ pub(crate) fn raise_add_toast(t: AddToast) {
                 "Undo",
                 Callback::new(move |()| {
                     let name = name.clone();
+                    // ⌘K must stop offering this one: undo is idempotent, so a
+                    // second reversal would succeed over a no-op and claim it
+                    // undid something (see `LastMoveState::forget`).
+                    crate::components::palette::forget_last_move(last_move, &[move_id]);
                     spawn_local(async move {
                         match crate::undo_quick_add(move_id).await {
                             Ok(()) => {

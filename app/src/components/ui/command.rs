@@ -67,8 +67,17 @@ struct CommandContext {
 }
 
 impl CommandContext {
-    /// Visible item ids in registration order — which equals DOM order for
-    /// every consumer so far, each for its own checked reason:
+    /// Visible item ids in registration order.
+    ///
+    /// **Registration happens in [`CommandItem`]'s component body, i.e. when the
+    /// view is *constructed* — not when it is inserted.** So "registration
+    /// order" is the order a consumer *builds* its rows in, which is only the
+    /// DOM order if it builds them in the order it mounts them. Building two
+    /// sections and then choosing which to place first silently breaks this
+    /// (the ⌘K palette did exactly that; see its `group_views`).
+    ///
+    /// It equals DOM order for every consumer so far, each for its own checked
+    /// reason:
     ///
     /// * **destination picker** — sorts its *data* before any item mounts and
     ///   only ever hides rows while typing (never reorders them);
@@ -76,13 +85,14 @@ impl CommandContext {
     ///   per query, so each server result set is a full remount in document
     ///   order and the registry is rebuilt with it;
     /// * **⌘K palette** — it *ranks* its rows, so its order genuinely changes
-    ///   per query. It keeps registration order equal to document order by
-    ///   forcing a real remount: its whole list is one `<For>` item keyed on the
-    ///   row set's identity, so any change to the rows disposes them and mounts
-    ///   the new order. Note what does **not** work, measured there: a plain
-    ///   dynamic closure returning the rows leaves the DOM nodes in place (an
-    ///   unkeyed positional diff) while re-running the item registrations.
-    ///   `command-palette.spec.ts` pins the remount by node identity.
+    ///   per query, and it needs two things to stay honest. It forces a real
+    ///   remount (its whole list is one `<For>` item keyed on the row set's
+    ///   identity), *and* it decides its group order before constructing either
+    ///   group. Both were measured, not reasoned: a plain dynamic closure leaves
+    ///   the DOM nodes in place (an unkeyed positional diff) while re-running the
+    ///   registrations, and building the groups eagerly reversed the registry
+    ///   against the DOM whenever a command outranked every place.
+    ///   `command-palette.spec.ts` pins both.
     ///
     /// In-place keyed *reorder* of persistent items would diverge from DOM
     /// order and want a `compareDocumentPosition` sort here. No consumer does
