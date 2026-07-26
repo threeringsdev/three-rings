@@ -1,7 +1,7 @@
 //! App shell + routing (specs/app-ui.md "App shell"): the top bar with the
 //! `Catalog | My cards` mode switch, the sidebar rail frame, mobile bottom
-//! tabs, the `/` auth redirect, and the `/my/*` auth guard. Page bodies here
-//! are route skeletons — each later Stage task replaces its own.
+//! tabs, the `/` auth redirect, and the `/my/*` auth guard. Every page body
+//! that once lived here as a route skeleton has graduated to its own module.
 
 use leptos::prelude::*;
 use leptos_router::components::{Outlet, Redirect};
@@ -13,7 +13,6 @@ use crate::components::ui::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::ui::popover::{Popover, PopoverAlign, PopoverContent, PopoverTrigger};
 use crate::components::ui::selection_tray::{provide_selection, SelectionState, SelectionTray};
 use crate::components::ui::separator::Separator;
-use crate::components::ui::skeleton::Skeleton;
 use crate::components::ui::sonner::Toaster;
 use crate::components::ui::theme_toggle::ThemeToggle;
 
@@ -449,35 +448,10 @@ fn UserMenu() -> impl IntoView {
     }
 }
 
-// ---- Route skeletons — each replaced by its own Stage 2/3 task. ----
-
-// `/cards/:id` graduated out of this file into `crate::cards` with the
-// card-detail task, the same way `/catalog` did. `/my` followed into
-// `crate::my::all_cards` with the All-cards task, and `/my/collections/:id`
-// into `crate::my::collection` with the binder/deck task.
-
-/// `/my/collections/:id/needs` — needs buckets + pick list land with their task.
-#[component]
-pub fn NeedsPage() -> impl IntoView {
-    view! {
-        <div class="space-y-6 p-6">
-            <h1 class="text-2xl font-bold">"Needs"</h1>
-            <div class="space-y-2">
-                {(0..4).map(|_| view! { <Skeleton class="h-8 w-full" /> }).collect_view()}
-            </div>
-        </div>
-    }
-}
-
-/// `/my/shopping` — the shopping list page lands with its task.
-#[component]
-pub fn ShoppingPage() -> impl IntoView {
-    view! {
-        <div class="space-y-6 p-6">
-            <h1 class="text-2xl font-bold">"Shopping list"</h1>
-            <div class="space-y-2">
-                {(0..4).map(|_| view! { <Skeleton class="h-8 w-full" /> }).collect_view()}
-            </div>
-        </div>
-    }
-}
+// ---- Route skeletons — all graduated. ----
+//
+// `/cards/:id` left this file for `crate::cards` with the card-detail task, the
+// same way `/catalog` did; `/my` for `crate::my::all_cards`,
+// `/my/collections/:id` for `crate::my::collection`, and the last two —
+// `/my/collections/:id/needs` and `/my/shopping` — for `crate::my::needs` and
+// `crate::my::shopping`. No placeholder route bodies remain.
