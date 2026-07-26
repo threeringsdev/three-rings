@@ -398,6 +398,11 @@ test("the last page offers no next, and back to the start returns @fast", async 
   await page.goto(`/catalog?q=bolt&cursor=${one.next_cursor}`);
   await hydrated(page);
   await expect(tileFor(page, last.cards[0].oracle_id)).toBeVisible();
+  // The card the cursor was taken *after* is gone. Without this the whole test
+  // passes on a page that ignores the cursor entirely: `bolt` fits one page, so
+  // the unpaged render also contains `last.cards[0]` and also has no next
+  // (found by mutating the resource to pass `None` — it survived).
+  await expect(tileFor(page, one.cards[0].oracle_id)).toHaveCount(0);
   // No next cursor, no Next control — offering one would page into nothing.
   await expect(page.getByTestId("page-next")).toHaveCount(0);
 
