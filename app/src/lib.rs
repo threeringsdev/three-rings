@@ -322,6 +322,53 @@ pub async fn search_catalog(
     }
 }
 
+/// One window of the set list for the filter rail's Set facet
+/// (specs/catalog-search.md → the `s:` term). A thin projection of
+/// `CatalogStore::list_sets`, GET for the same two reasons as
+/// [`search_catalog`]: a pure cacheable read, and the Tauri Android dev proxy
+/// strips POST bodies.
+///
+/// **Anonymous on both backends** — sets carry no ownership, so unlike the card
+/// reads there is no opportunistic-session arm here. `q` blank means "browse the
+/// newest sets"; [`shared::SetQuery::term`] owns that rule so both backends
+/// apply it identically.
+#[server(
+    prefix = "/api",
+    endpoint = "list_sets",
+    input = leptos::server_fn::codec::GetUrl
+)]
+pub async fn list_sets(q: String) -> Result<Vec<shared::SetSummary>, ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    let query = shared::SetQuery {
+        q: Some(q),
+        limit: None,
+    };
+
+    #[cfg(feature = "hosted")]
+    {
+        use crate::backend::{CatalogStore, HostedBackend};
+        HostedBackend::anonymous()
+            .await
+            .map_err(api_err)?
+            .list_sets(query)
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(all(feature = "native", not(feature = "hosted")))]
+    {
+        use crate::backend::{CatalogStore, NativeBackend};
+        NativeBackend::anonymous()
+            .list_sets(query)
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = q;
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
 /// One card's full detail — printings, rulings, and (authed only) the caller's
 /// copies and where they live. Same thin-adapter shape as [`search_catalog`],
 /// and **GET** for the same two reasons: a pure cacheable read, and the Tauri

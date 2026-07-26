@@ -219,6 +219,242 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### `CardSummary::owned` on catalog search (2026-07-26)
+
+`HostedBackend::search` finished with `into_summary(None)`, so the tile's
+"N owned" badge was dead code and **an authed catalog looked identical to an
+anonymous one**. New `owned_by_oracle(&[Uuid]) -> Option<HashMap<Uuid, i32>>`:
+`None` with no session, otherwise one
+`SELECT oracle_id, owned FROM owned_by_card WHERE oracle_id = ANY($1)` inside
+`scoped_tx`. `card_summary` was rewritten onto the same helper.
+
+**The scoped and unscoped reads were kept separate, deliberately.** Folding a
+`LEFT JOIN owned_by_card` into the paging query would force the *public,
+cacheable, hottest* read into a transaction for a column anonymous callers never
+see — or else duplicate the grammar/keyset/cursor construction across two paths.
+Keeping them separate also means the tile and the detail page read ownership
+through **one** helper and cannot drift, which was the binding constraint. Round
+trips are a wash (join = begin/set/select/commit; separate = select +
+begin/set/select/commit), and ownership stays out of the paging query so it
+structurally cannot influence which rows a search returns.
+
+`native.rs` needed no change, verified rather than assumed: `NativeBackend::search`
+GETs `/api/catalog/search` with the caller's bearer token, that route resolves its
+backend via the opportunistic `routes::catalog_backend`, and `owned` round-trips
+as JSON. The native shell inherits the fix from the hosted terminus — which is
+the point of the seam.
+
+**Tenancy was verified against real multi-tenant data**, not from the code
+comment. `migrations/0003_collections.sql:89` declares the view
+`WITH (security_invoker = true)` (confirmed live in `pg_class.reloptions`); both
+underlying tables carry `relrowsecurity` **and** `relforcerowsecurity`; the
+policies are `USING (user_id = current_setting('app.user_id', true)::uuid)` on
+role `public`; the pool role has `rolbypassrls = false`; and `scoped_tx` binds
+the GUC transaction-locally with a bound parameter. Batching by `ANY($1)` does
+not widen scope — neither the old single-id lookup nor the new one filters
+`user_id`, both relying identically on RLS. The dev branch happens to hold two
+oracle_ids owned by two different users, and for both the authed API returned
+this user's count — not the other user's, not the cross-user sum.
+
+**`Some(0)` and `None` render identically**, because the badge hides at zero. So
+the authed/anonymous distinction is only observable **on the wire**, and a
+page-only test cannot protect it. That is not a stylistic point: the mutation
+making anonymous return `Some(0)` was killed *only* by the JSON-route assertion.
+
+**The card-detail "Your copies" total is computed independently** — summed from
+`card_detail`'s per-collection ownership rows, a different query from
+`owned_by_card` — which makes it the only assertion that pins the actual count.
+The mutation returning `n + 2` was killed only by that cross-check; comparing the
+badge to the API's own `owned` would have survived, since both come from the
+mutated helper. Review confirmed the two cannot diverge structurally: same inner
+join under the same GUC, differing only in `GROUP BY` grain, and
+`holdings.printing_id` is `NOT NULL` so the join to `printings` drops nothing.
+
+**Both mutations were killed only by assertions that read as redundant.** That is
+the reusable lesson, and it generalizes: an assertion with *independent
+provenance* is the one with authority, even when it looks duplicative next to a
+cheaper one.
+
+**Two environment findings worth more than the fix.** `cargo leptos watch`
+silently dropped a save that landed while a rebuild was in flight, and `touch`
+did not retrigger it (it appears to hash content) — only a genuinely different
+edit forced the rebuild. Any mutation pass that trusts a green run without
+confirming the mutation actually compiled is measuring nothing. And the `{..}`
+spread trap bit again: a component prop ending in a bare path immediately before
+`{..}` parses as struct-update syntax (`E0797`), so the testid rides a wrapper
+`<span>` in both views.
+
+**Review: CLEAN, zero majors**, seven minors filed. Notable among them: `search`
+now opens an RLS transaction it previously never needed, so a failure in the
+ownership read turns a working catalog search into a 500 **for signed-in users
+only**, with no fallback degrading `owned` to `None` while still serving results.
+
+**Evidence.** `cargo test --workspace --exclude frontend` 138 + 26 green; full
+chromium e2e **153/153** at `--workers=1` (4.2 min); hydration CLEAN on three
+authed URLs plus one anonymous; SSR curl on the same card shows `7 owned` in both
+grid and list for an authed session and **zero** occurrences anonymously, with
+`/cards/<id>` reading `Your copies · 7`; Android webview probe covers the
+anonymous half (the dev proxy strips Cookie headers) and confirms 50 tiles, zero
+badges, `owned: null` on all ten API hits.
+
+### Set facet as a real picker (2026-07-26)
+
+`app/src/catalog/rail.rs` + `CatalogStore::list_sets` (trait, both backends,
+`GET /api/catalog/sets`, a thin GET server fn) + `SetSummary`/`SetQuery` in
+`shared`. Resolves the "Set is a text input, not a picker" deferral above.
+`RailState.set` became `Vec<String>`; `split_codes` and the comma round-trip are
+gone. The route is deliberately anonymous — sets carry no ownership, so there is
+no opportunistic-session arm.
+
+**The selection is the query text, and is never intersected with the fetched
+rows.** That is the whole design, and it is what prevents the widget silently
+dropping part of a pasted query. `s:xyz` renders a chip, counts in the badge,
+reflects on a shared link, survives an unrelated rail edit byte-for-byte, and is
+removable — identically to `s:mh3`, and identically to a *real* code that happens
+to fall outside the current 25-row window. There is no "unknown code" branch to
+get wrong because recognition never happens: validating the selection against the
+list is the only mechanism by which the widget could silently alter someone's
+query, so the mechanism was removed rather than special-cased. No "use `xyz`
+anyway" row either — the set list is complete, so an unmatched string is a typo,
+and offering it would let typos in. Case and whitespace normalization stay in the
+grammar's `csv()`, not against the list.
+
+**Bounded server-side search, not a preloaded list — forced by a measured
+O(n²).** `CommandItem`'s `highlighted` is a `Memo` calling
+`CommandContext::visible_ids()`, which clones the whole items vec and `.get()`s
+every item's `visible` signal: O(n) per item, O(n²) per invalidation — and
+`Command`'s highlight-reset `Effect` invalidates all of them on **every
+keystroke**. ~1050 sets is not viable. So `list_sets` takes `q` + `limit`
+(default 25) and ranks exact-code-match first (typing `mh3` also matches
+`amh3`/`tmh3`/`pmh3`, which would otherwise push MH3 out of the window), then
+newest-first. Review independently confirmed the complexity claim.
+
+`command`'s rows are built inside a `Suspend` keyed on the resource, so each
+result set is a **full remount in document order** — the safe case for the
+recorded `visible_ids()` ordering caveat. Nothing reorders in place, so ↑↓ visits
+rows in visual order.
+
+**The `Suspend` → signal → `Effect` commit hop.** A `Suspend`'s future and view
+must both be `Send`, and `use_navigate`'s closure is neither, so a row click
+writes a code into an `RwSignal` and an `Effect` outside the async boundary
+commits. Still exactly one writer (`use_navigate_query`), reached through a
+signal — which is also why the cursor drop comes for free on both the select and
+deselect paths and on Reset. Review verified the `Effect` reads `codes` and
+`query_map` **untracked**, so a URL change cannot re-fire it, it early-returns on
+`None` so it does not fire on mount, and the `set(None)` before commit makes the
+follow-up a no-op.
+
+**The debounce race was reduced, not compounded.** The old Set widget was a
+`RailTextField` that armed its own 250 ms navigate timer — a genuine participant.
+The picker commits synchronously on click, so that writer is gone and a Set click
+is now exactly a Color-checkbox click. Its only timer debounces the *read* and
+never touches a navigate path.
+
+**Review: one major.** Three distinct states — *not fetched*, *fetch failed*, and
+*fetched and genuinely empty* — were all crammed into `Vec<SetSummary>`, so two
+non-answers rendered as an authoritative claim about the user's catalog:
+`sets.await.unwrap_or_default()` turned an `Err` into "No set matches." with no
+error arm and no retry (and on native an **offline phone is the normal failure** —
+`native.rs` maps a transport error to `Upstream` precisely so callers can tell),
+while `if !expanded { return Ok(Vec::new()) }` made not-yet-fetched a *successful
+empty*, so bare `/catalog` SSR'd `set-empty` with zero `Loading sets…` and — since
+`Transition` holds previous children across a re-key — the first thing anyone ever
+saw in the facet was "No set matches." for the length of the round trip.
+
+Fixed by giving the resource `Option<Result<Vec<SetSummary>, _>>` and four arms
+(`EitherOf4`): `None` → loading, `Some(Err)` → `role="alert"` with the message
+from the shared `catalog::describe_error` (same vocabulary as the paging arm) plus
+a **Try again** button that bumps an `attempt` counter in the resource's source
+tuple, which is what makes it refetch an unchanged query; the search box stays
+usable so typing is also a retry. The lazy fetch was kept — `/catalog` is the
+most-loaded route and the rail renders twice. `Transition` was kept over
+`Suspense` deliberately: `Suspense` would also make the fallback reachable but
+would strobe the list away on every debounced keystroke. Verified: bare
+`/catalog` SSR went from `set-empty × 2, Loading × 0` to `set-loading × 2,
+set-empty × 0`.
+
+**The failure was induced for real, not asserted around.** The adapter is a GET
+server fn, so `page.route("**/api/list_sets*")` fulfilling a 500 produces the same
+`Err` shape an offline phone does. Two mutations, each killing exactly its own
+test and nothing else: collapsing the `Err` arm back into the empty state killed
+only the error test; rendering the empty state for not-fetched killed only the
+flash test. Liveness was proved before each run by `strings`-ing the served
+`/pkg/app.wasm` for the testid anchors rather than trusting the watch — which
+matters, since `cargo leptos watch` has been observed silently dropping a save
+mid-rebuild.
+
+**Evidence.** `cargo test --workspace --exclude frontend` 143 + 26 green; full
+chromium e2e **162/162** at `--workers=1` (4.3 min); hydration CLEAN; SSR curl of
+`?q=s:mh3,lea` renders both chips *and* the 25-row list while bare `/catalog`
+renders zero rows (lazy fetch confirmed); Android webview rail probe 11/11
+including chip reflect, search-by-name, multi-select and the badge.
+
+### Catalog paging via `?cursor=` (2026-07-25)
+
+`app/src/catalog.rs` + `app/src/catalog/rail.rs` — the slice deferred from the
+catalog-page task. The adapter always took a cursor and `SearchResults` always
+carried `next_cursor`; the page simply never used either.
+
+**A stale cursor is the defining failure mode**, so clearing it is a property of
+the URL the existing writers build rather than a new writer watching `q`. Review
+established by exhaustive grep that exactly **three** call sites navigate to a
+`/catalog` URL carrying a query — `QueryBar::commit` via `to_url`,
+`rail::use_navigate_query`, and `ViewSwitch::go` — plus the pager's own hrefs.
+The first two pass `None`; `use_commit` and `reset_all` both funnel through
+`use_navigate_query`; `RailBody`/`FilterSheet` navigate nowhere else. **No path
+can change `q` while keeping `cursor`.**
+
+**The view switch preserves the cursor deliberately** — relayouting is not a
+query edit, and the keyset compares tuples so `view` is orthogonal to position.
+That required the pager's hrefs to be reactive `move ||` closures reading
+`list_view.get()` rather than baked at build time, because a layout switch
+deliberately does not re-render the results block; a fixed href would page a
+list-view reader back into the grid.
+
+**The rail/debounce race was not compounded.** That filed defect (a facet click
+inside the query bar's 250 ms window overwritten by the debounce firing with
+captured text) now has a third participant in the same URL. Deliberately, no
+timer-based writer and no `Effect` watching `q` were added: the pager and view
+switch are click-driven and never write `q`, only add or remove `cursor`. An
+armed debounce firing after a Next click therefore commits page one of the
+newest typed text — the correct resolution rather than a hybrid. Review
+confirmed the claim.
+
+**One deviation from the `/my` pager, on purpose.** `/my`'s error arm is a dead
+end. Paging is what makes an error reachable *with nothing to fix* — a shared
+`?cursor=` link can be stale or corrupt, and the user who pasted it did nothing
+wrong. So both the error and empty-page states offer "← Back to the start",
+keeping `q` and dropping only the cursor. Verified: a corrupt cursor returns
+HTTP 200 with an inline error and a way home; past-end and cross-query cursors
+render "Nothing on this page." with the same. A deleted anchor row is a
+non-case — the keyset compares `(name, oracle_id) > (…)` and needs no existing
+row.
+
+Forward-only, matching `/my` and for the same structural reason: a keyset cursor
+means "everything after this row", so a real Previous needs a reverse-ordered
+query plus a `before` cursor. Filed rather than half-built.
+
+**Mutation testing found a survivor, which is the point of running it.** "The
+last page offers no next" originally passed *with the cursor ignored entirely*,
+because `bolt` fits on one page — the fixture could not distinguish the
+behaviors. Strengthened to assert the card the cursor was taken after is absent;
+it now dies under that mutation. Four mutations applied, four killed after the
+strengthening. The same weakness survives in the Android probe's equivalent
+step, filed.
+
+**Known limitation, not a defect:** the count states this page's row count with
+no page qualifier, so the last page of a 73-result search reads "23 results"
+while mid-pages read "50+ results". Keyset has no offset, so a "51–73 of 73"
+form needs a separate count query or a page ordinal in the URL.
+
+**Evidence.** `cargo test --workspace --exclude frontend` 138 + 26 green; full
+chromium e2e **151/151** at `--workers=1` (4.1 min); hydration CLEAN on four
+URLs including a cursored browse-all, a `?q=&cursor=`, a `?view=list&cursor=`
+and a past-the-end cursor; SSR curl of a cursored URL renders 50 tiles with
+page two's first card present and page one's absent, both pager controls in the
+raw HTML; Android webview probe 11/11 including a 34 px tap target and a
+deep-linked cursored page.
+
 ### Needs view + pick list + `/my/shopping` (2026-07-25)
 
 `app/src/my/needs.rs` + `app/src/my/shopping.rs` — the two remaining unrouted
@@ -1520,7 +1756,8 @@ device's Chrome 145. Codex e2e mutation pass: 10 mutations applied transiently,
   non-`Send` closure can't ride. Filed as its own task rather than bolted on.
 - **Set is a text input, not a picker.** No `list_sets` adapter exists, and
   adding one is a server-fn of its own. `s:mh3,lea` typed as comma-separated
-  codes is the honest interim; filed.
+  codes is the honest interim; filed. — **resolved 2026-07-26**, see the
+  set-picker Findings below.
 
 ### Card detail `/cards/:id` + previews (2026-07-20)
 

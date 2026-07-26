@@ -11,10 +11,11 @@ use shared::{
     Condition, DeckCommanders, DesireLine, Finish, HoldingLine, HoldingMove, Id, LineResult,
     MoveReceipt, MoveRequest, NeedRow, NeedsView, NewCollection, NewTag, OwnershipEntry, Page,
     PrintingSummary, Rename, RenameTag, Reorder, Reparent, Ruling, SearchQuery, SearchResults,
-    SetBoard, SetQuantity, ShoppingList, ShoppingRow, SuggestedDestination, Tag, TagAssignment,
-    TagScope, TaggedCard, Teardown, TeardownReceipt,
+    SetBoard, SetQuantity, SetQuery, SetSummary, ShoppingList, ShoppingRow, SuggestedDestination,
+    Tag, TagAssignment, TagScope, TaggedCard, Teardown, TeardownReceipt,
 };
 use sqlx::{PgPool, Postgres, Transaction};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::{CatalogStore, CollectionStore};
@@ -69,6 +70,49 @@ impl HostedBackend {
         self.session
             .ok_or_else(|| ApiError::Unauthorized("no session".into()))
     }
+
+    /// The caller's **owned** count (data-model's global per-user, per-oracle
+    /// aggregate) for each of `oracle_ids` — the one source both `CardSummary`
+    /// projections read, so a tile and the detail page can never disagree about
+    /// the number.
+    ///
+    /// `None` means *anonymous*: `owned` is unknown, which is a different claim
+    /// from `Some(0)` ("signed in, holds none") and is why the catalog can't
+    /// just default it. A card with no holdings has **no row** in the view, so
+    /// an authed miss is `Some(0)` — see [`owned_of`].
+    ///
+    /// `owned_by_card` is a `security_invoker` view over the RLS-forced
+    /// `holdings`/`collections`, so it is only readable inside [`scoped_tx`]
+    /// (`self.pool` would see zero rows). Callers whose main query is the public
+    /// unscoped catalog read therefore pay **one** extra round trip for a whole
+    /// page: every id goes in a single `= ANY($1)`, never one query per row.
+    ///
+    /// [`scoped_tx`]: HostedBackend::scoped_tx
+    async fn owned_by_oracle(&self, oracle_ids: &[Uuid]) -> ApiResult<Option<HashMap<Uuid, i32>>> {
+        if self.session.is_none() {
+            return Ok(None);
+        }
+        if oracle_ids.is_empty() {
+            return Ok(Some(HashMap::new()));
+        }
+        let mut tx = self.scoped_tx().await?;
+        let rows: Vec<(Uuid, i32)> =
+            sqlx::query_as("SELECT oracle_id, owned FROM owned_by_card WHERE oracle_id = ANY($1)")
+                .bind(oracle_ids)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+        Ok(Some(rows.into_iter().collect()))
+    }
+}
+
+/// One card's `owned` out of [`HostedBackend::owned_by_oracle`]'s answer:
+/// anonymous stays `None`, an authed card the view has no row for is `Some(0)`.
+fn owned_of(owned: &Option<HashMap<Uuid, i32>>, oracle_id: Uuid) -> Option<i32> {
+    owned
+        .as_ref()
+        .map(|m| m.get(&oracle_id).copied().unwrap_or(0))
 }
 
 /// The `collections` projection matching [`CollectionRow`] — `kind`/`position`
@@ -212,21 +256,8 @@ impl CatalogStore for HostedBackend {
         .map_err(upstream)?
         .ok_or_else(|| ApiError::NotFound("card".into()))?;
 
-        let owned = if self.session.is_some() {
-            let mut tx = self.scoped_tx().await?;
-            let owned: Option<(i32,)> =
-                sqlx::query_as("SELECT owned FROM owned_by_card WHERE oracle_id = $1")
-                    .bind(oracle_id)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(upstream)?;
-            tx.commit().await.map_err(upstream)?;
-            Some(owned.map(|(o,)| o).unwrap_or(0))
-        } else {
-            None
-        };
-
-        Ok(card.into_summary(owned))
+        let owned = self.owned_by_oracle(&[oracle_id]).await?;
+        Ok(card.into_summary(owned_of(&owned, oracle_id)))
     }
 
     async fn search(&self, query: SearchQuery, page: Page) -> ApiResult<SearchResults> {
@@ -268,11 +299,79 @@ impl CatalogStore for HostedBackend {
                 })
             })
             .flatten();
+
+        // The `owned` badge, authed-only: the catalog read above is deliberately
+        // unscoped (public, anonymous-safe), while `owned_by_card` is RLS-scoped
+        // and readable only inside `scoped_tx` — so ownership is a second,
+        // session-only round trip over *this page's* ids rather than a join into
+        // the paging query. Two reasons it is the second query and not the join:
+        // the anonymous path then stays byte-for-byte the query it always was
+        // (no transaction, no `owned` column, `None` not `0`), and the number
+        // comes out of the same helper `card_summary` uses, so tile and detail
+        // page cannot drift. Runs after `truncate`, so the discarded has-more
+        // probe row is not looked up.
+        let ids: Vec<Uuid> = rows.iter().map(|r| r.oracle_id).collect();
+        let owned = self.owned_by_oracle(&ids).await?;
         Ok(SearchResults {
-            cards: rows.into_iter().map(|r| r.into_summary(None)).collect(),
+            cards: rows
+                .into_iter()
+                .map(|r| {
+                    let n = owned_of(&owned, r.oracle_id);
+                    r.into_summary(n)
+                })
+                .collect(),
             next_cursor,
         })
     }
+
+    async fn list_sets(&self, query: SetQuery) -> ApiResult<Vec<SetSummary>> {
+        // Public read; catalog RLS is off, so no scoped transaction (same as
+        // `card_count`). `term()` — not the raw `q` — so a blank box browses
+        // instead of substring-matching every set with `''`.
+        let term = query.term();
+        let rows: Vec<SetRowSql> = sqlx::query_as(
+            "SELECT code, name, set_type, released_at::text AS released_at \
+             FROM sets \
+             WHERE $1::text IS NULL \
+                OR code ILIKE '%' || $1 || '%' \
+                OR name ILIKE '%' || $1 || '%' \
+             ORDER BY CASE \
+                        WHEN lower(code) = lower(coalesce($1, '')) THEN 0 \
+                        WHEN code ILIKE coalesce($1, '') || '%' \
+                          OR name ILIKE coalesce($1, '') || '%' THEN 1 \
+                        ELSE 2 \
+                      END, \
+                      released_at DESC NULLS LAST, code \
+             LIMIT $2",
+        )
+        // The three ORDER BY tiers exist because the window is bounded: typing
+        // `mh3` matches `amh3`/`tmh3`/`pmh3` as well, and without exact-code-first
+        // the set the user named can fall off the end of the page. Newest-first
+        // within a tier — a set filter is nearly always about a recent release.
+        .bind(term)
+        .bind(query.limit())
+        .fetch_all(self.pool)
+        .await
+        .map_err(upstream)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| SetSummary {
+                code: r.code,
+                name: r.name,
+                set_type: r.set_type,
+                released_at: r.released_at,
+            })
+            .collect())
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct SetRowSql {
+    code: String,
+    name: String,
+    set_type: String,
+    released_at: Option<String>,
 }
 
 impl CollectionStore for HostedBackend {
@@ -2281,9 +2380,11 @@ struct SearchRowSql {
 }
 
 impl SearchRowSql {
-    /// One summary shape for both per-oracle projections (search rows carry
-    /// `owned: None`; `card_summary` fills it) — including the flip faces,
-    /// which are only built for [`shared::catalog::BACK_FACE_LAYOUTS`].
+    /// One summary shape for both per-oracle projections — including the flip
+    /// faces, which are only built for [`shared::catalog::BACK_FACE_LAYOUTS`].
+    /// `owned` is not in this projection (it is RLS-scoped and the catalog read
+    /// is not): both callers fill it from [`HostedBackend::owned_by_oracle`],
+    /// which answers `None` for an anonymous caller.
     fn into_summary(self, owned: Option<i32>) -> CardSummary {
         let faces = shared::CardFaceSummary::build(
             self.layout.as_deref(),

@@ -26,8 +26,8 @@ use shared::{
     CatalogCount, CollectionSummary, CollectionTree, CollectionView, DeckCommanders, DesireLine,
     HoldingLine, HoldingMove, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection,
     NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard,
-    SetQuantity, ShoppingList, SuggestedDestination, Tag, TagAssignment, TaggedCard, Teardown,
-    TeardownReceipt,
+    SetQuantity, SetQuery, SetSummary, ShoppingList, SuggestedDestination, Tag, TagAssignment,
+    TaggedCard, Teardown, TeardownReceipt,
 };
 
 #[cfg(feature = "hosted")]
@@ -61,6 +61,8 @@ pub mod paths {
 
     pub const CATALOG_COUNT: &str = "/api/catalog/count";
     pub const CATALOG_SEARCH: &str = "/api/catalog/search";
+    /// GET one window of the set list — the rail's Set facet picker.
+    pub const CATALOG_SETS: &str = "/api/catalog/sets";
     /// GET = list the tree; POST = create.
     pub const COLLECTIONS: &str = "/api/collections";
     /// GET the sidebar-tree read model (rows + counts). Static, so it cannot
@@ -206,7 +208,22 @@ pub trait CatalogStore {
     /// (specs/collection-api.md): the query→SQL translation is
     /// [catalog-search](../../specs/catalog-search.md)'s — until it lands, `q`
     /// does a fuzzy name match. Empty until catalog-ingestion populates the rows.
+    ///
+    /// Each row's `owned` follows the same authed-only rule as
+    /// [`card_summary`](Self::card_summary) — the caller's global count when the
+    /// backend carries a session, `None` (unknown, *not* zero) when anonymous.
+    /// Ownership never affects *which* cards a search returns or how it pages.
     async fn search(&self, query: SearchQuery, page: Page) -> ApiResult<SearchResults>;
+
+    /// One window of the set list, newest first — the vocabulary behind the
+    /// filter rail's Set facet, so a user picks *Modern Horizons 3* instead of
+    /// remembering `mh3`.
+    ///
+    /// Bounded by [`SetQuery::limit`] and filtered by [`SetQuery::term`] rather
+    /// than returning all ~1050 sets; the reason is the picker's, and it is
+    /// recorded on `SetQuery`. Public/anonymous like the rest of this trait —
+    /// sets carry no ownership, so the answer never depends on the session.
+    async fn list_sets(&self, query: SetQuery) -> ApiResult<Vec<SetSummary>>;
 }
 
 /// Collection reads/writes — session-scoped. The backend carries the caller's
