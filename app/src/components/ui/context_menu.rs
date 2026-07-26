@@ -141,8 +141,14 @@ pub fn ContextMenu(
     }
 }
 
-/// Wrapper that opens the menu on right-click (or long-press where the
-/// platform synthesizes `contextmenu`, e.g. the Android webview).
+/// Wrapper that opens the menu on right-click, or on the keyboard's menu chord
+/// (`ContextMenu` / `Shift+F10`) from anything focused inside it.
+///
+/// **Not on long-press.** That was assumed for the Android webview and does not
+/// hold: a real held touch produced no `contextmenu` there
+/// (`end2end/android-tree-move-check.mjs`). A touch surface needs an explicit
+/// trigger calling [`ContextMenuHandle::open_at`] — what the tree's row `⋯`
+/// button does.
 #[component]
 pub fn ContextMenuTrigger(
     children: Children,

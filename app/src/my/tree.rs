@@ -354,14 +354,19 @@ fn TreeRow(node: TreeNode, depth: usize, pathname: Memo<String>) -> AnyView {
 /// painted via `data-drop-hint`.
 ///
 /// **Three ways in, because right-click is only one of them.** Right-click is
-/// the desktop-mouse gesture and the long-press the Android webview synthesizes
-/// from it; the `⋯` button is the tab-reachable and tap-reachable one (a real
-/// `<button>`, revealed on hover at `md` and up so the at-rest row still reads
-/// as the wireframe's `Tree Item`, always shown below it where there is no
-/// hover); and `ContextMenu`/`Shift+F10` from anywhere in the row is the
-/// platform keyboard contract for opening a context menu. All three set the
-/// same `menu_target` and open the same shared panel — the only difference is
-/// where it is anchored.
+/// the desktop-mouse gesture; the `⋯` button is the tab-reachable and
+/// tap-reachable one (a real `<button>`, revealed on hover at `md` and up so
+/// the at-rest row still reads as the wireframe's `Tree Item`, always shown
+/// below it where there is no hover); and `ContextMenu`/`Shift+F10` from
+/// anywhere in the row is the platform keyboard contract for opening a context
+/// menu. All three set the same `menu_target` and open the same shared panel —
+/// the only difference is where it is anchored.
+///
+/// The `⋯` button is not a convenience. A held touch does **not** produce a
+/// `contextmenu` on the Android webview — measured, against a comment in this
+/// repo that had claimed otherwise since the menu was vendored
+/// (`end2end/android-tree-move-check.mjs`) — so without an explicit trigger a
+/// phone has no way into this menu at all.
 #[component]
 fn RowShell(
     id: Id,
