@@ -103,7 +103,7 @@ test.describe("mobile", () => {
     // `display`, which is the thing under test.
     await expect(page.locator(TABLE)).toHaveCount(1);
     await expect(page.locator(TABLE)).toBeHidden();
-    await expect(page.locator('#my-query')).toBeHidden();
+    await expect(page.locator("#my-query")).toBeHidden();
   });
 
   test("@fast the list is the sidebar's top level — rows, order and counts", async ({
@@ -115,7 +115,10 @@ test.describe("mobile", () => {
     await expect(async () => {
       const tree = await fetchTree(request);
       const roots = expectedRoots(tree);
-      expect(roots.length, "seed must have top-level collections").toBeGreaterThan(1);
+      expect(
+        roots.length,
+        "seed must have top-level collections",
+      ).toBeGreaterThan(1);
       expect(roots[0].is_inbox, "the Inbox is pinned first").toBeTruthy();
 
       await page.goto("/my");
@@ -163,11 +166,16 @@ test.describe("mobile", () => {
     // the absences above are about depth and not about an empty page. (The seed
     // nests three deep — `Depth Box → Depth Shelf → Depth Drawer` — so the
     // parent has to be picked, not assumed to be a root.)
-    const byId = new Map(tree.collections.map((r) => [r.summary.id, r.summary]));
+    const byId = new Map(
+      tree.collections.map((r) => [r.summary.id, r.summary]),
+    );
     const parents = nested
       .map((r) => byId.get(r.summary.parent_id!)!)
       .filter((s) => s.parent_id === null);
-    expect(parents.length, "seed must nest under a top-level collection").toBeGreaterThan(0);
+    expect(
+      parents.length,
+      "seed must nest under a top-level collection",
+    ).toBeGreaterThan(0);
     expect(shown).toContain(parents[0].name);
   });
 
@@ -180,9 +188,7 @@ test.describe("mobile", () => {
 
     await page.goto("/my");
     await hydrated(page);
-    await page
-      .locator(`${ROW}[data-collection="${inbox.summary.id}"]`)
-      .tap();
+    await page.locator(`${ROW}[data-collection="${inbox.summary.id}"]`).tap();
     await page.waitForURL(`/my/collections/${inbox.summary.id}`);
     await hydrated(page);
     await expect(page.locator('[data-testid="collection-title"]')).toHaveText(
@@ -215,7 +221,7 @@ test.describe("mobile", () => {
 
     // Here the table *is* what a phone gets, and its query bar with it.
     await expect(page.locator(TABLE)).toBeVisible();
-    await expect(page.locator('#my-query')).toBeVisible();
+    await expect(page.locator("#my-query")).toBeVisible();
     await expect(page.locator(LIST)).toHaveCount(0);
 
     // And its own up-link walks back to the root screen.
@@ -238,7 +244,7 @@ test.describe("mobile", () => {
     await all.tap();
     await page.waitForURL("/my/all?q=bolt");
     await hydrated(page);
-    await expect(page.locator('#my-query')).toHaveValue("bolt");
+    await expect(page.locator("#my-query")).toHaveValue("bolt");
   });
 
   test("@fast the rail drawer stays shut and still opens the tree", async ({
@@ -248,14 +254,17 @@ test.describe("mobile", () => {
     await hydrated(page);
 
     const rail = page.locator("#sidebar-rail");
-    // NOT `toBeVisible`: the drawer is a `fixed` panel slid off screen by
-    // `left`, and an off-screen element reads as visible to Playwright. The
-    // computed `left` is the state.
-    const closedLeft = await rail.evaluate(
-      (el) => getComputedStyle(el).left,
-    );
+    // The computed `left` is the state, and it is what the CSS switch actually
+    // animates — `data-[open=true]:left-0` against a `-left-60` at rest
+    // (shell.rs). (`toBeHidden` would also work here, because the closed drawer
+    // carries `invisible` as well; `collection-tree-move.spec.ts:412` asserts it
+    // that way. `left` is the narrower assertion of the two: it fails if the
+    // slide is broken even while `visibility` still happens to be correct.)
+    const closedLeft = await rail.evaluate((el) => getComputedStyle(el).left);
     expect(closedLeft, "the drawer must start off screen").toBe("-240px");
-    expect(await rail.evaluate((el) => el.getAttribute("data-open"))).toBeNull();
+    expect(
+      await rail.evaluate((el) => el.getAttribute("data-open")),
+    ).toBeNull();
 
     // It is still the only touch path to the tree's create/rename/move/delete
     // menu, so it must still open — the list replaced its navigation job, not
@@ -263,11 +272,11 @@ test.describe("mobile", () => {
     await page.locator('[data-testid="rail-toggle"]').tap();
     await expect(rail).toHaveAttribute("data-open", "true");
     await expect(async () => {
-      expect(await rail.evaluate((el) => getComputedStyle(el).left)).toBe("0px");
+      expect(await rail.evaluate((el) => getComputedStyle(el).left)).toBe(
+        "0px",
+      );
     }).toPass({ timeout: 3000 });
-    await expect(
-      page.locator("[data-tree-row-actions]").first(),
-    ).toBeVisible();
+    await expect(page.locator("[data-tree-row-actions]").first()).toBeVisible();
 
     // A navigation is a dismissal (shell.rs), and the list is still underneath.
     // Tap the scrim to the *right* of the 240 px panel: the scrim spans the
@@ -281,36 +290,60 @@ test.describe("mobile", () => {
   });
 
   test("@fast nothing scrolls sideways at 390 px", async ({ page }) => {
-    for (const url of ["/my", "/my/all"]) {
+    // Measure the scroll containers, not just the document: an `overflow-auto`
+    // wrapper absorbs its own overflow and the document never moves
+    // (specs/app-ui.md:1198 — that mistake hid 92–128 px of sideways scroll).
+    //
+    // **Each URL names the container that must actually be measured.** A bare
+    // count of measured elements cannot tell "the wrapper is fine" from "the
+    // wrapper was skipped": on `/my` the `TableWrapper` is inside a
+    // `display: none` subtree, so it has no `clientWidth` at all and drops out
+    // silently while the count still reaches three from the document, `main`
+    // and the list. So the wrapper is required on `/my/all`, where it is the
+    // element that can fail, and the list is required on `/my`.
+    const cases = [
+      { url: "/my", required: '[data-testid="my-root-list"]' },
+      { url: "/my/all", required: '[data-name="TableWrapper"]' },
+    ];
+    for (const { url, required } of cases) {
       await page.goto(url);
       await hydrated(page);
 
-      // Measure the scroll containers, not just the document: an
-      // `overflow-auto` wrapper absorbs its own overflow and the document
-      // never moves (specs/app-ui.md:1198 — that mistake hid 92–128 px).
-      const worst = await page.evaluate(() => {
-        const out: { where: string; overflow: number; client: number }[] = [];
+      const measured = await page.evaluate((req) => {
+        const out: {
+          where: string;
+          overflow: number;
+          client: number;
+          required: boolean;
+        }[] = [];
         const els = [
           document.documentElement,
           ...document.querySelectorAll<HTMLElement>(
-            '[data-testid="my-root-list"], [data-name="TableWrapper"], main',
+            `main, [data-testid="my-root-list"], [data-name="TableWrapper"]`,
           ),
         ];
         for (const el of els) {
+          // Zero-width means the element is in a hidden subtree and has no
+          // scroll box to measure — reported, not silently dropped.
           if (!el.clientWidth) continue;
           out.push({
             where: el.tagName + (el.getAttribute("data-testid") ?? ""),
             overflow: el.scrollWidth - el.clientWidth,
             client: el.clientWidth,
+            required: el.matches(req),
           });
         }
         return out;
-      });
-      expect(worst.length, `${url} had no measurable container`).toBeGreaterThan(1);
-      for (const m of worst) {
+      }, required);
+
+      expect(
+        measured.filter((m) => m.required).length,
+        `${url}: ${required} was never measured — this check would pass vacuously`,
+      ).toBeGreaterThan(0);
+      for (const m of measured) {
         expect(
           m.overflow,
-          `${url}: ${m.where} scrolls sideways (${m.overflow}px)`,
+          `${url}: ${m.where} scrolls sideways (${m.overflow}px in ${m.client}px)`,
         ).toBeLessThanOrEqual(1);
       }
     }
@@ -325,12 +358,78 @@ test.describe("mobile", () => {
     for (let i = 0; i < n; i++) {
       const box = (await rows.nth(i).boundingBox())!;
       expect(box, `row ${i} has no box`).toBeTruthy();
-      expect(box.height, `row ${i} is under the 44px target`).toBeGreaterThanOrEqual(
-        44,
-      );
+      expect(
+        box.height,
+        `row ${i} is under the 44px target`,
+      ).toBeGreaterThanOrEqual(44);
       // The frame's rows fill the list's width (padding 8 px each side).
       expect(box.width).toBeGreaterThan(PHONE.width - 40);
     }
+  });
+
+  test("@fast a failed tree read still leaves a way out of My cards", async ({
+    page,
+  }) => {
+    // The list is the *only* navigation a phone has on `/my` — the table beside
+    // it is `display: none` and the rail drawer reads the same resource — so a
+    // failed collection-tree read must not take `/my/all` and `/my/shopping`
+    // with it. Neither depends on that read.
+    //
+    // **The failure is induced for real, not asserted against a hand-built
+    // error view.** That needs the resource to run *client-side*: `/my` is
+    // `SsrMode::Async`, so a document load resolves the tree in-process and
+    // serializes it — measured, zero browser requests — and `page.route` never
+    // sees it. `AppShell` (which calls `provide_collection_tree`) is not mounted
+    // on `/dev/components`, so an SPA navigation *from* there into the shell
+    // fetches `/api/collection_tree` over the wire, where the 500 lands.
+    let treeReads = 0;
+    await page.route("**/api/collection_tree*", async (route) => {
+      treeReads++;
+      await route.fulfill({
+        status: 500,
+        contentType: "text/plain",
+        body: "induced: collection tree unavailable",
+      });
+    });
+
+    await page.goto("/dev/components");
+    await hydrated(page);
+    // Into the shell, the only way the tree read becomes an HTTP request.
+    await page.locator(ROW).first().click();
+    await page.waitForURL("/my/all");
+    await page.locator('[data-testid="all-cards-back"]').click();
+    await page.waitForURL("/my");
+
+    expect(
+      treeReads,
+      "the tree read was never intercepted — the failure was not induced",
+    ).toBeGreaterThan(0);
+
+    // State control first: the table really is unavailable at this width, which
+    // is the whole reason the list has to carry the escape hatch.
+    await expect(page.locator(TABLE)).toBeHidden();
+
+    // The defect this test exists for: the two destinations that do not need
+    // the tree read must still be on screen. (Asserted before the error copy
+    // below, so a failure here reads as "no way out" rather than as a missing
+    // test id.)
+    await expect(page.locator(`a[href="/my/all"]`)).toBeVisible();
+    await expect(page.locator(`a[href="/my/shopping"]`)).toBeVisible();
+
+    // And they work — a dead end is what this test exists to rule out.
+    await page.locator(`a[href="/my/shopping"]`).click();
+    await page.waitForURL("/my/shopping");
+    await expect(page.locator("h1:visible")).toHaveText("Shopping list");
+    await expect(page.locator("h1:visible")).toHaveCount(1);
+
+    // Then the copy: the failure is announced, and it blames the collections
+    // list rather than implying the whole page is dead.
+    await page.goBack();
+    await page.waitForURL("/my");
+    const err = page.locator('[data-testid="my-root-error"]');
+    await expect(err).toBeVisible();
+    await expect(err).toContainText(/collections/i);
+    await expect(err).toHaveAttribute("role", "alert");
   });
 });
 
@@ -342,8 +441,9 @@ test.describe("desktop", () => {
     await hydrated(page);
     // Positive control first: the shipped desktop landing is unchanged.
     await expect(page.locator(TABLE)).toBeVisible();
-    await expect(page.locator('#my-query')).toBeVisible();
+    await expect(page.locator("#my-query")).toBeVisible();
     await expect(page.locator("h1:visible")).toHaveText("All cards");
+    await expect(page.locator("h1:visible")).toHaveCount(1);
     // The mobile list is in this document too, and hidden.
     await expect(page.locator(LIST)).toHaveCount(1);
     await expect(page.locator(LIST)).toBeHidden();

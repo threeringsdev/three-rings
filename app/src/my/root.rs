@@ -57,8 +57,11 @@ pub struct RootRow {
     pub href: String,
     pub icon: &'static str,
     pub label: String,
-    /// The rolled-up count the same row's sidebar badge shows.
-    pub count: i64,
+    /// The rolled-up count the same row's sidebar badge shows. `None` when it
+    /// is not *known* — the tree read failed and [`fallback_rows`] is standing
+    /// in — which renders as no count rather than as a `0` the app cannot vouch
+    /// for.
+    pub count: Option<i64>,
     /// The frame sets `All cards` to weight 600 and every other label to
     /// normal — it is the aggregate, not a sibling of the collections.
     pub strong: bool,
@@ -82,15 +85,7 @@ pub struct RootRow {
 /// (no rows at all, not even an Inbox) would otherwise draw two rules in a row.
 pub fn root_rows(t: &AssembledTree, all_cards_href: &str) -> Vec<RootRow> {
     let mut rows = Vec::with_capacity(t.roots.len() + 2);
-    rows.push(RootRow {
-        href: all_cards_href.to_string(),
-        icon: ICON_ALL_CARDS,
-        label: "All cards".into(),
-        count: t.total_present,
-        strong: true,
-        divider_before: false,
-        collection: None,
-    });
+    rows.push(all_cards_row(all_cards_href, Some(t.total_present)));
     let mut first_collection = true;
     for node in &t.roots {
         let id = node.row.summary.id;
@@ -102,22 +97,57 @@ pub fn root_rows(t: &AssembledTree, all_cards_href: &str) -> Vec<RootRow> {
                 ICON_COLLECTION
             },
             label: node.row.summary.name.clone(),
-            count: node.rolled_up,
+            count: Some(node.rolled_up),
             strong: false,
             divider_before: std::mem::take(&mut first_collection),
             collection: Some(id),
         });
     }
-    rows.push(RootRow {
+    rows.push(shopping_row(Some(t.shopping_short)));
+    rows
+}
+
+/// The rows that do **not** depend on the collection tree — what the list shows
+/// when that read fails.
+///
+/// This is a way out, not a nicety. Below `md` this list is the *only*
+/// navigation `/my` has: the All-cards table beside it is `display: none`, the
+/// `☰` rail drawer reads the very same resource and fails with it, and the
+/// bottom `My cards` tab links back here. Rendering only an error line therefore
+/// turned a partial backend failure into a total, phone-only dead end — no route
+/// to the aggregate table, the shopping list, or anything else. Neither
+/// destination below needs the tree, so neither has any business disappearing
+/// with it.
+///
+/// Counts are omitted rather than zeroed: both totals come out of the read that
+/// just failed, and `0` would be a number the app cannot vouch for.
+pub fn fallback_rows(all_cards_href: &str) -> Vec<RootRow> {
+    vec![all_cards_row(all_cards_href, None), shopping_row(None)]
+}
+
+fn all_cards_row(href: &str, count: Option<i64>) -> RootRow {
+    RootRow {
+        href: href.to_string(),
+        icon: ICON_ALL_CARDS,
+        label: "All cards".into(),
+        count,
+        strong: true,
+        divider_before: false,
+        collection: None,
+    }
+}
+
+fn shopping_row(count: Option<i64>) -> RootRow {
+    RootRow {
         href: "/my/shopping".into(),
         icon: ICON_SHOPPING,
         label: "Shopping list".into(),
-        count: t.shopping_short,
+        count,
         strong: false,
+        // Always: there is always at least the aggregate row above it.
         divider_before: true,
         collection: None,
-    });
-    rows
+    }
 }
 
 /// `/my` below `md`: the wireframe's screen — title, then the list.
@@ -157,11 +187,21 @@ pub fn MyRootNav() -> impl IntoView {
                                 view! { <MyRootList rows=root_rows(&assemble(dto), &href) /> }
                                     .into_any()
                             }
+                            // The tree read failed — name *that*, and still
+                            // render the two rows that never needed it. See
+                            // `fallback_rows`: without them a phone's My-cards
+                            // mode is a dead end, because this list is the only
+                            // navigation it has here.
                             Some(Err(_)) => {
                                 view! {
-                                    <p class="text-muted-foreground px-4 text-sm">
-                                        "Couldn't load collections."
+                                    <p
+                                        role="alert"
+                                        data-testid="my-root-error"
+                                        class="text-muted-foreground px-4 pb-1 text-sm"
+                                    >
+                                        "Couldn't load your collections. Everything else here still works."
                                     </p>
+                                    <MyRootList rows=fallback_rows(&href) />
                                 }
                                     .into_any()
                             }
@@ -239,12 +279,20 @@ fn RootListRow(row: RootRow) -> impl IntoView {
         >
             <span aria-hidden="true">{icon}</span>
             <span class=label_class>{label}</span>
-            <span
-                class="text-muted-foreground shrink-0 text-[13px] tabular-nums"
-                data-testid="my-root-count"
-            >
-                {count}
-            </span>
+            // Omitted, not emptied, when the count is unknown: an empty count
+            // cell would still answer `[data-testid=my-root-count]` and let a
+            // test read a missing number as a rendered one.
+            {count
+                .map(|n| {
+                    view! {
+                        <span
+                            class="text-muted-foreground shrink-0 text-[13px] tabular-nums"
+                            data-testid="my-root-count"
+                        >
+                            {n}
+                        </span>
+                    }
+                })}
             <span aria-hidden="true" class="text-muted-foreground shrink-0 text-base leading-none">
                 "›"
             </span>
@@ -299,7 +347,7 @@ mod tests {
     #[test]
     fn projects_the_frame_row_for_row() {
         let rows = root_rows(&ia_tree(), ALL_CARDS_PATH);
-        let shape: Vec<(&str, &str, i64, bool, bool)> = rows
+        let shape: Vec<(&str, &str, Option<i64>, bool, bool)> = rows
             .iter()
             .map(|r| {
                 (
@@ -316,16 +364,36 @@ mod tests {
             vec![
                 // All cards is the aggregate: every present copy, Inbox
                 // included (7 + 645 + 172), emphasized, no rule above it.
-                ("All cards", ICON_ALL_CARDS, 824, true, false),
+                ("All cards", ICON_ALL_CARDS, Some(824), true, false),
                 // A rule, then the tree — Inbox pinned first despite the
                 // server having returned it last.
-                ("Inbox", ICON_INBOX, 7, false, true),
-                ("Binders", ICON_COLLECTION, 645, false, false),
-                ("Decks", ICON_COLLECTION, 172, false, false),
+                ("Inbox", ICON_INBOX, Some(7), false, true),
+                ("Binders", ICON_COLLECTION, Some(645), false, false),
+                ("Decks", ICON_COLLECTION, Some(172), false, false),
                 // A second rule, then the pinned system row.
-                ("Shopping list", ICON_SHOPPING, 2, false, true),
+                ("Shopping list", ICON_SHOPPING, Some(2), false, true),
             ]
         );
+    }
+
+    #[test]
+    fn a_failed_tree_read_still_offers_a_way_out() {
+        // The escape hatch: below `md` this list is the only navigation `/my`
+        // has, so a failed tree read must not take the two tree-independent
+        // destinations with it.
+        let rows = fallback_rows(ALL_CARDS_PATH);
+        assert_eq!(
+            rows.iter().map(|r| r.href.as_str()).collect::<Vec<_>>(),
+            ["/my/all", "/my/shopping"]
+        );
+        // No counts: both totals come from the read that failed, and a `0`
+        // would be a number the app cannot vouch for.
+        assert!(rows.iter().all(|r| r.count.is_none()));
+        // One rule between them, none above the first — the empty-tree shape.
+        assert!(!rows[0].divider_before);
+        assert!(rows[1].divider_before);
+        // A search that landed on the list still rides down to the table.
+        assert_eq!(fallback_rows("/my/all?q=bolt")[0].href, "/my/all?q=bolt");
     }
 
     #[test]
