@@ -1029,31 +1029,30 @@ pub async fn move_selection(
                 ),
                 SelectionKey::Card { oracle_id: _ } => resolve_card(holdings, to_collection_id),
             };
-            let source = match source {
-                CardSource::Move { from, printing_id } => Ok((from, printing_id)),
-                CardSource::Refuse(reason) => Err(reason),
-            };
             match source {
-                Ok((from, printing_id)) => {
+                CardSource::Move(src) => {
                     moved.push(token);
                     lines.push(shared::MoveItem {
-                        from_collection_id: Some(from),
-                        printing_id,
-                        // The default grain — and resolution has already
-                        // established that the source holds copies at exactly
-                        // this grain on the mainboard, which is what keeps a
-                        // foil-only or sideboard-only row from reaching
-                        // `holding_take` and rolling the batch back. Moving the
-                        // *other* grains is the move-flows task's.
-                        finish: shared::Finish::default(),
-                        condition: shared::Condition::default(),
-                        language: shared::default_language(),
-                        from_board: shared::Board::default(),
-                        to_board: shared::Board::default(),
+                        from_collection_id: Some(src.from),
+                        printing_id: src.printing_id,
+                        // The grain and board of the stack resolution actually
+                        // found — never restated defaults. A `MoveItem` built at
+                        // the default grain beside a foil-only stack is a write
+                        // aimed at copies that do not exist, which reaches
+                        // `holding_take` as a `Conflict` and rolls the whole
+                        // batch back.
+                        finish: src.finish,
+                        condition: src.condition,
+                        language: src.language,
+                        from_board: src.board,
+                        // Copies moved out of a sideboard into another
+                        // collection are just copies there; re-labelling a board
+                        // is card-tagging's separate op.
+                        to_board: shared::Board::Main,
                         quantity: SELECTION_MOVE_QUANTITY,
                     });
                 }
-                Err(reason) => skipped.push(Skipped { token, reason }),
+                CardSource::Refuse(reason) => skipped.push(Skipped { token, reason }),
             }
         }
 
@@ -1062,16 +1061,28 @@ pub async fn move_selection(
         let move_ids = if lines.is_empty() {
             Vec::new()
         } else {
-            backend
+            match backend
                 .move_batch(shared::BatchMove {
                     to_collection_id: Some(to_collection_id),
                     items: lines,
                 })
                 .await
-                .map_err(api_err)?
-                .into_iter()
-                .map(|r| r.move_id)
-                .collect()
+            {
+                Ok(receipts) => receipts.into_iter().map(|r| r.move_id).collect(),
+                // The batch is one transaction, so this moved nothing. Trade the
+                // item *index* the backend tagged the failure with for the
+                // entry's token, so the client can put a card name on it — the
+                // alternative is an error that names none of the cards the user
+                // selected and is diagnosable only by bisecting the selection.
+                Err(e) => {
+                    return Err(match shared::batch_item_index(e.message()) {
+                        Some((i, rest)) if i < moved.len() => {
+                            ServerFnError::ServerError(format!("{}: {rest}", moved[i]))
+                        }
+                        _ => api_err(e),
+                    })
+                }
+            }
         };
 
         Ok(MoveOutcome {
