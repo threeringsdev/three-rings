@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type APIRequestContext } from "@playwright/test";
 import { hydrated } from "./helpers";
 
 // Filter rail + query↔rail sync (specs/app-ui.md "/catalog",
@@ -351,6 +351,191 @@ test("rail edits replace history rather than piling it up @fast", async ({
   await expect(page.getByTestId("results-grid")).toBeVisible();
 });
 
+// ---------------------------------------------------------------------------
+// The Set facet as a real picker (specs/app-ui.md → Filter rail;
+// specs/catalog-search.md → the `s:` term).
+//
+// The design these tests hold in place: **the selection is the query text, and
+// the fetched list is only a way to discover codes.** Chips and ✓ marks read the
+// parsed `s:` term and never intersect it with the rows, which is what makes a
+// code the list has never heard of impossible to silently drop.
+//
+// Fixture facts, taken from the Neon dev catalog itself rather than from the
+// code under test (`select code, name from sets …`): `mh3` is "Modern Horizons
+// 3", `lea` is "Limited Edition Alpha", and the name "Modern Horizons 3" is a
+// prefix of six *other* set names (Commander, Tokens, Promos, …) — so a search
+// for it returns several rows, which is what lets a per-row assertion about
+// selection mean anything. No set's code or name contains "xyz".
+// ---------------------------------------------------------------------------
+
+const SET_SEARCH = "#filter-rail-set";
+const chip = (page: import("@playwright/test").Page, code: string) =>
+  page.locator(`${RAIL} [data-testid=set-chip][data-code=${code}]`);
+const option = (page: import("@playwright/test").Page, code: string) =>
+  page.locator(`${RAIL} [data-testid=set-option][data-code=${code}]`);
+
+test("a shared set link SSRs its selection, and a bare one fetches nothing @fast", async ({
+  request,
+}) => {
+  // Request-level: chips in the raw HTML are proof the selection is derived from
+  // the query text server-side — it cannot have come from the list, which is
+  // fetched asynchronously.
+  const html = await (
+    await request.get("/catalog?q=id%3Awu%20s%3Amh3%2Clea")
+  ).text();
+  expect(html).toContain('data-testid="set-chip" data-code="mh3"');
+  expect(html).toContain('data-testid="set-chip" data-code="lea"');
+  // ...and the section is expanded because it carries filters, so the list is
+  // there too. This is the positive control for the negative assertions below:
+  // it proves the markup exists to be found when it should be.
+  expect(html).toContain('data-testid="set-option"');
+
+  // On a bare /catalog the facet still renders, but nothing is selected and the
+  // list has not been fetched — the section is collapsed, and `/catalog` is the
+  // app's most-loaded route.
+  const bare = await (await request.get("/catalog")).text();
+  expect(bare).toContain(">Set<"); // positive control: the facet is on the page
+  expect(bare).not.toContain('data-testid="set-chip"');
+  expect(bare).not.toContain('data-testid="set-option"');
+});
+
+test("a set term reflects into the picker's rows @fast", async ({ page }) => {
+  await page.goto("/catalog?q=s%3Amh3");
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+  await expect(rail.getByTestId("filter-count-set")).toContainText("1");
+  await expect(chip(page, "mh3")).toBeVisible();
+
+  // Search by *name* — the point of the picker. Several rows come back, and the
+  // fixture is what makes the assertion sharp: exactly the selected one carries
+  // the marker while its same-named siblings do not, so a widget that marked
+  // everything (or nothing) fails here.
+  await rail.locator(SET_SEARCH).fill("modern horizons 3");
+  await expect(option(page, "mh3")).toHaveAttribute("data-selected", "true");
+  await expect(option(page, "mh3")).toHaveText("Modern Horizons 3");
+  await expect(option(page, "m3c")).toHaveText("Modern Horizons 3 Commander");
+  await expect(option(page, "m3c")).not.toHaveAttribute(
+    "data-selected",
+    "true",
+  );
+});
+
+test("picking a set rewrites only its term @fast", async ({ page }) => {
+  // The load-bearing promise: `id:`, a negation and someone's chosen quoting all
+  // survive byte for byte, and the `s:` term is rewritten in place rather than
+  // appended.
+  const start = 'id:wu -t:land o:"draw a card" s:mh3 bolt';
+  await page.goto(`/catalog?q=${encodeURIComponent(start)}`);
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+
+  await rail.locator(SET_SEARCH).fill("limited edition alpha");
+  await expect(option(page, "lea")).toHaveText("Limited Edition Alpha");
+  await option(page, "lea").click();
+  await page.waitForURL((url) =>
+    (url.searchParams.get("q") ?? "").includes("s:mh3,lea"),
+  );
+
+  expect(q(page)).toBe('id:wu -t:land o:"draw a card" s:mh3,lea bolt');
+  // The query bar is the canonical surface, so it has to show what the rail did.
+  await expect(page.locator("#catalog-query")).toHaveValue(
+    'id:wu -t:land o:"draw a card" s:mh3,lea bolt',
+  );
+  // The picker follows its own edit — asserting only the URL would pass on a
+  // picker whose chips and ✓ never update.
+  await expect(chip(page, "lea")).toBeVisible();
+  await expect(chip(page, "mh3")).toBeVisible();
+  await expect(option(page, "lea")).toHaveAttribute("data-selected", "true");
+  await expect(rail.getByTestId("filter-count-set")).toContainText("2");
+  await expect(page.getByTestId("search-error")).toHaveCount(0);
+});
+
+test("unpicking the last set removes the term entirely @fast", async ({
+  page,
+}) => {
+  // Not `s:` with no value — that is a parse error, so a naive implementation
+  // breaks the whole query when the last chip goes.
+  await page.goto("/catalog?q=bolt%20s%3Amh3");
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+  await expect(rail.getByTestId("filter-count-set")).toContainText("1");
+
+  await chip(page, "mh3").click();
+  await page.waitForURL((url) => url.searchParams.get("q") === "bolt");
+  await expect(page.getByTestId("search-error")).toHaveCount(0);
+  await expect(page.getByTestId("results-grid")).toBeVisible();
+  // The section is still open and the search box still there — so the chips and
+  // the badge being gone is a real absence, not a missing subtree.
+  await expect(rail.locator(SET_SEARCH)).toBeVisible();
+  await expect(rail.getByTestId("set-chips")).toHaveCount(0);
+  await expect(rail.getByTestId("filter-count-set")).toHaveCount(0);
+});
+
+test("a code the picker never lists is still the user's selection @fast", async ({
+  page,
+}) => {
+  // The failure guarded here: validating the selection against the fetched list
+  // would drop a pasted `s:xyz` on the next unrelated rail click. No set's code
+  // or name contains "xyz", so the list genuinely cannot recognize it.
+  await page.goto("/catalog?q=s%3Axyz%2Cmh3");
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+  await expect(chip(page, "xyz")).toBeVisible();
+  await expect(chip(page, "mh3")).toBeVisible();
+  await expect(rail.getByTestId("filter-count-set")).toContainText("2");
+
+  // Searching for it finds nothing — with the chip still standing beside the
+  // empty list, which is the whole point.
+  await rail.locator(SET_SEARCH).fill("xyz");
+  await expect(rail.getByTestId("set-empty")).toBeVisible();
+  await expect(chip(page, "xyz")).toBeVisible();
+
+  // An edit elsewhere in the rail leaves it byte for byte alone...
+  await rail.getByRole("checkbox", { name: "Blue" }).click();
+  await page.waitForURL((url) =>
+    (url.searchParams.get("q") ?? "").includes("c:u"),
+  );
+  expect(q(page)).toBe("s:xyz,mh3 c:u");
+  // ...and it is removable like any other chip, which a code the list owned
+  // could never be.
+  await chip(page, "xyz").click();
+  await page.waitForURL((url) => url.searchParams.get("q") === "s:mh3 c:u");
+  await expect(chip(page, "xyz")).toHaveCount(0);
+  await expect(chip(page, "mh3")).toBeVisible(); // positive control
+});
+
+test("a set pick drops the page cursor @fast", async ({ page, request }) => {
+  // The picker reaches the URL through its own signal→Effect hop (a row is built
+  // inside a `Suspend`, so it cannot capture the non-Send navigate closure), so
+  // "every rail edit starts at page one" needs asserting on *this* writer and
+  // not only on a checkbox.
+  const first = await firstPage(request, "bolt");
+  await page.goto(`/catalog?q=bolt%20s%3Amh3&cursor=${first}`);
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+
+  await chip(page, "mh3").click();
+  await page.waitForURL("/catalog?q=bolt");
+  expect(new URL(page.url()).searchParams.get("cursor")).toBeNull();
+  await expect(rail.locator(SET_SEARCH)).toBeVisible(); // positive control
+});
+
+/// A real first-page cursor for `q`, from the hosted JSON route at `limit=1` —
+/// the page always asks for 50, so a small page is the only way to get a cursor
+/// out of a small result set.
+async function firstPage(request: APIRequestContext, q: string) {
+  const res = await request.get(
+    `/api/catalog/search?q=${encodeURIComponent(q)}&limit=1`,
+  );
+  expect(res.status()).toBe(200);
+  const body = (await res.json()) as { next_cursor: string | null };
+  expect(
+    body.next_cursor,
+    "the fixture must exceed a one-row page",
+  ).toBeTruthy();
+  return body.next_cursor!;
+}
+
 test.describe("mobile", () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
@@ -371,7 +556,9 @@ test.describe("mobile", () => {
     // and keeps its box when closed, so a closed sheet and everything in it is
     // "visible" to Playwright. Proved by mutation on the card-detail task
     // (app-ui Findings).
-    const panel = page.locator('[data-name=SheetContent][aria-label="Filters"]');
+    const panel = page.locator(
+      '[data-name=SheetContent][aria-label="Filters"]',
+    );
     await expect(panel).toHaveAttribute("data-state", "open");
     const sheet = page.locator("[data-testid=filter-sheet]");
     await expect(
@@ -392,6 +579,39 @@ test.describe("mobile", () => {
       (url.searchParams.get("q") ?? "").includes("t:instant,sorcery"),
     );
     await expect(page.getByTestId("filter-badge")).toContainText("5");
+  });
+
+  test("the set picker works inside the filter sheet @fast", async ({
+    page,
+  }) => {
+    // The rail becomes a slide-over on mobile, and the picker is the one rail
+    // widget that fetches — so it needs its own assertion that the sheet's copy
+    // is live rather than a second, inert render.
+    await page.goto("/catalog?q=s%3Amh3");
+    await hydrated(page);
+    await expect(page.getByTestId("filter-badge")).toContainText("1");
+
+    await page.getByRole("button", { name: /Filters/ }).click();
+    const panel = page.locator(
+      '[data-name=SheetContent][aria-label="Filters"]',
+    );
+    // `data-state`, not toBeVisible — a closed SheetContent keeps its box.
+    await expect(panel).toHaveAttribute("data-state", "open");
+    const sheet = page.locator("[data-testid=filter-sheet]");
+    await expect(
+      sheet.locator("[data-testid=set-chip][data-code=mh3]"),
+    ).toBeVisible();
+
+    // Its own list, fetched through its own resource.
+    await sheet.locator("#filter-sheet-set").fill("limited edition alpha");
+    const lea = sheet.locator("[data-testid=set-option][data-code=lea]");
+    await expect(lea).toHaveText("Limited Edition Alpha");
+    await lea.click();
+    await page.waitForURL((url) => url.searchParams.get("q") === "s:mh3,lea");
+    await expect(page.getByTestId("filter-badge")).toContainText("2");
+    // The sheet stays open across a pick: this facet is multi-select, so closing
+    // it would make every second set cost a reopen.
+    await expect(panel).toHaveAttribute("data-state", "open");
   });
 
   test("colorless counts even though it has no checkbox @fast", async ({

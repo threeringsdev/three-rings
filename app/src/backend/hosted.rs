@@ -11,8 +11,8 @@ use shared::{
     Condition, DeckCommanders, DesireLine, Finish, HoldingLine, Id, LineResult, MoveReceipt,
     MoveRequest, NeedRow, NeedsView, NewCollection, NewTag, OwnershipEntry, Page, PrintingSummary,
     Rename, RenameTag, Reorder, Reparent, Ruling, SearchQuery, SearchResults, SetBoard,
-    SetQuantity, ShoppingList, ShoppingRow, SuggestedDestination, Tag, TagAssignment, TagScope,
-    TaggedCard, Teardown, TeardownReceipt,
+    SetQuantity, SetQuery, SetSummary, ShoppingList, ShoppingRow, SuggestedDestination, Tag,
+    TagAssignment, TagScope, TaggedCard, Teardown, TeardownReceipt,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::HashMap;
@@ -323,6 +323,55 @@ impl CatalogStore for HostedBackend {
             next_cursor,
         })
     }
+
+    async fn list_sets(&self, query: SetQuery) -> ApiResult<Vec<SetSummary>> {
+        // Public read; catalog RLS is off, so no scoped transaction (same as
+        // `card_count`). `term()` — not the raw `q` — so a blank box browses
+        // instead of substring-matching every set with `''`.
+        let term = query.term();
+        let rows: Vec<SetRowSql> = sqlx::query_as(
+            "SELECT code, name, set_type, released_at::text AS released_at \
+             FROM sets \
+             WHERE $1::text IS NULL \
+                OR code ILIKE '%' || $1 || '%' \
+                OR name ILIKE '%' || $1 || '%' \
+             ORDER BY CASE \
+                        WHEN lower(code) = lower(coalesce($1, '')) THEN 0 \
+                        WHEN code ILIKE coalesce($1, '') || '%' \
+                          OR name ILIKE coalesce($1, '') || '%' THEN 1 \
+                        ELSE 2 \
+                      END, \
+                      released_at DESC NULLS LAST, code \
+             LIMIT $2",
+        )
+        // The three ORDER BY tiers exist because the window is bounded: typing
+        // `mh3` matches `amh3`/`tmh3`/`pmh3` as well, and without exact-code-first
+        // the set the user named can fall off the end of the page. Newest-first
+        // within a tier — a set filter is nearly always about a recent release.
+        .bind(term)
+        .bind(query.limit())
+        .fetch_all(self.pool)
+        .await
+        .map_err(upstream)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| SetSummary {
+                code: r.code,
+                name: r.name,
+                set_type: r.set_type,
+                released_at: r.released_at,
+            })
+            .collect())
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct SetRowSql {
+    code: String,
+    name: String,
+    set_type: String,
+    released_at: Option<String>,
 }
 
 impl CollectionStore for HostedBackend {

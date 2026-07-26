@@ -16,8 +16,8 @@ use shared::{
     CardSummary, CatalogCount, CollectionSummary, CollectionTree, CollectionView, DeckCommanders,
     DesireLine, ErrorEnvelope, HoldingLine, Id, LineResult, MoveReceipt, MoveRequest, NeedsView,
     NewCollection, NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults,
-    SetBoard, SetQuantity, ShoppingList, SuggestedDestination, Tag, TagAssignment, TaggedCard,
-    Teardown, TeardownReceipt,
+    SetBoard, SetQuantity, SetQuery, SetSummary, ShoppingList, SuggestedDestination, Tag,
+    TagAssignment, TaggedCard, Teardown, TeardownReceipt,
 };
 use tokio::sync::OnceCell;
 
@@ -222,6 +222,25 @@ impl CatalogStore for NativeBackend {
             qs.push(format!("cursor={cursor}"));
         }
         if let Some(limit) = page.limit {
+            qs.push(format!("limit={limit}"));
+        }
+        if !qs.is_empty() {
+            path.push('?');
+            path.push_str(&qs.join("&"));
+        }
+        self.get(&path).await
+    }
+
+    async fn list_sets(&self, query: SetQuery) -> ApiResult<Vec<SetSummary>> {
+        let mut path = super::paths::CATALOG_SETS.to_string();
+        let mut qs = Vec::new();
+        // `term()`, not the raw `q`: sending a blank `q=` would make the hosted
+        // side substring-match every set instead of browsing, so the two
+        // backends would answer differently for the same request.
+        if let Some(q) = query.term() {
+            qs.push(format!("q={}", urlencode(q)));
+        }
+        if let Some(limit) = query.limit {
             qs.push(format!("limit={limit}"));
         }
         if !qs.is_empty() {

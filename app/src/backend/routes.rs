@@ -15,8 +15,8 @@ use axum::Json;
 use http::StatusCode;
 use shared::{
     AddHave, AddLine, AddWant, ApiResult, BatchMove, Id, MoveRequest, NewCollection, NewTag, Page,
-    Rename, RenameTag, Reorder, Reparent, SearchQuery, SetBoard, SetQuantity, TagAssignment,
-    Teardown,
+    Rename, RenameTag, Reorder, Reparent, SearchQuery, SetBoard, SetQuantity, SetQuery,
+    TagAssignment, Teardown,
 };
 
 use super::paths;
@@ -33,6 +33,7 @@ where
     router
         .route(paths::CATALOG_COUNT, get(catalog_count))
         .route(paths::CATALOG_SEARCH, get(search))
+        .route(paths::CATALOG_SETS, get(list_sets))
         .route(paths::CARD_DETAIL_ROUTE, get(card_detail))
         .route(paths::CARD_SUMMARY_ROUTE, get(card_summary))
         .route(
@@ -147,6 +148,13 @@ async fn search(headers: http::HeaderMap, Query(p): Query<SearchParams>) -> Resp
         limit: p.limit,
     };
     json_result(async { catalog_backend(&headers).await?.search(query, page).await }.await)
+}
+
+/// `GET /api/catalog/sets?q=&limit=` — one window of the set list (the rail's
+/// Set facet). Anonymous, not [`catalog_backend`]: sets carry no ownership, so
+/// there is nothing a session would add to the answer.
+async fn list_sets(Query(query): Query<SetQuery>) -> Response {
+    json_result(async { HostedBackend::anonymous().await?.list_sets(query).await }.await)
 }
 
 /// `GET /api/collections` — the caller's collections (Inbox provisioned lazily).
