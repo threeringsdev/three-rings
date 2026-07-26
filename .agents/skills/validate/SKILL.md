@@ -1,15 +1,38 @@
 ---
 name: validate
-description: Reproduce the three-rings merge gate (fmt, clippy native+wasm+bench, tests, cargo leptos release build) exactly as CI runs it, with environment-aware exclusions and per-step exit codes. Use before any push, PR, or "is this green?" claim, whenever the user says validate, run the gate, run the checks, or pre-push — and after any multi-file change even if the user doesn't ask. Branch protection auto-merges on green, so this suite is the de facto reviewer.
+description: Reproduce the three-rings merge gate locally (fmt, clippy native+wasm+bench, tests, cargo leptos release build) with environment-aware exclusions and per-step exit codes. Use to DEBUG a red CI run whose logs don't explain themselves, when the user asks for it by name (validate, run the gate, run the checks), or when CI is unavailable. Do NOT run it as a pre-push ritual — CI runs this same suite on every PR in 2-3 minutes and is the authoritative check.
 ---
 
-# Validate — reproduce the merge gate
+# Validate — reproduce the merge gate locally
 
 The gate is [.github/workflows/validate.yml](../../../.github/workflows/validate.yml); branch
 protection on `main` requires it and auto-merge ships on green, so **a
-wrong-but-green change ships itself**. Reproducing it locally before pushing is
-the repo's substitute for human review. Run it exactly — a subset proves
-nothing.
+wrong-but-green change ships itself**. Run it exactly — a subset proves nothing.
+
+## When to run this (and when not to)
+
+**CI is the gate. This skill reproduces it; it does not replace it.**
+`validate.yml` runs these same eight steps on every PR in **2–3 minutes**, and
+a red gate simply doesn't merge — auto-merge fires only on green, so nothing
+broken can ship while you weren't looking.
+
+Run this locally when:
+
+- **CI went red and the logs don't explain it** — the primary use. Reproduce
+  locally, iterate with a real repro, push the fix.
+- The user asks for it by name.
+- You want a fast fail on an unusually large or risky change before burning a
+  cloud cycle.
+- CI is unavailable (offline, Actions down, no remote).
+
+**Do not** run it reflexively before every push, or "to be safe" after a
+multi-file change. That was the old contract and it was measured to cost ~53k
+tokens a task for an answer CI was about to give anyway (specs/ui-work-loop.md
+Findings, 2026-07-25).
+
+A local green is also **not the same green**: CI is linux with Tauri's system
+libs, the laptop is macOS, and the devcontainer cannot build `three_rings` at
+all. Local agreement is evidence, not proof.
 
 ## Environment detection (run first)
 
@@ -79,7 +102,7 @@ clippy bench (hosted)     pass
 clippy bench (wasm)       pass
 test workspace            pass
 leptos release build      pass
-→ gate green: safe to push
+→ gate green locally (CI's linux run is the authoritative one)
 ```
 
 On the first failure, stop, show the relevant tail of that command's output,
