@@ -627,6 +627,67 @@ if (!(await focusedIsOpener())) {
   failures.push('context_menu did not restore focus to its opener on ESC');
 }
 
+// Collection-header kebab: the app composite the wireframes' `Header Kebab` /
+// `M Header Kebab` frames specify. Benched (like the My-cards root list) because
+// its real home `/my/collections/:id` is authed and the Android dev proxy strips
+// cookies, so a real-webview touch check has nowhere else to land.
+//
+// What is under test here is the *button*, not the primitive above: that it aims
+// the menu **before** opening it (a panel that opened first would render the
+// previous subject on its first pass), that ⏎ on the focused button opens it and
+// puts focus inside, that ESC hands focus back to the button, and that the frame's
+// desktop metric is what actually renders.
+const kebab = page.locator('[data-testid="collection-actions"]');
+const kebabMenu = page.locator('#context-menu-bench-header-kebab');
+const kebabOpen = () => kebabMenu.evaluate((el) => el.matches(':popover-open'));
+await kebab.scrollIntoViewIfNeeded();
+const kebabBox = await kebab.boundingBox();
+// The frame's 32×32 bordered box at `md` and up (the 44 px phone target is
+// checked at 390 px by collection-header-kebab.spec.ts and on the real webview).
+if (!kebabBox || Math.round(kebabBox.width) !== 32 || Math.round(kebabBox.height) !== 32) {
+  failures.push(`header kebab is ${kebabBox?.width}×${kebabBox?.height}, not the frame's 32×32`);
+}
+if ((await kebab.evaluate((el) => getComputedStyle(el).opacity)) !== '1') {
+  failures.push('header kebab is not on screen at rest (the tree row\'s ⋯ is opacity-0; this one must not be)');
+}
+const aimed = () => page.locator('[data-bench-kebab-aimed]').textContent();
+if ((await aimed()) !== '0') failures.push('header kebab bench did not start un-aimed');
+await kebab.click();
+await page.waitForTimeout(150);
+if (!(await kebabOpen())) failures.push('header kebab did not open the menu on click');
+// Aiming happens in the click handler, before `open_at` — so by the time the
+// panel is up it must already have run exactly once.
+if ((await aimed()) !== '1') failures.push('header kebab did not aim the menu before opening it');
+await page.locator('#context-menu-bench-header-kebab [role="menuitem"]', { hasText: 'Move to…' }).click();
+await page.waitForTimeout(150);
+if (await kebabOpen()) failures.push('header kebab menu did not close after an item click');
+if ((await page.locator('[data-bench-kebab-last]').textContent()) !== 'move') {
+  failures.push('header kebab menu item did not run its on_select');
+}
+// The keyboard route in: the button is a real `<button>`, so ⏎ is the whole
+// story — but only if focus then lands *inside* the panel.
+const kebabFocused = () =>
+  page.evaluate(
+    () => document.activeElement?.getAttribute('data-testid') === 'collection-actions',
+  );
+await kebab.focus();
+await page.keyboard.press('Enter');
+await page.waitForTimeout(150);
+if (!(await kebabOpen())) failures.push('header kebab did not open on Enter');
+if ((await focusedText()) !== 'New binder inside…') {
+  failures.push('header kebab menu did not focus its first item on open');
+}
+await page.keyboard.press('ArrowDown');
+if ((await focusedText()) !== 'New deck inside…') {
+  failures.push('header kebab menu ArrowDown did not rove');
+}
+await page.keyboard.press('Escape');
+await page.waitForTimeout(150);
+if (await kebabOpen()) failures.push('header kebab menu did not close on ESC');
+if (!(await kebabFocused())) {
+  failures.push('header kebab menu did not restore focus to the kebab on ESC');
+}
+
 // ID stability: two fresh SSR renders must serve identical overlay id wiring
 // (deterministic caller IDs — the use_random_id class of bug).
 const raw2 = await (await page.request.get(url)).text();

@@ -23,6 +23,7 @@ mod command;
 mod context_menu;
 mod count_stepper;
 mod dialog;
+mod header_kebab;
 mod hover_card;
 mod input;
 mod input_group;
@@ -174,6 +175,11 @@ const SECTIONS: &[BenchSection] = &[
         id: "my-root-list",
         title: "My-cards root list (mobile drill-down)",
         demo: my_root::demo,
+    },
+    BenchSection {
+        id: "collection-header-kebab",
+        title: "Collection-header kebab (custom)",
+        demo: header_kebab::demo,
     },
     BenchSection {
         id: "table",

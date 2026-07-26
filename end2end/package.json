@@ -17,7 +17,8 @@
     "probe:android-needs": "node android-needs-check.mjs",
     "probe:android-palette": "node android-palette-check.mjs",
     "probe:android-tree-move": "node android-tree-move-check.mjs",
-    "probe:android-my-root": "node android-my-root-check.mjs"
+    "probe:android-my-root": "node android-my-root-check.mjs",
+    "probe:android-header-kebab": "node android-header-kebab-check.mjs"
   },
   "keywords": [],
   "author": "",
