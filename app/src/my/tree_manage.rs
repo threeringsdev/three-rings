@@ -339,7 +339,14 @@ pub fn TreeMenu() -> impl IntoView {
 #[component]
 pub fn TreeDialogs() -> impl IntoView {
     let manage = expect_context::<TreeManage>();
-    let tree = expect_context::<CollectionTreeResource>().0;
+    let tree_res = expect_context::<CollectionTreeResource>();
+    let tree = tree_res.0;
+    // Read in the component body, not inside the move picker's `Suspend`.
+    // Contexts do reach into a resolved async view here, but the tree already
+    // paid for learning that the rule is subtle (a `Provider` *above* a
+    // `Suspense` does not reach `use_context_menu()` inside it), and a body
+    // read is unconditionally correct.
+    let toast = expect_context::<ToastHandle>();
 
     let submit_create = move || {
         let Some(req) = manage.create_req.get_untracked() else {
@@ -658,7 +665,7 @@ pub fn TreeDialogs() -> impl IntoView {
                                                 Some(Ok(dto)) => dto.collections,
                                                 _ => Vec::new(),
                                             };
-                                            move_rows(manage, req, rows).into_any()
+                                            move_rows(manage, tree_res, toast, req, rows).into_any()
                                         })
                                     }}
                                 </Transition>
@@ -687,9 +694,13 @@ pub fn TreeDialogs() -> impl IntoView {
 /// primitive's per-item `is_visible` memo) — it never reorders them. Same
 /// standing as the destination picker, unlike ⌘K which ranks and therefore has
 /// to remount.
-fn move_rows(manage: TreeManage, req: MoveReq, rows: Vec<CollectionTreeRow>) -> impl IntoView {
-    let tree = expect_context::<CollectionTreeResource>();
-    let toast = expect_context::<ToastHandle>();
+fn move_rows(
+    manage: TreeManage,
+    tree: CollectionTreeResource,
+    toast: ToastHandle,
+    req: MoveReq,
+    rows: Vec<CollectionTreeRow>,
+) -> impl IntoView {
     let at_top = req.parent_id.is_none();
     let current = req.parent_id;
     let pick =
