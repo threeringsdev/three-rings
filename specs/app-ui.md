@@ -219,6 +219,105 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Tree move — a keyboard and touch path (2026-07-26)
+
+`Move to…` as a fourth action in the tree's context menu (`app/src/my/tree_manage.rs`):
+`MoveReq` snapshotted on open (following `DeleteReq`), `MoveTarget { TopLevel, Into(Id) }`,
+pure `move_destinations(rows, forbidden)` and `plan_move(rows, req, target)`, and a
+fourth `tree-move` dialog hosting the shared `DestinationList`. It commits through the
+existing `reparent_collection` + `reorder_collection` adapters — no new endpoint.
+
+**The task's own premise about the Inbox was wrong, and the code is right.**
+`hosted.rs:578` is `UPDATE collections SET parent_id = $2 WHERE id = $1 AND NOT is_inbox`
+— `$1` is the **subject**. The Inbox cannot be *moved*; it has always been a legal
+*parent*, and the drag path already allowed dropping into it (`drop_intent` collapses
+its bands to `Into`). So the picker offers the Inbox as a destination and `Move to…` is
+instead withheld from the Inbox's own menu. Review verified the SQL independently.
+
+**Three surprises, each bigger than the task line implied:**
+
+1. **There was no keyboard route into the context menu at all.** Rows are `<div>`s whose
+   only focusable children are the link and the collapse chevron, and the menu panel is a
+   `popover="manual"` with no focus management — so Tab from a row walks the *document*,
+   not the panel. Adding only the menu item would have left the task's own premise
+   unsatisfied. Added: a real `⋯` `<button>` (`opacity-0`, **not** `hidden`, at `md`+ so it
+   stays tab-reachable, with `focus-visible` bringing it back), the `ContextMenu`/`Shift+F10`
+   chord on the row and on `ContextMenuTrigger`, and focus-on-open + ↑↓/Home/End roving with
+   wrap + ESC-closes-and-restores in `context_menu.rs` itself.
+2. **A real long-press does NOT produce `contextmenu` on the Android webview** — the repo
+   asserted the opposite in three code comments since the menu was vendored. The
+   2026-07-20 "verified on the real webview" run had **dispatched a synthetic `contextmenu`
+   event**, so it tested the handler, not the gesture. Re-measured: a 1.2 s held touch with
+   a tracked contact id yields nothing, while a tap on the same page produces a click. All
+   three comments corrected. **This is why the `⋯` button exists** — without an explicit
+   trigger a phone has no way into the menu whatsoever.
+3. **The `hidden md:block` gap was worse than filed.** It was not just "tree dialogs are
+   invisible below `md`": the entire `aside` was `display:none`, so **a phone had no
+   collection tree at all**, and create/rename/delete rendered into a hidden subtree and
+   never appeared. Fixed in scope, because "no touch path" is half this task's title:
+   `TreeDialogs` hoisted to the shell, and the rail turned into a CSS slide-over drawer
+   (`invisible fixed -left-60` → `data-[open=true]:left-0`, `md:static md:visible`) with a
+   `md:hidden` toggle shown in My-cards mode only, so Catalog keeps its one designed mobile
+   filter path. **`left`, not `translate-x`** — a transformed ancestor becomes a containing
+   block, and `DialogContent` is a plain `fixed` div with `translate-x-[-50%]`, so a
+   transformed rail would have re-based every dialog. Review confirmed both the claim and
+   that desktop layout is untouched (`-left-60`/`top-14`/`bottom-0`/`z-50` are all inert
+   under `md:static`). **One `CollectionTreeNav` instance**, deliberately not following
+   Catalog's `FilterSheet` precedent of mounting a second `RailBody` — a second would
+   duplicate the ids its `ContextMenu` and `Collapsible`s key off.
+
+**Scope decision, stated plainly:** `Move to…` covers reparenting (including out to top
+level) and lands the collection **last among its new siblings** via `reorder_collection` —
+a defined spot a bare reparent lacks, since it would otherwise carry its old `position`
+into the new group and fall arbitrarily or tie on name. **Reordering among siblings you are
+already among stays drag-only, and therefore mouse-only.** No ordering UI was invented
+because no wireframe specifies one; the gap is filed as its own follow-up rather than left
+in a code comment.
+
+**The `command` ordering caveat does not apply to this picker**, verified independently by
+review: `move_destinations` sorts the *data* before any item mounts, `move_rows` emits the
+unconditional `Top level` row first and then the collections in one pass (no conditional
+section that could swap — the shape that bit ⌘K), and typing only flips each
+`CommandItem`'s `is_visible` memo rather than rebuilding the list. Pinned anyway by an e2e
+that reads the visible rows' DOM order, presses `↓` once and `⏎`, and asserts the
+collection that was **second on screen** received the move.
+
+`destination.rs` was **extended, not forked** for its third consumer: `DestinationRow`
+extracted out of `DestinationOption` (which is now a thin pass-through), because the tree's
+list has one row that is not a collection (`Top level`) and so carries no `Destination` —
+the alternatives were a sentinel `Id` or a second copy of the row markup. `DestinationList`
+gained an optional `input_id`. Review checked both existing consumers (catalog quick
+actions, selection tray) and found the emitted markup unchanged.
+
+**New focus rule in `context_menu`:** an activated item suppresses the focus restore,
+because the action owns focus from there. Without it the closing menu's restore races the
+move dialog's field focus in the same effect flush and dead-ends the keyboard path; the
+dialog also re-focuses on a `set_timeout(0)`.
+
+Review: **CLEAN, zero majors** — including a check that `commit_move`'s two sequential
+writes have an honest failure window (reparent lands, reorder fails ⇒ the node is in the
+requested parent carrying its old `position`, which is exactly what "Moved, but couldn't
+set its order" says, and `tree.0.refetch()` runs on both branches), that subtree exclusion
+is complete rather than direct-children-only, and that a stale `MoveReq` snapshot is
+backstopped by the server's recursive ancestor check surfaced inline as a 409. Ten minors
+filed. Review also verified that nothing in this workspace enables `leptos/delegation`, so
+`element_anchor`'s `current_target()` resolves to the bound element — had delegation been
+on, both the new anchors and the pre-existing `drop_intent` would silently return `None`.
+
+Verified: gate **8/8** on macOS incl. `three_rings`, full chromium tier **198/198** at
+`--workers=1` (6.4 min), hydration CLEAN anonymous ×4 + authed ×5, bench CLEAN with the new
+keyboard block **kill-checked** (flipping an expected label made it report
+`context_menu ArrowUp did not wrap to the last item`), authed SSR curl of `/my` showing 11
+row heads with `data-tree-row-actions`, exactly one `id="tree-move"` and one
+`id="tree-create"` (no duplication from the shell hoist) and **zero** `destination-option`
+(rows correctly unmounted while closed, so no testid collision with the other two pickers),
+and `probe:android-tree-move` PASS on the real webview driving `Input.dispatchTouchEvent`
+— tap opens the shared panel, the panel is clamped inside the phone viewport, tapping an
+item closes the menu *and* runs its `on_select`, with the closed rail drawer off screen and
+Catalog's own filter trigger as the positive control. `/my` is unreachable on-device (the
+dev proxy still strips cookies, so it redirects to `/login?next=/my`), which is why the tap
+path is driven on the bench and why `TapTrigger` was added there.
+
 ### ⌘K command palette (2026-07-26)
 
 `app/src/components/palette.rs` — mounted once in `AppShell`, rendering nothing
