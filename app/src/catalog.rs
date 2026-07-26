@@ -9,7 +9,12 @@
 //!   of what is on screen. The filter rail (its own task) rewrites terms in this
 //!   same string; nothing here may take a second source of truth for the query.
 //! - **First page SSRs when the URL carries `q`.** The results `Resource` is
-//!   keyed on the URL's query, so a cold load renders markup, not a spinner.
+//!   keyed on the URL's query *and* its `?cursor=`, so a cold load — page one or
+//!   a shared page-three link — renders markup, not a spinner.
+//! - **Paging is forward-only and lives in the URL too** (`?cursor=`), the same
+//!   keyset shape `/my` uses. A cursor names a position in the result set the
+//!   query produced, so **every path that edits the query drops it**; see
+//!   [`catalog_url`].
 //! - **Live typing: ~250 ms debounce, stale-response discard.** Both live in
 //!   the shared [`QueryBar`](crate::components::query_bar) — the debounce is
 //!   ours, the discard is the reactive layer's. Note what this is *not*: an
@@ -51,10 +56,28 @@ use crate::shell::CurrentUserResource;
 const VIEW_PARAM: &str = "view";
 const LIST_VIEW: &str = "list";
 
-/// Build `/catalog?q=…&view=…`, omitting empty parts. The single place a
-/// catalog URL is constructed, so the canonical form can't drift between the
-/// query bar, the clear button, and the view switch.
-fn catalog_url(q: &str, list_view: bool) -> String {
+/// The keyset page cursor, in the URL beside `?q=` (specs/catalog-search.md:
+/// `/catalog?q=…&cursor=…`, shareable/restorable/SSR-able).
+const CURSOR_PARAM: &str = "cursor";
+
+/// Build `/catalog?q=…&view=…&cursor=…`, omitting empty parts. The single place
+/// a catalog URL is constructed, so the canonical form can't drift between the
+/// query bar, the clear button, the view switch, the filter rail and the pager.
+///
+/// **`cursor` is named at every call site on purpose.** A cursor describes a
+/// position in the result set *the previous query* produced — the rows after
+/// `(name, oracle_id)` (specs/catalog-search.md "Result order and keyset") — so
+/// carrying one into a different query pages into rows that need not exist
+/// there, and lands on someone else's page or on nothing at all. Every caller
+/// that changes `q` therefore passes `None`, and there are exactly two of them:
+///
+/// - [`QueryBar`]'s `to_url` — typing, Enter, and the ✕ clear button;
+/// - [`rail::use_navigate_query`] — every facet checkbox, every rail text
+///   field, the mana-value row, and Reset.
+///
+/// The only callers that carry a cursor forward are [`ViewSwitch`] and
+/// [`Pager`], neither of which touches the query.
+fn catalog_url(q: &str, list_view: bool, cursor: Option<&str>) -> String {
     let mut url = String::from("/catalog");
     let mut sep = '?';
     if !q.is_empty() {
@@ -68,6 +91,13 @@ fn catalog_url(q: &str, list_view: bool) -> String {
         url.push_str(VIEW_PARAM);
         url.push('=');
         url.push_str(LIST_VIEW);
+        sep = '&';
+    }
+    if let Some(c) = cursor.filter(|c| !c.is_empty()) {
+        url.push(sep);
+        url.push_str(CURSOR_PARAM);
+        url.push('=');
+        url.push_str(&encode_query_value(c));
     }
     url
 }
@@ -119,17 +149,26 @@ pub fn CatalogPage() -> impl IntoView {
     let url_q = Memo::new(move |_| query_map.read().get("q").unwrap_or_default());
     let list_view =
         Memo::new(move |_| query_map.read().get(VIEW_PARAM).as_deref() == Some(LIST_VIEW));
+    let url_cursor = Memo::new(move |_| query_map.read().get(CURSOR_PARAM).unwrap_or_default());
 
     // The text in the box. The URL⇄field sync lives in QueryBar, which is the
     // only thing that writes either one.
     let query_text = RwSignal::new(url_q.get_untracked());
 
-    // First page. Keyed on the URL's query alone: the debounce decides *when*
-    // the URL moves, this decides what is displayed once it has.
+    // One keyset page. Keyed on the URL's query and cursor: the debounce decides
+    // *when* the URL moves, this decides what is displayed once it has. A
+    // navigation that changes only `view` moves neither, so switching layout
+    // does not re-search.
     let results = Resource::new(
-        move || url_q.get(),
-        |q| async move { crate::search_catalog(q, None).await },
+        move || (url_q.get(), url_cursor.get()),
+        |(q, cursor)| async move {
+            crate::search_catalog(q, (!cursor.is_empty()).then_some(cursor)).await
+        },
     );
+
+    // Whether we are past page one — the pager's "Back to the start" affordance,
+    // and the reason an empty page is not necessarily an empty search.
+    let paged = Memo::new(move |_| !url_cursor.read().is_empty());
 
     // The last result set that came back OK. A rejected query must not take
     // the results down with it (specs/catalog-search.md: half-typed queries hit
@@ -180,14 +219,18 @@ pub fn CatalogPage() -> impl IntoView {
                 text=query_text
                 url_q
                 // Reads `list_view` untracked at commit time: the layout is URL
-                // state this bar must preserve, not search state it owns.
-                to_url=Callback::new(move |q: String| catalog_url(&q, list_view.get_untracked()))
+                // state this bar must preserve, not search state it owns. The
+                // cursor is the opposite case — a new query has no page two yet
+                // (see `catalog_url`), so every edit here starts at the top.
+                to_url=Callback::new(move |q: String| {
+                    catalog_url(&q, list_view.get_untracked(), None)
+                })
                 id="catalog-query"
                 placeholder="Search the catalog — t:instant c:ur cmc<=2"
                 aria_label="Search the catalog"
             />
             <ResultsToolbar results list_view />
-            <Results results last_good list_view />
+            <Results results last_good list_view url_q paged />
         </div>
     }
 }
@@ -260,8 +303,17 @@ fn ViewSwitch(list_view: Memo<bool>) -> impl IntoView {
     let go = {
         let navigate = navigate.clone();
         move |list: bool| {
-            let q = query_map.read_untracked().get("q").unwrap_or_default();
-            navigate(&catalog_url(&q, list), NavigateOptions::default());
+            let params = query_map.read_untracked();
+            let q = params.get("q").unwrap_or_default();
+            // The cursor rides along: relayouting the page you are on is not a
+            // query edit, and bouncing a reader back to page one for choosing
+            // list view would lose their place.
+            let cursor = params.get(CURSOR_PARAM).unwrap_or_default();
+            drop(params);
+            navigate(
+                &catalog_url(&q, list, (!cursor.is_empty()).then_some(cursor.as_str())),
+                NavigateOptions::default(),
+            );
         }
     };
 
@@ -350,12 +402,15 @@ fn focus_switch_item(ev: &leptos::ev::KeyboardEvent, index: u32) {
     }
 }
 
-/// The result set: grid of image-led tiles, or the table in list view.
+/// The result set: grid of image-led tiles, or the table in list view, plus the
+/// pager underneath it.
 #[component]
 fn Results(
     results: Resource<Result<shared::SearchResults, ServerFnError<String>>>,
     last_good: RwSignal<Option<Vec<CardSummary>>>,
     list_view: Memo<bool>,
+    url_q: Memo<String>,
+    paged: Memo<bool>,
 ) -> impl IntoView {
     view! {
         // Transition, not Suspense: re-searching keeps the previous results on
@@ -363,22 +418,31 @@ fn Results(
         <Transition fallback=|| {
             view! { <ResultsSkeleton /> }
         }>
-            {move || Suspend::new(async move {
+            {move || {
+                // Read the query *here*, in the tracked render scope — not inside
+                // the async block, where the read would land after the await and
+                // outside this effect's dependency set (`/my` learned this one).
+                let q = url_q.get();
+                Suspend::new(async move {
                 match results.await {
                     Ok(r) if r.cards.is_empty() => {
-                        view! {
-                            <p class="text-muted-foreground py-12 text-center text-sm">
-                                "No cards match that search."
-                            </p>
-                        }
-                            .into_any()
+                        view! { <NoResults q paged list_view /> }.into_any()
                     }
                     Ok(r) => {
-                        view! { <ResultCards cards=r.cards list_view stale=false /> }.into_any()
+                        let shared::SearchResults { cards, next_cursor } = r;
+                        view! {
+                            <ResultCards cards list_view stale=false />
+                            <Pager next=next_cursor paged q list_view />
+                        }
+                            .into_any()
                     }
                     Err(e) => {
                         let (is_query_error, message) = describe_error(&e);
                         let kept = last_good.get_untracked();
+                        // Kept for the escape hatch below, which keeps the
+                        // query and drops only the cursor: a bad cursor must
+                        // not cost the user the search they typed.
+                        let q = StoredValue::new(q);
                         // The rejected query is a message about the *query*, so
                         // the last page that did parse stays underneath it —
                         // dimmed, because it no longer answers what is in the
@@ -396,6 +460,24 @@ fn Results(
                                     format!("Search failed: {message}")
                                 }}
                             </p>
+                            // Paging is what makes an error reachable with no
+                            // way out: a *shared* `?cursor=` link can be stale
+                            // or corrupt ("invalid cursor"), and unlike a
+                            // mid-typing error there is no last-good page under
+                            // it and nothing wrong with the box to fix. `/my`
+                            // leaves that a dead end; here the pager's own
+                            // affordance covers it.
+                            <Show when=move || paged.get()>
+                                <p class="text-muted-foreground pt-3 text-sm">
+                                    <a
+                                        href=move || catalog_url(&q.get_value(), list_view.get(), None)
+                                        class="underline"
+                                        data-testid="page-first"
+                                    >
+                                        "← Back to the start"
+                                    </a>
+                                </p>
+                            </Show>
                             {kept
                                 .filter(|c| !c.is_empty())
                                 .map(|cards| {
@@ -405,8 +487,93 @@ fn Results(
                             .into_any()
                     }
                 }
-            })}
+                })
+            }}
         </Transition>
+    }
+}
+
+/// Nothing to show. On page one that means the search matched nothing; past a
+/// cursor it may only mean the reader walked off the end, which needs a way
+/// home rather than a verdict on the query (`/my`'s `EmptyState`, same reason).
+#[component]
+fn NoResults(q: String, paged: Memo<bool>, list_view: Memo<bool>) -> impl IntoView {
+    let q = StoredValue::new(q);
+    view! {
+        <div class="text-muted-foreground py-12 text-center text-sm" data-testid="no-results">
+            <Show
+                when=move || paged.get()
+                fallback=|| view! { <p>"No cards match that search."</p> }
+            >
+                <p>
+                    "Nothing on this page. "
+                    <a
+                        href=move || catalog_url(&q.get_value(), list_view.get(), None)
+                        class="underline"
+                        data-testid="page-first"
+                    >
+                        "Back to the start"
+                    </a> "."
+                </p>
+            </Show>
+        </div>
+    }
+}
+
+/// Keyset paging controls (specs/catalog-search.md `/catalog?q=…&cursor=…`).
+///
+/// **Forward-only, matching `/my`'s pager** — a keyset cursor describes
+/// "everything after this row", so Previous would need a second, reverse-ordered
+/// query and a `before` cursor. Browser Back already walks the pages you came
+/// through (each Next is a real history entry); "Back to the start" is the jump
+/// home that Back alone can't give you.
+///
+/// Both links are reactive in `list_view` rather than baked: switching layout
+/// deliberately does *not* re-render this block (that is what `ResultCards`'
+/// inner closure buys), so a fixed href would page a list-view reader back into
+/// the grid.
+#[component]
+fn Pager(
+    next: Option<String>,
+    paged: Memo<bool>,
+    q: String,
+    list_view: Memo<bool>,
+) -> impl IntoView {
+    const LINK: &str =
+        "border-input hover:bg-accent hover:text-accent-foreground rounded-md border px-3 py-1.5 text-sm";
+    // StoredValue, not a plain String: the hrefs are `Fn` closures and `Show`
+    // rebuilds its children, so the query has to be cloneable out on every call
+    // rather than moved once.
+    let q = StoredValue::new(q);
+
+    view! {
+        <nav aria-label="Pagination" class="flex items-center justify-between gap-2">
+            <Show when=move || paged.get() fallback=|| view! { <span></span> }>
+                <a
+                    href=move || catalog_url(&q.get_value(), list_view.get(), None)
+                    class=LINK
+                    data-testid="page-first"
+                >
+                    "← Back to the start"
+                </a>
+            </Show>
+            {next
+                .map(|cursor| {
+                    let cursor = StoredValue::new(cursor);
+                    view! {
+                        <a
+                            href=move || {
+                                let cursor = cursor.get_value();
+                                catalog_url(&q.get_value(), list_view.get(), Some(&cursor))
+                            }
+                            class=format!("{LINK} ml-auto")
+                            data-testid="page-next"
+                        >
+                            "Next page →"
+                        </a>
+                    }
+                })}
+        </nav>
     }
 }
 
@@ -868,4 +1035,38 @@ pub(crate) fn raise_add_toast(t: AddToast) {
         None => options,
     };
     toast.show(options);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{catalog_url, encode_query_value};
+
+    #[test]
+    fn url_omits_empty_parts() {
+        assert_eq!(catalog_url("", false, None), "/catalog");
+        assert_eq!(catalog_url("", false, Some("")), "/catalog");
+        assert_eq!(catalog_url("bolt", false, None), "/catalog?q=bolt");
+        assert_eq!(catalog_url("", true, None), "/catalog?view=list");
+        assert_eq!(catalog_url("", false, Some("abc")), "/catalog?cursor=abc");
+        assert_eq!(
+            catalog_url("bolt", true, Some("abc")),
+            "/catalog?q=bolt&view=list&cursor=abc"
+        );
+    }
+
+    #[test]
+    fn url_percent_encodes_the_query_and_the_cursor() {
+        // The grammar is punctuation-heavy and a keyset cursor is an opaque
+        // string that may carry `&`, `+` or a space (it encodes a card *name*).
+        // Either read as URL structure is a different page than the one linked.
+        assert_eq!(
+            catalog_url("t:instant c:ur", false, None),
+            "/catalog?q=t%3Ainstant%20c%3Aur"
+        );
+        assert_eq!(
+            catalog_url("", false, Some("Fire // Ice|1")),
+            "/catalog?cursor=Fire%20%2F%2F%20Ice%7C1"
+        );
+        assert_eq!(encode_query_value("a&b+c"), "a%26b%2Bc");
+    }
 }

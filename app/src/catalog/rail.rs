@@ -399,8 +399,13 @@ fn use_commit() -> impl Fn(Field, Option<String>) + Clone + 'static {
 }
 
 /// Navigate to a query the caller has already built. Shared by Reset and by
-/// [`use_commit`] so the "replace, don't push" rule and the view-param
-/// preservation live in exactly one place.
+/// [`use_commit`] so the "replace, don't push" rule, the view-param
+/// preservation, and the cursor drop live in exactly one place.
+///
+/// Every rail edit reaches the URL through here — each facet checkbox, each
+/// text field, the mana-value row, and Reset — which makes this the rail's half
+/// of the "a query edit starts at page one" rule (`super::catalog_url`). The
+/// query bar's `to_url` is the other half.
 fn use_navigate_query() -> impl Fn(String) + Clone + 'static {
     let query_map = use_query_map();
     let navigate = use_navigate();
@@ -417,8 +422,10 @@ fn use_navigate_query() -> impl Fn(String) + Clone + 'static {
         // previous page under one entry per checkbox. The two surfaces edit the
         // same string, so they must agree on this or Back behaves differently
         // depending on which one you used last.
+        // `None` for the cursor: a rail edit *is* a query edit, and a cursor
+        // from the old result set names a row the new one need not contain.
         navigate(
-            &super::catalog_url(&next, list_view),
+            &super::catalog_url(&next, list_view, None),
             NavigateOptions {
                 replace: was_searching,
                 ..Default::default()
