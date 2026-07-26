@@ -151,8 +151,11 @@ test.describe("cross-view", () => {
     return hit!;
   }
 
-  async function openMy(page: Page) {
-    await page.goto("/my");
+  /// The All-cards table. `path` exists for the mobile block: below `md` `/my`
+  /// is the drill-down root list (app/src/my/root.rs) and this table is one
+  /// route down, at `/my/all` — the same rows, reachable on touch.
+  async function openMy(page: Page, path = "/my") {
+    await page.goto(path);
     await hydrated(page);
     await page.locator(MY_ROW_SELECT).first().waitFor();
   }
@@ -237,7 +240,7 @@ test.describe("cross-view", () => {
     test.use({ viewport: { width: 390, height: 844 } });
 
     test("@fast the tray docks above the bottom tab bar", async ({ page }) => {
-      await openMy(page);
+      await openMy(page, "/my/all");
       await page.locator(MY_ROW_SELECT).first().click();
       await expect(page.locator(COUNT)).toHaveText("1 card");
 

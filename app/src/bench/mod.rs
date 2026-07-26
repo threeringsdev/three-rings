@@ -28,6 +28,7 @@ mod input;
 mod input_group;
 mod item;
 mod kbd;
+mod my_root;
 mod palette;
 mod popover;
 mod selection_tray;
@@ -168,6 +169,11 @@ const SECTIONS: &[BenchSection] = &[
         id: "selection-tray",
         title: "Selection tray (custom)",
         demo: selection_tray::demo,
+    },
+    BenchSection {
+        id: "my-root-list",
+        title: "My-cards root list (mobile drill-down)",
+        demo: my_root::demo,
     },
     BenchSection {
         id: "table",

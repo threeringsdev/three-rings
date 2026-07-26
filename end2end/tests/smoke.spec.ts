@@ -82,11 +82,16 @@ test("login honors next after sign-in @fast", async ({ page }) => {
 test.describe("authed", () => {
   test.use({ storageState: AUTH_STATE });
 
+  // `h1:visible`, not `h1`: `/my` carries two headings in one document — the
+  // All-cards table's and the mobile root list's (app/src/my/root.rs) — with
+  // exactly one of them `display`ed at any width. The visible one is both what
+  // the reader gets and what a screen reader is announced, so it is the honest
+  // assertion; a bare `h1` is now two elements and a strict-mode error.
   test("/ redirects the signed-in session to /my @fast", async ({ page }) => {
     await page.goto("/");
     await hydrated(page);
     await page.waitForURL("/my");
-    await expect(page.locator("h1")).toHaveText("All cards");
+    await expect(page.locator("h1:visible")).toHaveText("All cards");
   });
 
   test("desktop mode switch swaps Catalog and My cards @fast", async ({
@@ -101,14 +106,14 @@ test.describe("authed", () => {
     );
     await modeSwitch.getByText("Catalog").click();
     await page.waitForURL("/catalog");
-    await expect(page.locator("h1")).toHaveText("Catalog");
+    await expect(page.locator("h1:visible")).toHaveText("Catalog");
     await expect(modeSwitch.getByText("Catalog")).toHaveAttribute(
       "aria-current",
       "page",
     );
     await modeSwitch.getByText("My cards").click();
     await page.waitForURL("/my");
-    await expect(page.locator("h1")).toHaveText("All cards");
+    await expect(page.locator("h1:visible")).toHaveText("All cards");
   });
 
   test("mobile bottom tabs replace the mode switch and navigate @fast", async ({
@@ -122,7 +127,9 @@ test.describe("authed", () => {
     await expect(page.getByRole("navigation", { name: "Mode" })).toBeHidden();
     await tabs.getByText("My cards").click();
     await page.waitForURL("/my");
-    await expect(page.locator("h1")).toHaveText("All cards");
+    // At phone width the My-cards landing is the drill-down root list
+    // (wireframes → "Mobile — My cards root"), not the All-cards table.
+    await expect(page.locator("h1:visible")).toHaveText("My cards");
     await tabs.getByText("Catalog").click();
     await page.waitForURL("/catalog");
   });
