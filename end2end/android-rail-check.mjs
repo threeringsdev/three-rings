@@ -59,8 +59,7 @@ else ok("sheet reflects the query into its widgets");
 //    two-surface design, exercised on the device's real engine.
 await sheet.getByRole("checkbox", { name: "Sorcery" }).click();
 await page.waitForURL(
-  (url) =>
-    (url.searchParams.get("q") ?? "").includes("t:instant,sorcery"),
+  (url) => (url.searchParams.get("q") ?? "").includes("t:instant,sorcery"),
   { timeout: 5000 },
 );
 ok("a facet click rewrites the query text");
@@ -73,8 +72,51 @@ else ok("badge follows the edit");
 //    scroll (the vendored use_scroll_lock behavior).
 const overflow = await page.evaluate(() => document.body.style.overflow);
 if (overflow !== "hidden")
-  fail(`body should be scroll-locked while the sheet is open, got "${overflow}"`);
+  fail(
+    `body should be scroll-locked while the sheet is open, got "${overflow}"`,
+  );
 else ok("body scroll-locked while the sheet is open");
+
+// 5. The Set picker, inside the sheet. It is the one rail widget that fetches,
+//    and the sheet is the only place it is reachable at phone width — so the
+//    device check is what proves the list, its search box and a multi-select
+//    pick all work on the real engine rather than only in a desktop viewport.
+await go("s:mh3");
+await page.getByRole("button", { name: /Filters/ }).click();
+await sheet.waitFor({ state: "visible", timeout: 5000 });
+
+// The selection comes off the query text, so the chip is there before any fetch.
+const chip = sheet.locator("[data-testid=set-chip][data-code=mh3]");
+if ((await chip.count()) === 0) fail("no set chip for the URL's s:mh3");
+else ok("the set chip reflects the query text");
+
+// Search by name — the point of the picker.
+await sheet.locator("#filter-sheet-set").fill("limited edition alpha");
+const lea = sheet.locator("[data-testid=set-option][data-code=lea]");
+try {
+  await lea.waitFor({ state: "visible", timeout: 8000 });
+  const name = (await lea.innerText()).trim();
+  if (name !== "Limited Edition Alpha")
+    fail(`the lea row should show its set name, got "${name}"`);
+  else ok("searching by name finds the set on the device");
+} catch {
+  fail("the set list never rendered a row for 'limited edition alpha'");
+}
+
+// A pick is multi-select: it joins the existing term rather than replacing it.
+await lea.click();
+try {
+  await page.waitForURL((url) => url.searchParams.get("q") === "s:mh3,lea", {
+    timeout: 5000,
+  });
+  ok("a set pick joins the existing s: term");
+} catch {
+  fail(`a set pick should give s:mh3,lea, URL is ${page.url()}`);
+}
+
+if ((await badge.innerText()).trim() !== "2")
+  fail(`badge should count 2 sets, got ${await badge.innerText()}`);
+else ok("badge counts both picked sets");
 
 console.log(
   process.exitCode ? "ANDROID RAIL CHECK FAIL" : "ANDROID RAIL CHECK PASS",

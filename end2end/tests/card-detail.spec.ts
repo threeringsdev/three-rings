@@ -8,7 +8,8 @@
 //   card image is projected — this is the COALESCE fallback, and it is the one
 //   assertion here that fails against the old SQL;
 // - "your copies" is present iff the caller is signed in, which is a different
-//   thing from "signed in and owning nothing";
+//   thing from "signed in and owning nothing", and its total agrees with the
+//   `owned` the catalog badge is drawn from;
 // - a malformed id is a rendered not-found, not a crash;
 // - desktop hovers a preview; touch taps a sheet *instead of navigating*.
 //
@@ -148,47 +149,40 @@ test.describe("authed", () => {
 
   test("owned copies show their collections and quantities @fast", async ({
     page,
-    request,
   }) => {
     // The dev seed puts holdings on the first hits of `t:creature`
-    // (app/src/seed.rs), and search orders by (name, oracle_id) — so the same
-    // query here resolves to the same cards. Note it deliberately does NOT use
-    // `CardSummary::owned`: the search projection never fills that column
-    // (see app-ui Findings), so filtering on it would silently skip.
-    const cards = await search(request, "t:creature");
-    let found = false;
-
-    for (const card of cards.slice(0, 4)) {
-      await page.goto(`/cards/${card.oracle_id}`);
-      await hydrated(page);
-      const section = page.getByTestId("your-copies");
-      await expect(section).toBeVisible();
-      const text = (await section.textContent()) ?? "";
-      const match = /Your copies · (\d+)/.exec(text);
-      expect(match, "your-copies rendered without a total").not.toBeNull();
-      const total = Number(match![1]);
-      if (total > 0) {
-        // Every copy is somewhere: the collections are named and linked...
-        const rows = section.locator("li");
-        await expect(rows.first().locator("a[href^='/my/collections/']")).toBeVisible();
-        // ...and each row carries its own quantity. Asserting only the header
-        // total would pass with every per-location count missing or wrong
-        // (Codex review, low) — so check the rows sum to the header.
-        const counts = await rows.evaluateAll((els) =>
-          els.map((el) => Number(el.lastElementChild?.textContent?.trim())),
-        );
-        expect(counts.length).toBeGreaterThan(0);
-        expect(counts.every((n) => Number.isInteger(n) && n > 0)).toBe(true);
-        expect(counts.reduce((a, b) => a + b, 0)).toBe(total);
-        found = true;
-        break;
-      }
-    }
-
+    // (app/src/seed.rs), and an authed search now *says which* — `owned` is
+    // filled on every search hit (the owned-badge task; it was `None` on all of
+    // them before, which is why this used to walk four candidate cards hoping
+    // one had holdings). `page.request` carries the page context's session.
+    const cards = await search(page.request, "t:creature");
+    const card = cards.find((c) => (c.owned ?? 0) > 0);
     expect(
-      found,
-      "no seeded holdings on the first creatures — run scripts/seed-dev-data.sh",
-    ).toBe(true);
+      card,
+      "no seeded holdings on the creatures — run scripts/seed-dev-data.sh",
+    ).toBeTruthy();
+
+    await page.goto(`/cards/${card!.oracle_id}`);
+    await hydrated(page);
+    const section = page.getByTestId("your-copies");
+    await expect(section).toBeVisible();
+    // The header total is summed from this page's own per-collection ownership
+    // rows — a different query from the `owned_by_card` read behind
+    // `CardSummary::owned` — so this doubles as the check that the catalog's
+    // badge and this page cannot disagree.
+    await expect(section).toContainText(`Your copies · ${card!.owned}`);
+    // Every copy is somewhere: the collections are named and linked...
+    const rows = section.locator("li");
+    await expect(rows.first().locator("a[href^='/my/collections/']")).toBeVisible();
+    // ...and each row carries its own quantity. Asserting only the header
+    // total would pass with every per-location count missing or wrong
+    // (Codex review, low) — so check the rows sum to the header.
+    const counts = await rows.evaluateAll((els) =>
+      els.map((el) => Number(el.lastElementChild?.textContent?.trim())),
+    );
+    expect(counts.length).toBeGreaterThan(0);
+    expect(counts.every((n) => Number.isInteger(n) && n > 0)).toBe(true);
+    expect(counts.reduce((a, b) => a + b, 0)).toBe(card!.owned);
   });
 });
 

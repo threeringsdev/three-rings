@@ -229,6 +229,56 @@ pub struct SearchResults {
     pub next_cursor: Option<String>,
 }
 
+/// A row of the Set facet's picker (`CatalogStore::list_sets`) — the `sets` table
+/// minus its Scryfall id (nothing outside the catalog references a set by id)
+/// and its `icon_svg_uri` (a remote SVG per row is a cost the rail has no use
+/// for). `code` is what the grammar's `s:` term carries, so it is the identity
+/// here as far as the UI is concerned.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSummary {
+    /// Lowercase set code — `mh3`, `lea`. What `s:`/`set:`/`e:` matches.
+    pub code: String,
+    pub name: String,
+    /// Scryfall's set kind — `expansion`, `core`, `commander`, `token`, …
+    pub set_type: String,
+    /// ISO release date; `None` for undated sets.
+    pub released_at: Option<String>,
+}
+
+/// A set-picker request (`CatalogStore::list_sets`).
+///
+/// **It is a search, not a dump.** There are ~1050 sets today, and the picker
+/// mounts one `command` item per row: that primitive's registry is O(n) per item
+/// (each item's highlight memo walks every item), so a full list is O(n²) work
+/// on mount and again on every keystroke. Asking the server for a bounded window
+/// is what keeps the widget usable, and it is why this carries a `q` at all
+/// rather than the UI filtering a preloaded list.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SetQuery {
+    /// Case-insensitive substring of the set's code **or** name. `None` (or
+    /// blank) browses the newest sets — the useful default, since a set filter
+    /// is nearly always about a recent release.
+    #[serde(default)]
+    pub q: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+impl SetQuery {
+    /// The effective window size, clamped (default 25 — a rail-width list you
+    /// scroll a little, not a page you page through).
+    pub fn limit(&self) -> i64 {
+        self.limit.unwrap_or(25).clamp(1, 200) as i64
+    }
+
+    /// The search term with surrounding space trimmed, or `None` when it is
+    /// absent or blank — blank must browse rather than match every set by
+    /// substring, and the two backends have to agree on that.
+    pub fn term(&self) -> Option<&str> {
+        self.q.as_deref().map(str::trim).filter(|t| !t.is_empty())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

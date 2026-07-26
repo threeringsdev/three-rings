@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type APIRequestContext } from "@playwright/test";
 import { AUTH_STATE, hydrated } from "./helpers";
 
 // Catalog page (specs/app-ui.md "/catalog", specs/catalog-search.md).
@@ -7,7 +7,8 @@ import { AUTH_STATE, hydrated } from "./helpers";
 //   the query text is canonical and lives in the URL · the first page SSRs ·
 //   typing debounces into one search · grammar errors render inline instead of
 //   blanking the page · the view switch is a real radiogroup · anonymous
-//   visitors get sign-in prompts carrying ?next.
+//   visitors get sign-in prompts carrying ?next · `?cursor=` is the keyset page
+//   and every query edit drops it.
 //
 // "bolt" is a stable POC-catalog probe (Lightning Bolt); assertions stay off
 // exact result counts, which move with the catalog.
@@ -279,5 +280,341 @@ test.describe("authed", () => {
     await expect(
       tile.getByRole("button", { name: /Add .* to Have/ }),
     ).toBeVisible();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keyset paging (`?cursor=`) — specs/catalog-search.md "Result order and
+// keyset". Two rules carry the feature: the cursor is URL state like `q` and
+// `view` (shareable, restorable, SSR'd), and *any* edit to the query throws it
+// away, because it names a row position in the result set the previous query
+// produced.
+// ---------------------------------------------------------------------------
+
+type Results = {
+  cards: { oracle_id: string; name: string; owned: number | null }[];
+  next_cursor: string | null;
+};
+
+/// The hosted JSON route behind the page's own adapter. `limit` is the reason
+/// it is used here rather than `/api/search_catalog`: the page always asks for
+/// 50, and a small page is the only way to put a *known* mid-set boundary under
+/// an assertion instead of wherever the 50th card happens to fall.
+async function search(
+  request: APIRequestContext,
+  opts: { q?: string; cursor?: string; limit?: number } = {},
+): Promise<Results> {
+  const params = new URLSearchParams({ q: opts.q ?? "" });
+  if (opts.cursor !== undefined) params.set("cursor", opts.cursor);
+  if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+  const url = `/api/catalog/search?${params}`;
+  const res = await request.get(url);
+  expect(res.status(), `GET ${url}`).toBe(200);
+  return (await res.json()) as Results;
+}
+
+/// A card's tile, by the oracle id its link carries — the grid has no per-tile
+/// id attribute and the link is what the page promises anyway.
+const tileFor = (page: import("@playwright/test").Page, oracleId: string) =>
+  page.locator(`[data-testid=results-grid] a[href="/cards/${oracleId}"]`);
+
+/// A syntactically valid cursor positioned past the end of the catalog
+/// (`{name, oracle_id}`, base64url, no padding — `hosted::encode_cursor`). Built
+/// rather than fetched because there is no cursor *for* the last page: the
+/// endpoint stops emitting one there, which is precisely the case under test.
+const PAST_THE_END = Buffer.from(
+  JSON.stringify({
+    name: "zzzzzzzz",
+    oracle_id: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+  }),
+).toString("base64url");
+
+test("the pager walks to a second page of different cards @fast", async ({
+  page,
+  request,
+}) => {
+  // The pager's own link, clicked — deep-linking a cursor from the JSON route
+  // would leave `Pager`'s href free to point anywhere (the lesson `/my`'s
+  // paging review left behind).
+  const first = await search(request);
+  expect(
+    first.next_cursor,
+    "browse-all must exceed one page for this to mean anything",
+  ).toBeTruthy();
+  const second = await search(request, { cursor: first.next_cursor! });
+  expect(second.cards.length).toBeGreaterThan(0);
+
+  await page.goto("/catalog");
+  await hydrated(page);
+  await expect(page.getByTestId("page-first")).toHaveCount(0);
+  await page.getByTestId("page-next").click();
+
+  // The URL carries the cursor the endpoint handed out — a base64url cursor is
+  // unreserved throughout, so it is its own encoding.
+  await page.waitForURL(`/catalog?cursor=${first.next_cursor}`);
+  // ...and the rows are the ones that follow page one, not page one again.
+  await expect(tileFor(page, second.cards[0].oracle_id)).toBeVisible();
+  await expect(tileFor(page, first.cards[0].oracle_id)).toHaveCount(0);
+  await expect(page.getByTestId("page-first")).toBeVisible();
+});
+
+test("a shared ?cursor= URL restores that page, SSR included @fast", async ({
+  page,
+  request,
+}) => {
+  const first = await search(request, { limit: 3 });
+  expect(first.next_cursor, "a 3-row page cannot be the last").toBeTruthy();
+  const rest = await search(request, { cursor: first.next_cursor! });
+  expect(rest.cards.length).toBeGreaterThan(0);
+
+  // Request-level: no JS has run, so page-two markup in the raw HTML is proof
+  // the cursor reached the server render rather than being applied afterwards.
+  const url = `/catalog?cursor=${first.next_cursor}`;
+  const html = await (await request.get(url)).text();
+  expect(html).toContain(`/cards/${rest.cards[0].oracle_id}`);
+  expect(html).not.toContain(`/cards/${first.cards[0].oracle_id}`);
+  expect(html).toContain('data-testid="page-first"');
+
+  await page.goto(url);
+  await hydrated(page);
+  for (const card of first.cards) {
+    await expect(tileFor(page, card.oracle_id)).toHaveCount(0);
+  }
+  await expect(tileFor(page, rest.cards[0].oracle_id)).toBeVisible();
+});
+
+test("the last page offers no next, and back to the start returns @fast", async ({
+  page,
+  request,
+}) => {
+  // A one-card first page of a small result set, so the page *after* it is the
+  // last one whatever the catalog holds.
+  const one = await search(request, { q: "bolt", limit: 1 });
+  expect(one.next_cursor).toBeTruthy();
+  const last = await search(request, { q: "bolt", cursor: one.next_cursor! });
+  expect(last.next_cursor, "the rest of `bolt` must fit one page").toBeNull();
+  expect(last.cards.length).toBeGreaterThan(0);
+
+  await page.goto(`/catalog?q=bolt&cursor=${one.next_cursor}`);
+  await hydrated(page);
+  await expect(tileFor(page, last.cards[0].oracle_id)).toBeVisible();
+  // The card the cursor was taken *after* is gone. Without this the whole test
+  // passes on a page that ignores the cursor entirely: `bolt` fits one page, so
+  // the unpaged render also contains `last.cards[0]` and also has no next
+  // (found by mutating the resource to pass `None` — it survived).
+  await expect(tileFor(page, one.cards[0].oracle_id)).toHaveCount(0);
+  // No next cursor, no Next control — offering one would page into nothing.
+  await expect(page.getByTestId("page-next")).toHaveCount(0);
+
+  await page.getByTestId("page-first").click();
+  // Home means page one *of the same search*: a cursor is the only thing the
+  // link drops. Losing `q` would throw away the search to fix the page.
+  await page.waitForURL("/catalog?q=bolt");
+  await expect(tileFor(page, one.cards[0].oracle_id)).toBeVisible();
+  await expect(page.getByTestId("page-first")).toHaveCount(0);
+});
+
+test("typing drops the page cursor @fast", async ({ page, request }) => {
+  const first = await search(request, { limit: 3 });
+  await page.goto(`/catalog?cursor=${first.next_cursor}`);
+  await hydrated(page);
+
+  // A new query has no page two yet; carrying the cursor forward would page
+  // into rows that result set need not contain.
+  await page.fill("#catalog-query", "bolt");
+  await page.waitForURL("/catalog?q=bolt");
+});
+
+test("a rail edit and Reset drop the page cursor @fast", async ({
+  page,
+  request,
+}) => {
+  // The rail is the *other* writer of the query text, so it needs its own
+  // assertion: it navigates through its own committer, not the query bar's.
+  const first = await search(request, { q: "bolt", limit: 1 });
+  await page.goto(`/catalog?q=bolt&cursor=${first.next_cursor}`);
+  await hydrated(page);
+
+  const rail = page.locator("[data-testid=filter-rail]");
+  await rail.getByRole("checkbox", { name: "Red" }).click();
+  await page.waitForURL((url) => url.searchParams.get("q") === "bolt c:r");
+  expect(new URL(page.url()).searchParams.get("cursor")).toBeNull();
+
+  // Reset is the third path into the same string and does not go through a
+  // facet — it clears the rail-owned terms wholesale.
+  await page.goto(`/catalog?q=bolt%20c%3Ar&cursor=${first.next_cursor}`);
+  await hydrated(page);
+  await page.locator("[data-testid=filter-rail]").getByText("Reset").click();
+  await page.waitForURL("/catalog");
+});
+
+test("the view switch keeps your place in the results @fast", async ({
+  page,
+  request,
+}) => {
+  // Relayouting is not a query edit: the reader stays on the page they are on.
+  const first = await search(request, { limit: 3 });
+  await page.goto(`/catalog?cursor=${first.next_cursor}`);
+  await hydrated(page);
+
+  await page.getByRole("radio", { name: "List view" }).click();
+  await page.waitForURL(`/catalog?view=list&cursor=${first.next_cursor}`);
+  await expect(page.getByTestId("results-list")).toBeVisible();
+  // And the pager keeps the layout, or Next would drop a list reader into the
+  // grid (the hrefs are reactive in `view` for exactly this).
+  await expect(page.getByTestId("page-next")).toHaveAttribute(
+    "href",
+    /view=list/,
+  );
+});
+
+test("a page past the end says so and offers a way home @fast", async ({
+  page,
+}) => {
+  // An empty *cursored* page is not "no cards match": the search is fine, the
+  // reader has walked off the end.
+  await page.goto(`/catalog?cursor=${PAST_THE_END}`);
+  await hydrated(page);
+  const empty = page.getByTestId("no-results");
+  await expect(empty).toContainText("Nothing on this page");
+  await expect(empty).not.toContainText("No cards match");
+  await page.getByTestId("page-first").click();
+  await page.waitForURL("/catalog");
+  await expect(page.getByTestId("results-grid")).toBeVisible();
+});
+
+test("a corrupt cursor renders an error with a way back @fast", async ({
+  page,
+}) => {
+  // A shared link can rot. `/my` leaves this a dead end (its error arm has no
+  // pager); here the query survives and only the cursor is dropped.
+  await page.goto("/catalog?q=bolt&cursor=not-a-real-cursor");
+  await hydrated(page);
+  await expect(page.getByTestId("search-error")).toContainText(
+    "invalid cursor",
+  );
+  await page.getByTestId("page-first").click();
+  await page.waitForURL("/catalog?q=bolt");
+  await expect(page.getByTestId("results-grid")).toContainText(
+    "Lightning Bolt",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The "N owned" badge — authed only. `CardSummary::owned` is data-model's
+// global per-user, per-oracle count (specs/collection-api.md read models), and
+// `null` on the wire means *unknown*, which is a different claim from 0.
+//
+// The regression this locks is a silent one: catalog search never filled the
+// column, so the badge was unreachable and a signed-in catalog rendered
+// identically to an anonymous one. An authed-only assertion would not have
+// caught that — both halves are asserted here, against the same cards.
+//
+// `t:creature` is the seed's own picking query (app/src/seed.rs), so its first
+// page is where the fixture's holdings are; counts are read from the API rather
+// than hardcoded, because re-seeding moves them.
+// ---------------------------------------------------------------------------
+
+const OWNED_QUERY = "t:creature";
+
+/// The owned badge on one card's tile, located through the oracle id its link
+/// carries (the grid has no per-tile id of its own).
+const ownedBadgeFor = (
+  page: import("@playwright/test").Page,
+  oracleId: string,
+) =>
+  page
+    .locator("[data-testid=results-grid] li")
+    .filter({ has: page.locator(`a[href="/cards/${oracleId}"]`) })
+    .getByTestId("owned-badge");
+
+test("an anonymous catalog reports owned as unknown and badges nothing @fast", async ({
+  page,
+  request,
+}) => {
+  const anon = await search(request, { q: OWNED_QUERY, limit: 15 });
+  expect(anon.cards.length).toBeGreaterThan(0);
+  // Strictly `null`, not falsy: a projection that defaulted the column to 0
+  // would render the same badge-free page as this one, so only the wire value
+  // distinguishes "unknown" from "you hold none of these".
+  for (const c of anon.cards) {
+    expect(
+      c.owned,
+      `owned for ${c.name} must be null when anonymous`,
+    ).toBeNull();
+  }
+
+  await page.goto(`/catalog?q=${encodeURIComponent(OWNED_QUERY)}`);
+  await hydrated(page);
+  await expect(page.getByTestId("results-grid")).toBeVisible();
+  await expect(page.getByTestId("owned-badge")).toHaveCount(0);
+});
+
+test.describe("authed", () => {
+  test.use({ storageState: AUTH_STATE });
+
+  test("the tile badges your own copies, and agrees with the card page @fast", async ({
+    page,
+  }) => {
+    // `page.request` shares the page context's cookies, so this is the same
+    // session the render below uses — not a second, anonymous one.
+    const mine = await search(page.request, { q: OWNED_QUERY, limit: 15 });
+    for (const c of mine.cards) {
+      expect(
+        c.owned,
+        `owned for ${c.name} must be filled when authed`,
+      ).not.toBeNull();
+    }
+
+    // Fixture check, not a behavior check: if the seed gave every card the same
+    // count, "the badge shows the right number" would be unfalsifiable.
+    const distinct = new Set(
+      mine.cards.map((c) => c.owned).filter((n) => n! > 0),
+    );
+    expect(
+      distinct.size,
+      "seeded owned counts are all identical — re-run scripts/seed-dev-data.sh",
+    ).toBeGreaterThan(1);
+
+    const top = mine.cards.reduce((a, b) => (b.owned! > a.owned! ? b : a));
+    expect(top.owned!).toBeGreaterThan(0);
+    const none = mine.cards.find((c) => c.owned === 0);
+    expect(
+      none,
+      "no authed-but-unowned card here — the 0-vs-null distinction goes untested",
+    ).toBeTruthy();
+
+    // SSR, before any JS: the number is server-rendered, not filled in after
+    // hydration by a second request.
+    const url = `/catalog?q=${encodeURIComponent(OWNED_QUERY)}`;
+    const html = await (await page.request.get(url)).text();
+    expect(html).toContain('data-testid="owned-badge"');
+    expect(html).toContain(`${top.owned} owned`);
+
+    await page.goto(url);
+    await hydrated(page);
+    await expect(ownedBadgeFor(page, top.oracle_id)).toHaveText(
+      `${top.owned} owned`,
+    );
+    // `Some(0)` is a real answer and still no badge — "0 owned" would be noise
+    // on every card you don't have.
+    await expect(ownedBadgeFor(page, none!.oracle_id)).toHaveCount(0);
+
+    // The list view projects the same column and must not have been forgotten.
+    await page.goto(`${url}&view=list`);
+    await hydrated(page);
+    await expect(
+      page.getByTestId("results-list").getByTestId("owned-badge").first(),
+    ).toBeVisible();
+
+    // The number itself, pinned to an independently-computed one: the detail
+    // page's total is summed from the per-collection *ownership* rows (a
+    // different query from the `owned_by_card` read behind the badge), so a
+    // wrong-but-plausible count in either place fails here.
+    await page.goto(`/cards/${top.oracle_id}`);
+    await hydrated(page);
+    await expect(page.getByTestId("your-copies")).toContainText(
+      `Your copies · ${top.owned}`,
+    );
   });
 });
