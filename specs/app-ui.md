@@ -219,6 +219,100 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Undoable removal + deck teardown (2026-07-25)
+
+The third of the three split move-flow tasks, and the one carrying the
+trait/backend work the first two were fenced from. Its acceptance criterion was
+the standing discovery "**a card cannot be removed from a binder at all**"; that
+is now false, undoably.
+
+**Two ledger columns, not one.** `migrations/0009_move_boards.sql` adds
+`from_board` *and* `to_board` to `moves`, both `DEFAULT 'main'`, expand-first
+with no backfill. A move's ends need not agree — copies leaving a sideboard land
+in a binder as ordinary copies — so one column could not say which end it
+described, and undo must reverse both ends exactly. `to_board` is always `main`
+today; board relabel is card-tagging's operation.
+
+**The row cannot state its grain, so the server resolves it.**
+`CardRow::holding_id` is `Some` exactly when one `holdings` row backs the cell,
+but `present` is `GROUP BY printing_id, board`, so the rendered row knows no
+finish/condition/language. New `CollectionStore::move_holding` (trait + hosted +
+native + `POST /api/holdings/{id}/move`) is addressed by **holding id** and
+reads grain, board, owning collection and quantity off that row `FOR UPDATE`
+**inside the write transaction**. That is also what closes the row-path TOCTOU
+the batch-move task had to leave open.
+
+This is the direct application of the rule that task established — *anything
+deciding whether a write is possible cannot use a read model that groups away
+the write's addressing*. Here the write stopped using a read model at all.
+
+**The `min=1` floor is gone and the defect behind it is genuinely gone, not
+re-routed.** Review confirmed `set_holding_quantity(id, 0)` is now unreachable
+from the UI (`on_commit` intercepts `c.to == 0` first), so the old
+`DELETE FROM holdings`-behind-a-success-toast path has no caller. **Undo
+re-creates the holding with a new id** — any UI holding a `holding_id` across an
+undo must refetch, which the row does via `HoldingsRevision`; a stale id
+surfaces as a visible `not found: holding` rather than touching another row
+(UUIDs, no reuse).
+
+**A latent bug fixed in passing:** `add_holding`'s intake move recorded no
+board, so undoing a `+ Have` onto a sideboard took copies off the *mainboard*.
+
+**Batch refusals became capabilities.** `movable` dropped to `quantity > 0` and
+`CardSource::Move` carries a grain-complete `MoveSource`, so `SkipReason::Board`
+is gone entirely. One refusal is deliberately kept: `Grain(n)` for a stack with
+several grains and **no default one** (2 foil + 1 etched) — nothing about the
+row says which the checkbox meant. `ManyCollections`/`ManyPrintings`/`ManyBoards`
+remain, each a question the user answers by opening a page where the choice is a
+visible row.
+
+**The batch-path TOCTOU stays open, deliberately, but is now attributable.**
+Grain+board on `MoveItem` is the same addressing as a holding id
+(`holdings_uniq` makes them equivalent), so adding an id would not narrow the
+window; genuinely closing it means `move_batch` taking selection keys instead of
+move items — a different API. Instead the residual whole-batch abort now names
+the card: `move_batch` tags the failure with the item index, the adapter swaps
+it for the entry's token, `name_batch_failure` swaps that for the name. Review
+confirmed indices cannot shift (`lines[i]` and `moved[i]` are pushed in the same
+match arm).
+
+**Seven mutations, seven deaths** — the highest-value evidence in this task,
+since its failure mode is silent corruption behind a success toast: undo
+restoring `Board::Main` regardless of the ledger (killed the sideboard
+round-trip test), `move_holding` using the default grain instead of the row's
+(killed the foil/LP/Japanese test), teardown summing across boards, `min = 1`
+restored (killed **four**), `caller_reports` disabled, `MoveItem` restating the
+default grain, and `from_board: Main` instead of the resolved board. No test
+survived its own mutation.
+
+**Review: one blocker, zero code majors.** The blocker is operational ordering,
+not code — see below. The grain/board round trip was traced end to end and no
+path substitutes a default for a resolved grain or board; no `board = 'main'`
+literal survives in any write; the migration's defaults reproduce prior undo
+behavior exactly, because pre-0009 moves were all mainboard-addressed by
+construction (`holding_take` pinned `'main'`, `holding_add` inserted `'main'`).
+
+> **Deploy ordering is load-bearing for this change.** The new code names
+> `moves.from_board` / `to_board` in three places — `add_holding`'s intake
+> INSERT, `append_move`'s INSERT, and `undo_one`'s SELECT. Migration 0009 is
+> expand-first only in the *old-code-against-new-schema* direction; the new code
+> **cannot run against the unmigrated schema at all**. On an unmigrated
+> database every write path (`+ Have`, every move, every removal, every
+> teardown, every undo) fails `42703 column "to_board" does not exist` → 502,
+> while reads are untouched — so the app looks alive while every write errors
+> behind a toast. Nothing enforces the ordering: the merge gate never touches
+> Neon, auto-merge ships on green, and Render deploys on push to `main`.
+> `scripts/migrate.sh prod` must be run **before** the merge.
+
+**Evidence.** `cargo test --workspace --exclude frontend` 138 + 28 green; full
+chromium e2e **149/149** at `--workers=1` (4.5 min); hydration CLEAN on four
+authed URLs; Android webview stepper + collection probes green; grain/board
+round trips verified against the Neon dev branch read back through
+`/api/cards/{id}/holdings` — the one read that does not group grain away —
+including a foil/LP/Japanese stack, a sideboard→binder→undo cycle, a two-board
+teardown writing one ledger row per board, and return-to-previous landing back
+in the originating binder.
+
 ### Batch move (2026-07-25)
 
 `app/src/my/move_selection.rs` — the tray's "Move to…" wired to a real write.
