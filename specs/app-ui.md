@@ -219,6 +219,72 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Catalog paging via `?cursor=` (2026-07-25)
+
+`app/src/catalog.rs` + `app/src/catalog/rail.rs` — the slice deferred from the
+catalog-page task. The adapter always took a cursor and `SearchResults` always
+carried `next_cursor`; the page simply never used either.
+
+**A stale cursor is the defining failure mode**, so clearing it is a property of
+the URL the existing writers build rather than a new writer watching `q`. Review
+established by exhaustive grep that exactly **three** call sites navigate to a
+`/catalog` URL carrying a query — `QueryBar::commit` via `to_url`,
+`rail::use_navigate_query`, and `ViewSwitch::go` — plus the pager's own hrefs.
+The first two pass `None`; `use_commit` and `reset_all` both funnel through
+`use_navigate_query`; `RailBody`/`FilterSheet` navigate nowhere else. **No path
+can change `q` while keeping `cursor`.**
+
+**The view switch preserves the cursor deliberately** — relayouting is not a
+query edit, and the keyset compares tuples so `view` is orthogonal to position.
+That required the pager's hrefs to be reactive `move ||` closures reading
+`list_view.get()` rather than baked at build time, because a layout switch
+deliberately does not re-render the results block; a fixed href would page a
+list-view reader back into the grid.
+
+**The rail/debounce race was not compounded.** That filed defect (a facet click
+inside the query bar's 250 ms window overwritten by the debounce firing with
+captured text) now has a third participant in the same URL. Deliberately, no
+timer-based writer and no `Effect` watching `q` were added: the pager and view
+switch are click-driven and never write `q`, only add or remove `cursor`. An
+armed debounce firing after a Next click therefore commits page one of the
+newest typed text — the correct resolution rather than a hybrid. Review
+confirmed the claim.
+
+**One deviation from the `/my` pager, on purpose.** `/my`'s error arm is a dead
+end. Paging is what makes an error reachable *with nothing to fix* — a shared
+`?cursor=` link can be stale or corrupt, and the user who pasted it did nothing
+wrong. So both the error and empty-page states offer "← Back to the start",
+keeping `q` and dropping only the cursor. Verified: a corrupt cursor returns
+HTTP 200 with an inline error and a way home; past-end and cross-query cursors
+render "Nothing on this page." with the same. A deleted anchor row is a
+non-case — the keyset compares `(name, oracle_id) > (…)` and needs no existing
+row.
+
+Forward-only, matching `/my` and for the same structural reason: a keyset cursor
+means "everything after this row", so a real Previous needs a reverse-ordered
+query plus a `before` cursor. Filed rather than half-built.
+
+**Mutation testing found a survivor, which is the point of running it.** "The
+last page offers no next" originally passed *with the cursor ignored entirely*,
+because `bolt` fits on one page — the fixture could not distinguish the
+behaviors. Strengthened to assert the card the cursor was taken after is absent;
+it now dies under that mutation. Four mutations applied, four killed after the
+strengthening. The same weakness survives in the Android probe's equivalent
+step, filed.
+
+**Known limitation, not a defect:** the count states this page's row count with
+no page qualifier, so the last page of a 73-result search reads "23 results"
+while mid-pages read "50+ results". Keyset has no offset, so a "51–73 of 73"
+form needs a separate count query or a page ordinal in the URL.
+
+**Evidence.** `cargo test --workspace --exclude frontend` 138 + 26 green; full
+chromium e2e **151/151** at `--workers=1` (4.1 min); hydration CLEAN on four
+URLs including a cursored browse-all, a `?q=&cursor=`, a `?view=list&cursor=`
+and a past-the-end cursor; SSR curl of a cursored URL renders 50 tiles with
+page two's first card present and page one's absent, both pager controls in the
+raw HTML; Android webview probe 11/11 including a 34 px tap target and a
+deep-linked cursored page.
+
 ### Batch move (2026-07-25)
 
 `app/src/my/move_selection.rs` — the tray's "Move to…" wired to a real write.
