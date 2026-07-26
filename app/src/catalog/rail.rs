@@ -21,14 +21,17 @@
 //! The pure half (everything above the components) is unit-tested; the widgets
 //! are thin over it.
 
+use leptos::either::EitherOf4;
 use leptos::prelude::*;
 use leptos_router::hooks::{use_navigate, use_query_map};
 use leptos_router::NavigateOptions;
 use shared::search::{facet_term, parse_tokens, quote_value, Cmp, ParseError, Pred, Term};
+use shared::SetSummary;
 
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::ui::checkbox::Checkbox;
+use crate::components::ui::command::{Command, CommandInput, CommandItem, CommandList};
 use crate::components::ui::input::{Input, InputType};
 use crate::components::ui::label::Label;
 use crate::components::ui::sheet::{Sheet, SheetClose, SheetContent, SheetDirection, SheetTrigger};
@@ -75,9 +78,16 @@ pub struct RailState {
     /// The bare-word run, re-joined as typed (quoting included).
     pub name: String,
     pub text: String,
-    /// Set codes as one comma-joined string — the widget is a text field, not
-    /// a picker, until a `list_sets` adapter exists (see the spec Findings).
-    pub set: String,
+    /// The `s:` term's codes, lowercase, **in the order the query text lists
+    /// them**. Order is preserved rather than sorted so a rail edit rewrites the
+    /// term in place instead of reshuffling a query someone may also be typing
+    /// in the box.
+    ///
+    /// Every code the term carries lands here, including ones the picker's
+    /// server-side list has never heard of: the widget's selection *is* this
+    /// vector, never an intersection with the fetched rows, which is what makes
+    /// a pasted `s:xyz` impossible to silently drop.
+    pub set: Vec<String>,
     pub colors: Vec<char>,
     /// `c:colorless` — a Color-field filter with no checkbox to show it (the
     /// wireframe's facet is the five colors). Tracked so it still counts.
@@ -94,7 +104,7 @@ impl RailState {
         match field {
             Field::Name => usize::from(!self.name.is_empty()),
             Field::Text => usize::from(!self.text.is_empty()),
-            Field::Set => self.set_codes().len(),
+            Field::Set => self.set.len(),
             Field::Color => self.colors.len() + usize::from(self.colorless),
             Field::Type => self.types.len(),
             Field::Rarity => self.rarities.len(),
@@ -116,10 +126,6 @@ impl RailState {
         .into_iter()
         .map(|f| self.count(f))
         .sum()
-    }
-
-    pub fn set_codes(&self) -> Vec<String> {
-        split_codes(&self.set)
     }
 }
 
@@ -184,7 +190,7 @@ pub fn read(q: &str) -> Result<RailState, ParseError> {
         seen.push(field);
         match &tok.term.pred {
             Pred::OracleText(v) => st.text = v.clone(),
-            Pred::Set(codes) => st.set = codes.join(","),
+            Pred::Set(codes) => st.set = codes.clone(),
             Pred::TypeLine(vals) => st.types = vals.clone(),
             Pred::Rarity(vals) => st.rarities = vals.clone(),
             Pred::Colors(cs) => st.colors = cs.clone(),
@@ -240,15 +246,6 @@ pub fn rewrite(q: &str, field: Field, replacement: Option<String>) -> Result<Str
         }
     }
     Ok(out.join(" "))
-}
-
-/// Comma-split a set-code field into codes, dropping blanks so a trailing
-/// comma mid-typing doesn't produce the valueless term the grammar rejects.
-fn split_codes(s: &str) -> Vec<String> {
-    s.split(',')
-        .map(|c| c.trim().to_ascii_lowercase())
-        .filter(|c| !c.is_empty())
-        .collect()
 }
 
 /// Serialize what the name box holds back into bare-word terms.
@@ -551,25 +548,10 @@ fn RailBody(heading_id: &'static str) -> impl IntoView {
                         value=Signal::derive(move || ok.get().map(|s| s.text).unwrap_or_default())
                         to_term=oracle_term
                     />
-                    <RailSection
-                        title="Set"
-                        count=Signal::derive(move || {
-                            ok.get().map(|s| s.count(Field::Set)).unwrap_or(0)
-                        })
-                        default_open=false
-                    >
-                        <RailTextField
-                            id=format!("{heading_id}-set")
-                            label="Set codes"
-                            placeholder="e.g. mh3, lea"
-                            field=Field::Set
-                            value=Signal::derive(move || {
-                                ok.get().map(|s| s.set).unwrap_or_default()
-                            })
-                            to_term=set_term
-                            hide_label=true
-                        />
-                    </RailSection>
+                    <SetPicker
+                        id=format!("{heading_id}-set")
+                        codes=Signal::derive(move || ok.get().map(|s| s.set).unwrap_or_default())
+                    />
                     <RailFacet
                         title="Color"
                         field=Field::Color
@@ -629,8 +611,10 @@ fn oracle_term(s: &str) -> Option<String> {
     (!t.is_empty()).then(|| format!("o:{}", quote_value(t)))
 }
 
-fn set_term(s: &str) -> Option<String> {
-    facet_term("s", &split_codes(s))
+/// The Set facet's term. `s:` (not `set:`/`e:`) because the rail emits one
+/// canonical spelling for every facet it owns; the aliases still *parse*.
+fn set_term(vals: &[String]) -> Option<String> {
+    facet_term("s", vals)
 }
 
 /// Colors concatenate (`c:ur`) rather than comma-separating: `c:` means "has
@@ -660,7 +644,6 @@ fn RailTextField(
     field: Field,
     value: Signal<String>,
     to_term: fn(&str) -> Option<String>,
-    #[prop(optional)] hide_label: bool,
 ) -> impl IntoView {
     let commit = use_commit();
     let initial = value.get_untracked();
@@ -706,7 +689,7 @@ fn RailTextField(
 
     view! {
         <div class="space-y-1.5">
-            <Label html_for=id.clone() class=if hide_label { "sr-only" } else { "text-xs" }>
+            <Label html_for=id.clone() class="text-xs">
                 {label}
             </Label>
             <Input
@@ -721,6 +704,17 @@ fn RailTextField(
     }
 }
 
+/// The state a rail section's disclosure is *seeded* in: the wireframe's default
+/// for that section, plus "open if it already carries filters".
+///
+/// A function rather than an inline expression because [`SetPicker`] needs the
+/// same answer to seed its lazily-fetched list — two copies of the rule would
+/// drift the moment one changed, and the drift would show up as SSR rendering
+/// the section open while the picker believed it closed.
+fn section_seeded_open(default_open: bool, count: usize) -> bool {
+    default_open || count > 0
+}
+
 /// A collapsible rail section with the wireframe's active-count badge.
 ///
 /// `<details>` rather than a JS disclosure: it collapses without hydration, is
@@ -733,12 +727,32 @@ fn RailSection(
     title: &'static str,
     count: Signal<usize>,
     default_open: bool,
+    /// Optional mirror of the disclosure's live open state, for a section whose
+    /// body costs a round trip to fill ([`SetPicker`]). Written on every
+    /// `toggle`; the `open` attribute itself stays non-reactive, so this
+    /// *observes* the disclosure and never drives it.
+    #[prop(optional)]
+    expanded: Option<RwSignal<bool>>,
     children: Children,
 ) -> impl IntoView {
-    let open = default_open || count.get_untracked() > 0;
+    let open = section_seeded_open(default_open, count.get_untracked());
     let testid = format!("filter-count-{}", title.to_lowercase().replace(' ', "-"));
     view! {
-        <details open=open class="group border-t pt-3">
+        <details
+            open=open
+            class="group border-t pt-3"
+            on:toggle=move |ev| {
+                if let Some(expanded) = expanded {
+                    // The content attribute, not `HtmlDetailsElement::open`: the
+                    // typed element is not in the web-sys feature set this crate
+                    // compiles with, and `<details>` reflects `open` into the
+                    // attribute before it queues the `toggle` event, so the two
+                    // answer identically here.
+                    let el = event_target::<leptos::web_sys::Element>(&ev);
+                    expanded.set(el.has_attribute("open"));
+                }
+            }
+        >
             <summary class="flex cursor-pointer list-none items-center gap-2 text-sm font-medium">
                 <span
                     aria-hidden="true"
@@ -820,6 +834,335 @@ fn RailFacet(
                     .collect_view()}
             </div>
         </RailSection>
+    }
+}
+
+/// The Set facet's disclosure default (wireframe: collapsed).
+const SET_SECTION_DEFAULT_OPEN: bool = false;
+
+/// "The list isn't here yet" — the one rendering shared by the `Transition`'s
+/// fallback and the not-yet-fetched arm, so the two cannot say different things
+/// about the same situation.
+fn set_list_loading() -> impl IntoView {
+    view! {
+        <p class="text-muted-foreground p-2 text-xs" data-testid="set-loading">
+            "Loading sets…"
+        </p>
+    }
+}
+
+/// Add or remove one code from the Set selection, keeping the order the query
+/// text already had.
+///
+/// Order matters: appending a new code rather than sorting is what makes an edit
+/// rewrite the `s:` term *in place* instead of reshuffling text a user may also
+/// be typing in the query box — the same rule [`rewrite`] follows for terms.
+fn toggle_code(codes: &[String], code: &str) -> Vec<String> {
+    let mut next = codes.to_vec();
+    match next.iter().position(|c| c == code) {
+        Some(i) => {
+            next.remove(i);
+        }
+        None => next.push(code.to_ascii_lowercase()),
+    }
+    next
+}
+
+/// The year to show beside a set's code — the disambiguator between the four
+/// sets whose names differ only by a suffix. Empty for an undated set.
+fn set_year(released_at: Option<&str>) -> String {
+    released_at
+        .and_then(|d| d.get(..4))
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The Set facet: a real picker over the catalog's set list
+/// (`CatalogStore::list_sets`), replacing the comma-separated code box.
+///
+/// Two halves that deliberately do not talk to each other:
+///
+/// * **The selection is the query text.** The chips and the rows' ✓ come from
+///   `codes` — the `s:` term, parsed — and never from the fetched list. So a
+///   pasted `s:xyz` shows up as an ordinary chip that counts, reflects, and can
+///   be removed, even though no row will ever match it. There is no
+///   "unrecognized code" state to get wrong because recognition never happens:
+///   validating the selection against the list is the only way this widget could
+///   silently drop part of someone's query, so it doesn't do it.
+/// * **The list is a discovery affordance**, fetched from the server a bounded
+///   window at a time. It is not the vocabulary of what may be selected — the
+///   query bar remains the way to name a code the picker can't find.
+///
+/// The list is fetched only once the section is actually open (`expanded`,
+/// written by the disclosure's own `toggle`): the rail renders twice per page
+/// (desktop + mobile sheet) and `/catalog` is the app's most-loaded route, so an
+/// eager fetch would be two round trips on every visit for a facet most visits
+/// never touch.
+#[component]
+fn SetPicker(#[prop(into)] id: String, codes: Signal<Vec<String>>) -> impl IntoView {
+    let commit = use_commit();
+    let count = Signal::derive(move || codes.read().len());
+    let expanded = RwSignal::new(section_seeded_open(
+        SET_SECTION_DEFAULT_OPEN,
+        count.get_untracked(),
+    ));
+    let search = RwSignal::new(String::new());
+
+    // Bumped by the error arm's retry — a source-signal change is what makes the
+    // resource fetch again for an unchanged query.
+    let attempt = RwSignal::new(0u32);
+
+    // **`Option<Result<…>>`, and both layers carry weight.** A bare
+    // `Vec<SetSummary>` cannot tell *not fetched yet* from *fetched and empty*
+    // from *the fetch failed*, and collapsing any of those into an empty vector
+    // renders a confident "No set matches." — a false claim about a catalog that
+    // holds ~1050 sets — over a question that was never asked or never answered.
+    // `None` is the collapsed section (see the note above on why it doesn't
+    // fetch); `Some(Err)` is a real failure, which on the native backend is the
+    // *ordinary* case for an offline phone (`ApiError::Upstream`, kept distinct
+    // from an auth error precisely so callers can tell them apart).
+    let sets = Resource::new(
+        move || (expanded.get(), search.get(), attempt.get()),
+        |(expanded, q, _)| async move {
+            if !expanded {
+                return None;
+            }
+            Some(crate::list_sets(q).await)
+        },
+    );
+
+    // A row can only *ask* for a toggle. The rows are built inside a `Suspend`,
+    // whose future and resulting view must both be `Send`, and `use_commit`'s
+    // closure is neither `Send` nor `Sync` (it wraps `use_navigate` — see its
+    // docs). So the click writes a code into this signal and the commit happens
+    // out here: still exactly one navigation path, reached through a signal
+    // instead of a captured closure.
+    let requested = RwSignal::new(None::<String>);
+    Effect::new(move |_| {
+        let Some(code) = requested.get() else {
+            return;
+        };
+        requested.set(None);
+        commit(
+            Field::Set,
+            set_term(&toggle_code(&codes.get_untracked(), &code)),
+        );
+    });
+
+    // Typing filters the list *server-side*, so the keystrokes are debounced —
+    // but note what this timer does and does not do: it re-keys a read, and
+    // never writes the URL. The rail's known race (a facet click swallowed by
+    // the query bar's pending debounce, filed separately) is between *writers*;
+    // this adds none, and the picker's own commits are synchronous on click.
+    let pending = StoredValue::new(None::<leptos::leptos_dom::helpers::TimeoutHandle>);
+    let clear_pending = move || {
+        pending.update_value(|h| {
+            if let Some(h) = h.take() {
+                h.clear();
+            }
+        });
+    };
+    on_cleanup(clear_pending);
+    let on_search = Callback::new(move |text: String| {
+        clear_pending();
+        let handle = set_timeout_with_handle(
+            move || search.set(text),
+            std::time::Duration::from_millis(crate::components::query_bar::SEARCH_DEBOUNCE_MS),
+        );
+        pending.set_value(handle.ok());
+    });
+
+    let chips = move || {
+        codes
+            .get()
+            .into_iter()
+            .map(|code| {
+                let label = code.to_ascii_uppercase();
+                let aria = format!("Remove set {label}");
+                let for_click = code.clone();
+                view! {
+                    <li>
+                        <button
+                            type="button"
+                            class="bg-secondary text-secondary-foreground hover:bg-accent hover:text-accent-foreground inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-medium"
+                            data-testid="set-chip"
+                            data-code=code
+                            aria-label=aria
+                            on:click=move |_| requested.set(Some(for_click.clone()))
+                        >
+                            {label}
+                            <span aria-hidden="true">"×"</span>
+                        </button>
+                    </li>
+                }
+            })
+            .collect_view()
+    };
+
+    view! {
+        <RailSection title="Set" count default_open=SET_SECTION_DEFAULT_OPEN expanded>
+            <div class="space-y-2">
+                // Selected codes, straight off the query text — rendered before
+                // (and independently of) the list, so a shared `s:` link shows
+                // its selection in the SSR'd HTML with no round trip.
+                <Show when=move || !codes.read().is_empty()>
+                    <ul class="flex flex-wrap gap-1" data-testid="set-chips">
+                        {chips}
+                    </ul>
+                </Show>
+                <Label html_for=id.clone() class="sr-only">
+                    "Search sets"
+                </Label>
+                <Command should_filter=false class="border-input rounded-md border">
+                    <div class="border-b px-2">
+                        <CommandInput
+                            attr:id=id.clone()
+                            placeholder="Search sets…"
+                            class="h-8"
+                            on_search_change=on_search
+                        />
+                    </div>
+                    <CommandList class="max-h-56 p-1">
+                        // `Transition`, not `Suspense`: re-keying on each
+                        // debounced keystroke must not strobe the list away and
+                        // back. The cost is that its fallback only ever runs when
+                        // *nothing* has resolved yet, which is why the
+                        // not-fetched arm below renders the same line rather than
+                        // leaning on this one.
+                        <Transition fallback=set_list_loading>
+                            {move || Suspend::new(async move {
+                                match sets.await {
+                                    // Not fetched: the section is collapsed, so
+                                    // this is invisible — except in the one
+                                    // moment that matters. Opening the section
+                                    // re-keys the resource, and a `Transition`
+                                    // holds the previous children while the new
+                                    // value loads, so *these* are what shows for
+                                    // the length of that first round trip. It has
+                                    // to read as "loading", never as an answer:
+                                    // an empty state here was the first thing
+                                    // anyone ever saw in this facet.
+                                    None => EitherOf4::A(set_list_loading()),
+                                    Some(Err(e)) => {
+                                        let (_, message) = crate::catalog::describe_error(&e);
+                                        // A dead end otherwise: there is nothing
+                                        // in the search box to fix, and nothing
+                                        // retries on its own. Same rule the
+                                        // paging task recorded for its own error
+                                        // and empty arms — both offer a way out.
+                                        EitherOf4::B(
+                                            view! {
+                                                <div class="space-y-1.5 p-2" data-testid="set-error">
+                                                    <p role="alert" class="text-destructive text-xs">
+                                                        {format!("Couldn't load the set list: {message}")}
+                                                    </p>
+                                                    <button
+                                                        type="button"
+                                                        class="text-muted-foreground hover:text-foreground text-xs underline"
+                                                        data-testid="set-retry"
+                                                        on:click=move |_| attempt.update(|n| *n += 1)
+                                                    >
+                                                        "Try again"
+                                                    </button>
+                                                </div>
+                                            },
+                                        )
+                                    }
+                                    // Genuinely nothing matched — the only one of
+                                    // the four that is a claim about the catalog.
+                                    // The list is server-filtered, so
+                                    // `CommandEmpty` (which infers emptiness from
+                                    // the item registry) has nothing to infer
+                                    // from; the row count is known right here.
+                                    Some(Ok(rows)) if rows.is_empty() => {
+                                        EitherOf4::C(
+                                            view! {
+                                                <p
+                                                    class="text-muted-foreground p-2 text-xs"
+                                                    data-testid="set-empty"
+                                                >
+                                                    "No set matches."
+                                                </p>
+                                            },
+                                        )
+                                    }
+                                    Some(Ok(rows)) => {
+                                        EitherOf4::D(
+                                            rows
+                                                .into_iter()
+                                                .map(|set| {
+                                                    view! { <SetOption set codes requested /> }
+                                                })
+                                                .collect_view(),
+                                        )
+                                    }
+                                }
+                            })}
+                        </Transition>
+                    </CommandList>
+                </Command>
+            </div>
+        </RailSection>
+    }
+}
+
+/// One row of [`SetPicker`]'s list.
+///
+/// Its props are all `Send` on purpose — it is instantiated inside a `Suspend`,
+/// so anything it captures has to be (see [`SetPicker`]'s note on `requested`).
+#[component]
+fn SetOption(
+    set: SetSummary,
+    codes: Signal<Vec<String>>,
+    requested: RwSignal<Option<String>>,
+) -> impl IntoView {
+    let SetSummary {
+        code,
+        name,
+        set_type,
+        released_at,
+    } = set;
+    let selected = {
+        let code = code.clone();
+        Memo::new(move |_| codes.read().contains(&code))
+    };
+    let on_select = {
+        let code = code.clone();
+        Callback::new(move |()| requested.set(Some(code.clone())))
+    };
+    // `value` is what `command` would filter on; this list filters server-side
+    // (`should_filter=false`), so it is documentation of the row's search text
+    // rather than live behavior — kept in step with the SQL, which matches code
+    // or name.
+    let value = format!("{name} {code}");
+    let hint = {
+        let year = set_year(released_at.as_deref());
+        let code = code.to_ascii_uppercase();
+        if year.is_empty() {
+            code
+        } else {
+            format!("{code} · {year}")
+        }
+    };
+
+    view! {
+        <CommandItem value=value on_select=on_select class="cursor-pointer justify-between">
+            // The selected marker rides an inner element, not the `CommandItem`:
+            // its own `aria-selected` means "keyboard-highlighted", a different
+            // thing from "this set is in the filter" (same reasoning as the
+            // destination picker's `data-chosen`).
+            <span
+                class="truncate"
+                data-testid="set-option"
+                data-code=code
+                data-set-type=set_type
+                data-selected=move || selected.get().then_some("true")
+            >
+                {name}
+            </span>
+            <span class="text-muted-foreground shrink-0 text-xs">{hint}</span>
+            {move || selected.get().then(|| view! { <span aria-hidden="true">"✓"</span> })}
+        </CommandItem>
     }
 }
 
@@ -1115,14 +1458,88 @@ mod tests {
     }
 
     #[test]
-    fn set_codes_tolerate_mid_typing_commas() {
-        let st = RailState {
-            set: "mh3, ,lea,".into(),
-            ..Default::default()
-        };
-        assert_eq!(st.set_codes(), vec!["mh3", "lea"]);
-        let q = rewrite("", Field::Set, facet_term("s", &st.set_codes())).unwrap();
-        assert_eq!(q, "s:mh3,lea");
+    fn a_set_term_reflects_into_the_pickers_selection_in_order() {
+        // The picker's whole state is this vector — chips, ✓ marks and the badge
+        // all read it — so the round trip starts here.
+        let st = read("s:mh3,lea bolt").unwrap();
+        assert_eq!(st.set, vec!["mh3", "lea"]);
+        assert_eq!(st.count(Field::Set), 2);
+        // Every alias reflects the same way; the rail re-emits one spelling.
+        assert_eq!(read("set:mh3").unwrap().set, vec!["mh3"]);
+        assert_eq!(read("e:MH3").unwrap().set, vec!["mh3"]);
+    }
+
+    #[test]
+    fn picking_a_set_appends_and_unpicking_removes_in_place() {
+        // Appending (not sorting) is what keeps the rewrite in place: `s:` stays
+        // where the user's text had it, and so does everything around it.
+        assert_eq!(toggle_code(&["mh3".into()], "lea"), vec!["mh3", "lea"]);
+        let q = rewrite(
+            "s:mh3 bolt",
+            Field::Set,
+            set_term(&toggle_code(&["mh3".into()], "lea")),
+        )
+        .unwrap();
+        assert_eq!(q, "s:mh3,lea bolt");
+        // ...and back off again, first value included, leaving the order alone.
+        let codes = read(&q).unwrap().set;
+        let out = rewrite(&q, Field::Set, set_term(&toggle_code(&codes, "mh3"))).unwrap();
+        assert_eq!(out, "s:lea bolt");
+    }
+
+    #[test]
+    fn unpicking_the_last_set_removes_the_term_entirely() {
+        // Not `s:` with no value — the grammar rejects that, so unchecking the
+        // last chip would break the whole query.
+        let codes = read("s:mh3 bolt").unwrap().set;
+        let next = toggle_code(&codes, "mh3");
+        assert!(next.is_empty());
+        assert_eq!(set_term(&next), None);
+        let out = rewrite("s:mh3 bolt", Field::Set, set_term(&next)).unwrap();
+        assert_eq!(out, "bolt");
+        assert!(read(&out).is_ok());
+        assert_eq!(read(&out).unwrap().count(Field::Set), 0);
+    }
+
+    #[test]
+    fn a_code_the_picker_never_lists_is_still_the_users_selection() {
+        // The failure this guards: validating the selection against the fetched
+        // list would drop a pasted `s:xyz` on the next unrelated rail click. The
+        // selection is the query text, so there is nothing to validate against.
+        let st = read("s:xyz,mh3").unwrap();
+        assert_eq!(st.set, vec!["xyz", "mh3"]);
+        assert_eq!(st.count(Field::Set), 2);
+        // An edit elsewhere in the rail leaves it alone...
+        let out = rewrite("s:xyz,mh3", Field::Color, Some("c:u".into())).unwrap();
+        assert_eq!(out, "s:xyz,mh3 c:u");
+        // ...picking another set keeps it...
+        let out = rewrite("s:xyz", Field::Set, set_term(&toggle_code(&st.set, "lea"))).unwrap();
+        assert_eq!(out, "s:xyz,mh3,lea");
+        // ...and it can be removed, which a code with no row could not be if the
+        // list were the vocabulary.
+        let out = rewrite(
+            "s:xyz",
+            Field::Set,
+            set_term(&toggle_code(&["xyz".into()], "xyz")),
+        )
+        .unwrap();
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn the_set_section_seeds_open_only_when_it_carries_filters() {
+        // The picker seeds its lazily-fetched list from this same answer, so a
+        // disagreement here would fetch on a closed section (or never fetch on
+        // an open one).
+        assert!(!section_seeded_open(SET_SECTION_DEFAULT_OPEN, 0));
+        assert!(section_seeded_open(SET_SECTION_DEFAULT_OPEN, 1));
+        assert!(section_seeded_open(true, 0));
+    }
+
+    #[test]
+    fn a_set_row_shows_its_release_year_when_it_has_one() {
+        assert_eq!(set_year(Some("2024-06-14")), "2024");
+        assert_eq!(set_year(None), "");
     }
 
     #[test]

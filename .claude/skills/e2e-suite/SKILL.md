@@ -20,6 +20,7 @@ rather than folklore:
 | `npm run probe:android-collection` | `/my/collections/:id` on the real Android webview (needs the android-smoke attach) |
 | `npm run probe:android-quick-add` | quick-add's ↑↓/⏎/⌥⏎ registry navigation on the real Android webview, via the bench (the panel itself is authed, so unreachable through the dev proxy) |
 | `npm run probe:android-selection-tray` | selection tray + row checkbox on the real Android webview, via the bench (both hosting pages are authed) |
+| `npm run probe:android-rail` | the filter sheet on the real Android webview — badge, facet click, scroll lock, and the Set picker's search + multi-select pick (the rail is only a sheet at phone width) |
 
 **A probe covers what the browser tier structurally cannot.** `probe:paging`
 exists because page size is fixed in the UI, so only the JSON route can ask for

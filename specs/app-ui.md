@@ -297,6 +297,98 @@ grid and list for an authed session and **zero** occurrences anonymously, with
 anonymous half (the dev proxy strips Cookie headers) and confirms 50 tiles, zero
 badges, `owned: null` on all ten API hits.
 
+### Set facet as a real picker (2026-07-26)
+
+`app/src/catalog/rail.rs` + `CatalogStore::list_sets` (trait, both backends,
+`GET /api/catalog/sets`, a thin GET server fn) + `SetSummary`/`SetQuery` in
+`shared`. Resolves the "Set is a text input, not a picker" deferral above.
+`RailState.set` became `Vec<String>`; `split_codes` and the comma round-trip are
+gone. The route is deliberately anonymous — sets carry no ownership, so there is
+no opportunistic-session arm.
+
+**The selection is the query text, and is never intersected with the fetched
+rows.** That is the whole design, and it is what prevents the widget silently
+dropping part of a pasted query. `s:xyz` renders a chip, counts in the badge,
+reflects on a shared link, survives an unrelated rail edit byte-for-byte, and is
+removable — identically to `s:mh3`, and identically to a *real* code that happens
+to fall outside the current 25-row window. There is no "unknown code" branch to
+get wrong because recognition never happens: validating the selection against the
+list is the only mechanism by which the widget could silently alter someone's
+query, so the mechanism was removed rather than special-cased. No "use `xyz`
+anyway" row either — the set list is complete, so an unmatched string is a typo,
+and offering it would let typos in. Case and whitespace normalization stay in the
+grammar's `csv()`, not against the list.
+
+**Bounded server-side search, not a preloaded list — forced by a measured
+O(n²).** `CommandItem`'s `highlighted` is a `Memo` calling
+`CommandContext::visible_ids()`, which clones the whole items vec and `.get()`s
+every item's `visible` signal: O(n) per item, O(n²) per invalidation — and
+`Command`'s highlight-reset `Effect` invalidates all of them on **every
+keystroke**. ~1050 sets is not viable. So `list_sets` takes `q` + `limit`
+(default 25) and ranks exact-code-match first (typing `mh3` also matches
+`amh3`/`tmh3`/`pmh3`, which would otherwise push MH3 out of the window), then
+newest-first. Review independently confirmed the complexity claim.
+
+`command`'s rows are built inside a `Suspend` keyed on the resource, so each
+result set is a **full remount in document order** — the safe case for the
+recorded `visible_ids()` ordering caveat. Nothing reorders in place, so ↑↓ visits
+rows in visual order.
+
+**The `Suspend` → signal → `Effect` commit hop.** A `Suspend`'s future and view
+must both be `Send`, and `use_navigate`'s closure is neither, so a row click
+writes a code into an `RwSignal` and an `Effect` outside the async boundary
+commits. Still exactly one writer (`use_navigate_query`), reached through a
+signal — which is also why the cursor drop comes for free on both the select and
+deselect paths and on Reset. Review verified the `Effect` reads `codes` and
+`query_map` **untracked**, so a URL change cannot re-fire it, it early-returns on
+`None` so it does not fire on mount, and the `set(None)` before commit makes the
+follow-up a no-op.
+
+**The debounce race was reduced, not compounded.** The old Set widget was a
+`RailTextField` that armed its own 250 ms navigate timer — a genuine participant.
+The picker commits synchronously on click, so that writer is gone and a Set click
+is now exactly a Color-checkbox click. Its only timer debounces the *read* and
+never touches a navigate path.
+
+**Review: one major.** Three distinct states — *not fetched*, *fetch failed*, and
+*fetched and genuinely empty* — were all crammed into `Vec<SetSummary>`, so two
+non-answers rendered as an authoritative claim about the user's catalog:
+`sets.await.unwrap_or_default()` turned an `Err` into "No set matches." with no
+error arm and no retry (and on native an **offline phone is the normal failure** —
+`native.rs` maps a transport error to `Upstream` precisely so callers can tell),
+while `if !expanded { return Ok(Vec::new()) }` made not-yet-fetched a *successful
+empty*, so bare `/catalog` SSR'd `set-empty` with zero `Loading sets…` and — since
+`Transition` holds previous children across a re-key — the first thing anyone ever
+saw in the facet was "No set matches." for the length of the round trip.
+
+Fixed by giving the resource `Option<Result<Vec<SetSummary>, _>>` and four arms
+(`EitherOf4`): `None` → loading, `Some(Err)` → `role="alert"` with the message
+from the shared `catalog::describe_error` (same vocabulary as the paging arm) plus
+a **Try again** button that bumps an `attempt` counter in the resource's source
+tuple, which is what makes it refetch an unchanged query; the search box stays
+usable so typing is also a retry. The lazy fetch was kept — `/catalog` is the
+most-loaded route and the rail renders twice. `Transition` was kept over
+`Suspense` deliberately: `Suspense` would also make the fallback reachable but
+would strobe the list away on every debounced keystroke. Verified: bare
+`/catalog` SSR went from `set-empty × 2, Loading × 0` to `set-loading × 2,
+set-empty × 0`.
+
+**The failure was induced for real, not asserted around.** The adapter is a GET
+server fn, so `page.route("**/api/list_sets*")` fulfilling a 500 produces the same
+`Err` shape an offline phone does. Two mutations, each killing exactly its own
+test and nothing else: collapsing the `Err` arm back into the empty state killed
+only the error test; rendering the empty state for not-fetched killed only the
+flash test. Liveness was proved before each run by `strings`-ing the served
+`/pkg/app.wasm` for the testid anchors rather than trusting the watch — which
+matters, since `cargo leptos watch` has been observed silently dropping a save
+mid-rebuild.
+
+**Evidence.** `cargo test --workspace --exclude frontend` 143 + 26 green; full
+chromium e2e **162/162** at `--workers=1` (4.3 min); hydration CLEAN; SSR curl of
+`?q=s:mh3,lea` renders both chips *and* the 25-row list while bare `/catalog`
+renders zero rows (lazy fetch confirmed); Android webview rail probe 11/11
+including chip reflect, search-by-name, multi-select and the badge.
+
 ### Catalog paging via `?cursor=` (2026-07-25)
 
 `app/src/catalog.rs` + `app/src/catalog/rail.rs` — the slice deferred from the
@@ -1485,7 +1577,8 @@ device's Chrome 145. Codex e2e mutation pass: 10 mutations applied transiently,
   non-`Send` closure can't ride. Filed as its own task rather than bolted on.
 - **Set is a text input, not a picker.** No `list_sets` adapter exists, and
   adding one is a server-fn of its own. `s:mh3,lea` typed as comma-separated
-  codes is the honest interim; filed.
+  codes is the honest interim; filed. — **resolved 2026-07-26**, see the
+  set-picker Findings below.
 
 ### Card detail `/cards/:id` + previews (2026-07-20)
 
