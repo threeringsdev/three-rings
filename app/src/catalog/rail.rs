@@ -644,7 +644,6 @@ fn RailTextField(
     field: Field,
     value: Signal<String>,
     to_term: fn(&str) -> Option<String>,
-    #[prop(optional)] hide_label: bool,
 ) -> impl IntoView {
     let commit = use_commit();
     let initial = value.get_untracked();
@@ -690,7 +689,7 @@ fn RailTextField(
 
     view! {
         <div class="space-y-1.5">
-            <Label html_for=id.clone() class=if hide_label { "sr-only" } else { "text-xs" }>
+            <Label html_for=id.clone() class="text-xs">
                 {label}
             </Label>
             <Input
