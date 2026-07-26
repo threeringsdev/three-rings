@@ -520,6 +520,94 @@ test("a set pick drops the page cursor @fast", async ({ page, request }) => {
   await expect(rail.locator(SET_SEARCH)).toBeVisible(); // positive control
 });
 
+// The picker's list has three non-answers — not fetched, failed, and genuinely
+// empty — and only the last is a claim about the catalog. These two tests hold
+// them apart, because a `Vec` that flattened them rendered "No set matches." over
+// a catalog of ~1050 sets both when the fetch had not happened yet and when it
+// had failed (adversarial review, major).
+
+test("a failed set list says the fetch failed, and retries @fast", async ({
+  page,
+}) => {
+  // The cheapest way to force an `Err` out of the adapter: fail its request. This
+  // is the *normal* case on the native backend, where an offline phone gets
+  // `ApiError::Upstream` — which the client maps distinctly on purpose.
+  let broken = true;
+  await page.route("**/api/list_sets*", async (route) => {
+    if (broken) {
+      await route.fulfill({
+        status: 500,
+        contentType: "text/plain",
+        body: "set list unavailable",
+      });
+    } else {
+      await route.continue();
+    }
+  });
+
+  await page.goto("/catalog");
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+  // Collapsed by default, so opening it is the first fetch — and the one that
+  // fails.
+  await rail.locator("summary").filter({ hasText: "Set" }).click();
+
+  await expect(rail.getByTestId("set-error")).toBeVisible();
+  // The whole point: a failure must not masquerade as a verdict on the catalog.
+  await expect(rail.getByTestId("set-empty")).toHaveCount(0);
+  // Positive control for that count — the picker itself rendered, so the absence
+  // above is a real absence and not a missing subtree.
+  await expect(rail.locator(SET_SEARCH)).toBeVisible();
+
+  // And the way out works: nothing in the search box is wrong to fix, and
+  // nothing retries on its own.
+  broken = false;
+  await rail.getByTestId("set-retry").click();
+  await expect(rail.locator("[data-testid=set-option]").first()).toBeVisible();
+  await expect(rail.getByTestId("set-error")).toHaveCount(0);
+});
+
+test("the set list never flashes an empty verdict before it loads @fast", async ({
+  page,
+  request,
+}) => {
+  // Request-level pin: on a bare /catalog the section is collapsed and the list
+  // has not been asked for, so the SSR'd markup must not already contain an
+  // answer. It did — `set-empty` shipped in the HTML with no loading state at
+  // all, which made "No set matches." the first thing anyone ever saw here.
+  const html = await (await request.get("/catalog")).text();
+  expect(html).toContain(">Set<"); // positive control: the facet is on the page
+  expect(html).toContain('data-testid="set-loading"');
+  expect(html).not.toContain('data-testid="set-empty"');
+
+  // ...and in the browser. The response is held open so the window under
+  // assertion is deterministic rather than a race with a ~95 ms local round trip
+  // (a cold Neon hop is materially worse, which is the case that bites).
+  await page.route("**/api/list_sets*", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await route.continue();
+  });
+  await page.goto("/catalog");
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+  // Hidden inside the closed disclosure until here, which is why the SSR'd
+  // loading state costs the user nothing.
+  await expect(rail.getByTestId("set-loading")).toBeHidden();
+
+  await rail.locator("summary").filter({ hasText: "Set" }).click();
+  await expect(rail.getByTestId("set-loading")).toBeVisible();
+  await expect(rail.getByTestId("set-empty")).toHaveCount(0);
+
+  // The rows arriving are the positive control that this was a delay and not a
+  // failure — otherwise the two assertions above would also pass on a picker
+  // that never loaded anything at all.
+  await expect(rail.locator("[data-testid=set-option]").first()).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(rail.getByTestId("set-loading")).toHaveCount(0);
+  await expect(rail.getByTestId("set-error")).toHaveCount(0);
+});
+
 /// A real first-page cursor for `q`, from the hosted JSON route at `limit=1` —
 /// the page always asks for 50, so a small page is the only way to get a cursor
 /// out of a small result set.

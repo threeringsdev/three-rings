@@ -21,7 +21,7 @@
 //! The pure half (everything above the components) is unit-tested; the widgets
 //! are thin over it.
 
-use leptos::either::Either;
+use leptos::either::EitherOf4;
 use leptos::prelude::*;
 use leptos_router::hooks::{use_navigate, use_query_map};
 use leptos_router::NavigateOptions;
@@ -840,6 +840,17 @@ fn RailFacet(
 /// The Set facet's disclosure default (wireframe: collapsed).
 const SET_SECTION_DEFAULT_OPEN: bool = false;
 
+/// "The list isn't here yet" — the one rendering shared by the `Transition`'s
+/// fallback and the not-yet-fetched arm, so the two cannot say different things
+/// about the same situation.
+fn set_list_loading() -> impl IntoView {
+    view! {
+        <p class="text-muted-foreground p-2 text-xs" data-testid="set-loading">
+            "Loading sets…"
+        </p>
+    }
+}
+
 /// Add or remove one code from the Set selection, keeping the order the query
 /// text already had.
 ///
@@ -897,13 +908,26 @@ fn SetPicker(#[prop(into)] id: String, codes: Signal<Vec<String>>) -> impl IntoV
     ));
     let search = RwSignal::new(String::new());
 
+    // Bumped by the error arm's retry — a source-signal change is what makes the
+    // resource fetch again for an unchanged query.
+    let attempt = RwSignal::new(0u32);
+
+    // **`Option<Result<…>>`, and both layers carry weight.** A bare
+    // `Vec<SetSummary>` cannot tell *not fetched yet* from *fetched and empty*
+    // from *the fetch failed*, and collapsing any of those into an empty vector
+    // renders a confident "No set matches." — a false claim about a catalog that
+    // holds ~1050 sets — over a question that was never asked or never answered.
+    // `None` is the collapsed section (see the note above on why it doesn't
+    // fetch); `Some(Err)` is a real failure, which on the native backend is the
+    // *ordinary* case for an offline phone (`ApiError::Upstream`, kept distinct
+    // from an auth error precisely so callers can tell them apart).
     let sets = Resource::new(
-        move || (expanded.get(), search.get()),
-        |(expanded, q)| async move {
+        move || (expanded.get(), search.get(), attempt.get()),
+        |(expanded, q, _)| async move {
             if !expanded {
-                return Ok(Vec::new());
+                return None;
             }
-            crate::list_sets(q).await
+            Some(crate::list_sets(q).await)
         },
     );
 
@@ -999,37 +1023,79 @@ fn SetPicker(#[prop(into)] id: String, codes: Signal<Vec<String>>) -> impl IntoV
                         />
                     </div>
                     <CommandList class="max-h-56 p-1">
-                        <Transition fallback=|| {
-                            view! {
-                                <p class="text-muted-foreground p-2 text-xs">"Loading sets…"</p>
-                            }
-                        }>
+                        // `Transition`, not `Suspense`: re-keying on each
+                        // debounced keystroke must not strobe the list away and
+                        // back. The cost is that its fallback only ever runs when
+                        // *nothing* has resolved yet, which is why the
+                        // not-fetched arm below renders the same line rather than
+                        // leaning on this one.
+                        <Transition fallback=set_list_loading>
                             {move || Suspend::new(async move {
-                                let rows = sets.await.unwrap_or_default();
-                                // The list is server-filtered, so `CommandEmpty`
-                                // (which infers emptiness from the item registry)
-                                // has nothing to infer from — the row count is
-                                // known right here instead.
-                                if rows.is_empty() {
-                                    Either::Left(
-                                        view! {
-                                            <p
-                                                class="text-muted-foreground p-2 text-xs"
-                                                data-testid="set-empty"
-                                            >
-                                                "No set matches."
-                                            </p>
-                                        },
-                                    )
-                                } else {
-                                    Either::Right(
-                                        rows
-                                            .into_iter()
-                                            .map(|set| {
-                                                view! { <SetOption set codes requested /> }
-                                            })
-                                            .collect_view(),
-                                    )
+                                match sets.await {
+                                    // Not fetched: the section is collapsed, so
+                                    // this is invisible — except in the one
+                                    // moment that matters. Opening the section
+                                    // re-keys the resource, and a `Transition`
+                                    // holds the previous children while the new
+                                    // value loads, so *these* are what shows for
+                                    // the length of that first round trip. It has
+                                    // to read as "loading", never as an answer:
+                                    // an empty state here was the first thing
+                                    // anyone ever saw in this facet.
+                                    None => EitherOf4::A(set_list_loading()),
+                                    Some(Err(e)) => {
+                                        let (_, message) = crate::catalog::describe_error(&e);
+                                        // A dead end otherwise: there is nothing
+                                        // in the search box to fix, and nothing
+                                        // retries on its own. Same rule the
+                                        // paging task recorded for its own error
+                                        // and empty arms — both offer a way out.
+                                        EitherOf4::B(
+                                            view! {
+                                                <div class="space-y-1.5 p-2" data-testid="set-error">
+                                                    <p role="alert" class="text-destructive text-xs">
+                                                        {format!("Couldn't load the set list: {message}")}
+                                                    </p>
+                                                    <button
+                                                        type="button"
+                                                        class="text-muted-foreground hover:text-foreground text-xs underline"
+                                                        data-testid="set-retry"
+                                                        on:click=move |_| attempt.update(|n| *n += 1)
+                                                    >
+                                                        "Try again"
+                                                    </button>
+                                                </div>
+                                            },
+                                        )
+                                    }
+                                    // Genuinely nothing matched — the only one of
+                                    // the four that is a claim about the catalog.
+                                    // The list is server-filtered, so
+                                    // `CommandEmpty` (which infers emptiness from
+                                    // the item registry) has nothing to infer
+                                    // from; the row count is known right here.
+                                    Some(Ok(rows)) if rows.is_empty() => {
+                                        EitherOf4::C(
+                                            view! {
+                                                <p
+                                                    class="text-muted-foreground p-2 text-xs"
+                                                    data-testid="set-empty"
+                                                >
+                                                    "No set matches."
+                                                </p>
+                                            },
+                                        )
+                                    }
+                                    Some(Ok(rows)) => {
+                                        EitherOf4::D(
+                                            rows
+                                                .into_iter()
+                                                .map(|set| {
+                                                    view! { <SetOption set codes requested /> }
+                                                })
+                                                .collect_view(),
+                                        )
+                                    }
                                 }
                             })}
                         </Transition>
