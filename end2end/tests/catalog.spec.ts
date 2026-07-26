@@ -292,7 +292,7 @@ test.describe("authed", () => {
 // ---------------------------------------------------------------------------
 
 type Results = {
-  cards: { oracle_id: string; name: string }[];
+  cards: { oracle_id: string; name: string; owned: number | null }[];
   next_cursor: string | null;
 };
 
@@ -498,4 +498,123 @@ test("a corrupt cursor renders an error with a way back @fast", async ({
   await expect(page.getByTestId("results-grid")).toContainText(
     "Lightning Bolt",
   );
+});
+
+// ---------------------------------------------------------------------------
+// The "N owned" badge — authed only. `CardSummary::owned` is data-model's
+// global per-user, per-oracle count (specs/collection-api.md read models), and
+// `null` on the wire means *unknown*, which is a different claim from 0.
+//
+// The regression this locks is a silent one: catalog search never filled the
+// column, so the badge was unreachable and a signed-in catalog rendered
+// identically to an anonymous one. An authed-only assertion would not have
+// caught that — both halves are asserted here, against the same cards.
+//
+// `t:creature` is the seed's own picking query (app/src/seed.rs), so its first
+// page is where the fixture's holdings are; counts are read from the API rather
+// than hardcoded, because re-seeding moves them.
+// ---------------------------------------------------------------------------
+
+const OWNED_QUERY = "t:creature";
+
+/// The owned badge on one card's tile, located through the oracle id its link
+/// carries (the grid has no per-tile id of its own).
+const ownedBadgeFor = (
+  page: import("@playwright/test").Page,
+  oracleId: string,
+) =>
+  page
+    .locator("[data-testid=results-grid] li")
+    .filter({ has: page.locator(`a[href="/cards/${oracleId}"]`) })
+    .getByTestId("owned-badge");
+
+test("an anonymous catalog reports owned as unknown and badges nothing @fast", async ({
+  page,
+  request,
+}) => {
+  const anon = await search(request, { q: OWNED_QUERY, limit: 15 });
+  expect(anon.cards.length).toBeGreaterThan(0);
+  // Strictly `null`, not falsy: a projection that defaulted the column to 0
+  // would render the same badge-free page as this one, so only the wire value
+  // distinguishes "unknown" from "you hold none of these".
+  for (const c of anon.cards) {
+    expect(
+      c.owned,
+      `owned for ${c.name} must be null when anonymous`,
+    ).toBeNull();
+  }
+
+  await page.goto(`/catalog?q=${encodeURIComponent(OWNED_QUERY)}`);
+  await hydrated(page);
+  await expect(page.getByTestId("results-grid")).toBeVisible();
+  await expect(page.getByTestId("owned-badge")).toHaveCount(0);
+});
+
+test.describe("authed", () => {
+  test.use({ storageState: AUTH_STATE });
+
+  test("the tile badges your own copies, and agrees with the card page @fast", async ({
+    page,
+  }) => {
+    // `page.request` shares the page context's cookies, so this is the same
+    // session the render below uses — not a second, anonymous one.
+    const mine = await search(page.request, { q: OWNED_QUERY, limit: 15 });
+    for (const c of mine.cards) {
+      expect(
+        c.owned,
+        `owned for ${c.name} must be filled when authed`,
+      ).not.toBeNull();
+    }
+
+    // Fixture check, not a behavior check: if the seed gave every card the same
+    // count, "the badge shows the right number" would be unfalsifiable.
+    const distinct = new Set(
+      mine.cards.map((c) => c.owned).filter((n) => n! > 0),
+    );
+    expect(
+      distinct.size,
+      "seeded owned counts are all identical — re-run scripts/seed-dev-data.sh",
+    ).toBeGreaterThan(1);
+
+    const top = mine.cards.reduce((a, b) => (b.owned! > a.owned! ? b : a));
+    expect(top.owned!).toBeGreaterThan(0);
+    const none = mine.cards.find((c) => c.owned === 0);
+    expect(
+      none,
+      "no authed-but-unowned card here — the 0-vs-null distinction goes untested",
+    ).toBeTruthy();
+
+    // SSR, before any JS: the number is server-rendered, not filled in after
+    // hydration by a second request.
+    const url = `/catalog?q=${encodeURIComponent(OWNED_QUERY)}`;
+    const html = await (await page.request.get(url)).text();
+    expect(html).toContain('data-testid="owned-badge"');
+    expect(html).toContain(`${top.owned} owned`);
+
+    await page.goto(url);
+    await hydrated(page);
+    await expect(ownedBadgeFor(page, top.oracle_id)).toHaveText(
+      `${top.owned} owned`,
+    );
+    // `Some(0)` is a real answer and still no badge — "0 owned" would be noise
+    // on every card you don't have.
+    await expect(ownedBadgeFor(page, none!.oracle_id)).toHaveCount(0);
+
+    // The list view projects the same column and must not have been forgotten.
+    await page.goto(`${url}&view=list`);
+    await hydrated(page);
+    await expect(
+      page.getByTestId("results-list").getByTestId("owned-badge").first(),
+    ).toBeVisible();
+
+    // The number itself, pinned to an independently-computed one: the detail
+    // page's total is summed from the per-collection *ownership* rows (a
+    // different query from the `owned_by_card` read behind the badge), so a
+    // wrong-but-plausible count in either place fails here.
+    await page.goto(`/cards/${top.oracle_id}`);
+    await hydrated(page);
+    await expect(page.getByTestId("your-copies")).toContainText(
+      `Your copies · ${top.owned}`,
+    );
+  });
 });

@@ -199,6 +199,11 @@ pub trait CatalogStore {
     /// (specs/collection-api.md): the query→SQL translation is
     /// [catalog-search](../../specs/catalog-search.md)'s — until it lands, `q`
     /// does a fuzzy name match. Empty until catalog-ingestion populates the rows.
+    ///
+    /// Each row's `owned` follows the same authed-only rule as
+    /// [`card_summary`](Self::card_summary) — the caller's global count when the
+    /// backend carries a session, `None` (unknown, *not* zero) when anonymous.
+    /// Ownership never affects *which* cards a search returns or how it pages.
     async fn search(&self, query: SearchQuery, page: Page) -> ApiResult<SearchResults>;
 }
 
