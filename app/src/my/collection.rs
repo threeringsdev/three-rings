@@ -709,9 +709,11 @@ fn CollectionPath(
                 // Mobile drill-down: back walks *up the tree* (the IA's My-cards
                 // tab is a drill-down, not a history stack), so the target is
                 // the parent crumb — `/my` at the top level, where the tree's
-                // roots sit.
+                // roots sit. Its label is the *screen* you land on, and below
+                // `md` that screen is now the root list titled "My cards", not
+                // the All-cards table (which moved to `/my/all` for touch).
                 let (back_href, back_label) = match crumbs.len() {
-                    0 | 1 => ("/my".to_string(), "All cards".to_string()),
+                    0 | 1 => ("/my".to_string(), "My cards".to_string()),
                     n => {
                         let parent = &crumbs[n - 2];
                         (format!("/my/collections/{}", parent.id), parent.name.clone())

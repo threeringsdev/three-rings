@@ -23,6 +23,7 @@ rather than folklore:
 | `npm run probe:android-rail` | the filter sheet on the real Android webview — badge, facet click, scroll lock, and the Set picker's search + multi-select pick (the rail is only a sheet at phone width) |
 | `npm run probe:android-needs` | `/my/collections/:id/needs` + `/my/shopping` route guards through the redirect shim, and the pick list's checkbox tap, on the real Android webview |
 | `npm run probe:android-palette` | the ⌘K desktop gate reads `false` at phone width on the real Android webview, with `CommandDialog` itself proven working there (the negative check's positive control) |
+| `npm run probe:android-my-root` | the My-cards root drill-down list on the real Android webview — the frame's row shape, 44 px touch targets and no sideways scroll on the real engine, and a real `Input.dispatchTouchEvent` tap on a row navigating to its `href` (via the bench; `/my` is authed and unreachable through the dev proxy), plus the anonymous `/my` guard bounce through the redirect shim |
 | `npm run probe:android-tree-move` | the tree's touch path on the real Android webview — a real tap on an `⋯`-shaped trigger opens the shared `context_menu` and a real tap on an item runs it, via the bench (the tree itself is authed); also measures whether a real long-press yields `contextmenu` (it does not) and that the rail drawer stays off screen at phone width |
 
 **A probe covers what the browser tier structurally cannot.** `probe:paging`

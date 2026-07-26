@@ -209,6 +209,18 @@ pub fn AppShell() -> impl IntoView {
                 // "Mobile — Catalog filter sheet") — and a second way in would
                 // be two controls opening two copies of the same filters. The
                 // tree has no such sheet, which is the gap this fills.
+                //
+                // **Its justification is now narrower than when it was added.**
+                // `/my` below `md` is the wireframe's drill-down root list
+                // (`crate::my::root`), so *navigating* the tree no longer needs
+                // this drawer. What still does is everything the list has no
+                // affordance for: the tree's create / rename / **move** /
+                // delete menu (which hangs off a row's `⋯`), and jumping
+                // straight to a nested collection without walking down to it.
+                // Removing the drawer would take those off touch entirely —
+                // the exact defect the tree-move task fixed — so it stays until
+                // a wireframe specifies a touch path to tree management. Filed
+                // as a follow-up rather than invented here.
                 <Show when=move || my_mode.get()>
                     <button
                         type="button"

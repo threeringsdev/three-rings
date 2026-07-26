@@ -128,6 +128,16 @@ pub fn App() -> impl IntoView {
             />
             <ParentRoute path=StaticSegment("my") view=shell::RequireAuth>
                 <Route path=StaticSegment("") view=my::all_cards::AllCardsPage ssr=SsrMode::Async />
+                // The All-cards table on its own route. `/my` is a drill-down
+                // list of collections below `md` (wireframes → "Mobile — My
+                // cards root"), so the table needs a URL a phone can reach;
+                // desktop `/my` still renders it, and every existing link and
+                // `?q=`/`?cursor=` deep link there is untouched.
+                <Route
+                    path=StaticSegment("all")
+                    view=my::all_cards::AllCardsTablePage
+                    ssr=SsrMode::Async
+                />
                 <Route
                     path=(StaticSegment("collections"), ParamSegment("id"))
                     view=my::collection::CollectionPage

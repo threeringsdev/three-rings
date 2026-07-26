@@ -701,7 +701,8 @@ test("the back link targets the parent collection @fast", async ({
   );
   await expect(back).toContainText(shoebox.summary.name);
 
-  // A top-level collection goes up to All cards instead.
+  // A top-level collection goes up to the root screen instead — `/my`, which
+  // below `md` is the My-cards drill-down list (app/src/my/root.rs).
   await page.goto(`/my/collections/${shoebox.summary.id}`);
   await hydrated(page);
   await expect(page.locator('[data-testid="collection-back"]')).toHaveAttribute(

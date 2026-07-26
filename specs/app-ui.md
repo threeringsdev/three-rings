@@ -219,6 +219,111 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Mobile `/my` root — the wireframe's collection drill-down (2026-07-26)
+
+`app/src/my/root.rs`. `root_rows(&AssembledTree, all_cards_href) -> Vec<RootRow>` is the
+whole projection and is pure, running over the **same** `AssembledTree` the desktop rail
+renders — same shell-level fetch, same Inbox pin from `assemble`, same sibling order, same
+rolled-up counts — so the list and the rail structurally cannot disagree. New route
+`/my/all` (`AllCardsTablePage`) gives the aggregate table a URL a phone can reach.
+
+**`/my` emits both markups and CSS picks; the width is never resolved in code.** List below
+`md`, table at `md`+. This is forced, not preferred: desktop `/my` must keep the table, the
+frame requires the list at 390 px, and **SSR cannot know viewport width** — resolving a
+media query in Rust would make the server's markup disagree with what hydrates. So the
+absence of a hydration mismatch is *by construction*, not by care, and the new `PROBE_WIDTH`
+env on `hydration-check-authed.mjs` makes it checkable rather than argued (`/my` is the
+first page whose layout switches on a media query, and the probe could not see phone width
+at all before). Review confirmed independently that nothing in the diff resolves a width in
+Rust or JS, and that the two subtrees' `data-testid`/`id` sets are disjoint.
+
+**The review's one major was a regression this task introduced, and it is worth
+remembering as a shape rather than an incident:** a CSS-hidden fallback is not a fallback.
+When `collection_tree()` errored on a phone, `MyRootNav` rendered "Couldn't load
+collections." and the All-cards table beside it was `display:none`, so the document
+contained **no link to `/my/all`, none to `/my/shopping`, and none to any collection** — the
+rail drawer reads the same failed resource and the bottom tab points back to `/my`, so
+My-cards mode was a dead end on touch. Before the CSS switch the same backend failure
+degraded gracefully, because the table's read is independent of the tree read. Fixed with
+`fallback_rows(all_cards_href)`: the two rows that never needed the tree read, built through
+the *same* `all_cards_row`/`shopping_row` helpers as the happy path so the two cannot
+describe different rows, rendered after an `role="alert"` line that blames the collections
+rather than the page. `RootRow::count` became `Option<i64>` and the fallback carries `None`
+— both totals come from the read that just failed, and a `0` would be a number the app
+cannot vouch for; an absent count **omits its cell** so a test cannot read a missing number
+as a rendered one.
+
+**`page.route` cannot induce a server-resolved resource failure, and a test that tries is
+vacuous.** `/my` is `SsrMode::Async`, so the tree resource resolves in-process and is
+serialized into the HTML — a `goto('/my')` makes **zero** browser requests beyond the
+document, measured. The working mechanism: `AppShell` (which calls
+`provide_collection_tree`) is not mounted on `/dev/components`, so an **SPA navigation**
+from there into the shell fetches `/api/collection_tree` over the wire, giving exactly the
+tree-Err/all_cards-Ok state. The test asserts the interception actually happened
+(`treeReads > 0`) so it cannot pass by not inducing anything. It failed before the fix with
+`element(s) not found` — not "hidden", *absent* — and passes after. Independently
+corroborated mid-run when the e2e `tr_jwt` expired and produced the real failure
+server-side: an SSR curl showed the error line plus exactly two rows, `/my/all` and
+`/my/shopping`, with `counts: 0`.
+
+**One forwarded finding was disputed and the dispute upheld.** `h1:visible` was said to
+have lost the strict-mode catch for a second visible heading; mutating `MyRootNav` to drop
+`md:hidden` showed the *existing* assertion already caught it
+(`strict mode violation: locator('h1:visible') resolved to 2 elements`), because
+`toHaveText(string)` requires a single match. The added `toHaveCount(1)` is therefore
+redundant with current behavior — kept for explicitness and to survive a later switch to
+`.first()`, but it closed no real gap.
+
+**A pre-existing, unasserted 3 px overflow was found and fixed.** With Type and Mana
+dropped, the All-cards table's intrinsic width was 359 px against a 356 px wrapper at
+390×844, because WANTED and OWNED are sized by their own header words. It was a
+*wrapper-local* scroll — invisible to a document-level assertion, the same trap recorded at
+line 1198 — present since `/my` shipped, and unhit only because the table was desktop-only
+in practice; `/my/all` makes it a phone surface. Fixed with `px-1 sm:px-2`, measured 356/356.
+**The first cut of this task reproduced the same class of bug**: `Separator` is `w-full`, so
+`class="mx-2.5"` made every divider 20 px wider than its container and gave `/my` 2 px of
+document scroll. The frame's own `M Divider Wrap` — a padded wrapper around a fill-container
+rule — is the correct shape and is what shipped. **Rule: never put `mx-*` on `Separator`.**
+
+**The frame's `Binders`/`Decks` rows are ordinary user collections, not synthetic groups.**
+They read like categories, but `design/information-architecture.md:21-34` has them as
+top-level binders holding `Trade`/`Bulk` and `Grixis`. Building groups would have invented a
+data model; a unit test now asserts each carries a real collection id and a
+`/my/collections/{id}` href.
+
+**The rail drawer stays, unchanged.** The list replaced its *navigation* job, not its
+*management* job — create/rename/move/delete hang off a tree row's `⋯` button and no frame
+specifies a touch path for them, so removing or gating the drawer would take all four off
+touch, the exact defect the tree-move task fixed. `TreeDialogs` remains at the shell. Two
+overlapping navigations below `md` is a smell this task did not resolve; a `⋯` on the list
+rows was *not* invented, because the frame's row is icon/label/count/chevron and the
+repo's precedent is not to invent unspecified UI.
+
+Deviations from the frame, all deliberate: the 30 px avatar is omitted (the shell top bar
+already carries the account avatar one row above at every width — two would be wrong);
+**emoji stand in for lucide** because no icon set is vendored, and 🗂/📁 render
+near-identically so the aggregate-vs-collection distinction leans on font weight plus the
+divider (filed — a real icon set is the durable fix); row metrics are `min-h-11` + `px-2.5`
+rather than the frame's literal 13/10 px paddings, because the requirement is the 44 px
+touch target (measured 47.4 px on the real webview); Selection Tray and Tab Bar were not
+rebuilt (existing shell chrome already renders there); and no search field was added
+because the frame has none. Three pre-existing specs were adjusted, all legitimately —
+notably `selection-tray.spec.ts`'s one mobile test had to move to `/my/all` because
+`openMy`'s `waitFor()` defaults to `state: "visible"` and the checkboxes now sit in a
+`display:none` subtree at phone width.
+
+Review: **one major** (above) and **thirteen minors**, filed. Verified: gate **8/8** on
+macOS incl. `three_rings` — with the workspace clippy step's cargo **fingerprint cache hit**
+called out and re-run against a scratch target dir to force a genuine from-scratch check
+(467 lines, `Checking app`, exit 0), and `three_rings` confirmed genuinely lint-checked via
+`--message-format=json` rather than inferred from an absent `Checking` line. Full chromium
+tier **210/210** at `--workers=1` (6.6 min), workspace tests 239, hydration CLEAN at default
+width and at `PROBE_WIDTH=390`, bench CLEAN, authed SSR curls on `/my` (one `my-root-list`,
+8 rows, *and* the hidden `all-cards-table` with 50 rows, two `<h1>`s) and `/my/all` (50
+rows, **zero** `my-root-list`), `probe:android-my-root` PASS driving a real
+`Input.dispatchTouchEvent` tap that drills in, with the overflow check **kill-verified**
+(requiring `TableWrapper` on `/my` correctly reports it was never measured).
+
 ### Tree move — a keyboard and touch path (2026-07-26)
 
 `Move to…` as a fourth action in the tree's context menu (`app/src/my/tree_manage.rs`):

@@ -6,6 +6,12 @@
 // storageState (run the suite once first, or `npx playwright test --project=setup`).
 //
 // Usage: node hydration-check-authed.mjs <url…>
+//
+// `PROBE_WIDTH=390 node hydration-check-authed.mjs <url…>` probes at phone
+// width. `/my` is the first page whose *layout* switches on a media query (the
+// mobile root list vs. the All-cards table, app/src/my/root.rs): both are in the
+// one SSR'd markup and CSS picks, so a mismatch cannot be width-specific in
+// principle — this makes that checkable rather than argued.
 import { chromium } from "playwright";
 import fs from "node:fs";
 import path from "node:path";
@@ -25,9 +31,12 @@ if (!urls.length) {
 }
 
 const browser = await chromium.launch();
+const width = Number(process.env.PROBE_WIDTH || 0);
 const ctx = await browser.newContext({
   storageState: JSON.parse(fs.readFileSync(stateFile, "utf8")),
+  ...(width ? { viewport: { width, height: 844 } } : {}),
 });
+if (width) console.log(`viewport: ${width}×844`);
 let dirty = 0;
 for (const url of urls) {
   const page = await ctx.newPage();

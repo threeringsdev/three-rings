@@ -217,6 +217,11 @@ fn TreeBody(t: AssembledTree, pathname: Memo<String>) -> impl IntoView {
         >
             <PinnedRow
                 href="/my"
+                // The same view has a second route — the phone's drill-down
+                // target (`crate::my::root::ALL_CARDS_PATH`) — and the rail is
+                // on screen there too at `md` and up. Without the alias the
+                // sidebar would highlight nothing on it.
+                also=super::root::ALL_CARDS_PATH
                 icon="🗂"
                 label="All cards"
                 count=t.total_present
@@ -244,9 +249,14 @@ fn TreeBody(t: AssembledTree, pathname: Memo<String>) -> impl IntoView {
 
 /// A pinned system row (All cards / Shopping list) — an `Item` link with the
 /// wireframe's icon and a count badge.
+///
+/// `also` is a second path the row is current *on* but does not link *to* —
+/// still exact matching, not a prefix, because `/my` prefixes every collection
+/// route.
 #[component]
 fn PinnedRow(
     href: &'static str,
+    #[prop(optional)] also: Option<&'static str>,
     icon: &'static str,
     label: &'static str,
     count: i64,
@@ -258,7 +268,10 @@ fn PinnedRow(
             size=ItemSize::Xs
             class="aria-[current=page]:bg-accent aria-[current=page]:text-accent-foreground w-full"
             {..}
-            aria-current=move || (pathname.get() == href).then_some("page")
+            aria-current=move || {
+                let p = pathname.get();
+                (p == href || also == Some(p.as_str())).then_some("page")
+            }
         >
             <span aria-hidden="true">{icon}</span>
             <span class="min-w-0 flex-1 truncate font-medium">{label}</span>
