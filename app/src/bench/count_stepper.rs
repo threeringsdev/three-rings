@@ -1,6 +1,7 @@
 //! Bench section for the custom `CountStepper` gap component: the happy path
-//! (hover-reveal ± / click-to-type / commit-on-blur / undo toast) and a
-//! failing-save row demonstrating the caller-revert contract.
+//! (hover-reveal ± / click-to-type / commit-on-blur / undo toast), a
+//! failing-save row demonstrating the caller-revert contract, and a
+//! caller-reported row where a committed 0 is the caller's to announce and undo.
 
 use leptos::prelude::*;
 
@@ -50,6 +51,31 @@ fn StepperRows() -> impl IntoView {
         );
     });
 
+    // Caller-reported removal: a committed 0 deletes the thing being counted,
+    // so its undo is a *different operation* and the stepper must not promise
+    // its own. `caller_reports` hands those commits over whole — no toast from
+    // the component — and this row raises the one message that is true, with an
+    // Undo that restores the count the way the caller means to.
+    let removable = RwSignal::new(2);
+    let removed = RwSignal::new(false);
+    let on_removable = Callback::new(move |c: StepperCommit| {
+        if c.to > 0 {
+            return;
+        }
+        removed.set(true);
+        toast.show(
+            ToastOptions::message(format!("Removed Counterspell ({} copies)", c.from))
+                .kind(ToastKind::Success)
+                .action(
+                    "Undo",
+                    Callback::new(move |()| {
+                        removable.set(c.from);
+                        removed.set(false);
+                    }),
+                ),
+        );
+    });
+
     view! {
         <div class="flex flex-col gap-4">
             <div id="bench-stepper-basic" class="flex items-center gap-4">
@@ -65,6 +91,29 @@ fn StepperRows() -> impl IntoView {
             <div id="bench-stepper-failing" class="flex items-center gap-4">
                 <span class="w-40 text-sm">"Failing save"</span>
                 <CountStepper value=failing label="Failing save" on_commit=on_failing />
+            </div>
+            <div id="bench-stepper-removable" class="flex items-center gap-4">
+                <span class="w-40 text-sm">"Counterspell"</span>
+                <Show
+                    when=move || !removed.get()
+                    fallback=move || {
+                        view! {
+                            <span
+                                class="text-muted-foreground text-sm"
+                                data-testid="bench-stepper-removed"
+                            >
+                                "removed"
+                            </span>
+                        }
+                    }
+                >
+                    <CountStepper
+                        value=removable
+                        label="Counterspell"
+                        on_commit=on_removable
+                        caller_reports=Callback::new(|c: StepperCommit| c.to == 0)
+                    />
+                </Show>
             </div>
         </div>
     }

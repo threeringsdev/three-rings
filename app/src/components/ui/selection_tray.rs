@@ -62,8 +62,9 @@ pub enum SelectionKey {
     /// A `/my/collections/:id` card row: copies of one printing, on one board,
     /// held in one collection. Board is carried because two rows of the same
     /// printing in the same deck (main vs sideboard) are two rows on screen and
-    /// must be two checkboxes — even though `move_cards`/`holding_take` are
-    /// currently hardcoded to `board = 'main'` and cannot yet honor it.
+    /// must be two checkboxes. It rode here for one task before the write could
+    /// honor it; `move_cards`/`holding_take` are board-addressed now, so the key
+    /// and the write finally agree.
     Held {
         collection_id: Id,
         printing_id: Id,
@@ -383,8 +384,8 @@ mod tests {
     #[test]
     fn board_is_part_of_the_key() {
         // Two rows of the same printing in the same deck (main vs sideboard)
-        // are two rows on screen, so they must be two selections — even though
-        // the move that will consume them is board-blind today.
+        // are two rows on screen, so they must be two selections — and the move
+        // that consumes them now takes the board from the key it was given.
         let main = SelectionKey::Held {
             collection_id: id(1),
             printing_id: id(2),

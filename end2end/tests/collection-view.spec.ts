@@ -1001,15 +1001,20 @@ test("the stepper edits HERE in place, and the header follows it @fast", async (
   }
 });
 
-test("the stepper will not commit a count of zero @fast", async ({
+test("the stepper's last copy is removable, not floored @fast", async ({
   page,
   request,
 }) => {
-  // The floor is 1, and this is why. `set_holding_quantity(id, 0)` DELETES the
-  // holdings row, and the undo the stepper always offers re-POSTs the same,
-  // now-deleted id — 404, error toast, copies gone. A success toast with a
-  // dead Undo is worse than no zero at all, so `min=1` makes the destructive
-  // commit unreachable until the move flows can make it undoable.
+  // This test used to assert the opposite. The floor was `min = 1` because a
+  // committed 0 ran `DELETE FROM holdings` while the undo the stepper always
+  // offers re-POSTed the dead id — a success toast over vanished copies. It
+  // made the destructive commit unreachable, and with no per-row move
+  // affordance shipped it made a binder card **impossible to remove**.
+  //
+  // A committed 0 is now a move with no destination, so what this call site has
+  // to keep proving is that the floor did not creep back: at one copy the `−`
+  // is live and announced enabled. What the removal *does* — and that its Undo
+  // restores the same grain and board — is `removal.spec.ts`.
   const card = await somePrinting(request);
   const scratch = await createCollection(request, "binder", scratchName("floor"));
   try {
@@ -1019,32 +1024,23 @@ test("the stepper will not commit a count of zero @fast", async ({
 
     const tr = rowFor(page, card.oracle_id);
     const dec = tr.locator('[data-testid="count-stepper-dec"]');
-    await expect(dec).toHaveAttribute("aria-disabled", "true");
+    await expect(dec).toHaveAttribute("aria-disabled", "false");
+    await expect(
+      tr.locator('[data-testid="count-stepper-value"]'),
+    ).toHaveAttribute("aria-valuemin", "0");
 
-    // `force`, because Playwright's own actionability check refuses to click an
-    // `aria-disabled="true"` control — which is itself the assertion that the
-    // floor is announced, not merely enforced. Forcing it dispatches a real
-    // click anyway, so the "and it does nothing" half below is genuine.
-    await dec.click({ force: true });
+    // A plain click, not `force`: an `aria-disabled` control would fail
+    // Playwright's actionability check, which is what makes this an assertion
+    // rather than a hope.
+    await dec.click();
     await page.locator('[data-testid="collection-title"]').click();
-    await expect(tr.locator('[data-testid="count-stepper-value"]')).toHaveText(
-      "1",
-    );
-    // …and no commit happened, so no toast offered an Undo that could not work.
-    await expect(page.locator('[data-name="Toast"]')).toHaveCount(0);
 
-    // …nor by typing a zero into it, which clamps.
-    await tr.locator('[data-testid="count-stepper-value"]').click();
-    const field = tr.locator('[data-testid="count-stepper-input"]');
-    await field.fill("0");
-    await field.press("Enter");
-    await expect(tr.locator('[data-testid="count-stepper-value"]')).toHaveText(
-      "1",
-    );
-
-    const after = await viewOf(request, scratch);
-    expect(after.cards.length, "the holding must still exist").toBe(1);
-    expect(after.cards[0].present).toBe(1);
+    await expect(
+      page.locator('[data-name="Toast"]', { hasText: "Removed" }),
+    ).toBeVisible();
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards).toEqual([]);
+    }).toPass({ timeout: 10_000 });
   } finally {
     await deleteCollection(request, scratch);
   }

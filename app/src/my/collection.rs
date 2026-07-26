@@ -31,10 +31,14 @@
 //! a delta that belongs to the rendered payload and is zeroed by the next one,
 //! never by the URL (see [`CollectionPage`]).
 //!
-//! **The stepper's floor here is 1, not the component's 0.** A committed 0 is a
-//! deletion, and the deletion is not undoable through this write path — the
-//! reasoning is at the `CountStepper` call site, and removing the last copy
-//! belongs to the move flows.
+//! **A committed 0 removes the card, and it is undoable.** It is a *move with no
+//! destination* (`remove_holding` → `move_holding(to = None)`), not a delete: the
+//! server reads the grain and the board off the named holding inside the write
+//! transaction and appends a ledger row, so Undo returns those copies to that
+//! board. The stepper's own toast is suppressed for that commit
+//! (`caller_reports`) because its undo is "re-commit the old count", which posts
+//! a dead id. The floor was 1 for two tasks to make the destructive commit
+//! unreachable; the cost was a binder card that could not be removed at all.
 //!
 //! **A deck is the same page with three differences** (spec): a header card
 //! for format + commanders, cards grouped by board and type with slot counts,
@@ -1205,9 +1209,99 @@ fn HereCount(
     };
 
     let value = RwSignal::new(present);
+    // The holding is gone and its id is dead — see `remove` below. The stepper
+    // is withdrawn rather than left showing 0, because every further write it
+    // could issue is addressed at a row that no longer exists.
+    let removed = RwSignal::new(false);
     let toast = expect_context::<ToastHandle>();
     let tree = expect_context::<CollectionTreeResource>().0;
+    // Bumping this refetches the page's view (it is one of the resource's
+    // sources), which is how the row gets a *new* `holding_id` after an undo —
+    // reversing a removal re-inserts the holding, so the old id stays dead.
+    let revision = use_context::<crate::my::move_selection::HoldingsRevision>();
+
+    let label = StoredValue::new(name.clone());
+
+    // Reverse the removal through the move ledger — the copies come back at the
+    // grain and on the board they left, which is the whole reason the removal is
+    // a move rather than a delete.
+    let undo_removal = move |move_id: Id, copies: i32| {
+        spawn_local(async move {
+            match crate::undo_move(move_id).await {
+                Ok(()) => {
+                    // `try_*` throughout: a toast outlives its row, so this can
+                    // run after a navigation disposed these signals. The
+                    // refetch below is what actually restores the truth on
+                    // screen; these are the optimistic half.
+                    let _ = here_delta.try_update(|d| *d += copies);
+                    let _ = removed.try_set(false);
+                    let _ = value.try_set(copies);
+                    tree.refetch();
+                    // The row must come back with a *new* `holding_id`: undoing
+                    // a removal re-inserts the holding, so the id this closure
+                    // captured is dead for good.
+                    if let Some(r) = revision {
+                        r.bump();
+                    }
+                }
+                Err(e) => {
+                    toast.show(
+                        ToastOptions::message(format!("Couldn't undo: {}", message_of(&e)))
+                            .kind(ToastKind::Error),
+                    );
+                }
+            }
+        });
+    };
+
+    // A committed 0. The optimistic write has already happened (the stepper
+    // wrote `value`), and the stepper raised nothing — `caller_reports` claimed
+    // this commit — so the message and the undo are both this callback's.
+    let remove = move |copies: i32| {
+        here_delta.update(|d| *d -= copies);
+        removed.set(true);
+        spawn_local(async move {
+            match crate::remove_holding(holding_id).await {
+                Ok(move_id) => {
+                    // The view is deliberately *not* refetched here: it would
+                    // unmount this row and take the Undo below with it. The
+                    // sidebar badges are a different read, so they refresh.
+                    tree.refetch();
+                    let copies_label = if copies == 1 {
+                        "1 copy".to_string()
+                    } else {
+                        format!("{copies} copies")
+                    };
+                    toast.show(
+                        ToastOptions::message(format!(
+                            "Removed {} ({copies_label})",
+                            label.get_value()
+                        ))
+                        .kind(ToastKind::Success)
+                        .action(
+                            "Undo",
+                            Callback::new(move |()| undo_removal(move_id, copies)),
+                        ),
+                    );
+                }
+                Err(e) => {
+                    removed.set(false);
+                    value.set(copies);
+                    here_delta.update(|d| *d += copies);
+                    toast.show(
+                        ToastOptions::message(format!("Couldn't remove: {}", message_of(&e)))
+                            .kind(ToastKind::Error),
+                    );
+                }
+            }
+        });
+    };
+
     let on_commit = Callback::new(move |c: StepperCommit| {
+        if c.to == 0 {
+            remove(c.from);
+            return;
+        }
         // Optimistic on both numbers at once: the stepper already wrote `value`,
         // so the header must move with it or the two disagree on screen.
         here_delta.update(|d| *d += c.to - c.from);
@@ -1232,27 +1326,40 @@ fn HereCount(
     });
 
     view! {
-        // `min = 1`, deliberately, and it is the one place this view diverges
-        // from the stepper's own default.
+        // The floor is the component's own 0 again. It was 1 for two tasks
+        // because a committed 0 ran `DELETE FROM holdings` while the undo the
+        // stepper always offers re-POSTed the dead id — a success toast over
+        // vanished copies. The floor made that unreachable and, with no per-row
+        // move affordance shipped, made a binder card **impossible to remove**.
         //
-        // `CountStepper` documents a committed 0 as "delete the holding row",
-        // and `set_holding_quantity(id, 0)` does exactly that — after which the
-        // undo the stepper *always* offers re-POSTs the now-deleted holding id
-        // and 404s. The user is shown a success toast with an Undo, presses it,
-        // gets "not found: holding", and the copies are gone. Every card in a
-        // binder was one `−` and one blur away from that.
-        //
-        // Making the deletion undoable needs a write addressed by grain rather
-        // than by row id (holdings are recreated by `add_holding`/`move_cards`,
-        // neither of which the row can address: `move_cards` is board-blind and
-        // `CardRow` carries no finish/condition/language). That is a widening of
-        // collection-api's surface, and removing the last copy is a **move**
-        // (`to = None`) in this app's model — the selection-tray + move-flows
-        // task's job, where undo is the ledger's `undone_at` and works. Until
-        // then the floor is 1: the ± button announces `aria-disabled` there and
-        // a typed 0 clamps, so the destructive commit is unreachable rather
-        // than reachable-and-lying.
-        <CountStepper value label=name on_commit min=1 class="justify-end" />
+        // Both halves are fixed rather than fenced off. A committed 0 now goes
+        // through `remove_holding`, a move with no destination, whose ledger row
+        // carries the grain and the board — so the undo is the ledger's
+        // `undone_at` and gives the same copies back. And the stepper no longer
+        // promises that undo itself (`caller_reports`), because it would be the
+        // wrong operation: this callback owns the message and the reversal.
+        <Show
+            when=move || !removed.get()
+            fallback=move || {
+                view! {
+                    <span
+                        class="text-muted-foreground"
+                        data-testid="here-count"
+                        title="removed — Undo from the toast, or reload to see the card gone"
+                    >
+                        "—"
+                    </span>
+                }
+            }
+        >
+            <CountStepper
+                value
+                label=label.get_value()
+                on_commit
+                caller_reports=Callback::new(|c: StepperCommit| c.to == 0)
+                class="justify-end"
+            />
+        </Show>
     }
     .into_any()
 }

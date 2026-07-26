@@ -14,10 +14,10 @@
 use shared::{
     AddHave, AddLine, AddWant, AllCardsView, ApiError, ApiResult, BatchMove, CardDetail,
     CardSummary, CatalogCount, CollectionSummary, CollectionTree, CollectionView, DeckCommanders,
-    DesireLine, ErrorEnvelope, HoldingLine, Id, LineResult, MoveReceipt, MoveRequest, NeedsView,
-    NewCollection, NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults,
-    SetBoard, SetQuantity, SetQuery, SetSummary, ShoppingList, SuggestedDestination, Tag,
-    TagAssignment, TaggedCard, Teardown, TeardownReceipt,
+    DesireLine, ErrorEnvelope, HoldingLine, HoldingMove, Id, LineResult, MoveReceipt, MoveRequest,
+    NeedsView, NewCollection, NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery,
+    SearchResults, SetBoard, SetQuantity, SetQuery, SetSummary, ShoppingList, SuggestedDestination,
+    Tag, TagAssignment, TaggedCard, Teardown, TeardownReceipt,
 };
 use tokio::sync::OnceCell;
 
@@ -394,6 +394,12 @@ impl CollectionStore for NativeBackend {
     async fn move_batch(&self, req: BatchMove) -> ApiResult<Vec<MoveReceipt>> {
         self.require_session()?;
         self.post(super::paths::MOVES_BATCH, &req).await
+    }
+
+    async fn move_holding(&self, holding_id: Id, req: HoldingMove) -> ApiResult<MoveReceipt> {
+        self.require_session()?;
+        self.post(&super::paths::holding_move(holding_id), &req)
+            .await
     }
 
     async fn undo_move(&self, move_id: Id) -> ApiResult<()> {

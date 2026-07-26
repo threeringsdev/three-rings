@@ -24,6 +24,18 @@
 //! failure it sets `value` back and reports the error — the stepper knows
 //! nothing about transport.
 //!
+//! **`caller_reports` is the escape hatch from that contract, and it exists for
+//! exactly one shape of commit: one whose undo is a *different operation*.**
+//! The built-in undo re-commits the old count through `on_commit`, which assumes
+//! the write is idempotent in both directions on the same target. A committed 0
+//! is not: it removes the row the write is addressed at, so re-committing the
+//! old count posts a dead id. Where the caller's undo has to be something else
+//! entirely — reversing a ledger entry, say — the stepper must not raise a toast
+//! promising an undo it cannot perform. `caller_reports` names those commits;
+//! for them the stepper still writes `value` optimistically and still fires
+//! `on_commit`, but raises nothing, and the caller owns the message *and* the
+//! undo. Two toasts, one of them lying, is the failure this replaces.
+//!
 //! Engine note: the ± buttons cancel `pointerdown` so a click steals no focus
 //! — WebKit never focuses clicked buttons, so an uncancelled click would blur
 //! the session's input (committing mid-session) on that engine while Chrome
@@ -61,6 +73,12 @@ pub fn CountStepper(
     label: String,
     /// Fired once per committed session, after the optimistic write.
     on_commit: Callback<StepperCommit>,
+    /// Which commits the **caller** reports, instead of this component. Returns
+    /// `true` for a commit whose confirmation and undo the caller owns (see the
+    /// module docs); the stepper then skips its own toast entirely. Absent, the
+    /// stepper reports every commit — the behavior every other call site keeps.
+    #[prop(optional)]
+    caller_reports: Option<Callback<StepperCommit, bool>>,
     /// Lower clamp (default 0 — quantity 0 means "delete the holding row").
     #[prop(optional)]
     min: i32,
@@ -176,6 +194,16 @@ pub fn CountStepper(
         editing.set(false);
         if let Some(to) = target {
             if to != from {
+                let commit = StepperCommit { from, to };
+                // A commit the caller reports gets the optimistic write and
+                // `on_commit` and nothing else: no toast, and above all no Undo
+                // action, because the stepper's undo is "re-commit the old
+                // count", which is the wrong operation for it.
+                if caller_reports.is_some_and(|is_theirs| is_theirs.run(commit)) {
+                    value.set(to);
+                    on_commit.run(commit);
+                    return;
+                }
                 // Read the component-owned `label` and build the toast message
                 // *before* on_commit: a committed 0 is a deletion, and a caller
                 // that removes the row synchronously would dispose `label`, so
@@ -202,7 +230,7 @@ pub fn CountStepper(
                         .kind(ToastKind::Success)
                         .action("Undo", undo),
                 );
-                on_commit.run(StepperCommit { from, to });
+                on_commit.run(commit);
             }
         }
     };

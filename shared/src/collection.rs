@@ -372,9 +372,18 @@ impl Page {
 }
 
 /// Move physical copies between collections (specs/collection-api.md → Move).
-/// `from = None` is an external intake, `to = None` a removal. Moves are
-/// board-agnostic (the ledger has no board) — they act on the mainboard;
-/// board re-labels are a separate card-tagging op, not a move.
+/// `from = None` is an external intake, `to = None` a removal.
+///
+/// **A move addresses a board at each end, and the two need not agree.**
+/// `from_board` names the stack the copies are taken from — a deck's sideboard
+/// is a different stack of the same printing, and a write that assumed `main`
+/// would take copies the caller never pointed at (or none at all). `to_board` is
+/// where they land, normally `main`: copies moved out of a sideboard into a
+/// binder are just copies in a binder. Re-labelling a board *in place* is
+/// card-tagging's separate quantity-preserving op, not a move.
+///
+/// Both default to `main`, so a caller that has no boards writes the same
+/// request it always did.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MoveRequest {
     pub from_collection_id: Option<Id>,
@@ -386,7 +395,43 @@ pub struct MoveRequest {
     pub condition: Condition,
     #[serde(default = "default_language")]
     pub language: String,
+    /// Board the copies leave (ignored for an intake, where `from` is `None`).
+    #[serde(default)]
+    pub from_board: Board,
+    /// Board the copies land on (ignored for a removal, where `to` is `None`).
+    #[serde(default)]
+    pub to_board: Board,
     pub quantity: i32,
+}
+
+/// Move copies **out of one specific `holdings` row** — the grain-addressed
+/// write, addressed by the id of the stack rather than by a grain the caller
+/// re-states (specs/collection-api.md → Move; specs/app-ui.md → the collection
+/// view's removal).
+///
+/// This exists because of a rule the batch-move task wrote down the hard way:
+/// *anything deciding whether a write is possible cannot use a read model that
+/// groups away the write's addressing.* A rendered collection row is
+/// `(printing, board)` with finish/condition/language summed away, so it cannot
+/// state the grain a [`MoveRequest`] needs. Naming the holding instead means the
+/// **server** reads the grain, the board and the owning collection — inside the
+/// same transaction that performs the write, which is also what closes the
+/// check-then-write window a client-side resolution leaves open.
+///
+/// `to_collection_id = None` is a removal, and it is undoable like any other
+/// move: the ledger row records the full grain and the board it came off, so
+/// undo puts *those* copies back on *that* board.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HoldingMove {
+    /// Destination, or `None` to remove the copies from the collection.
+    pub to_collection_id: Option<Id>,
+    /// Copies to move; `None` means the whole stack.
+    ///
+    /// `None` rather than a number the client computed from a rendered count:
+    /// "remove this row" is what the user asked for, and a stale count would
+    /// otherwise leave copies behind or fail the write.
+    #[serde(default)]
+    pub quantity: Option<i32>,
 }
 
 /// The id of a created move — returned so the toast can offer Undo.
@@ -419,6 +464,7 @@ pub struct QuickAddReceipt {
 
 /// One line of a batch move — the persistent selection tray: N `(card, from)`
 /// pairs to one destination, applied in a single transaction (all-or-nothing).
+/// Boards work exactly as they do on [`MoveRequest`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MoveItem {
     pub from_collection_id: Option<Id>,
@@ -429,6 +475,12 @@ pub struct MoveItem {
     pub condition: Condition,
     #[serde(default = "default_language")]
     pub language: String,
+    /// Board the copies leave (ignored for an intake).
+    #[serde(default)]
+    pub from_board: Board,
+    /// Board they land on (ignored for a removal).
+    #[serde(default)]
+    pub to_board: Board,
     pub quantity: i32,
 }
 
@@ -437,6 +489,31 @@ pub struct MoveItem {
 pub struct BatchMove {
     pub to_collection_id: Option<Id>,
     pub items: Vec<MoveItem>,
+}
+
+/// Prefix a batch-move failure with the **position** of the item that caused it.
+///
+/// A batch move is one transaction, so a single bad item rolls the whole batch
+/// back — and `Conflict("no copies to move")` on its own names none of the cards
+/// the user selected, which made a real failure diagnosable only by bisecting
+/// the selection (specs/app-ui.md → Findings, batch move). The server does not
+/// know the card *names*; the caller that built the list does. So the wire
+/// carries the one thing that bridges them: the index.
+///
+/// This is part of `move_batch`'s contract rather than either side's private
+/// convention, which is why both the writer and [`batch_item_index`] live here —
+/// a format duplicated at two call sites is a format that drifts.
+pub fn batch_item_error(index: usize, message: &str) -> String {
+    format!("item {index}: {message}")
+}
+
+/// Recover the item position from a [`batch_item_error`] message, or `None` if
+/// the failure was not attributable to one item (a transport or session error,
+/// say). The remainder is returned so a caller can restate it beside a name.
+pub fn batch_item_index(message: &str) -> Option<(usize, &str)> {
+    let rest = message.strip_prefix("item ")?;
+    let (index, rest) = rest.split_once(": ")?;
+    Some((index.parse().ok()?, rest))
 }
 
 /// A collection that wants a card more than it currently has — the destination
@@ -560,4 +637,25 @@ pub struct ShoppingRow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShoppingList {
     pub rows: Vec<ShoppingRow>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_batch_failure_carries_the_item_it_belongs_to() {
+        let msg = batch_item_error(3, "no copies to move");
+        assert_eq!(batch_item_index(&msg), Some((3, "no copies to move")));
+    }
+
+    #[test]
+    fn an_unattributed_failure_stays_unattributed() {
+        // Anything that is not one item's fault (a session error, a transport
+        // failure) must not be read as item 0 — naming an innocent card is
+        // worse than naming none.
+        assert_eq!(batch_item_index("unauthorized"), None);
+        assert_eq!(batch_item_index("item x: nope"), None);
+        assert_eq!(batch_item_index("item 2"), None);
+    }
 }

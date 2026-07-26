@@ -353,12 +353,17 @@ test("@fast a /my row held in one place resolves to that place and moves", async
 // `collection_view` groups by `(printing, board)` and `CardDetail::ownership`
 // by `(collection, printing)`. So a foil-only stack and a sideboard-only card
 // are selectable rows that look exactly like movable ones. Before the
-// resolution read they reached `holding_take`, which matches the full grain and
+// resolution read they reached `holding_take`, which matched the full grain and
 // `board = 'main'`, returned `Conflict("no copies to move")`, and — because the
 // batch is one transaction — killed every *other* card in the selection with an
-// error naming none of them. These two tests are the ones that catch that.
+// error naming none of them. That was fixed first by refusing them, and now by
+// **moving** them: `MoveItem` carries the grain and the board of the stack the
+// resolution actually found. These two tests are the ones that catch a
+// regression to either behavior — an assertion that the copies moved is also an
+// assertion that they were addressed correctly, since a default-grain write
+// finds nothing to take.
 
-test("@fast a foil-only row is refused by name while the rest of the batch moves", async ({
+test("@fast a foil-only row moves as foil, alongside a plain one", async ({
   page,
   request,
 }) => {
@@ -368,8 +373,8 @@ test("@fast a foil-only row is refused by name while the rest of the batch moves
   const dest = await createCollection(request, "binder", "graindest");
   try {
     await addHave(request, source.id, plain.printing_id as string, 2);
-    // Foil, and *only* foil: the row still renders `present = 2` with a
-    // checkbox, because the view sums across finishes.
+    // Foil, and *only* foil: the row renders `present = 2` with a checkbox,
+    // because the view sums across finishes and says nothing about which.
     await addHave(request, source.id, foil.printing_id as string, 2, {
       finish: "foil",
     });
@@ -388,17 +393,12 @@ test("@fast a foil-only row is refused by name while the rest of the batch moves
 
     await moveTo(page, dest.name);
 
-    // The movable one moved…
-    await expect(page.locator(TOAST, { hasText: "Moved 1 card" })).toContainText(
-      `Moved 1 card (1 copy) → 🗂 ${dest.name}`,
+    // Both moved, in one write — and nothing was refused.
+    await expect(page.locator(TOAST, { hasText: "Moved 2 cards" })).toContainText(
+      `Moved 2 cards (1 copy each) → 🗂 ${dest.name}`,
     );
-    // …and the other was named, with a reason, rather than taking the batch
-    // down with an error naming no card at all.
-    await expect(
-      page.locator(TOAST, { hasText: "wasn't moved" }),
-    ).toContainText(`${foil.name} has only foil, non-NM or non-English copies`);
-    // It is still checked: the refusal is work left to do, not a silent drop.
-    await expect(page.locator(COUNT)).toHaveText("1 card");
+    await expect(page.locator(TOAST, { hasText: "wasn't moved" })).toHaveCount(0);
+    await expect(page.locator(COUNT)).toHaveCount(0);
 
     await expect(async () => {
       expect(
@@ -406,21 +406,33 @@ test("@fast a foil-only row is refused by name while the rest of the batch moves
           plain.printing_id as string,
           foil.printing_id as string,
         ]),
-      ).toEqual([1, 2]);
+      ).toEqual([1, 1]);
       expect(
         await present(request, dest.id, [
           plain.printing_id as string,
           foil.printing_id as string,
         ]),
-      ).toEqual([1, 0]);
+      ).toEqual([1, 1]);
     }).toPass({ timeout: 5000 });
+
+    // The copy that landed is still foil — the assertion a default-grain write
+    // would fail even while the counts above looked right.
+    const landed = await request.get(`/api/cards/${foil.oracle_id}/holdings`);
+    expect(landed.status()).toBe(200);
+    const rows = (await landed.json()) as {
+      collection_id: string;
+      finish: string;
+    }[];
+    expect(
+      rows.filter((h) => h.collection_id === dest.id).map((h) => h.finish),
+    ).toEqual(["foil"]);
   } finally {
     await deleteCollection(request, source.id);
     await deleteCollection(request, dest.id);
   }
 });
 
-test("@fast a /my row whose copies are all sideboarded is refused by board", async ({
+test("@fast a /my row whose copies are all sideboarded moves off the sideboard", async ({
   page,
   request,
 }) => {
@@ -433,24 +445,30 @@ test("@fast a /my row whose copies are all sideboarded is refused by board", asy
     });
 
     // `/my` aggregates across boards, so the row reads OWNED 2 and offers a
-    // checkbox — the board is invisible here, which is exactly the trap.
+    // checkbox — the board is invisible here. It used to be a refusal for that
+    // reason; the ungrouped read supplies it to the write instead.
     await page.goto(`/my?q=${encodeURIComponent(card.name)}`);
     await hydrated(page);
     await select(myRow(page, card.oracle_id)).click();
 
     await moveTo(page, dest.name);
 
-    await expect(page.locator(TOAST).first()).toContainText(
-      `${card.name} sits on the side board`,
-    );
-    await expect(page.locator(COUNT)).toHaveText("1 card");
-    // Nothing was taken from the mainboard it does not have, and nothing
-    // landed in the destination.
-    const landed = await viewOf(request, dest.id);
-    expect(landed.cards).toHaveLength(0);
-    expect(
-      await present(request, deck.id, [card.printing_id as string]),
-    ).toEqual([2]);
+    await expect(page.locator(TOAST).first()).toContainText("Moved 1 card");
+    await expect(async () => {
+      // Taken off the *sideboard* — a `board = 'main'` write would have found
+      // nothing and rolled back — and landed in the binder as an ordinary copy.
+      const res = await request.get(`/api/cards/${card.oracle_id}/holdings`);
+      const rows = (await res.json()) as {
+        collection_id: string;
+        board: string;
+        quantity: number;
+      }[];
+      expect(
+        rows
+          .map((h) => `${h.collection_id === deck.id ? "deck" : "dest"}/${h.board} x${h.quantity}`)
+          .sort(),
+      ).toEqual(["deck/side x1", "dest/main x1"]);
+    }).toPass({ timeout: 5000 });
   } finally {
     await deleteCollection(request, deck.id);
     await deleteCollection(request, dest.id);
