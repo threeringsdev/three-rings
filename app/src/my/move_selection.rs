@@ -136,6 +136,12 @@ pub enum SkipReason {
     /// Nothing is held any more — the selection outlived the copies (another
     /// tab, the stepper, or simply a tray left open a long time).
     NoCopies,
+    /// A pick-list line whose *need* is gone: the destination no longer wants
+    /// more copies of that card than it holds. The other half of `NoCopies` —
+    /// that one is the source going away, this one is the gap closing — and it
+    /// is why a pull's quantity is re-derived server-side rather than trusted
+    /// (`my::needs`).
+    NoLongerNeeded,
     /// A `/my` row whose copies sit in several collections: which one to take
     /// from is the user's call, not a guess this code may make.
     ManyCollections(usize),
@@ -156,6 +162,7 @@ impl SkipReason {
                 format!("is held in {n} finishes or conditions at once — a move has to name one")
             }
             Self::NoCopies => "has no copies left to move — reload the page".to_string(),
+            Self::NoLongerNeeded => "is no longer missing here — reload the page".to_string(),
             Self::ManyCollections(n) => {
                 format!("is in {n} collections — open one and select the row there")
             }
