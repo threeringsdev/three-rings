@@ -351,9 +351,9 @@ fn CardsTable(rows: Vec<AllCardsRow>) -> impl IntoView {
                         <TableHead>"Card"</TableHead>
                         <TableHead class="hidden md:table-cell">"Type"</TableHead>
                         <TableHead class="hidden sm:table-cell">"Mana"</TableHead>
-                        <TableHead class="px-1 sm:px-2">"Where"</TableHead>
-                        <TableHead class="px-1 text-right sm:px-2">"Wanted"</TableHead>
-                        <TableHead class="px-1 text-right sm:px-2">"Owned"</TableHead>
+                        <TableHead class="px-1 md:px-2">"Where"</TableHead>
+                        <TableHead class="px-1 text-right md:px-2">"Wanted"</TableHead>
+                        <TableHead class="px-1 text-right md:px-2">"Owned"</TableHead>
                     </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -421,18 +421,18 @@ fn CardsRow(row: AllCardsRow) -> impl IntoView {
             </TableCell>
             <TableCell class="text-muted-foreground hidden p-2 md:table-cell">{type_line}</TableCell>
             <TableCell class="text-muted-foreground hidden p-2 sm:table-cell">{mana_cost}</TableCell>
-            <TableCell class="px-1 py-2 sm:px-2">
+            <TableCell class="px-1 py-2 md:px-2">
                 <LocationSummary oracle_id owned locations />
             </TableCell>
             <TableCell
-                class="px-1 py-2 text-right tabular-nums sm:px-2"
+                class="px-1 py-2 text-right tabular-nums md:px-2"
                 {..}
                 data-testid="wanted-count"
             >
                 {count_or_dash(wanted)}
             </TableCell>
             <TableCell
-                class="px-1 py-2 text-right tabular-nums sm:px-2"
+                class="px-1 py-2 text-right tabular-nums md:px-2"
                 {..}
                 data-testid="owned-count"
             >

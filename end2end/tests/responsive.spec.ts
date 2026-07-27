@@ -401,9 +401,11 @@ test.describe("reaching a screen by clicking, not by goto", () => {
   // adjacent navigation — collection → Catalog — which is the last test here.
 
   /// Small collections only. This is a fixture requirement, not a convenience:
-  /// the bug rendered the *collection's* cards as catalog results, so the two
-  /// outcomes are only distinguishable where the collection holds fewer cards
-  /// than a catalog page. Bulk Box holds a full 50 and would pass either way.
+  /// the assertion below is `tiles > collectionCards`, and a catalog page holds
+  /// 50. At 50 cards the comparison is `50 > 50` — false — so a full-size
+  /// collection like Bulk Box makes the test fail in *both* renderings, the
+  /// correct one included. The filter exists to keep the assertion meaningful,
+  /// not because a big collection would pass either way.
   async function smallHolders(request: APIRequestContext) {
     const rows = (await tree(request)).filter((r) => r.present > 0);
     const small: { row: TreeRow; cards: number }[] = [];
@@ -433,7 +435,12 @@ test.describe("reaching a screen by clicking, not by goto", () => {
     // serialized `collection_view` slot, believed it, and never fetched. The
     // page then reported "11 results" over a Commander Deck's eleven cards.
     // Closed by the named-field `SearchPayload` (app/src/catalog.rs).
-    for (const { row, cards } of (await smallHolders(request)).slice(0, 4)) {
+    // Every qualifying collection, not the first four in tree order: this bug
+    // and both of its predecessors were collection-dependent — the client id
+    // counter sits somewhere different after each page builds its own resources
+    // — so a slice can miss every reproducing collection and clear a live bug.
+    // Nine collections at ~1.5 s each is a price worth paying for that.
+    for (const { row, cards } of await smallHolders(request)) {
       await page.goto(`/my/collections/${row.summary.id}`);
       await hydrated(page);
       await expect(page.locator('[data-testid="collection-title"]')).toHaveText(
@@ -471,6 +478,68 @@ test.describe("reaching a screen by clicking, not by goto", () => {
       await expect(page.getByTestId("result-count")).not.toHaveText(
         `${cards} results`,
       );
+    }
+  });
+
+  test("@fast a card page reached by clicking a catalog result renders the card", async ({
+    page,
+    request,
+  }) => {
+    await page.setViewportSize(DESKTOP);
+    // The click-through this block existed to cover and did not: all eight
+    // `card-detail.spec.ts` cases and `catalog.spec.ts` reach `/cards/:id` with
+    // `page.goto`, and catalog → card detail is the most common navigation in
+    // the product.
+    //
+    // `CardDetailPage`'s resource was `Option<Result<…>>`, and **a bare `null`
+    // deserializes into every `Option` whatever the inner type** — so it did not
+    // need a structurally similar struct to collide with, and `/catalog` leaves
+    // four `null` slots behind (ids 1, 4, 7, 12 anonymous). Its `None` arm
+    // rendered "That card id isn't valid." for a card that exists.
+    //
+    // **This test is a standing guard, not a caught regression.** Measured
+    // 2026-07-27: the resource lands on id 64 (anonymous) / 66 (authed) while
+    // `/catalog` serializes 13 / 19 slots, so it reads `undefined` and fetches —
+    // the mechanism is armed but does not fire at today's id layout. Flooding
+    // the array with `"null"` reproduces it exactly. What keeps it from firing
+    // is an accident of how many resources `/catalog` builds, so this asserts
+    // the property rather than waiting for the arithmetic to drift.
+    for (const q of ["t:instant", "bolt", "c:ur"]) {
+      await page.goto(`/catalog?q=${encodeURIComponent(q)}`);
+      await hydrated(page);
+      const tiles = page.locator('[data-testid="card-preview-trigger"] a[href^="/cards/"]');
+      await expect(tiles.first()).toBeVisible();
+      const n = await tiles.count();
+
+      // Several positions, because the id a resource lands on depends on how
+      // much was built before it — a single tile is the spot check that cleared
+      // both earlier collisions.
+      for (const idx of [0, Math.min(1, n - 1), Math.min(9, n - 1), n - 1]) {
+        await page.goto(`/catalog?q=${encodeURIComponent(q)}`);
+        await hydrated(page);
+        const link = tiles.nth(idx);
+        const href = await link.getAttribute("href");
+        const fetches: string[] = [];
+        const onReq = (r: { url(): string }) => {
+          if (r.url().includes("/api/card_detail")) fetches.push(r.url());
+        };
+        page.on("request", onReq);
+        await link.click();
+        await page.waitForURL((u) => u.pathname.startsWith("/cards/"));
+
+        // The card renders, named — not the `None` arm, and not the missing arm.
+        await expect(
+          page.getByTestId("card-name"),
+          `${href} (tile #${idx} of "${q}") did not render a card`,
+        ).toBeVisible();
+        await expect(page.getByTestId("card-detail-missing")).toHaveCount(0);
+        // …and it got there by asking. Zero requests is the collision's
+        // signature, and the half a content assertion cannot see.
+        await expect
+          .poll(() => fetches.length, { message: `${href} rendered without fetching` })
+          .toBeGreaterThan(0);
+        page.off("request", onReq);
+      }
     }
   });
 

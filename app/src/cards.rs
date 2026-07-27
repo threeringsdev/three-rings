@@ -402,6 +402,65 @@ pub fn CardPreview(
     }
 }
 
+/// What `CardDetailPage`'s resource carries.
+///
+/// **A named field, and not an `Option` at the top level — both halves matter.**
+///
+/// The named field is the [`crate::my::all_cards::AllCardsPayload`] /
+/// [`crate::catalog::SearchPayload`] pattern, for the third time: `initial_value()`
+/// reads `__RESOLVED_RESOURCES[<next monotonic id>]` for every `Resource::new`
+/// without checking `during_hydration()`, so a resource created during a
+/// client-side navigation reads a slot left behind by the page you came from, and
+/// if it decodes the fetcher never runs.
+///
+/// This resource was the **worst-exposed of the three**, because its payload used
+/// to be `Option<Result<…>>` and **a bare `null` deserializes into every
+/// `Option`, whatever the inner type**. It did not need a structurally similar
+/// struct to collide with; any `null` slot anywhere would do. `/catalog` leaves
+/// four of them: measured at ids 1, 4, 7, 12 anonymous and 4, 7, 12 authed.
+///
+/// Measured, because the mechanism existing and the mechanism firing are
+/// different claims (responsive audit, 2026-07-27). It does **not** fire today:
+/// over 60 real click-throughs — anonymous and authed, six origin queries, six
+/// tile positions each — every one fetched and rendered the right card. The
+/// resource lands on id **64** (anonymous) / **66** (authed), while `/catalog`
+/// serializes only **13** / **19** slots, so the slot it reads is `undefined` and
+/// the fetcher runs. Pinned by *injection*, the inverse of the removal trick that
+/// found the other two: flooding slots 0..199 with `"null"` reproduces the bug
+/// exactly (`card_detail` never requested, "Card not found" rendered for a card
+/// that exists), and a binary search on the flood ceiling puts the landing id at
+/// those two numbers. So the margin is ~50 slots — real, but nothing enforces it,
+/// and it is an accident of how many resources `/catalog` happens to build rather
+/// than a designed gap.
+///
+/// The second half — `card` is a plain enum, not an `Option` — closes the hole
+/// this wrapper would otherwise leave open. A struct whose only field is an
+/// `Option` accepts `{}`, because serde defaults a missing `Option` field to
+/// `None`; that would make the wrapper decorative against any future `{}`-shaped
+/// payload. Naming the two outcomes also fixes a dishonest state on its own
+/// terms: "the URL carried no parseable id" and "nothing arrived" are different
+/// facts, and only the first of them justifies telling a visitor their card id
+/// isn't valid.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CardDetailPayload {
+    card: CardIdOutcome,
+}
+
+/// The two things `CardDetailPage`'s fetcher can conclude — kept distinct so the
+/// render site cannot confuse "your link is wrong" with "the read never
+/// happened". See [`CardDetailPayload`].
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+enum CardIdOutcome {
+    /// The route carried no parseable card id. The only case that honestly
+    /// warrants "That card id isn't valid."
+    NoId,
+    /// The read ran and this is what it said. Boxed because `CardDetail` is far
+    /// larger than `NoId` and clippy's `large_enum_variant` is right that every
+    /// value would otherwise pay for the biggest one.
+    Fetched(Box<Result<CardDetail, ServerFnError<String>>>),
+}
+
 #[component]
 pub fn CardDetailPage() -> impl IntoView {
     let params = use_params_map();
@@ -420,9 +479,11 @@ pub fn CardDetailPage() -> impl IntoView {
     let detail_res = Resource::new(
         move || oracle_id.get(),
         |id| async move {
-            match id {
-                Some(id) => Some(crate::card_detail(id).await),
-                None => None,
+            CardDetailPayload {
+                card: match id {
+                    Some(id) => CardIdOutcome::Fetched(Box::new(crate::card_detail(id).await)),
+                    None => CardIdOutcome::NoId,
+                },
             }
         },
     );
@@ -432,24 +493,28 @@ pub fn CardDetailPage() -> impl IntoView {
             <Transition fallback=|| view! { <CardDetailSkeleton /> }>
                 {move || {
                     Suspend::new(async move {
-                        match detail_res.await {
-                            Some(Ok(card)) => view! { <CardDetailBody card=card /> }.into_any(),
-                            Some(Err(e)) => match classify(&e) {
-                                Failure::Missing(detail) => {
-                                    view! { <NotFound detail=detail /> }.into_any()
-                                }
-                                Failure::Broken(failure, detail) => {
-                                    view! {
-                                        <LoadFailed
-                                            failure
-                                            detail=detail
-                                            detail_res=detail_res
-                                        />
+                        match detail_res.await.card {
+                            CardIdOutcome::Fetched(res) => match *res {
+                                Ok(card) => view! { <CardDetailBody card=card /> }.into_any(),
+                                Err(e) => match classify(&e) {
+                                    Failure::Missing(detail) => {
+                                        view! { <NotFound detail=detail /> }.into_any()
                                     }
-                                        .into_any()
-                                }
+                                    Failure::Broken(failure, detail) => {
+                                        view! {
+                                            <LoadFailed
+                                                failure
+                                                detail=detail
+                                                detail_res=detail_res
+                                            />
+                                        }
+                                            .into_any()
+                                    }
+                                },
                             },
-                            None => {
+                            // The route's own id, not a read outcome — see
+                            // `CardIdOutcome`.
+                            CardIdOutcome::NoId => {
                                 view! { <NotFound detail="That card id isn't valid." /> }.into_any()
                             }
                         }
@@ -505,7 +570,7 @@ fn classify(e: &ServerFnError<String>) -> Failure {
 fn LoadFailed(
     failure: states::Failure,
     #[prop(into)] detail: String,
-    detail_res: Resource<Option<Result<CardDetail, ServerFnError<String>>>>,
+    detail_res: Resource<CardDetailPayload>,
 ) -> impl IntoView {
     // Only "on our side" when it actually is. A refused request is not an outage,
     // and inviting the reader to wait a moment for one they cannot fix by waiting

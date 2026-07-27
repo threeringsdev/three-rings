@@ -289,6 +289,26 @@ pub fn QuickAddPanel(
     }
 }
 
+/// What the quick-add panel's candidate resource carries.
+///
+/// A named field, the same pattern as [`crate::catalog::SearchPayload`]. This
+/// payload is the one that caused the **first** collision: its closed-panel value
+/// serializes as `{"Ok":{"cards":[],"next_cursor":null}}`, which is byte-identical
+/// to an empty `shared::AllCardsView`, and `/my` decoded it and rendered "You
+/// haven't added any cards yet." on an account with 100 cards (#75). That instance
+/// was closed from the *consumer* side by `AllCardsPayload`; naming the field here
+/// closes it from the producer side too, so the next type that happens to look
+/// like `SearchResults` does not have to be found the hard way.
+///
+/// Two collection pages both mount a quick-add panel, so this resource is also
+/// exposed to the **same-type** case a named field cannot fix — that one needs the
+/// payload to echo the request it answered. Unchanged, and measured not to fire.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuickAddPayload {
+    quick_add: shared::SearchResults,
+}
+
 #[component]
 fn QuickAddSurface(
     #[prop(into)] field_id: String,
@@ -328,12 +348,16 @@ fn QuickAddSurface(
         move || (open.get(), url_q.get()),
         |(open, q)| async move {
             if !open || q.trim().is_empty() {
-                return Ok(shared::SearchResults {
-                    cards: Vec::new(),
-                    next_cursor: None,
+                return Ok(QuickAddPayload {
+                    quick_add: shared::SearchResults {
+                        cards: Vec::new(),
+                        next_cursor: None,
+                    },
                 });
             }
-            crate::search_catalog(q, None).await
+            Ok(QuickAddPayload {
+                quick_add: crate::search_catalog(q, None).await?,
+            })
         },
     );
 
@@ -621,7 +645,7 @@ fn PresentSection(present: Signal<Vec<PresentMatch>>) -> impl IntoView {
 
 #[component]
 fn CandidateSection(
-    candidates: Resource<Result<shared::SearchResults, ServerFnError<String>>>,
+    candidates: Resource<Result<QuickAddPayload, ServerFnError<String>>>,
     present: Signal<Vec<PresentMatch>>,
     url_q: Memo<String>,
     default_kind: Signal<QuickAddKind>,
@@ -642,7 +666,7 @@ fn CandidateSection(
             {move || {
                 let q = url_q.get();
                 Suspend::new(async move {
-                    let cards = match candidates.await {
+                    let cards = match candidates.await.map(|p| p.quick_add) {
                         Ok(results) => results.cards,
                         Err(e) => {
                             let (_, message) = describe_error(&e);

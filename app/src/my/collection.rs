@@ -121,6 +121,28 @@ pub fn add_default(kind: CollectionKind) -> QuickAddKind {
     }
 }
 
+/// What `CollectionPage`'s resource carries.
+///
+/// A named field, the same pattern as [`crate::catalog::SearchPayload`] and
+/// [`crate::cards::CardDetailPayload`], and this is the payload that baited the
+/// other two: its serialized `{collection, children, cards, next_cursor, totals,
+/// commanders}` is what `SearchResults` cross-decoded (`CardRow` is a structural
+/// superset of `CardSummary`), and its sibling quick-add slot is what
+/// `AllCardsView` cross-decoded. Wrapping it is what turns "structurally
+/// compatible" into "must share a unique field name", which closes the *class*
+/// rather than the next instance of it.
+///
+/// The `Result` stays outside the struct here, unlike the other two payloads: this
+/// resource's error arm is a first-class rendering (`LoadError`, with paging-aware
+/// escape hatches) rather than something the page merely reports, and the
+/// `?`-through-`Ok(...)` shape keeps that arm untouched. A wrapper's job is to
+/// make the payload *unmistakable*, not to relocate error handling.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CollectionViewPayload {
+    collection_view: CollectionView,
+}
+
 #[component]
 pub fn CollectionPage() -> impl IntoView {
     let params = use_params_map();
@@ -170,7 +192,9 @@ pub fn CollectionPage() -> impl IntoView {
                 )
             })?;
             let cursor = (!cursor.is_empty()).then_some(cursor);
-            crate::collection_view(id, q, cursor).await
+            Ok(CollectionViewPayload {
+                collection_view: crate::collection_view(id, q, cursor).await?,
+            })
         },
     );
 
@@ -205,7 +229,11 @@ pub fn CollectionPage() -> impl IntoView {
     // collection in its toast, and lists what is already here — none of it
     // re-derived or re-fetched, so none of it can disagree with the header and
     // the table. Memos, not raw reads: the panel re-renders on every keystroke.
-    let resolved = Memo::new(move |_| view_res.get().and_then(|r| r.ok()));
+    let resolved = Memo::new(move |_| {
+        view_res
+            .get()
+            .and_then(|r| r.ok().map(|p| p.collection_view))
+    });
     let quick_add_destination = Memo::new(move |_| {
         resolved
             .get()
@@ -252,7 +280,7 @@ pub fn CollectionPage() -> impl IntoView {
                 view! { <HeaderSkeleton /> }
             }>
                 {move || Suspend::new(async move {
-                    match view_res.await {
+                    match view_res.await.map(|p| p.collection_view) {
                         Ok(view) => {
                             view! {
                                 <CollectionHeader
@@ -306,7 +334,7 @@ pub fn CollectionPage() -> impl IntoView {
                     let q = url_q.get();
                     let id = url_id.get();
                     Suspend::new(async move {
-                        match view_res.await {
+                        match view_res.await.map(|p| p.collection_view) {
                             Ok(view) => {
                                 let next = view.next_cursor.clone();
                                 let searching = !q.is_empty();
@@ -379,7 +407,7 @@ pub(crate) fn message_of(e: &ServerFnError<String>) -> String {
 #[component]
 fn LoadError(
     e: ServerFnError<String>,
-    view_res: Resource<Result<CollectionView, ServerFnError<String>>>,
+    view_res: Resource<Result<CollectionViewPayload, ServerFnError<String>>>,
     paged: Memo<bool>,
     url_id: Memo<String>,
     url_q: Memo<String>,
@@ -601,7 +629,7 @@ fn CollectionHeader(
     view: CollectionView,
     here_delta: RwSignal<i32>,
     teardown_open: RwSignal<bool>,
-    view_res: Resource<Result<CollectionView, ServerFnError<String>>>,
+    view_res: Resource<Result<CollectionViewPayload, ServerFnError<String>>>,
     tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
 ) -> impl IntoView {
     let id = view.collection.id;
@@ -1155,17 +1183,20 @@ fn CollectionTable(
                     <TableRow>
                         // `w-11` below `md` is the select control's 44 px touch
                         // target (see `SelectionCheckbox`); the 12 px it costs
-                        // the row at 390 px is paid for by `px-1` on WANTED and
-                        // OWNED below, the same trade `/my/all` already makes.
+                        // the row is paid for by `px-1` on HERE / WANTED /
+                        // OWNED, the trade `/my/all` already makes. Both
+                        // switch at `md` — pairing the compensation with `sm`
+                        // instead left 640–767 px carrying the wide column
+                        // with nothing paying for it.
                         <TableHead class="w-11 md:w-8">
                             <span class="sr-only">"Select"</span>
                         </TableHead>
                         <TableHead>"Card"</TableHead>
                         <TableHead class="hidden md:table-cell">"Type"</TableHead>
                         <TableHead class="hidden sm:table-cell">"Mana"</TableHead>
-                        <TableHead class="px-1 text-right sm:px-2">"Here"</TableHead>
-                        <TableHead class="px-1 text-right sm:px-2">"Wanted"</TableHead>
-                        <TableHead class="px-1 text-right sm:px-2">"Owned"</TableHead>
+                        <TableHead class="px-1 text-right md:px-2">"Here"</TableHead>
+                        <TableHead class="px-1 text-right md:px-2">"Wanted"</TableHead>
+                        <TableHead class="px-1 text-right md:px-2">"Owned"</TableHead>
                     </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1251,7 +1282,7 @@ fn FolderTableRow(
             <TableCell class="hidden p-2 sm:table-cell">""</TableCell>
             // Italic + dimmed: these copies are *there*, not here.
             <TableCell
-                class="text-muted-foreground px-1 py-2 text-right italic tabular-nums sm:px-2"
+                class="text-muted-foreground px-1 py-2 text-right italic tabular-nums md:px-2"
                 {..}
                 data-testid="here-count"
             >
@@ -1265,8 +1296,8 @@ fn FolderTableRow(
                     })}
                 </Suspense>
             </TableCell>
-            <TableCell class="px-1 py-2 text-right sm:px-2">""</TableCell>
-            <TableCell class="px-1 py-2 text-right sm:px-2">""</TableCell>
+            <TableCell class="px-1 py-2 text-right md:px-2">""</TableCell>
+            <TableCell class="px-1 py-2 text-right md:px-2">""</TableCell>
         </TableRow>
     }
 }
@@ -1362,7 +1393,7 @@ fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>, collection_id: Id) -> i
                 {mana_cost.unwrap_or_default()}
             </TableCell>
             <TableCell
-                class="px-1 py-2 text-right tabular-nums sm:px-2"
+                class="px-1 py-2 text-right tabular-nums md:px-2"
                 {..}
                 data-testid="here-cell"
             >
@@ -1385,14 +1416,14 @@ fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>, collection_id: Id) -> i
                 </div>
             </TableCell>
             <TableCell
-                class="px-1 py-2 text-right tabular-nums sm:px-2"
+                class="px-1 py-2 text-right tabular-nums md:px-2"
                 {..}
                 data-testid="wanted-count"
             >
                 {wanted.map(|n| n.to_string()).unwrap_or_else(|| "—".to_string())}
             </TableCell>
             <TableCell
-                class="px-1 py-2 text-right tabular-nums sm:px-2"
+                class="px-1 py-2 text-right tabular-nums md:px-2"
                 {..}
                 data-testid="owned-count"
             >
@@ -1629,7 +1660,7 @@ fn Pager(next: Option<String>, paged: Memo<bool>, q: String, id: String) -> impl
 fn TeardownDialog(
     open: RwSignal<bool>,
     collection_id: Id,
-    view_res: Resource<Result<CollectionView, ServerFnError<String>>>,
+    view_res: Resource<Result<CollectionViewPayload, ServerFnError<String>>>,
     tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
 ) -> impl IntoView {
     let toast = expect_context::<ToastHandle>();
