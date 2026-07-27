@@ -1153,15 +1153,19 @@ fn CollectionTable(
             <Table {..} data-testid="collection-table">
                 <TableHeader>
                     <TableRow>
-                        <TableHead class="w-8">
+                        // `w-11` below `md` is the select control's 44 px touch
+                        // target (see `SelectionCheckbox`); the 12 px it costs
+                        // the row at 390 px is paid for by `px-1` on WANTED and
+                        // OWNED below, the same trade `/my/all` already makes.
+                        <TableHead class="w-11 md:w-8">
                             <span class="sr-only">"Select"</span>
                         </TableHead>
                         <TableHead>"Card"</TableHead>
                         <TableHead class="hidden md:table-cell">"Type"</TableHead>
                         <TableHead class="hidden sm:table-cell">"Mana"</TableHead>
-                        <TableHead class="text-right">"Here"</TableHead>
-                        <TableHead class="text-right">"Wanted"</TableHead>
-                        <TableHead class="text-right">"Owned"</TableHead>
+                        <TableHead class="px-1 text-right sm:px-2">"Here"</TableHead>
+                        <TableHead class="px-1 text-right sm:px-2">"Wanted"</TableHead>
+                        <TableHead class="px-1 text-right sm:px-2">"Owned"</TableHead>
                     </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1229,7 +1233,9 @@ fn FolderTableRow(
     view! {
         <TableRow {..} data-testid="folder-row" data-collection=id.to_string()>
             // No checkbox: the selection tray moves cards, not collections.
-            <TableCell class="p-2">""</TableCell>
+            // Padding still tracks the card rows' select cell, or the two row
+            // kinds would size the column differently.
+            <TableCell class="p-0 md:p-2">""</TableCell>
             <TableCell class="p-2">
                 <a
                     href=format!("/my/collections/{id}")
@@ -1245,7 +1251,7 @@ fn FolderTableRow(
             <TableCell class="hidden p-2 sm:table-cell">""</TableCell>
             // Italic + dimmed: these copies are *there*, not here.
             <TableCell
-                class="text-muted-foreground p-2 text-right italic tabular-nums"
+                class="text-muted-foreground px-1 py-2 text-right italic tabular-nums sm:px-2"
                 {..}
                 data-testid="here-count"
             >
@@ -1259,8 +1265,8 @@ fn FolderTableRow(
                     })}
                 </Suspense>
             </TableCell>
-            <TableCell class="p-2 text-right">""</TableCell>
-            <TableCell class="p-2 text-right">""</TableCell>
+            <TableCell class="px-1 py-2 text-right sm:px-2">""</TableCell>
+            <TableCell class="px-1 py-2 text-right sm:px-2">""</TableCell>
         </TableRow>
     }
 }
@@ -1337,7 +1343,9 @@ fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>, collection_id: Id) -> i
             data-board=board.to_pg()
             data-state=move || selected.get().then_some("selected")
         >
-            <TableCell class="p-2">
+            // `p-0` below `md` so the 44 px select target *is* the column
+            // rather than 44 px plus 16 px of cell padding (`SelectionCheckbox`).
+            <TableCell class="p-0 md:p-2">
                 {selectable.map(|card| view! { <SelectionCheckbox selection card /> })}
             </TableCell>
             <TableCell class="p-2">
@@ -1353,7 +1361,11 @@ fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>, collection_id: Id) -> i
             <TableCell class="text-muted-foreground hidden p-2 sm:table-cell">
                 {mana_cost.unwrap_or_default()}
             </TableCell>
-            <TableCell class="p-2 text-right tabular-nums" {..} data-testid="here-cell">
+            <TableCell
+                class="px-1 py-2 text-right tabular-nums sm:px-2"
+                {..}
+                data-testid="here-cell"
+            >
                 <div class="flex items-center justify-end gap-1">
                     <HereCount name=name.clone() present holding_id here_delta />
                     // Italic + dimmed, per the spec: copies a child collection
@@ -1372,10 +1384,18 @@ fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>, collection_id: Id) -> i
                         })}
                 </div>
             </TableCell>
-            <TableCell class="p-2 text-right tabular-nums" {..} data-testid="wanted-count">
+            <TableCell
+                class="px-1 py-2 text-right tabular-nums sm:px-2"
+                {..}
+                data-testid="wanted-count"
+            >
                 {wanted.map(|n| n.to_string()).unwrap_or_else(|| "—".to_string())}
             </TableCell>
-            <TableCell class="p-2 text-right tabular-nums" {..} data-testid="owned-count">
+            <TableCell
+                class="px-1 py-2 text-right tabular-nums sm:px-2"
+                {..}
+                data-testid="owned-count"
+            >
                 {owned.map(|n| n.to_string()).unwrap_or_else(|| "—".to_string())}
             </TableCell>
         </TableRow>

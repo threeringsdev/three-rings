@@ -117,8 +117,17 @@ impl ToastHandle {
 
 /// The toaster container. Mount once near the app root. Bottom-right,
 /// stacking upward.
+///
+/// `class` exists for one reason: the container is `fixed`, so nothing in the
+/// document can push it, and **the only code that knows what else is parked at
+/// the bottom of the viewport is whoever mounted the other fixed chrome.** The
+/// app shell passes a reactive `bottom-*` that clears the mobile tab bar and the
+/// selection tray; without it a visible toast paints over the tray's clear `×`
+/// (see `crate::shell`). Reactive rather than a plain `String` because the tray
+/// comes and goes with the selection. Stays a caller decision — this component
+/// has no business reading `SelectionState`.
 #[component]
-pub fn Toaster() -> impl IntoView {
+pub fn Toaster(#[prop(into, optional)] class: Signal<String>) -> impl IntoView {
     let handle = ToastHandle {
         toasts: RwSignal::new(Vec::new()),
         next_id: RwSignal::new(0),
@@ -129,7 +138,12 @@ pub fn Toaster() -> impl IntoView {
         <ol
             data-name="Toaster"
             aria-live="polite"
-            class="fixed bottom-6 right-6 z-[200] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2 pointer-events-none [&>*]:pointer-events-auto"
+            class=move || {
+                tw_merge::tw_merge!(
+                    "fixed bottom-6 right-6 z-[200] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2 pointer-events-none [&>*]:pointer-events-auto",
+                    class.get(),
+                )
+            }
         >
             <For each=move || handle.toasts.get() key=|t| t.id let:toast>
                 {
