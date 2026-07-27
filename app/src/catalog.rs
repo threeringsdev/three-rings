@@ -140,6 +140,50 @@ pub(crate) fn describe_error(e: &ServerFnError<String>) -> (bool, String) {
     }
 }
 
+/// The catalog search resource's payload — a **named field**, for exactly the
+/// reason [`crate::my::all_cards`]'s `AllCardsPayload` is one, and against a
+/// second live instance of the same bug.
+///
+/// `leptos_server`'s `initial_value()` reads `__RESOLVED_RESOURCES[<next
+/// monotonic id>]` for **every** `Resource::new` without consulting
+/// `during_hydration()`, so a resource created during a client-side navigation
+/// reads a slot belonging to the page you just left. If it decodes, the fetcher
+/// never runs.
+///
+/// It decoded, and this pair is worse than the `/my` one because the wrong data
+/// is *plausible*. `shared::SearchResults { cards, next_cursor }` and
+/// `shared::CollectionView { collection, children, cards, next_cursor, totals,
+/// commanders }` cross-decode: serde ignored the four extra keys, and
+/// `shared::CardRow` is a structural superset of `shared::CardSummary`
+/// (`printing_id: Id` widens into `Option<Id>`, `owned: i32` into `Option<i32>`,
+/// `faces` is `serde(default)`). So clicking **Catalog** from a collection page
+/// re-rendered *that collection's cards* as catalog results, under a confident
+/// "11 results", having issued **zero** requests.
+///
+/// Measured before the fix (responsive audit, 2026-07-26): Commander Deck → 11
+/// tiles / "11 results", Depth Box → 3 / "3", Depth Shelf → 1 / "1", Shoebox →
+/// 1 / "1", each reproducing on both attempts and via both the desktop mode
+/// switch and the mobile bottom tab; Inbox, Rares, Bulk Box, Trade Binder and
+/// Depth Drawer were correct. Collection-dependent for the same reason `/my`'s
+/// was — the client id counter sits somewhere different after each page builds
+/// its own resources — which is why a single spot check cleared it. Pinned by
+/// removal: deleting serialized slot 6 or 14, both carrying the `collection_view`
+/// payload, made the search fetch correctly.
+///
+/// `{"Ok":{"collection":…}}` cannot decode into `{"search":…}`, so
+/// `initial_value` returns `None` and the fetcher runs.
+///
+/// **What this still does not fix**, restated because it is now the *only*
+/// remaining hole rather than one of two: two resources of the **same** type can
+/// cross-decode a correctly-shaped but wrong-query payload. Closing that needs
+/// the payload to echo the request it answered and the consumer to reject a
+/// mismatch. Measured not to occur at today's id layout — latent, not active.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SearchPayload {
+    pub(crate) search: Result<shared::SearchResults, ServerFnError<String>>,
+}
+
 #[component]
 pub fn CatalogPage() -> impl IntoView {
     let query_map = use_query_map();
@@ -163,7 +207,9 @@ pub fn CatalogPage() -> impl IntoView {
     let results = Resource::new(
         move || (url_q.get(), url_cursor.get()),
         |(q, cursor)| async move {
-            crate::search_catalog(q, (!cursor.is_empty()).then_some(cursor)).await
+            SearchPayload {
+                search: crate::search_catalog(q, (!cursor.is_empty()).then_some(cursor)).await,
+            }
         },
     );
 
@@ -179,7 +225,7 @@ pub fn CatalogPage() -> impl IntoView {
     // page to keep.
     let last_good = RwSignal::new(None::<Vec<CardSummary>>);
     Effect::new(move |_| {
-        if let Some(Ok(r)) = results.get() {
+        if let Some(Ok(r)) = results.get().map(|p| p.search) {
             last_good.set(Some(r.cards));
         }
     });
@@ -239,10 +285,7 @@ pub fn CatalogPage() -> impl IntoView {
 /// Result count on the left of the grid/list switch. The destination picker
 /// (`Adding to: 📥 Inbox ▾`, wireframe) joins this row in its own task.
 #[component]
-fn ResultsToolbar(
-    results: Resource<Result<shared::SearchResults, ServerFnError<String>>>,
-    list_view: Memo<bool>,
-) -> impl IntoView {
+fn ResultsToolbar(results: Resource<SearchPayload>, list_view: Memo<bool>) -> impl IntoView {
     // The mobile sheet's "Show N results" footer. The goal is to stay *outside*
     // a suspense boundary — the sheet is open while a search is in flight, and
     // a `None` here reads as "Show results" rather than blocking the button.
@@ -261,7 +304,7 @@ fn ResultsToolbar(
     // change, which does update the DOM.
     let count_after_hydrate = RwSignal::new(None::<usize>);
     Effect::new(move |_| {
-        if let Some(Ok(r)) = results.get() {
+        if let Some(Ok(r)) = results.get().map(|p| p.search) {
             count_after_hydrate.set(Some(r.cards.len()));
         }
     });
@@ -275,7 +318,7 @@ fn ResultsToolbar(
                     view! { <span>"Searching…"</span> }
                 }>
                     {move || Suspend::new(async move {
-                        match results.await {
+                        match results.await.search {
                             Ok(r) => {
                                 let n = r.cards.len();
                                 let more = if r.next_cursor.is_some() { "+" } else { "" };
@@ -407,7 +450,7 @@ fn focus_switch_item(ev: &leptos::ev::KeyboardEvent, index: u32) {
 /// pager underneath it.
 #[component]
 fn Results(
-    results: Resource<Result<shared::SearchResults, ServerFnError<String>>>,
+    results: Resource<SearchPayload>,
     last_good: RwSignal<Option<Vec<CardSummary>>>,
     list_view: Memo<bool>,
     url_q: Memo<String>,
@@ -425,7 +468,7 @@ fn Results(
                 // outside this effect's dependency set (`/my` learned this one).
                 let q = url_q.get();
                 Suspend::new(async move {
-                match results.await {
+                match results.await.search {
                     Ok(r) if r.cards.is_empty() => {
                         view! { <NoResults q paged list_view /> }.into_any()
                     }

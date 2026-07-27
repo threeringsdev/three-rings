@@ -396,6 +396,83 @@ test.describe("reaching a screen by clicking, not by goto", () => {
   // It was collection-dependent (the client id counter sits somewhere different
   // after each page builds its own resources), so a single spot check would
   // have cleared a live bug. Hence the loop.
+  //
+  // The audit that added this block found a *second* live instance on the
+  // adjacent navigation — collection → Catalog — which is the last test here.
+
+  /// Small collections only. This is a fixture requirement, not a convenience:
+  /// the bug rendered the *collection's* cards as catalog results, so the two
+  /// outcomes are only distinguishable where the collection holds fewer cards
+  /// than a catalog page. Bulk Box holds a full 50 and would pass either way.
+  async function smallHolders(request: APIRequestContext) {
+    const rows = (await tree(request)).filter((r) => r.present > 0);
+    const small: { row: TreeRow; cards: number }[] = [];
+    for (const row of rows) {
+      const res = await request.get(`/api/collections/${row.summary.id}/view`);
+      if (res.status() !== 200) continue;
+      const view = (await res.json()) as { cards: unknown[] };
+      if (view.cards.length > 0 && view.cards.length < 40) {
+        small.push({ row, cards: view.cards.length });
+      }
+    }
+    expect(
+      small.length,
+      "the fixture needs collections holding fewer cards than one catalog page, or this test cannot tell the two renderings apart",
+    ).toBeGreaterThan(1);
+    return small;
+  }
+
+  test("@fast Catalog reached by clicking from a collection shows the catalog, not the collection", async ({
+    page,
+    request,
+  }) => {
+    await page.setViewportSize(DESKTOP);
+    // `shared::SearchResults` and `shared::CollectionView` cross-decoded: serde
+    // ignored the four extra keys and `CardRow` is a structural superset of
+    // `CardSummary`, so the catalog's resource read the collection page's
+    // serialized `collection_view` slot, believed it, and never fetched. The
+    // page then reported "11 results" over a Commander Deck's eleven cards.
+    // Closed by the named-field `SearchPayload` (app/src/catalog.rs).
+    for (const { row, cards } of (await smallHolders(request)).slice(0, 4)) {
+      await page.goto(`/my/collections/${row.summary.id}`);
+      await hydrated(page);
+      await expect(page.locator('[data-testid="collection-title"]')).toHaveText(
+        row.summary.name,
+      );
+
+      const searches: string[] = [];
+      const onReq = (r: { url(): string }) => {
+        if (r.url().includes("/api/search_catalog")) searches.push(r.url());
+      };
+      page.on("request", onReq);
+      await page.locator('nav[aria-label="Mode"] a[href="/catalog"]').click();
+      await page.waitForURL(/\/catalog$/);
+
+      // The resource must have actually gone to the server. This is the half
+      // that fails loudest under the bug: the old behaviour rendered a
+      // plausible page having made *zero* requests, so a content-only
+      // assertion could in principle be satisfied by a lucky payload.
+      await expect
+        .poll(() => searches.length, { message: "catalog never fetched results" })
+        .toBeGreaterThan(0);
+      page.off("request", onReq);
+
+      // …and the content is a catalog page, not this collection. Strictly more
+      // tiles than the collection holds, so it cannot be the collection's rows
+      // however they were ordered.
+      await expect
+        .poll(
+          () => page.locator('[data-testid="card-preview-trigger"]').count(),
+          {
+            message: `/catalog after ${row.summary.name} (${cards} cards) rendered the collection instead`,
+          },
+        )
+        .toBeGreaterThan(cards);
+      await expect(page.getByTestId("result-count")).not.toHaveText(
+        `${cards} results`,
+      );
+    }
+  });
 
   test("@fast /my carries rows when reached by clicking All cards from each collection", async ({
     page,
