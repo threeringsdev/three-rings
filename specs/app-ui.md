@@ -1,7 +1,16 @@
 # App UI — the real pages
 
-**Status:** accepted
+**Status:** implemented
 **Depends on:** [ui-design](ui-design.md), [ui-components](ui-components.md), [ui-component-bench](ui-component-bench.md), [collection-api](collection-api.md), [catalog-search](catalog-search.md), [auth](auth.md), [ui-work-loop](ui-work-loop.md)
+
+> **What `implemented` means here** (maintainer decision, 2026-07-27, at the Stage 3
+> boundary): all nine wireframe screens exist and reconcile against their frames at their
+> own widths, with every deviation recorded in Findings. **One drawn control is knowingly
+> unbuilt** — the `+ Want` / `+ Have` quick actions in the hover preview and the card sheet
+> (`Preview Actions` / `Sheet Actions` in the frames, named at
+> [information-architecture.md:78](../design/information-architecture.md)) — filed as a `[ ]`
+> under Phase 5 discoveries rather than held open. So this status asserts *every screen
+> exists and every frame otherwise reconciles*, not *every drawn control is built*.
 
 ## Problem
 
@@ -218,6 +227,160 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
+
+### Responsive audit + stage close (2026-07-27) — **the Stage 3 boundary**
+
+All nine wireframe frames reconciled against the running app at their own widths (3 desktop
+at 1440, 5 mobile at 390, plus the hover-preview overlay). Every frame now conforms or
+deviates deliberately with the deviation recorded; **one gap remains and is deferred by
+maintainer decision** (below).
+
+**Four touch targets fixed, all measured on the real webview rather than reasoned about:**
+
+| | Before | After |
+|---|---|---|
+| Selection checkbox | control box **16×16**, cell 32 px, card-detail link 16 px away | target **44×44** (drawn box still 16×16), link 8 px beyond `target.right`, a 3 px-in corner tap selects without navigating; desktop unchanged; **44×44 CSS px at 540 px/dpr 2 on-device** |
+| Toast over the tray's clear `×` | @1440 the toast box wholly contained the `×`; @390 with *no* selection it covered **35 px of the bottom tab bar** | @1440 clears the pill by 10.5 px; @390 clears the tab bar by 21 px and the pill by 10.5 px |
+| Tray dock centring | pill centre **720** vs content-column centre **840** — off by half the 240 px rail | pill centre **840**, ≤1 px from the column centre; still full-width below `md` |
+| Rail toggle | **27.8×26** — and it is the *only* touch route into tree management, since a long-press raises no `contextmenu` on the webview | **44×44** |
+
+**The kill-verification `app-ui.md:1198` left unfinished is now complete, and the caveat there
+can be struck.** Re-applying the class-stripping mutation made the corrected wrapper-scoped
+assertion **fail** (`Depth Box's table scrolls sideways inside its wrapper / Received: 112`).
+Measured across all nine collections under that mutation, wrapper overflow read
+**58, 83, 99, 101, 112, 119, 128, 131, 148 px while `document.documentElement` read exactly 0
+on every one** — so the original document-level assertion could not have failed. It also
+caught this task's *own* 2 px regression mid-flight, so it works on real defects and not only
+synthetic ones.
+
+#### Adding SPA click-through to the audit found a second live collision, then a third mechanism
+
+PR #74's bug hid behind direct page loads: every probe, every hydration check and the whole
+210-test tier passed it because **they all load pages directly**. So this audit reached each
+frame by *clicking* as well, and asserted content rather than just the route.
+
+**It immediately found an active collision on `main`:** from a collection page, clicking
+**Catalog** rendered *the collection's own cards as catalog search results*, with a false "N
+results" count and **zero `/api/search_catalog` requests**. `SearchResults { cards:
+Vec<CardSummary>, next_cursor }` cross-decoded `CollectionView` because neither refused
+unknown fields and `CardRow` is a structural superset of `CardSummary`. Deterministic on 4 of
+9 collections — the tile count equalling the collection's row count was the signature — and
+**collection-dependent exactly like #75**, which is why a spot check would have cleared it.
+Fixed with a named-field `SearchPayload`; verified **0 wrong out of 20** (10 collections × two
+entry points), and regression-tested **red then green** (the red failed on the request
+assertion with `Received: 0`, the bug's exact fingerprint).
+
+**Then review overturned the audit's own conclusion, and this is the durable lesson.** The
+scan that concluded "two payloads remain exposed" was for `Result<T, _>` and **structurally
+could not see the `Option<_>` family — which is strictly more promiscuous, because a bare
+`null` deserializes into *every* `Option`-typed resource regardless of inner type.** Four of
+the six slots anonymous `/catalog` leaves behind are bare `null`, and `CardDetailPage`'s
+resource is `Resource<Option<Result<CardDetail, _>>>` whose `None` arm rendered *"That card id
+isn't valid."* — so catalog → click a tile → `/cards/:id` could claim a real card does not
+exist, with zero requests, on the most common click-through in the product. The real inventory
+was **eight** raw `Result` and **four** `Option`-typed, not two.
+
+**Measured outcome: the mechanism is armed but does not fire today.** 60+ real click-throughs
+across six origin queries and six tile positions, anonymous and authed — every one fetched and
+rendered correctly. Flooding `__RESOLVED_RESOURCES[0..199]` with `"null"` reproduces the bug
+exactly, and the landing id was pinned by **injection** (the inverse of the removal trick that
+found the first two) at **64 anonymous / 66 authed** against 13 / 19 slots serialized — ~50
+slots of headroom that is *an accident of how many resources `/catalog` happens to build*, not
+a designed margin.
+
+**The cross-shape class is now closed, by a mix of wrappers and structural facts rather than by
+wrapping everything.** Five payloads carry named fields (`CardDetailPayload`,
+`CollectionViewPayload`, `QuickAddPayload`, `CollectionListPayload`, `SearchPayload` +
+`AllCardsPayload`). The skips were **tested, not asserted**: shell-level resources (`shell.rs`,
+`tree.rs`) are created once per document so their ids cannot drift; `catalog.rs`'s count and
+`rail.rs`'s set facet are `Option`-typed but their `None` is the *correct* default, so a
+collision degrades to the honest resting state; `shopping.rs` and `needs.rs` already
+self-discriminate on their DTO field names (flood-tested 4/4). Three universal promiscuous
+keys — bare `null`, `{"Ok":null}`, `{"Ok":[]}` — are empirically defeated on every edge tested
+(20/20: 5 SPA edges × 4 payloads that have actually collided in this repo).
+
+**One skip was wrong and was caught by measuring it** — `destination.rs`'s `list_collections`.
+Under an `{"Ok":[]}` flood the picker rendered **0 of 10 collections, no error arm, no
+request**, silently claiming the account has none: **an array payload is promiscuous the same
+way `null` is**, since `{"Ok":[]}` decodes into an empty `Vec<T>` for any `T`. Wrapped.
+
+Two structural notes carried from it: **a wrapper whose only field is an `Option` is
+decorative**, because serde defaults a missing `Option` to `None` so the struct still accepts
+`{}` — `CardDetailPayload`'s field is a plain enum for that reason; and wrapping
+`selection_destinations` was **declined with the cost stated** (it makes
+`Resource<Result<Wrapper,_>>` non-`Copy`, turning the `Suspend` closure into an `FnOnce` the
+view macro rejects) and is safe only because that resource is never serialized — confirmed by
+dumping every `/my/*` route's slots.
+
+**`cards.rs`'s dishonest arm was fixed independently of any id arithmetic**, because a `None`
+meaning *"not fetched"* must not render *"That card id isn't valid."* — the same class the
+states sweep had just removed elsewhere. `CardIdOutcome` names the two facts the old `None`
+conflated: the route carried no parseable id, versus nothing arrived.
+
+**The new catalog→card-detail test is a standing guard, not a caught regression, and says so.**
+Since the collision does not fire today it was not red-then-greened; what *is* kill-verified is
+the fix, and more strongly than one mutation would show — flooding all 200 slots breaks the
+pre-fix build and leaves the wrapped build correct, so **a wrapped payload is immune at every
+id, not just today's**.
+
+**Same-type collisions remain the one open hole**, unchanged and now the only one:
+`list_collections` has two consumers of one type, `/my` and `/my/all` share `AllCardsPayload`,
+and two collection pages each mount quick-add. Closing it needs the payload to echo the request
+it answered and the consumer to reject a mismatch. The durable fix above all of this is still
+upstream — `initial_value()` honouring `during_hydration()` — and is filed.
+
+**Two pre-existing table overflows found and filed, not fixed**: below ~385 px (9–14 px at 375,
+64–69 px at 320) and 30–34 px at exactly 768 px where `md` adds the Type column. Neither is
+this task's: measured by reverting its classes in the live DOM, this branch **reduces** the
+tables' intrinsic width by ~20 px at every width below `md`, and at ≥768 px resolves to exactly
+the pre-task values. Both are outside the nine frames' widths.
+
+Three review minors were **fixed rather than filed** because all three were this branch's own
+work: the `px-1` compensations now switch at `md` alongside the select column they pay for
+(measured 0 overflow at 320/375/390/430/639/640/700/767/768/1024/1440), the click-through loop
+no longer slices four collections in tree order, and an inverted fixture-filter comment was
+corrected. Two review corrections were accepted in the other direction: a kill-verification is
+a transient mutation and is *correctly* absent from a diff, and Playwright's `[n/n]` count
+includes the `setup` project.
+
+**Operational lesson worth carrying:** the watch server's rebuilds were slow enough that two
+intermediate measurements read **stale** output before it was caught. A stale read is
+indistinguishable from a passing test, so measurements now poll on a marker in the served HTML
+rather than on elapsed time.
+
+#### The stage-boundary call
+
+**`ui-work-loop` → `implemented`.** Nothing in this stage contradicted it; its contract — spec
+reading before code, kill-verification, probes, the platform matrix, mirror sync — held
+throughout, and its recorded stopping rule is what kept the boundary task from sprawling.
+
+**`app-ui` → `implemented`, with one gap recorded rather than hidden.** The implementing agent's
+blunt assessment was that it could *not* honestly be flipped, on two grounds; the first (the
+catalog collision) is fixed above. The second stands: **the hover preview and the card sheet
+both omit the `+ Want` / `+ Have` quick actions their frames draw** (`Preview Actions`,
+`Sheet Actions`), which `design/information-architecture.md:78` names explicitly, and on a
+collection row the preview is the *only* place those actions could live. **Maintainer decision
+2026-07-27: flip and file.** So `implemented` here means *every screen exists and every frame
+reconciles except those two drawn controls* — not that every drawn control is built. The gap is
+a `[ ]` under Phase 5 discoveries with the adapters it should reuse named.
+
+**The Android release smoke is maintainer-owned and was not run by the loop.** `artifacts.yml`
+is `workflow_dispatch` only and the maintainer handles Tauri releases manually, so no release
+APK was built or triggered and **no release coverage is claimed**. What *is* proven on the real
+webview is the dev-attach path: seven probes green at phone width — tap targets, selection
+tray, `/my` root, states, header kebab, tree move, and the ⌘K desktop gate correctly reading
+false.
+
+Verified at the boundary: gate **8/8** on macOS incl. `three_rings`, with **four** cargo
+fingerprint cache hits (steps 3–6, the three feature-split lines that matter most for five
+changed wire payloads) each called out and re-run against a scratch target dir outside the repo
+to force genuine from-scratch checks — 198/293/164 crates compiled, `app` genuinely checked in
+every one. Workspace tests **256**. Full chromium tier **249/249** at `--workers=1` (7.0 min).
+Hydration CLEAN anonymous and authed, at default width and `PROBE_WIDTH=390`. Bench CLEAN.
+**24 table surfaces measured at 390 px with zero document and zero wrapper-local overflow.**
+A **39-edge SPA sweep** at both widths compared each destination's rendered content against the
+API's own JSON; the four edges it flagged all reproduced clean in isolation and were harness
+timing, reported as such.
 
 ### Empty / error / loading arms across the nine screens (2026-07-26)
 

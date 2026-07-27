@@ -1,7 +1,14 @@
 # UI work loop — the per-task agent loop for Phase 5
 
-**Status:** accepted
+**Status:** implemented
 **Depends on:** [app-ui](app-ui.md), [delivery-pipeline](delivery-pipeline.md)
+
+> Flipped at the Stage 3 boundary, 2026-07-27. The loop ran all of Stage 3; its contract —
+> spec reading before code, kill-verification, the probe layer beneath the suite, the
+> platform matrix, and skill-mirror sync — held throughout, and its recorded stopping rule
+> is what kept the boundary task from sprawling. The **Android release smoke stays
+> maintainer-owned** (`artifacts.yml` is `workflow_dispatch` only), so the loop records it
+> rather than claiming release coverage it does not produce.
 
 ## Problem
 
