@@ -260,9 +260,14 @@ pub struct TreeManage {
     /// showed the new one; creating a child from its own header added a row that
     /// did not appear. Both read as "the action did nothing".
     ///
-    /// Delete is deliberately **not** in that list — it navigates away instead
-    /// ([`route_after_delete`]), and refetching a collection that no longer
-    /// exists would only trade a stale page for an error one.
+    /// Delete bumps it too, but **only when it does not navigate**. The two cases
+    /// are genuinely different and the first cut of this got it wrong by treating
+    /// them as one: when [`route_after_delete`] sends the page up to the parent,
+    /// that remounts and refetches by itself, and bumping as well would refetch a
+    /// collection that no longer exists — a stale page traded for an error one.
+    /// When it returns `None` there is no navigation, and the delete still changed
+    /// what this page says: a deleted child is one of its folder rows and part of
+    /// its rollup.
     pub revision: RwSignal<u32>,
 }
 
@@ -538,11 +543,20 @@ pub fn TreeDialogs() -> impl IntoView {
                     manage.busy.set(false);
                     manage.delete_open.set(false);
                     tree.refetch();
-                    // Deleting the collection you are standing on (or an
-                    // ancestor of it) leaves the page rendering a dead id —
-                    // `route_after_delete` sends it up to the parent instead.
-                    if let Some(to) = leaving {
-                        navigate(&to, Default::default());
+                    match leaving {
+                        // Deleting the collection you are standing on (or an
+                        // ancestor of it) leaves the page rendering a dead id —
+                        // `route_after_delete` sends it up to the parent, which
+                        // remounts the page and refetches on its own.
+                        Some(to) => navigate(&to, Default::default()),
+                        // Deleting anything *else* still changes what this page
+                        // says. Standing on a parent and deleting one of its
+                        // children is the likeliest case — the child is a folder
+                        // row here (`view.children`) and its copies are in this
+                        // header's rollup, and neither comes from the tree read.
+                        // Without the bump the row stayed, linking to an id the
+                        // database no longer had.
+                        None => manage.revision.update(|r| *r = r.wrapping_add(1)),
                     }
                 }
                 Err(e) => {

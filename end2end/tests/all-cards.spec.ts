@@ -488,6 +488,67 @@ test("a junk cursor is a rendered error, not a crash @fast", async ({
   );
 });
 
+test.describe("reached by a client-side navigation", () => {
+  // A regression from #74 (the mobile `/my` root), shipping on `main` when this
+  // was written: arriving at `/my` by an in-app **click** rendered
+  // "You haven't added any cards yet." on an account with 100 cards, having made
+  // **zero** requests.
+  //
+  // `leptos_server`'s `initial_value()` reads `__RESOLVED_RESOURCES[<next
+  // monotonic id>]` for every `Resource::new` — it never checks the
+  // `during_hydration()` flag leptos itself maintains — so a resource created
+  // during a client-side navigation reads a slot belonging to the page just left.
+  // `SsrMode::Async` serializes three times at disjoint id ranges and the client
+  // consumes only the first, so the rest are unclaimed. The collection page
+  // leaves quick-add's `{"Ok":{"cards":[],"next_cursor":null}}` at ids 8/12/16,
+  // and that is byte-identical to an empty `AllCardsView`. #74 inserted
+  // `MyRootNav`'s `<Suspense>` ahead of `AllCardsBody`, shifting this resource's
+  // post-navigation id by +1 — off a hole (11) and onto a landmine (12).
+  // Measured: dropping slot 12 fixes it, dropping 8 or 16 does not, and removing
+  // `MyRootNav` fixes it. `AllCardsPayload`'s named field is the fix.
+  //
+  // **This must be a click, not a `goto`** — a cold load consumes the *first* id
+  // range and is correct, which is why the bug hid for a whole task.
+  test("shows the real rows, and actually fetches them @fast", async ({
+    page,
+  }) => {
+    const calls: string[] = [];
+    page.on("request", (r) => {
+      if (r.url().includes("all_cards")) calls.push(r.url());
+    });
+
+    // Start somewhere whose leftover payload is the landmine. Trade Binder is
+    // the measured case; any collection page serializes the same shape.
+    const tree = await page.request.get("/api/collection_tree");
+    expect(tree.ok()).toBeTruthy();
+    const rows = (
+      (await tree.json()) as { collections: { summary: { id: string; name: string } }[] }
+    ).collections;
+    const trade = rows.find((r) => r.summary.name === "Trade Binder")?.summary;
+    expect(trade, "the dev seed must contain Trade Binder").toBeTruthy();
+    await page.goto(`/my/collections/${trade!.id}`);
+    await hydrated(page);
+
+    // The sidebar's own `All cards` row — a real in-app navigation, the path a
+    // user takes.
+    await page.locator('#sidebar-rail a[href="/my"]').first().click();
+    await expect(page).toHaveURL(/\/my$/);
+
+    // Rows are on screen…
+    await expect(page.locator('[data-testid="all-cards-row"]').first()).toBeVisible();
+    // …and the empty state is not. Both directions, because "some rows exist"
+    // and "the empty state is gone" fail differently.
+    await expect(page.locator('[data-testid="all-cards-empty"]')).toHaveCount(0);
+    // …and they came from the server. Without this a correctly-guessed cached
+    // payload would pass every assertion above — which is exactly how the bug
+    // shipped, only with a wrong guess.
+    expect(
+      calls.length,
+      "/my reached by a click must fetch, not read a leftover payload",
+    ).toBeGreaterThan(0);
+  });
+});
+
 // The anonymous `/my` bounce is asserted in smoke.spec.ts ("anonymous /my
 // bounces to login with a return path") and is not repeated here. Note also
 // that `browser.newContext()` inside a spec is NOT anonymous — Playwright

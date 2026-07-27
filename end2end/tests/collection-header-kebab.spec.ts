@@ -435,6 +435,76 @@ test.describe("deleting what you are looking at", () => {
   });
 });
 
+test.describe("deleting something else you can see", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("takes its folder row and its rollup off the page with it @fast", async ({
+    page,
+  }) => {
+    // The other half of the delete story, and the half the first cut got wrong:
+    // when `route_after_delete` returns `None` there is no navigation, so nothing
+    // refetched `collection_view` and the deleted child stayed on its parent's
+    // page as a folder row linking to an id the database no longer had — with its
+    // copies still counted in the header. Exactly the defect class `revision` was
+    // added for.
+    //
+    // Driven from the **sidebar row**, not the kebab: the parent is the page most
+    // likely to be open when you right-click a child in the tree, and the fix
+    // belongs to the shared dialog rather than to either trigger.
+    const parent = await createCollection(page, { name: scratchName("sib-p") });
+    const child = await createCollection(page, {
+      parent_id: parent.id,
+      name: scratchName("sib-k"),
+    });
+    try {
+      await page.goto(`/my/collections/${parent.id}`);
+      await hydrated(page);
+
+      const folder = page.locator(
+        `[data-testid="folder-row"][data-collection="${child.id}"]`,
+      );
+      // The positive control: the row is there to begin with, so its later
+      // absence means something.
+      await expect(folder).toBeVisible();
+      await expect(folder.locator("a")).toHaveAttribute(
+        "href",
+        `/my/collections/${child.id}`,
+      );
+
+      await page.locator(`[data-tree-row-head="${child.id}"]`).click({
+        button: "right",
+      });
+      const treeMenu = page.locator("#context-menu-tree");
+      await expect
+        .poll(() =>
+          treeMenu.evaluate((el: HTMLElement) => el.matches(":popover-open")),
+        )
+        .toBe(true);
+      await treeMenu.locator('[role="menuitem"]', { hasText: "Delete…" }).click();
+      await page.locator("#tree-delete-confirm").click();
+
+      // Gone from the server…
+      await expect
+        .poll(async () =>
+          (await fetchTree(page)).some((r) => r.summary.id === child.id),
+        )
+        .toBe(false);
+      // …and gone from this page, which never navigated.
+      await expect(page).toHaveURL(
+        new RegExp(`/my/collections/${parent.id}$`),
+      );
+      await expect(folder).toHaveCount(0);
+      // The header stopped counting its copies too. `0 here` is the whole
+      // sentence for an empty binder with nothing rolled up (`counts_summary`),
+      // so this also proves the rollup clause went away rather than just
+      // shrinking.
+      await expect(page.getByTestId("collection-counts")).toHaveText("0 here");
+    } finally {
+      await deleteCollection(page, parent.id);
+    }
+  });
+});
+
 test.describe("mobile", () => {
   // A real phone: `hasTouch` so taps are taps, and a width below `md` — where
   // the collection tree is behind the rail drawer and this kebab is the natural
