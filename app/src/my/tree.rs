@@ -19,6 +19,7 @@ use shared::{CollectionTreeRow, Id};
 use std::collections::{HashMap, HashSet};
 
 use super::tree_manage::{commit_drop, DragState, DropIntent, MenuTarget, TreeManage, TreeMenu};
+use crate::components::states::{StateBadge, Tone};
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::collapsible::{Collapsible, CollapsibleContent, CollapsibleTrigger};
 use crate::components::ui::context_menu::{use_context_menu, ContextMenu};
@@ -153,11 +154,46 @@ pub fn CollectionTreeNav() -> impl IntoView {
                 {move || Suspend::new(async move {
                     match tree.await {
                         Some(Ok(dto)) => assembled_view(assemble(dto), pathname).into_any(),
-                        Some(Err(_)) => {
+                        // `warning`, not `destructive`: the rail failing does not
+                        // break the page beside it — every route under `/my` reads
+                        // its own data — so this is the *partial* tone, and the
+                        // one thing the line was missing is a way to ask again.
+                        // `role="alert"` because a quiet unannounced line is
+                        // invisible to a screen reader, which is the reader least
+                        // able to notice a nav that simply isn't there.
+                        //
+                        // The retry is **conditional**, on the shared classifier
+                        // rather than on this file's judgement. `/my`'s root list
+                        // renders the same failed read, so the two had to agree on
+                        // whether asking again is possible — see
+                        // [`tree_retryable`], which is the one place that decides
+                        // and the reason neither surface can drift from the other.
+                        Some(Err(e)) => {
+                            let retryable = tree_retryable(&e);
                             view! {
-                                <p class="text-muted-foreground px-2 text-xs">
-                                    "Couldn't load collections."
-                                </p>
+                                <div
+                                    class="space-y-1.5 px-2"
+                                    data-testid="tree-error"
+                                    data-failure=crate::components::states::describe(&e).0.slug()
+                                >
+                                    <StateBadge tone=Tone::Partial label="Partial" />
+                                    <p role="alert" class="text-muted-foreground text-xs">
+                                        "Couldn't load collections."
+                                    </p>
+                                    {retryable
+                                        .then(|| {
+                                            view! {
+                                                <button
+                                                    type="button"
+                                                    class="text-muted-foreground hover:text-foreground text-xs underline"
+                                                    data-testid="tree-retry"
+                                                    on:click=move |_| tree.refetch()
+                                                >
+                                                    "Try again"
+                                                </button>
+                                            }
+                                        })}
+                                </div>
                             }
                                 .into_any()
                         }
@@ -167,6 +203,18 @@ pub fn CollectionTreeNav() -> impl IntoView {
             </Suspense>
         </nav>
     }
+}
+
+/// Whether a failed [`CollectionTreeResource`] read is worth asking again.
+///
+/// One function because there are **two** surfaces rendering this one read — the
+/// desktop rail here and the phone's root list ([`super::root`]) — and before this
+/// existed they disagreed: the rail offered a retry for every failure including
+/// the ones that will never clear, and the root list offered none for any failure
+/// including the ones a second attempt fixes. Two consumers of one resource
+/// cannot honestly hold different beliefs about whether it can be retried.
+pub fn tree_retryable(e: &ServerFnError<String>) -> bool {
+    crate::components::states::describe(e).0.retryable()
 }
 
 fn tree_skeleton() -> impl IntoView {
@@ -669,6 +717,26 @@ fn row_link(
 mod tests {
     use super::*;
     use shared::{CollectionKind, CollectionSummary, CollectionTree};
+
+    /// The rail and the phone's root list render the same failed read, so the
+    /// one thing they must not do is disagree about whether asking again can
+    /// help. Pinning the delegation here is what catches a future edit that
+    /// hard-codes `true` (which is what the rail shipped with) or `false` (which
+    /// is what the root list shipped with).
+    #[test]
+    fn tree_retryable_follows_the_shared_classifier() {
+        let e = |raw: &str| ServerFnError::<String>::ServerError(raw.into());
+        // An unreachable backend — the case a second attempt is for.
+        assert!(tree_retryable(&e("upstream: neon unreachable")));
+        // An expired session: the fix is a sign-in, and a retry 401s again.
+        // This is not hypothetical — it is what an idle tab produces, because
+        // `fetch_current_user` refreshes a stale `tr_jwt` from `tr_session`
+        // while `user_id_from_headers` (every data read) does not.
+        assert!(!tree_retryable(&e("unauthorized: invalid token")));
+        // And the request-level classes, which will never clear.
+        assert!(!tree_retryable(&e("validation: nope")));
+        assert!(!tree_retryable(&e("not found: collection")));
+    }
 
     fn row(
         id: u128,

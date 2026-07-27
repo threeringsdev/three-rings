@@ -109,15 +109,23 @@ test.describe("bench", () => {
 
     // The picker is the *catalog's* control (`DestinationList`), so it brings
     // that control's search box with it. On the bench the collection list is a
-    // session read the anonymous page cannot make, so the honest rendering is
-    // the empty state — asserted on the content, never on a visibility flag
-    // (a closed popover is in the DOM either way; e2e-suite skill).
+    // session read the anonymous page cannot make, so what it renders is the
+    // **failed** arm — asserted on the content, never on a visibility flag (a
+    // closed popover is in the DOM either way; e2e-suite skill).
+    //
+    // This assertion used to read `No collection to move to.`, and the comment
+    // above it used to call that "the honest rendering". It was not: the read
+    // 401s, and an empty list is a claim about the account rather than about the
+    // read. `DestinationList` now separates the two (the state-arms task) and the
+    // empty line is reserved for what it can actually speak about — a *filter*
+    // that matched nothing.
     await move.click();
     const picker = page.locator("#popover-tray-destination");
     await expect(
       picker.locator('[data-name="CommandInput"]'),
     ).toHaveAttribute("placeholder", "Search collections…");
-    await expect(picker).toContainText("No collection to move to.");
+    await expect(picker).toContainText("Couldn't load your collections.");
+    await expect(picker).not.toContainText("No collection to move to.");
     // Nothing was moved and nothing was deselected by merely opening it.
     await expect(page.locator(COUNT)).toHaveText("1 card");
   });

@@ -65,6 +65,7 @@ use std::collections::HashSet;
 use super::collection::{ancestor_path, assembled_roots, message_of, needs_chip};
 use super::move_selection::{movable, MoveSource, Skipped};
 use super::tree::CollectionTreeResource;
+use crate::components::states::{ErrorNote, StateBadge, Tone};
 use crate::components::ui::button::{Button, ButtonVariant};
 use crate::components::ui::checkbox::Checkbox;
 use crate::components::ui::skeleton::Skeleton;
@@ -318,7 +319,14 @@ pub fn NeedsPage() -> impl IntoView {
         move || (url_id.get(), revision.get()),
         |(id, _revision)| async move {
             let id = Id::parse_str(&id).map_err(|_| {
-                ServerFnError::<String>::ServerError("that is not a collection id".into())
+                // `validation:` deliberately — the wire vocabulary is what the
+                // UI classifies on, and a malformed id in the URL is a *request*
+                // failure that will never resolve. Unprefixed it read as a
+                // transport failure and the error arm offered a "Try again" that
+                // re-parsed the same broken string forever.
+                ServerFnError::<String>::ServerError(
+                    "validation: that is not a collection id".into(),
+                )
             })?;
             crate::collection_needs(id).await
         },
@@ -342,15 +350,19 @@ pub fn NeedsPage() -> impl IntoView {
                             view! { <NeedsBody view picks /> }
                                 .into_any()
                         }
+                        // The way out is already on the page: `NeedsHeader` sits
+                        // *outside* this boundary (it awaits the tree, not the
+                        // needs read), so its back link to the collection
+                        // survives this arm — which is why this is the one error
+                        // banner here that needs no `children`.
                         Err(e) => {
                             view! {
-                                <p
-                                    role="alert"
-                                    data-testid="needs-error"
-                                    class="border-destructive/40 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-sm"
-                                >
-                                    {format!("Couldn't load these needs: {}", message_of(&e))}
-                                </p>
+                                <ErrorNote
+                                    what="Couldn't load these needs"
+                                    e
+                                    testid="needs-error"
+                                    retry=Callback::new(move |()| needs_res.refetch())
+                                />
                             }
                                 .into_any()
                         }
@@ -450,17 +462,43 @@ fn NeedsBody(view: NeedsView, picks: RwSignal<Option<Vec<PickGroup>>>) -> impl I
             // deck whose only unmet slots are board-level reads it as "your deck
             // is complete", and the arithmetic behind it never looked at a board
             // (module doc). The second clause is what keeps the first one true.
-            <p class="text-muted-foreground py-12 text-center text-sm" data-testid="needs-empty">
-                "Nothing to pull or buy — this collection holds every copy it wants. Unfilled board slots aren't counted here."
-            </p>
+            //
+            // The badge is the `success` family because this arm is the *good*
+            // kind of nothing — the collection holds every copy it wants — and
+            // that is a different claim from `/my/all`'s "you haven't added any
+            // cards yet", which is the *absent* kind. Same blank table, opposite
+            // meanings; the tone is what tells them apart at a glance.
+            <div
+                class="text-muted-foreground flex flex-col items-center gap-2 py-12 text-center text-sm"
+                data-testid="needs-empty"
+            >
+                <StateBadge tone=Tone::Resolved label="All set" />
+                <p>
+                    "Nothing to pull or buy — this collection holds every copy it wants. Unfilled board slots aren't counted here."
+                </p>
+            </div>
         }
         .into_any();
     }
 
     view! {
-        <p class="text-sm font-medium" data-testid="needs-summary">
-            {summary.unwrap_or_else(|| "Nothing missing".to_string())}
-        </p>
+        // No `unwrap_or_else`. The line is omitted when there is no summary to
+        // give, the way `RootRow::count` omits a count it cannot vouch for: the
+        // fallback used to be the bare **"Nothing missing"** — the same
+        // unqualified claim the empty arm above was rewritten to stop making,
+        // and worse here, because reaching it means rows *do* exist. It is
+        // unreachable today (`needs()` filters on `desired > present_here`, so
+        // every row it returns has a gap and `needs_chip` always answers), which
+        // made it a dishonest sentence waiting for the first payload shape that
+        // reaches it rather than one anybody had seen.
+        {summary
+            .map(|s| {
+                view! {
+                    <p class="text-sm font-medium" data-testid="needs-summary">
+                        {s}
+                    </p>
+                }
+            })}
         {(!elsewhere.is_empty())
             .then(|| view! { <OwnedElsewhere rows=elsewhere collection_id picks /> })}
         {(!short.is_empty()).then(|| view! { <ShortBucket rows=short /> })}

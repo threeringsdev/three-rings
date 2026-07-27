@@ -219,6 +219,148 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Empty / error / loading arms across the nine screens (2026-07-26)
+
+An audit-then-fix sweep, not a feature. `app/src/components/states.rs` is the centrepiece:
+five surfaces had hand-rolled the same `border-destructive/40` banner and each offered a
+different amount of nothing.
+
+**The load-bearing idea: the banner takes the *error*, not a message.** `ErrorNote`
+classifies the wire prefix four ways and picks affordances from the classification —
+`Missing`/`Request` **withhold** the retry (it would re-send the same doomed request),
+`Transport` offers it, `Session` offers neither and links `/login?next=<here>`. A uniform
+"Try again" everywhere would be a lie on most pages. Review verified the classifier against
+reality: `shared/src/lib.rs:50-72` gives exactly six `Display` prefixes, `ApiError::from_wire`
+reconstructs the same six on the native backend, and every other `ServerFnError` variant
+carries no known prefix — so the `Transport` default is right for them. `Failure::Missing` is
+split from `Request` because `ApiError::NotFound` carries a bare noun across ~21 call sites,
+so appending the detail produced *"Couldn't load this collection: collection"*.
+
+**The dishonest states found, which were the point of the task:**
+
+- **`unwrap_or_default()` on the collection list in *two* shipped pickers** — a failed fetch
+  asserted the account has no collections. On the native backend an offline phone is the
+  *normal* failure, so this was the common case, not an exotic one.
+- **`/cards/:id`'s `LoadFailed` was a page with no link or control at all.**
+- **An expired session rendered raw `unauthorized: invalid token`** in a red box — the exact
+  symptom the e2e-suite skill documents as reading like a page bug.
+- **An existing test asserted the dishonesty and called it honest.**
+  `selection-tray.spec.ts:120` expected "No collection to move to." with a comment reading
+  *"the collection list is a session read the anonymous page cannot make, so the honest
+  rendering is the empty state."* It was not — the read 401s. Test and comment both
+  corrected, and the on-device probe asserting the same string was corrected with them.
+
+**Review found the one surface where the collapse survived — and that the new docstring
+claimed otherwise.** `tree_manage.rs:798` flattened `_ => Vec::new()` with no `failed` prop,
+while `destination.rs:239-244` stated both the tray and the tree's `Move to…` were safe.
+With a failed tree read, `MenuTarget::for_collection` deliberately degrades `forbidden` to
+`{self}` so the kebab item stays live, `move_rows` renders its unconditional `⬆ Top level`
+row, and `CommandEmpty` never fires because the registry is non-empty — so the dialog
+silently asserted root was the only destination and offered a reparent as the only action:
+**a real write on a false picture.** A docstring contradicting its own code is the more
+dangerous half, because the next reader stops checking. **`⬆ Top level` was deliberately
+kept**, because reparenting to root is the one destination that never needed the tree —
+removing it would be the CSS-hidden-fallback mistake from the mobile-`/my` review in reverse.
+What it must not be is *alone and unexplained*.
+
+**Three retry buttons bypassed the classifier the task introduced** (orchestrator promoted
+these from minors as scope completion, not new work — a component whose premise is that
+affordances follow the classification cannot ship beside three surfaces contradicting it):
+`PickerBody` printed the raw wire detail and offered an unconditional retry, so an
+`unauthorized:` failure read *"Couldn't load your collections: invalid token"* over a retry
+that 401s forever — verbatim the defect the component exists to prevent; `cards.rs`'s retry
+was unconditional for every non-`not found:` class; and `tree.rs`/`root.rs` **disagreed with
+each other about the same shell resource** — one offered a retry, the other offered none.
+`tree::tree_retryable` is now the single decision point, because two consumers of one read
+diverging is incoherent by construction rather than merely inconsistent.
+
+#### `Failure::Session` is reachable on every `/my/*` route, and the reason is a two-credential mismatch
+
+Review could find no app consumer of the `Session` arm — every `ErrorNote` surface sits
+behind `RequireAuth`, which bounces an expired session before the page renders. That
+contradicted an *unplanned* live observation, and reconciling the two found the mechanism.
+**The app carries two credentials with different lifetimes and different fallbacks:**
+
+- `fetch_current_user` (`account.rs:320-344`), which `RequireAuth` awaits, tries `tr_jwt` and
+  **on failure falls back to `tr_session` and re-establishes the session** — so an expired
+  JWT with a live session yields `Ok(Some(user))` and **the guard passes**.
+- `user_id_from_headers` (`auth.rs:233-239`), which every *data* server fn uses, reads
+  `tr_jwt` or a Bearer header **only, with no session fallback** — same request, same expired
+  cookie, `unauthorized: invalid token`.
+
+The refreshed JWT lands on the *response*, so data reads inside that same SSR pass still see
+the stale request header. **The window is 15 minutes wide and any idle tab hits it.**
+Observed twice on two routes (`/my/shopping`, `/my/all`), each rendering
+`data-failure="session"` while `__RESOLVED_RESOURCES[0]` carried the fully resolved user. So
+it is not a route the guard fails to cover — it is a route where the guard **succeeds** and
+the data layer doesn't. Pinned in a unit test with the mechanism in the test comment,
+precisely so a future reader does not call it unreachable again. **The underlying auth
+mismatch is filed, not fixed**: it is an auth-request-lifetime change, not a state-arm
+rendering, and it does not belong in a states PR.
+
+**Where the previously-unused token variants went** — three tones, three different claims,
+mapped to families and never to hex (the recorded WCAG tuning means the tokens carry four
+deliberate deviations from upstream, so hand-picking colours would discard that work):
+`Resolved`→`success` for needs-empty and shopping-empty, because *that* nothing is an
+achievement and the opposite claim from `/my/all`'s "you haven't added any cards yet" — same
+blank table, opposite meanings; `Partial`→`warning` for the `/my` root fallback rows and the
+failed sidebar tree, which matters most where the rows *look* complete; `Stale`→`info` for
+the catalog's dimmed last-good page, which was previously unlabelled and `aria-hidden`, so
+nothing said *why* results sat under an error. **`ButtonVariant::Warning`/`Success` were
+deliberately left unused** — a retry is neutral and a way-out is a link, and "warning" on a
+button reads as *this action is risky*; they belong to destructive-adjacent confirm flows.
+The gate confirmed `bg-success-light`/`bg-warning-light`/`bg-info-light` are emitted into the
+release CSS with resolved colours in both themes, so no badge ships invisible.
+
+**Traps worth carrying:**
+
+- **`CommandEmpty` can only ever speak about *filtering*.** It infers emptiness from the item
+  registry, so zero registered items conflates not-fetched / failed / genuinely-empty — the
+  same collapse the set picker's four arms exist to refuse, and three pickers were leaning on
+  it to describe a failed fetch. It **cannot** be fixed in place: the ⌘K palette's "No
+  matches" depends on exactly that inference.
+- **A caller-side `failed` flag must be Effect-written, and that makes it SSR-blind.**
+  `ResultsToolbar`'s recorded lesson (hydration *claims* the server's text without rewriting
+  it) rules out reading a resource in render, and Effects do not run during SSR — so a flag
+  is only safe on a surface that never server-renders. That is why the sticky picker got a
+  structural fix inside its `Suspend` and the tray and move dialog got flags; review verified
+  the tray genuinely cannot server-render (`SelectionState::new()` is an empty `RwSignal` with
+  no cookie/localStorage restore, and the tray is inside `<Show when=!items.is_empty()>`).
+- **Any client-constructed `ServerFnError` must speak the `ApiError` prefix vocabulary.** Two
+  (`needs.rs`, `collection.rs`) carried none, so the classifier read them as *transport* and
+  would have offered a retry that re-parses the same broken string forever.
+- **No wireframe frame specifies an empty, error or loading state** — checked across every
+  string in `design/wireframes.pen`, so judgement was not overriding a frame anywhere.
+- **The needs-empty arm remains unreachable by navigation** (the needs chip is its only link
+  and is absent when nothing is missing), so its test reaches it by URL — the same trap
+  already recorded for that route.
+- **Fixture limit, stated rather than papered over:** the e2e user's shopping list has 4 rows,
+  so `shopping-empty` — the second `Resolved` consumer — has **no** honest e2e; it is covered
+  by the bench section and the unit-tested tone mapping only. Emptying it would mean mutating
+  shared fixture data.
+
+**No mutation pass was run** (switched off in the loop), so each new test is instead anchored
+on a `data-testid`/attribute the fix introduced — `destination-error`,
+`collection-error-home`, `tree-error`, `data-failure`, `data-tone`, `state-retry` — none of
+which exist on `main`, so no assertion keyed on them could have passed before. Review
+assessed that substitution and found it holds for all six. The major's fix was additionally
+**kill-verified** by dropping the `failed` prop and watching `destination-error` fail to
+appear.
+
+Verified: gate **8/8** on macOS incl. `three_rings` with **no** cargo cache hits (every
+compiled step showed a real `Checking`/`Compiling app` line), workspace tests **254**, full
+chromium tier **234/234** at `--workers=1` (7.6 min), hydration CLEAN anonymous ×5 / authed
+×6 / ×6 again at `PROBE_WIDTH=390`, bench CLEAN, `probe:android-states` PASS (all four
+failure classes rendering their own affordances and no others, a real touch on Try again
+moving the counter 0→1, and all three tone badges resolving to real dark-theme oklch colours
+— a token family with no CSS behind it would have been transparent), and
+`probe:android-selection-tray` restored to PASS after its stale assertion was corrected.
+
+The `.agents/skills/` ⇄ `.claude/skills/` mirror had drifted again during this loop
+(`e2e-suite/SKILL.md`, by the probe rows and the `diag:resource-ids` paragraph added by
+earlier tasks in the same session). Resynced here; `diff -rq` clean on all six. This is the
+second occurrence, which strengthens the already-filed case for the merge-gate assertion.
+
 ### Collection-header kebab, and a Leptos resource-id collision (2026-07-26)
 
 `HeaderKebab` in `app/src/my/collection.rs` — a real `<button>` in a new `Header Actions`

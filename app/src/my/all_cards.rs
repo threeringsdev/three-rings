@@ -39,6 +39,7 @@ use shared::{AllCardsRow, CardLocation};
 
 use crate::cards::CardPreview;
 use crate::components::query_bar::QueryBar;
+use crate::components::states::ErrorNote;
 use crate::components::ui::collapsible::{Collapsible, CollapsibleContent, CollapsibleTrigger};
 use crate::components::ui::selection_tray::{
     use_selection, SelectedCard, SelectionCheckbox, SelectionKey,
@@ -221,10 +222,14 @@ fn AllCardsBody(base: &'static str, class: &'static str, back: bool) -> impl Int
                     // the await and outside this effect's dependency set.
                     let q = url_q.get();
                     let searching = !q.is_empty();
+                    // The way home keeps the search and drops only the cursor —
+                    // `/catalog` learned this one: a stale cursor must not cost
+                    // the user the query they typed. `base` alone did.
+                    let home = my_url(base, &q, None);
                     Suspend::new(async move {
                     match rows.await.all_cards {
                         Ok(view) if view.cards.is_empty() => {
-                            view! { <EmptyState searching paged base /> }.into_any()
+                            view! { <EmptyState searching paged home=home.clone() /> }.into_any()
                         }
                         Ok(view) => {
                             let next = view.next_cursor.clone();
@@ -234,15 +239,32 @@ fn AllCardsBody(base: &'static str, class: &'static str, back: bool) -> impl Int
                             }
                                 .into_any()
                         }
+                        // **The arm the pager does not reach.** `Pager` renders
+                        // only under `Ok`, so past a cursor this page used to be
+                        // a message and nothing else — and the failure that puts
+                        // you here most often is a *shared or bookmarked*
+                        // `?cursor=` gone stale, where there is nothing in the box
+                        // to fix and no way back. That is the case
+                        // `/catalog`'s own error arm was given a way home for; it
+                        // is the same defect and this is the same fix.
                         Err(e) => {
                             view! {
-                                <p
-                                    role="alert"
-                                    data-testid="all-cards-error"
-                                    class="border-destructive/40 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-sm"
+                                <ErrorNote
+                                    what="Couldn't load your cards"
+                                    e
+                                    testid="all-cards-error"
+                                    retry=Callback::new(move |()| rows.refetch())
                                 >
-                                    {format!("Couldn't load your cards: {}", message_of(&e))}
-                                </p>
+                                    <Show when=move || paged.get()>
+                                        <a
+                                            href=home.clone()
+                                            class="text-destructive text-sm font-medium underline"
+                                            data-testid="page-first"
+                                        >
+                                            "← Back to the start"
+                                        </a>
+                                    </Show>
+                                </ErrorNote>
                             }
                                 .into_any()
                         }
@@ -251,15 +273,6 @@ fn AllCardsBody(base: &'static str, class: &'static str, back: bool) -> impl Int
                 }}
             </Transition>
         </div>
-    }
-}
-
-/// The human-facing half of a server-fn error (the transport only carries
-/// `ApiError`'s `Display` string).
-fn message_of(e: &ServerFnError<String>) -> String {
-    match e {
-        ServerFnError::ServerError(msg) => msg.clone(),
-        other => other.to_string(),
     }
 }
 
@@ -275,8 +288,12 @@ fn RowsSkeleton() -> impl IntoView {
 /// Nothing to show. Which of the three reasons it is matters: an empty
 /// collection wants a pointer at the catalog, a filtered-out search wants its
 /// term blamed, and a walked-past-the-end page wants a way back.
+///
+/// `home` is page one *of the current search* — see the caller: dropping the
+/// query along with the cursor made the way out cost the user their search.
 #[component]
-fn EmptyState(searching: bool, paged: Memo<bool>, base: &'static str) -> impl IntoView {
+fn EmptyState(searching: bool, paged: Memo<bool>, home: String) -> impl IntoView {
+    let home = StoredValue::new(home);
     view! {
         <div class="text-muted-foreground py-12 text-center text-sm" data-testid="all-cards-empty">
             <Show
@@ -298,8 +315,10 @@ fn EmptyState(searching: bool, paged: Memo<bool>, base: &'static str) -> impl In
                 }
             >
                 <p>
-                    "Nothing on this page. " <a href=base class="underline">"Back to the start"</a>
-                    "."
+                    "Nothing on this page. "
+                    <a href=move || home.get_value() class="underline">
+                        "Back to the start"
+                    </a> "."
                 </p>
             </Show>
         </div>
