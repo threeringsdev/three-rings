@@ -219,6 +219,139 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Collection-header kebab, and a Leptos resource-id collision (2026-07-26)
+
+`HeaderKebab` in `app/src/my/collection.rs` — a real `<button>` in a new `Header Actions`
+cluster, wrapped in a second `ContextMenu id="collection-header"` whose panel **is `TreeMenu`
+itself**, so the two menus' offered *and withheld* sets cannot drift (an e2e asserts both
+panels' full ordered label lists for the same collection). Review confirmed the invariant
+holds, including the Inbox withholding move/rename/delete on both surfaces.
+
+**The task's headline result is not the kebab. It is that a second consumer of a shared
+menu is exactly where "the tree refetch is enough" stops being true** — and, following that
+thread, a live data-correctness bug on `main`.
+
+#### The `/my` empty-state regression: a Leptos resource-id collision
+
+Found as an aside while building this surface, believed pre-existing, and proven to be a
+**regression from the immediately preceding PR (#74, mobile `/my` root)**. Symptom: signed
+in with 100 present copies, an **SPA navigation** into `/my` — the sidebar's `All cards` row
+or the breadcrumb root — rendered "You haven't added any cards yet" with **zero network
+requests**. A direct `goto('/my')` was correct.
+
+Mechanism, verified in the vendored source rather than assumed:
+
+- `leptos_server-0.8.6/src/resource.rs:399-427` — `initial_value()` calls
+  `shared_context.read_data(id)` with **no `during_hydration()` check**, for every
+  `Resource::new`, at any time. `hydration_context-0.3.1/src/hydrate.rs:133` is a bare
+  `__RESOLVED_RESOURCES[id]` read that does not consume the slot. If the slot decodes,
+  `is_ready = true` and **the fetcher never runs**. `during_hydration()` /
+  `hydration_complete()` both exist and are maintained (`hydrate.rs:145`,
+  `leptos-0.8.20/src/mount.rs:97`) — `initial_value` simply ignores them. The real fix is
+  an upstream one-liner.
+- An `SsrMode::Async` page renders **three times** server-side and serializes at three
+  disjoint id ranges; the client consumes only the **first** during hydration, leaving
+  unclaimed slots as landmines for resources created during client-side navigation.
+- `shared::AllCardsView { cards, next_cursor }` and `shared::SearchResults { cards,
+  next_cursor }` are **byte-identical when `cards` is empty**, so quick-add's closed-panel
+  `{"Ok":{"cards":[],"next_cursor":null}}` cross-decoded into an empty All-cards view.
+- **#74's authorship was measured, not argued.** Temporarily deleting `<MyRootNav />` from
+  `AllCardsPage` made the bug disappear; pre-#74 the resource landed on id 11, an
+  unserialized hole, so it fetched. `MyRootNav`'s `<Suspense>` sits *ahead* of
+  `AllCardsBody` and shifts its id by exactly +1.
+- **The colliding slot was id 12**, pinned by identification-by-removal (dropping 8 or 16
+  left it broken; dropping 12 fixed it). The review's derived guess of 10 was wrong while
+  its payload-stride fingerprint was right — worth remembering as the difference between a
+  correct mechanism and a correct address.
+- **It was collection-dependent, which is why it hid**: Trade Binder and Bulk Box broke
+  while Shoebox and Commander Deck worked, on identical serialized slots — the difference is
+  where the client id counter sits after each page creates its own resources. A spot check
+  on the wrong collection would have cleared it.
+
+Fixed with `AllCardsPayload { all_cards: Result<AllCardsView, ServerFnError<String>> }`
+carrying `serde(deny_unknown_fields)` — **a named field, chosen over re-numbering ids
+precisely because re-numbering leaves the next identical-shape collision waiting.**
+
+**The honest limit, recorded because it is not fixed:** a decode-layer refusal cannot close
+the **same-type** case. `/my` and `/my/all` both resolve `AllCardsView`, so a correctly
+typed payload answering a *different* `?q=` passes any type tag; closing that needs the
+payload to echo the request it answered and the consumer to reject a mismatch. Two
+general fixes were investigated and rejected as unsafe from app code: clearing
+`__RESOLVED_RESOURCES` at hydration-complete **races streaming** (late chunks write into the
+same array, so out-of-order routes would lose legitimate values), and clearing on navigation
+is **too late** (Effects run after the new route's components are built, so the new resource
+reads the stale slot first). There is no keyed or opt-out `Resource` constructor. Both the
+echo-comparison and the upstream report are filed.
+
+`npm run diag:resource-ids` (`end2end/measure-resource-ids.mjs`) is kept and documented in
+the e2e-suite skill — it is the tool that pinned slot 12 and will pin the next one.
+
+**Two predictions I made were disputed with evidence and the disputes upheld:** the
+`/my` → `/my/all?q=…` corollary **does not reproduce** (the mechanism permits it, but at
+today's id layout the resource lands on a hole or an incompatible slot — latent, not active),
+and `CollectionPage`'s `view_res` is safe in both directions of collection→collection SPA
+navigation. Also corrected: the vendored crate is 0.8.6, not 0.8.7.
+
+#### The two defects the second consumer exposed
+
+- **A mutation was invisible on the page you performed it from.** Title, counts and folder
+  rows come from `collection_view`, so no `tree.refetch()` could update them: renaming left
+  a stale `<h1>` beside an already-updated breadcrumb, and `New binder inside…` added a
+  folder row that never appeared. Both read as "the action did nothing". Fixed with
+  `TreeManage::revision` as a `view_res` source — the same structural trick
+  `HoldingsRevision` plays.
+- **Deleting the collection you are viewing left a dead id on screen.** `route_after_delete`
+  walks up to the parent (`/my` at top level) and covers the **cascade**, since any route
+  inside the deleted subtree is equally dead. Fixed in the shared `submit_delete`, so the
+  pre-existing tree-row path is fixed too.
+
+**Review found the delete carve-out from `revision` was too broad** — a second major. The
+exclusion was justified as "delete navigates away instead", but that only holds when
+`route_after_delete` returns `Some`. Standing on parent `P` and deleting *child* `C` from the
+sidebar returns `None`, so nothing refetched `collection_view` and **`C`'s folder row stayed
+on the page linking to a deleted id**, with its copies still in the counts. `submit_delete`
+now matches on `leaving`: `Some(to)` navigates and must *not* bump (the remount refetches,
+and a bump would refetch a deleted collection), `None` bumps. The doc comment asserting the
+old carve-out was corrected rather than left lying.
+
+**`Empty deck…` deliberately stays a visible button, not a sixth kebab item.** The kebab's
+five are collection *lifecycle*; teardown moves the cards *inside*, which is where the code
+already splits. The frame drawing this kebab draws a **binder**, so it cannot be read as
+relocating a deck action, and burying a primary destructive affordance is a discoverability
+loss no frame asked for. Review judged this defensible against the frames.
+
+**`design/information-architecture.md:37` is stale**: it calls the Inbox "undeletable,
+renamable", but `hosted.rs:492` carries `AND NOT is_inbox` on rename, so the API refuses.
+The UI now follows the server on two surfaces. Filed — one of the two must be reconciled.
+
+`Row Kebab` turned out to belong to the **`Card Row`** frame, not the tree — the per-card-row
+move affordance, unbuilt, correctly left out of scope, along with the `Hdr Kebab Spacer`
+that reserves its column. **None of the four filed `ContextMenuItem` minors crossed from
+imperfect into broken** on this surface, so none were touched; review verified the two
+load-bearing claims (each `ContextMenuContent` owns its own `open` and `restore_focus`, and
+the window ESC/pointerdown listeners early-return on `!open`, so the closed instance cannot
+interfere; cross-instance focus hand-off is ordered correctly because `open_at` defers a
+macrotask).
+
+Deviations from the frames, all deliberate: `size-11` (44 px) hit area below `md` because the
+frame's bare 18 px ellipsis is the *look*, not the target (measured 44×44 on-device);
+`⋯` (U+22EF) rather than lucide `ellipsis` (no icon set vendored — already filed);
+`text-muted-foreground` for both `$text-3` and `$text-2` (the app has no third text token);
+`bg-background` rather than `#FFFFFF` (dark is the default theme); one element with
+responsive classes rather than two (SSR cannot know the viewport); top-aligned rather than
+`alignItems: center`, because the app's title group has three lines to the frame's two.
+
+Verified: gate **8/8** on macOS incl. `three_rings` — with **four** cargo fingerprint cache
+hits (steps 4, 5, 6, 7) each called out and re-run against a scratch target dir to force
+genuine from-scratch work. Full chromium tier **223/223** at `--workers=1` (7.2 min),
+workspace tests 245, hydration CLEAN authed ×4 and ×3 at `PROBE_WIDTH=390`, bench CLEAN,
+authed SSR curls showing exactly one each of `tree-create/rename/delete/move` and **zero**
+`role="menuitem"` until aimed (no cross-panel testid collision from two menus in one
+document), `probe:android-header-kebab` PASS driving real touch — 44×44 target, aim-before-
+open, clamped panel, item `on_select`. Both majors' tests confirmed **failing before** their
+fix (`element(s) not found` for `all-cards-row`; the folder row still resolving) and passing
+after. Eleven minors filed.
+
 ### Mobile `/my` root — the wireframe's collection drill-down (2026-07-26)
 
 `app/src/my/root.rs`. `root_rows(&AssembledTree, all_cards_href) -> Vec<RootRow>` is the

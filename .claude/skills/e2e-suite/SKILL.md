@@ -24,7 +24,20 @@ rather than folklore:
 | `npm run probe:android-needs` | `/my/collections/:id/needs` + `/my/shopping` route guards through the redirect shim, and the pick list's checkbox tap, on the real Android webview |
 | `npm run probe:android-palette` | the ⌘K desktop gate reads `false` at phone width on the real Android webview, with `CommandDialog` itself proven working there (the negative check's positive control) |
 | `npm run probe:android-my-root` | the My-cards root drill-down list on the real Android webview — the frame's row shape, 44 px touch targets and no sideways scroll on the real engine, and a real `Input.dispatchTouchEvent` tap on a row navigating to its `href` (via the bench; `/my` is authed and unreachable through the dev proxy), plus the anonymous `/my` guard bounce through the redirect shim |
+| `npm run probe:android-header-kebab` | the collection-header `⋯` on the real Android webview — its 44 px tap target at phone width, a real `Input.dispatchTouchEvent` tap opening the shared `context_menu` (having aimed it first), the panel clamped inside the viewport, and a real tap on `Move to…` running its `on_select` (via the bench; `/my/collections/:id` is authed and unreachable through the dev proxy) |
 | `npm run probe:android-tree-move` | the tree's touch path on the real Android webview — a real tap on an `⋯`-shaped trigger opens the shared `context_menu` and a real tap on an item runs it, via the bench (the tree itself is authed); also measures whether a real long-press yields `contextmenu` (it does not) and that the rail drawer stays off screen at phone width |
+
+One **diagnostic** rather than a probe (it reports, it does not pass/fail):
+`npm run diag:resource-ids -- <collection-id> [slot…]` prints the serialized
+`__RESOLVED_RESOURCES` slots a page carries, then does a real SPA navigation into
+`/my` and reports whether it fetched. Reach for it whenever a client-side
+navigation shows **stale or empty data with zero requests**: leptos'
+`initial_value()` reads `__RESOLVED_RESOURCES[<next monotonic id>]` for every
+`Resource::new` without checking `during_hydration()`, so a resource created
+during a navigation can decode a payload belonging to the page you left. Passing
+slot numbers `delete`s them before navigating, which identifies the colliding slot
+by removal — that is how id 12 was pinned (see `AllCardsPayload` in
+`app/src/my/all_cards.rs`).
 
 **A probe covers what the browser tier structurally cannot.** `probe:paging`
 exists because page size is fixed in the UI, so only the JSON route can ask for

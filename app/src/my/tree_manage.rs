@@ -23,9 +23,10 @@ use std::collections::HashSet;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use leptos_router::hooks::{use_location, use_navigate};
 use shared::{CollectionKind, CollectionSummary, CollectionTreeRow, Id};
 
-use super::tree::CollectionTreeResource;
+use super::tree::{find_node, subtree_ids, CollectionTreeResource, TreeNode};
 use crate::catalog::destination::{picker_order, Destination, DestinationList, DestinationRow};
 use crate::components::ui::button::{Button, ButtonVariant};
 use crate::components::ui::context_menu::{ContextMenuContent, ContextMenuItem};
@@ -64,6 +65,43 @@ pub enum MenuTarget {
     Background,
 }
 
+impl MenuTarget {
+    /// Aim the shared menu at a collection named by the **route** rather than by
+    /// a tree row — the collection-header `⋯` (`super::collection`).
+    ///
+    /// The identity half (`id` / `name` / `is_inbox` / `parent_id`) comes from
+    /// the page's own payload, so the menu describes what the header describes.
+    /// The `forbidden` set can only come from the tree, which is the only read
+    /// that knows the whole subtree; when the tree does not contain the node —
+    /// a collection created since the shell's fetch, or a failed tree read — the
+    /// guard degrades to "not itself" and the server's recursive ancestor check
+    /// is the terminus, exactly the standing a [`MoveReq`] snapshot has after a
+    /// refetch lands under it.
+    ///
+    /// `cards` is passed in rather than read off the tree because the page has a
+    /// better number: the view's own whole-collection totals, plus any stepper
+    /// delta the header is already showing. A delete confirm that named a
+    /// different count than the counts line two rows above it would be its own
+    /// small lie.
+    pub fn for_collection(c: &CollectionSummary, roots: &[TreeNode], cards: i64) -> MenuTarget {
+        let mut forbidden = HashSet::new();
+        match find_node(roots, c.id) {
+            Some(node) => subtree_ids(node, &mut forbidden),
+            None => {
+                forbidden.insert(c.id);
+            }
+        }
+        MenuTarget::Row {
+            id: c.id,
+            name: c.name.clone(),
+            is_inbox: c.is_inbox,
+            parent_id: c.parent_id,
+            forbidden,
+            cards,
+        }
+    }
+}
+
 /// A create dialog request: where and what kind.
 #[derive(Clone, PartialEq)]
 pub struct CreateReq {
@@ -79,10 +117,51 @@ pub struct CreateReq {
 pub struct DeleteReq {
     pub id: Id,
     pub name: String,
-    /// Nested collections that cascade with it (for the confirm copy).
-    pub descendants: usize,
+    /// Self plus every descendant — the ids this delete cascades away. Carried
+    /// (rather than just a count) because **the route may be inside it**: see
+    /// [`route_after_delete`].
+    pub subtree: HashSet<Id>,
+    /// Where the deleted node lived, so a page standing on it knows where to
+    /// go. `None` = top level.
+    pub parent_id: Option<Id>,
     /// Rolled-up present copies that cascade with it.
     pub cards: i64,
+}
+
+impl DeleteReq {
+    /// Nested collections that cascade with it (for the confirm copy) — the
+    /// subtree minus the node itself.
+    fn descendants(&self) -> usize {
+        self.subtree.len().saturating_sub(1)
+    }
+}
+
+/// Where the app must go once a delete succeeds, or `None` to stay put.
+///
+/// **Deleting the collection you are looking at is a real path**, and it became a
+/// likely one the moment the collection header grew its own `⋯`: the kebab's
+/// subject *is* the current route. Nothing refetches `/my/collections/:id` on a
+/// delete, so without this the page keeps rendering a collection the database no
+/// longer has — stale rows, a breadcrumb that has already dropped the node, and
+/// a reload that 404s. The cascade makes it wider than the one node: every
+/// descendant goes too, so `/my/collections/<a child>` is just as dead.
+///
+/// The destination is the deleted node's parent (which by construction is *not*
+/// in the subtree), or `/my` at the top level — the same "back walks up the tree"
+/// rule the mobile header's back link follows.
+pub fn route_after_delete(pathname: &str, req: &DeleteReq) -> Option<String> {
+    // `/my/collections/{id}` and its subpages (`…/needs`) — anything else is not
+    // standing on a collection and has nothing to flee.
+    let rest = pathname.strip_prefix("/my/collections/")?;
+    let id = rest.split('/').next()?;
+    let id = Id::parse_str(id).ok()?;
+    if !req.subtree.contains(&id) {
+        return None;
+    }
+    Some(match req.parent_id {
+        Some(parent) => format!("/my/collections/{parent}"),
+        None => "/my".to_string(),
+    })
 }
 
 /// A move request — snapshotted when the picker opens, for the same reason
@@ -168,6 +247,28 @@ pub struct TreeManage {
     busy: RwSignal<bool>,
     /// Inline dialog error (server message) — cleared on open/submit.
     error: RwSignal<Option<String>>,
+    /// Bumped after every successful create / rename / move. A page whose own
+    /// read describes a collection takes it as a resource **source**, so a
+    /// mutation refetches what it invalidated — the same structural trick
+    /// `HoldingsRevision` plays for the tray's batch move.
+    ///
+    /// It exists because the tree refetch alone is not enough for the collection
+    /// view, and the header kebab is what made that visible: `/my/collections/:id`
+    /// reads its title, its counts and its **folder rows** from `collection_view`,
+    /// none of which the tree read can update. Renaming the collection you are
+    /// standing on left the `<h1>` on the old name while the breadcrumb beside it
+    /// showed the new one; creating a child from its own header added a row that
+    /// did not appear. Both read as "the action did nothing".
+    ///
+    /// Delete bumps it too, but **only when it does not navigate**. The two cases
+    /// are genuinely different and the first cut of this got it wrong by treating
+    /// them as one: when [`route_after_delete`] sends the page up to the parent,
+    /// that remounts and refetches by itself, and bumping as well would refetch a
+    /// collection that no longer exists — a stale page traded for an error one.
+    /// When it returns `None` there is no navigation, and the delete still changed
+    /// what this page says: a deleted child is one of its folder rows and part of
+    /// its rollup.
+    pub revision: RwSignal<u32>,
 }
 
 /// Provided by the **app shell**, not by the tree. ⌘K's `New binder…` /
@@ -193,6 +294,7 @@ pub fn provide_tree_manage() {
         move_open: RwSignal::new(false),
         busy: RwSignal::new(false),
         error: RwSignal::new(None),
+        revision: RwSignal::new(0),
     })
 }
 
@@ -220,14 +322,18 @@ impl TreeManage {
             Some(MenuTarget::Row {
                 id,
                 name,
+                parent_id,
                 forbidden,
                 cards,
                 ..
             }) => DeleteReq {
                 id,
                 name,
-                // Self is in the set; the confirm counts the *nested* ones.
-                descendants: forbidden.len().saturating_sub(1),
+                // Self *and* every descendant: the confirm counts the nested ones
+                // (`descendants()`), and `route_after_delete` needs the whole set
+                // because the route may be standing on any of them.
+                subtree: forbidden,
+                parent_id,
                 cards,
             },
             _ => return,
@@ -347,6 +453,10 @@ pub fn TreeDialogs() -> impl IntoView {
     // `Suspense` does not reach `use_context_menu()` inside it), and a body
     // read is unconditionally correct.
     let toast = expect_context::<ToastHandle>();
+    // Read in the component body for the same reason: hooks belong to the
+    // reactive owner, not to a callback that may run after a navigation.
+    let navigate = use_navigate();
+    let pathname = use_location().pathname;
 
     let submit_create = move || {
         let Some(req) = manage.create_req.get_untracked() else {
@@ -369,6 +479,9 @@ pub fn TreeDialogs() -> impl IntoView {
                     manage.busy.set(false);
                     manage.create_open.set(false);
                     tree.refetch();
+                    // The new child is a folder row on its parent's page, which
+                    // is a different read from the tree's — see `revision`.
+                    manage.revision.update(|r| *r = r.wrapping_add(1));
                 }
                 Err(e) => {
                     manage.busy.set(false);
@@ -398,6 +511,9 @@ pub fn TreeDialogs() -> impl IntoView {
                     manage.busy.set(false);
                     manage.rename_open.set(false);
                     tree.refetch();
+                    // The collection view's own `<h1>` and breadcrumb fallback
+                    // come from `collection_view`, not from the tree.
+                    manage.revision.update(|r| *r = r.wrapping_add(1));
                 }
                 Err(e) => {
                     manage.busy.set(false);
@@ -418,12 +534,30 @@ pub fn TreeDialogs() -> impl IntoView {
         }
         manage.busy.set(true);
         manage.error.set(None);
+        // Decided *before* the await, off the route the confirm was answered on.
+        let leaving = route_after_delete(&pathname.get_untracked(), &req);
+        let navigate = navigate.clone();
         spawn_local(async move {
             match crate::delete_collection(req.id).await {
                 Ok(()) => {
                     manage.busy.set(false);
                     manage.delete_open.set(false);
                     tree.refetch();
+                    match leaving {
+                        // Deleting the collection you are standing on (or an
+                        // ancestor of it) leaves the page rendering a dead id —
+                        // `route_after_delete` sends it up to the parent, which
+                        // remounts the page and refetches on its own.
+                        Some(to) => navigate(&to, Default::default()),
+                        // Deleting anything *else* still changes what this page
+                        // says. Standing on a parent and deleting one of its
+                        // children is the likeliest case — the child is a folder
+                        // row here (`view.children`) and its copies are in this
+                        // header's rollup, and neither comes from the tree read.
+                        // Without the bump the row stayed, linking to an id the
+                        // database no longer had.
+                        None => manage.revision.update(|r| *r = r.wrapping_add(1)),
+                    }
                 }
                 Err(e) => {
                     manage.busy.set(false);
@@ -444,7 +578,7 @@ pub fn TreeDialogs() -> impl IntoView {
         manage
             .delete_req
             .get()
-            .map(|r| (r.name, r.descendants, r.cards))
+            .map(|r| (r.name.clone(), r.descendants(), r.cards))
     };
 
     // Put the caret in the move picker's field when it opens. Without this the
@@ -761,6 +895,7 @@ fn focus_move_field() -> bool {
 pub fn commit_drop(
     tree: CollectionTreeResource,
     toast: ToastHandle,
+    manage: TreeManage,
     drag: DragState,
     target_id: Id,
     intent: DropIntent,
@@ -803,6 +938,10 @@ pub fn commit_drop(
         // us (a stale render is exactly how a cycle slips past the
         // pre-check), and the sidebar must show the server's truth.
         tree.0.refetch();
+        // Every tree mutation bumps it, this one included: a drag reparent moves
+        // a folder row off one collection's page and onto another's, and neither
+        // page learns that from the tree read. See `TreeManage::revision`.
+        manage.revision.update(|r| *r = r.wrapping_add(1));
     });
 }
 
@@ -986,6 +1125,11 @@ pub fn commit_move(
         // Refetch either way — on failure the tree may have changed under us,
         // and the sidebar must show the server's truth.
         tree.0.refetch();
+        // A move changes the moved collection's `parent_id`, which is what the
+        // header kebab's next `Move to…` snapshots and what the breadcrumb walks
+        // — and both a page *on* the moved node and a page on its old or new
+        // parent describe a different set of folder rows now.
+        manage.revision.update(|r| *r = r.wrapping_add(1));
     });
 }
 
@@ -1258,6 +1402,151 @@ mod tests {
             None,
             "a collection that is no longer there"
         );
+    }
+
+    // ------------------------------------- the collection header's subject --
+
+    fn summary(id: u128, parent: Option<u128>, name: &str, is_inbox: bool) -> CollectionSummary {
+        CollectionSummary {
+            id: Id::from_u128(id),
+            parent_id: parent.map(Id::from_u128),
+            kind: CollectionKind::Binder,
+            name: name.into(),
+            is_inbox,
+            position: 1.0,
+            format: None,
+        }
+    }
+
+    /// The `nested()` cast as the tree the *rail* renders: Inbox, Shoebox >
+    /// Rares, Trade > Moved > Inside Moved.
+    fn roots() -> Vec<TreeNode> {
+        crate::my::tree::assemble(shared::CollectionTree {
+            collections: nested(),
+            shopping_short: 0,
+        })
+        .roots
+    }
+
+    fn row_parts(t: &MenuTarget) -> (Id, &str, bool, Option<Id>, Vec<u128>, i64) {
+        match t {
+            MenuTarget::Row {
+                id,
+                name,
+                is_inbox,
+                parent_id,
+                forbidden,
+                cards,
+            } => {
+                let mut ids: Vec<u128> = forbidden.iter().map(|i| i.as_u128()).collect();
+                ids.sort_unstable();
+                (*id, name.as_str(), *is_inbox, *parent_id, ids, *cards)
+            }
+            MenuTarget::Background => panic!("the header always aims at a row"),
+        }
+    }
+
+    #[test]
+    fn the_header_subject_carries_the_whole_subtree_from_the_tree() {
+        // `Moved`(9) holds `Inside Moved`(10). Both are forbidden destinations
+        // for a `Move to…` opened from *its own page*, exactly as they are from
+        // its tree row — the cycle guard cannot be weaker on the second surface.
+        let t = MenuTarget::for_collection(&summary(9, Some(3), "Moved", false), &roots(), 42);
+        let (id, name, is_inbox, parent, forbidden, cards) = row_parts(&t);
+        assert_eq!(id, Id::from_u128(9));
+        assert_eq!(name, "Moved");
+        assert!(!is_inbox);
+        assert_eq!(parent, Some(Id::from_u128(3)));
+        assert_eq!(forbidden, [9, 10]);
+        assert_eq!(cards, 42);
+    }
+
+    #[test]
+    fn a_collection_the_tree_has_not_seen_still_gets_a_menu() {
+        // Just created, or the tree read failed: the subtree is unknowable, so
+        // the guard degrades to "not itself" and the server's ancestor check is
+        // the terminus. The menu must still open — a header with no actions is
+        // worse than one whose picker can be told no.
+        let t = MenuTarget::for_collection(&summary(404, None, "Fresh", false), &roots(), 0);
+        let (_, _, _, parent, forbidden, _) = row_parts(&t);
+        assert_eq!(parent, None);
+        assert_eq!(forbidden, [404]);
+    }
+
+    #[test]
+    fn the_inbox_route_is_marked_as_the_inbox() {
+        // `/my/collections/:id` can be an Inbox id, and the menu withholds
+        // move/rename/delete on that flag — all three are refused by the server
+        // (`AND NOT is_inbox` on rename, delete and reparent alike).
+        let t = MenuTarget::for_collection(&summary(4, None, "Inbox", true), &roots(), 7);
+        let (_, name, is_inbox, _, forbidden, _) = row_parts(&t);
+        assert_eq!(name, "Inbox");
+        assert!(is_inbox);
+        // Nothing is nested under it here, so it forbids only itself.
+        assert_eq!(forbidden, [4]);
+    }
+
+    // ------------------------------------- deleting what you are looking at --
+
+    fn del(id: u128, parent: Option<u128>, subtree: &[u128]) -> DeleteReq {
+        DeleteReq {
+            id: Id::from_u128(id),
+            name: "Doomed".into(),
+            subtree: subtree.iter().map(|&i| Id::from_u128(i)).collect(),
+            parent_id: parent.map(Id::from_u128),
+            cards: 0,
+        }
+    }
+
+    fn path_of(id: u128) -> String {
+        format!("/my/collections/{}", Id::from_u128(id))
+    }
+
+    #[test]
+    fn deleting_the_collection_you_are_viewing_goes_up_to_its_parent() {
+        let req = del(9, Some(3), &[9, 10]);
+        assert_eq!(
+            route_after_delete(&path_of(9), &req).as_deref(),
+            Some(path_of(3).as_str())
+        );
+        // A top-level collection has no parent to fall back to — `/my` is the
+        // top of the drill-down.
+        assert_eq!(
+            route_after_delete(&path_of(1), &del(1, None, &[1])).as_deref(),
+            Some("/my")
+        );
+    }
+
+    #[test]
+    fn a_cascaded_descendant_is_just_as_dead() {
+        // Deleting `Moved`(9) takes `Inside Moved`(10) with it, so a page
+        // standing on 10 must leave too — and it goes to 9's parent, since 9 is
+        // gone as well.
+        let req = del(9, Some(3), &[9, 10]);
+        assert_eq!(
+            route_after_delete(&path_of(10), &req).as_deref(),
+            Some(path_of(3).as_str())
+        );
+        // …including from a collection subpage.
+        assert_eq!(
+            route_after_delete(&format!("{}/needs", path_of(10)), &req).as_deref(),
+            Some(path_of(3).as_str())
+        );
+    }
+
+    #[test]
+    fn deleting_something_else_leaves_the_page_alone() {
+        let req = del(9, Some(3), &[9, 10]);
+        // A different collection — including the deleted node's own parent, the
+        // page most likely to have the tree row you right-clicked.
+        assert_eq!(route_after_delete(&path_of(3), &req), None);
+        assert_eq!(route_after_delete(&path_of(1), &req), None);
+        // …and every route that is not standing on a collection at all.
+        for path in ["/my", "/my/all", "/my/shopping", "/catalog", "/"] {
+            assert_eq!(route_after_delete(path, &req), None, "{path}");
+        }
+        // A malformed id is not a collection we can be standing on.
+        assert_eq!(route_after_delete("/my/collections/not-a-uuid", &req), None);
     }
 
     #[test]

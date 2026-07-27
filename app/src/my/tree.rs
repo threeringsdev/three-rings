@@ -501,7 +501,7 @@ fn RowShell(
                 let Some(intent) = drop_intent(&ev, is_inbox) else {
                     return;
                 };
-                commit_drop(tree, toast, drag, id, intent);
+                commit_drop(tree, toast, manage, drag, id, intent);
             }
             on:dragend=move |_| {
                 manage.drag.set(None);
@@ -544,8 +544,12 @@ fn RowShell(
 /// Viewport coordinates to anchor the shared context menu at: the bottom-left
 /// of whatever element the handler is bound to. Hydrate-only — the measurement
 /// API exists client-side, and so does every gesture that calls this.
+///
+/// `pub(crate)` for the collection header's own `⋯` (`super::collection`), which
+/// opens the same shared panel from a real button and needs the same rect rather
+/// than a click's `client_x/y` — a keyboard activation reports 0,0.
 #[cfg(feature = "hydrate")]
-fn element_anchor(ev: &leptos::web_sys::Event) -> Option<(f64, f64)> {
+pub(crate) fn element_anchor(ev: &leptos::web_sys::Event) -> Option<(f64, f64)> {
     use leptos::wasm_bindgen::JsCast;
     let el = ev
         .current_target()?
@@ -556,16 +560,31 @@ fn element_anchor(ev: &leptos::web_sys::Event) -> Option<(f64, f64)> {
 }
 
 #[cfg(not(feature = "hydrate"))]
-fn element_anchor(_ev: &leptos::web_sys::Event) -> Option<(f64, f64)> {
+pub(crate) fn element_anchor(_ev: &leptos::web_sys::Event) -> Option<(f64, f64)> {
     None
 }
 
 /// Collect a node's id plus every descendant's.
-fn subtree_ids(node: &TreeNode, out: &mut HashSet<Id>) {
+pub(crate) fn subtree_ids(node: &TreeNode, out: &mut HashSet<Id>) {
     out.insert(node.row.summary.id);
     for c in &node.children {
         subtree_ids(c, out);
     }
+}
+
+/// The node with this id, anywhere in the forest. The collection header's menu
+/// needs it to learn the subtree of the collection the *route* names — the tree
+/// rows get theirs for free from the recursion that renders them.
+pub(crate) fn find_node(nodes: &[TreeNode], id: Id) -> Option<&TreeNode> {
+    for n in nodes {
+        if n.row.summary.id == id {
+            return Some(n);
+        }
+        if let Some(hit) = find_node(&n.children, id) {
+            return Some(hit);
+        }
+    }
+    None
 }
 
 /// Mark the drag for the browser: Firefox won't start a drag without

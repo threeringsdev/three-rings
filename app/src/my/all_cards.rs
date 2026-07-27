@@ -76,6 +76,47 @@ pub(crate) fn my_url(base: &str, q: &str, cursor: Option<&str>) -> String {
     url
 }
 
+/// What [`AllCardsBody`]'s resource resolves to — the read's own result, behind a
+/// **named field**, so its serialized form cannot be mistaken for another
+/// resource's.
+///
+/// This wrapper carries no information. It exists to close a real, shipping
+/// wrong-data bug, and the mechanism is worth stating because the next resource
+/// added to this app is exposed to it too.
+///
+/// `leptos_server`'s `initial_value()` reads `__RESOLVED_RESOURCES[<next
+/// monotonic id>]` for **every** `Resource::new`, at any time — it never consults
+/// the `during_hydration()` flag that `hydration_context` maintains and that
+/// `leptos::mount` dutifully flips (`hydrate.rs:145`, `mount.rs:97`). So a
+/// resource created during a **client-side navigation** still reads a slot, and
+/// that slot belongs to the page you just left. If it decodes, `is_ready` is true
+/// and **the fetcher never runs**.
+///
+/// It decoded. An `SsrMode::Async` route serializes its resources three times at
+/// three disjoint id ranges and the client consumes only the first, so the rest
+/// are unclaimed slots. `/my/collections/:id` leaves
+/// `{"Ok":{"cards":[],"next_cursor":null}}` — the quick-add panel's closed-state
+/// search — at ids 8, 12 and 16 (measured), and `shared::AllCardsView` and
+/// `shared::SearchResults` are byte-identical when `cards` is empty. Navigating
+/// from a collection into `/my` put this resource on **id 12** (measured by
+/// removal: dropping slot 12 fixes it, dropping 8 or 16 does not), so `/my`
+/// rendered "You haven't added any cards yet." on an account with 100 cards,
+/// having issued **zero** requests.
+///
+/// A named field is the whole fix: `{"Ok":{…}}` cannot decode into
+/// `{"all_cards":…}`, so `initial_value` returns `None` and the fetcher runs.
+///
+/// **What this does not fix**, stated so nobody assumes otherwise: two resources
+/// of the *same* type can still cross-decode a correctly-shaped but wrong-query
+/// payload (`/my` ↔ `/my/all` with different `?q=`). Only echoing the request
+/// back in the payload and rejecting a mismatch would close that, and it is
+/// currently latent — measured not to occur at today's id layout.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AllCardsPayload {
+    all_cards: Result<shared::AllCardsView, ServerFnError<String>>,
+}
+
 /// `/my` — the My-cards landing. Below `md` the drill-down root list the
 /// wireframe puts here; at `md` and up the All-cards table, unchanged.
 ///
@@ -124,7 +165,9 @@ fn AllCardsBody(base: &'static str, class: &'static str, back: bool) -> impl Int
         move || (url_q.get(), url_cursor.get(), revision.get()),
         |(q, cursor, _revision)| async move {
             let cursor = (!cursor.is_empty()).then_some(cursor);
-            crate::all_cards(q, cursor).await
+            AllCardsPayload {
+                all_cards: crate::all_cards(q, cursor).await,
+            }
         },
     );
 
@@ -179,7 +222,7 @@ fn AllCardsBody(base: &'static str, class: &'static str, back: bool) -> impl Int
                     let q = url_q.get();
                     let searching = !q.is_empty();
                     Suspend::new(async move {
-                    match rows.await {
+                    match rows.await.all_cards {
                         Ok(view) if view.cards.is_empty() => {
                             view! { <EmptyState searching paged base /> }.into_any()
                         }

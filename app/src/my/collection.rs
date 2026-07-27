@@ -46,6 +46,14 @@
 //!
 //! **The URL is the whole view state** — `?q=` (in-collection quick search)
 //! and `?cursor=` (keyset page), same contract as `/my`.
+//!
+//! **The header's `⋯` is the tree's menu, aimed at this route** ([`HeaderKebab`]):
+//! one `menu_target`, one `TreeMenu`, one set of dialogs, a second `context_menu`
+//! instance. Two consequences land in *this* file. The page takes
+//! `TreeManage::revision` as a resource source, because a rename/create/move
+//! changes what `collection_view` says and no tree refetch can tell it. And a
+//! delete whose cascade contains this route navigates up instead of leaving the
+//! page on a dead id — `tree_manage::route_after_delete`.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -53,7 +61,8 @@ use leptos_router::hooks::{use_params_map, use_query_map};
 use shared::{Board, CardRow, CardSummary, CollectionKind, CollectionView, Id, QuickAddKind};
 use std::collections::HashSet;
 
-use super::tree::{assemble, CollectionTreeResource, TreeNode};
+use super::tree::{assemble, element_anchor, CollectionTreeResource, TreeNode};
+use super::tree_manage::{MenuTarget, TreeManage, TreeMenu};
 use crate::cards::CardPreview;
 use crate::components::quick_add::QuickAddPanel;
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
@@ -61,6 +70,7 @@ use crate::components::ui::breadcrumb::{
     Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator,
 };
 use crate::components::ui::button::{Button, ButtonVariant};
+use crate::components::ui::context_menu::{use_context_menu, ContextMenu};
 use crate::components::ui::count_stepper::{CountStepper, StepperCommit};
 use crate::components::ui::dialog::{
     Dialog, DialogBody, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader,
@@ -129,10 +139,25 @@ pub fn CollectionPage() -> impl IntoView {
     // as a source makes the refetch structural: a move bumps it, the resource
     // re-runs, HERE and the totals move with the database.
     let revision = crate::my::move_selection::holdings_revision();
+    // The same trick for the *collection tree's* mutations, and the header kebab
+    // is what made it necessary: this page's title, counts and folder rows all
+    // come from `collection_view`, which no `tree.refetch()` can update. A rename
+    // from the header left the `<h1>` stale beside a breadcrumb that had already
+    // caught up; a `New binder inside…` added a folder row that never appeared.
+    // See `TreeManage::revision`.
+    let manage = expect_context::<TreeManage>();
 
     let view_res = Resource::new(
-        move || (url_id.get(), url_q.get(), url_cursor.get(), revision.get()),
-        |(id, q, cursor, _revision)| async move {
+        move || {
+            (
+                url_id.get(),
+                url_q.get(),
+                url_cursor.get(),
+                revision.get(),
+                manage.revision.get(),
+            )
+        },
+        |(id, q, cursor, _revision, _tree_revision)| async move {
             let id = Id::parse_str(&id).map_err(|_| {
                 ServerFnError::<String>::ServerError("that is not a collection id".into())
             })?;
@@ -544,6 +569,31 @@ fn CollectionHeader(
     let commanders = view.commanders.clone();
     let chip = needs_chip(&totals);
 
+    // ---- what the header kebab aims the shared tree menu at ----
+    //
+    // The subject is *this route's* collection, snapshotted when the menu opens
+    // — the same discipline `DeleteReq`/`MoveReq` follow, and for a sharper
+    // reason here: `menu_target` is one signal shared with the sidebar's rows, so
+    // a snapshot that outlived its aim would act on whatever was right-clicked
+    // last.
+    let manage = expect_context::<TreeManage>();
+    let collection = StoredValue::new(view.collection.clone());
+    // Read *untracked at click time* rather than awaited in a nested `Suspense`.
+    // Two reasons: a header action that pops into existence when a second read
+    // lands is worse than one that is simply always there, and — decisively — a
+    // `Provider` above a `Suspense` does not reach a `use_context_menu()` call
+    // made inside it (the rule that forced the tree's own menu wrapper inside its
+    // boundary), so the kebab could not find its panel from in there.
+    let cards_here = i64::from(totals.present_total());
+    let aim = Callback::new(move |()| {
+        let roots = assembled_roots(tree.get_untracked().flatten());
+        manage.menu_target.set(Some(MenuTarget::for_collection(
+            &collection.get_value(),
+            &roots,
+            cards_here + i64::from(here_delta.get_untracked()),
+        )));
+    });
+
     view! {
         <div class="flex flex-col gap-3">
             <CollectionPath id name=name.clone() tree />
@@ -589,15 +639,33 @@ fn CollectionHeader(
                         }}
                     </p>
                 </div>
-                <Show when=move || kind == CollectionKind::Deck>
-                    <Button
-                        variant=ButtonVariant::Outline
-                        attr:data-testid="teardown-open"
-                        on:click=move |_| teardown_open.set(true)
-                    >
-                        "Empty deck…"
-                    </Button>
-                </Show>
+                // The frame's `Header Actions` — right end of the `Title Row`,
+                // `gap: 8`. The kebab is the only thing in it in the wireframe;
+                // `Empty deck…` joins it here because it was already a header
+                // action and the frame draws a *binder*, so it says nothing about
+                // where a deck's teardown goes. It stays a visible button rather
+                // than moving into the menu: see [`HeaderKebab`] on why the
+                // kebab's set is collection *lifecycle* only.
+                <div class="flex shrink-0 items-center gap-2">
+                    <Show when=move || kind == CollectionKind::Deck>
+                        <Button
+                            variant=ButtonVariant::Outline
+                            attr:data-testid="teardown-open"
+                            on:click=move |_| teardown_open.set(true)
+                        >
+                            "Empty deck…"
+                        </Button>
+                    </Show>
+                    // A *second* `context_menu` instance, not a second menu: the
+                    // panel is `TreeMenu`, rendered off the very same
+                    // `menu_target` the sidebar's rows aim, so the two surfaces
+                    // cannot drift on what the actions are. Only the instance id
+                    // (and therefore the popover) differs.
+                    <ContextMenu id="collection-header">
+                        <HeaderKebab aim />
+                        <TreeMenu />
+                    </ContextMenu>
+                </div>
             </div>
 
             {chip
@@ -677,6 +745,89 @@ fn CollectionHeader(
                     view! { <TeardownDialog open=teardown_open collection_id=id view_res tree /> }
                 })}
         </div>
+    }
+}
+
+/// The collection header's `⋯` (`design/wireframes.pen` → `Header Kebab` on
+/// *Desktop — Collection view*, `M Header Kebab` on *Mobile — Collection view*).
+///
+/// **The second designed home for tree management, and on a phone the natural
+/// one** — the tree is behind a drawer there, so the header is where you already
+/// are. It opens the *same* panel the sidebar's rows open, aimed at the
+/// collection the route names, so the offered set is the tree row's set by
+/// construction: `New binder inside…` / `New deck inside…`, then (withheld on the
+/// Inbox, whose rename, delete **and** reparent the API all refuse with the same
+/// `AND NOT is_inbox`) `Move to…` / `Rename…` / `Delete…`. Nothing is added and
+/// nothing is dropped — a header kebab offering a different five actions than the
+/// row for the same collection would be two contracts for one feature.
+///
+/// **What is deliberately *not* in it: `Empty deck…`.** The kebab's five actions
+/// are all collection-*lifecycle* — they create, name, re-place or destroy the
+/// node. Teardown moves the *cards inside* it and belongs with the other
+/// content-level affordances on the page; that split is also where the code
+/// already lives (`tree_manage` versus this file's `TeardownDialog`). It is a
+/// deck's primary destructive action, the wireframe that draws this kebab draws a
+/// binder and so cannot be read as relocating it, and burying a visible button in
+/// a menu is a discoverability loss no frame asked for.
+///
+/// One button at both widths, styled by breakpoint: the frames put it in the same
+/// structural slot (right end of the title row) and differ only in dress — a
+/// 32 px bordered box on desktop, a bare 18 px glyph on the phone. Emitting one
+/// element is also the rule this repo already follows for width-switched
+/// surfaces, since SSR cannot know the viewport.
+///
+/// It is a real `<button>`, which is the whole keyboard and touch story: ⏎/space
+/// opens the panel (`ContextMenuContent` then puts focus on the first item, ↑↓
+/// rove, ESC closes and hands focus back), and a tap is just a click. The tree
+/// needed a `⋯` invented for it precisely because a held touch produces no
+/// `contextmenu` on the Android webview; here there was never anything else.
+/// `pub(crate)` for the bench: `/my/*` is unreachable on the Android emulator
+/// (the Tauri dev proxy strips Cookie headers), so a real-touch check of *this*
+/// button has to happen on `/dev/components` or nowhere — the same reason the
+/// My-cards root list is benched.
+#[component]
+pub(crate) fn HeaderKebab(
+    /// Point the shared `menu_target` at this page's collection. Runs before the
+    /// panel opens, so `TreeMenu` renders the right subject on its first pass.
+    aim: Callback<()>,
+) -> impl IntoView {
+    // Called from *under* the `ContextMenu` provider — a call in the enclosing
+    // component's body sits above it and resolves to `None`.
+    let menu = use_context_menu();
+
+    view! {
+        <button
+            type="button"
+            data-testid="collection-actions"
+            aria-haspopup="menu"
+            // Not "Actions for {name}", the tree row's label: at `md` and up the
+            // rail row for this very collection is on screen carrying exactly
+            // that, and two buttons with one accessible name is an ambiguity for
+            // whoever is listening. There is only ever one of these per page, and
+            // the title it sits beside says which collection.
+            aria-label="Collection actions"
+            // `size-11` below `md` is the 44 px touch target — the frame's bare
+            // 18 px glyph is the *look*, not the hit area. `md:border` +
+            // `md:bg-background` is the frame's 32 px bordered box; the app has
+            // no third text token, so `$text-3` and `$text-2` both land on
+            // `text-muted-foreground`.
+            class="text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:ring-ring inline-flex size-11 shrink-0 items-center justify-center rounded-md text-lg leading-none focus-visible:ring-1 focus-visible:outline-none md:size-8 md:border md:bg-background md:text-base"
+            on:click=move |ev| {
+                ev.stop_propagation();
+                aim.run(());
+                if let Some(menu) = menu {
+                    // The button's own rect, never `client_x/y`: a keyboard
+                    // activation fires a click reporting 0,0, which would park
+                    // the panel in the viewport corner, and a tap reports a point
+                    // *inside* the button — the rect puts the panel in the same
+                    // place either way.
+                    let (x, y) = element_anchor(ev.as_ref()).unwrap_or((0.0, 0.0));
+                    menu.open_at(x, y);
+                }
+            }
+        >
+            <span aria-hidden="true">"⋯"</span>
+        </button>
     }
 }
 
