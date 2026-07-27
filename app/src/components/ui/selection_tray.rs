@@ -200,24 +200,49 @@ pub fn use_selection() -> SelectionState {
 const STACK: usize = 3;
 
 /// One row's select control, wired to the shared selection.
+///
+/// **The hit area is the wrapper, not the box.** [`Checkbox`] draws a 16 px
+/// control, and 16 px is this feature's *primary* interaction on a phone while
+/// the cell next door is the card-detail link — so a mis-tap didn't merely miss,
+/// it navigated away from the page you were selecting on. The 16 px box cannot
+/// simply be grown: it is the visual, and the wireframe's row is a dense one.
+/// So the padded `<span>` below is the 44 px target (`size-11`, the same
+/// number the collection header's `⋯` and the `/my` root's rows use), reverting
+/// to the control's own size at `md`+ where the pointer is a mouse and the
+/// column has to stay narrow.
+///
+/// Because the span is the target, **the span owns the toggle and the checkbox
+/// has no `on_checked_change` at all** — a handler on both would fire twice for
+/// every click that landed on the box and cancel itself out. The button keeps
+/// `role`/`aria-checked`/focus, so a keyboard Space still activates it and the
+/// resulting click bubbles to the span exactly like a pointer tap: one code
+/// path, two input methods.
 #[component]
 pub fn SelectionCheckbox(selection: SelectionState, card: SelectedCard) -> impl IntoView {
     let key = card.key;
     let checked = selection.selected(key);
-    let aria_label = format!("Select {}", card.name);
+    let name = card.name.clone();
     // The callback outlives this render (a row remounts on every route churn),
     // so the payload is stored rather than captured by move-clone per click.
     let card = StoredValue::new(card);
 
     view! {
-        <Checkbox
-            checked
-            aria_label=aria_label
-            on_checked_change=Callback::new(move |_| selection.toggle(card.get_value()))
-            {..}
-            data-testid="row-select"
-            data-selection-key=key.token()
-        />
+        <span
+            class="flex size-11 cursor-pointer items-center justify-center md:size-4"
+            data-testid="row-select-target"
+            on:click=move |_| selection.toggle(card.get_value())
+        >
+            // NB: the last prop before `{..}` must not be a bare identifier —
+            // `aria_label=aria_label {..}` parses as a struct-update expression
+            // and fails with "expected struct, variant or union type".
+            <Checkbox
+                checked
+                aria_label=format!("Select {name}")
+                {..}
+                data-testid="row-select"
+                data-selection-key=key.token()
+            />
+        </span>
     }
 }
 

@@ -222,9 +222,16 @@ pub fn AppShell() -> impl IntoView {
                 // a wireframe specifies a touch path to tree management. Filed
                 // as a follow-up rather than invented here.
                 <Show when=move || my_mode.get()>
+                    // `size-11` is the 44 px touch target, not the look — the
+                    // glyph stays 18 px, exactly as the collection header's `⋯`
+                    // does. This button is the *only* way into tree management
+                    // on a phone (a real long-press raises no `contextmenu` on
+                    // the Android webview), so a 28×26 hit area was the smallest
+                    // target on the most consequential control; measured
+                    // 27.8×26 before, 44×44 after.
                     <button
                         type="button"
-                        class="text-muted-foreground hover:text-foreground -ml-1 rounded-md px-1.5 py-1 text-lg leading-none md:hidden"
+                        class="text-muted-foreground hover:text-foreground -ml-2 inline-flex size-11 shrink-0 items-center justify-center rounded-md text-lg leading-none md:hidden"
                         aria-label="Collections"
                         aria-controls="sidebar-rail"
                         aria-expanded=move || rail_open.get().to_string()
@@ -268,7 +275,12 @@ pub fn AppShell() -> impl IntoView {
             // `ToastHandle` out of context, and a context is only there for
             // things built after the `provide_context` that put it there.
             // Position is `fixed` on both, so the swap is invisible.
-            <Toaster />
+            //
+            // The offset is [`toaster_offset`]'s decision — see its docs for why
+            // it belongs to the shell rather than to the toaster.
+            <Toaster class=Signal::derive(move || {
+                toaster_offset(!selection.is_empty()).to_string()
+            }) />
             <SelectionTrayDock selection />
             // The tree's four management dialogs, mounted at the shell rather
             // than beside the tree. Two reasons, and the second is a bug fix:
@@ -291,16 +303,58 @@ pub fn AppShell() -> impl IntoView {
 /// in. Separate from the tray itself so the component stays position-agnostic
 /// (and the bench can render it inline).
 ///
+/// How far off the viewport floor the toaster has to sit, given whether the
+/// selection tray is up.
+///
+/// **This is the shell's decision, not the toaster's.** The tab bar and the tray
+/// dock are both `fixed` chrome this shell owns, and a `fixed` element cannot be
+/// pushed by a sibling — so the only code that knows what is already parked at
+/// the bottom of the viewport is right here. The same reasoning already shapes
+/// `<main>`'s padding.
+///
+/// The numbers are measured, not guessed (responsive audit, 2026-07-26, at the
+/// two frame widths):
+///
+/// | | bottom chrome | toaster bottom |
+/// |---|---|---|
+/// | 390, no tray | tab bar occupies the bottom 59 px | 80 px |
+/// | 390, tray up | tab bar + pill, pill top at 125.5 px | 136 px |
+/// | 1440, no tray | nothing | 24 px (the base) |
+/// | 1440, tray up | pill top at 61.5 px | 72 px |
+///
+/// Each clears the tallest thing under it by ~10 px. Before this, a visible
+/// toast painted over the tray's clear `×` at 1440 (the `×` sat wholly inside
+/// the toast's box) and over the bottom tab bar at 390. The e2e asserts the
+/// *relationship* — toaster bottom above tray top — rather than these constants,
+/// so a taller pill fails the test instead of silently re-colliding.
+fn toaster_offset(tray_up: bool) -> &'static str {
+    if tray_up {
+        "bottom-[8.5rem] md:bottom-[4.5rem]"
+    } else {
+        // Only the tab bar to clear, and only below `md`.
+        "bottom-[5rem] md:bottom-6"
+    }
+}
+
 /// `bottom-16` on mobile is the bottom tab bar's height — the wireframe puts
 /// the tray *above* the tabs, not over them; `md:bottom-0` docks it to the
 /// viewport floor on desktop, where there are no tabs. `pointer-events-none`
 /// on the wrapper matters: with an empty selection the tray renders nothing at
 /// all, and a full-width invisible strip would still swallow clicks.
+///
+/// **`md:left-60` is the sidebar rail's width, and it is what makes the pill
+/// centre on the table it describes rather than on the window.** The dock is
+/// `fixed`, so `inset-x-0` measures the *viewport*; with a 240 px rail to the
+/// left of the content column, `mx-auto` then centred the pill 120 px left of
+/// the rows it is talking about (measured 720 against a content-column centre of
+/// 840 at 1440). Below `md` the rail is an overlay drawer and the content column
+/// *is* the viewport, so `inset-x-0` is already right there — which is why this
+/// is a `md:` override and not a change to the base.
 #[component]
 fn SelectionTrayDock(selection: SelectionState) -> impl IntoView {
     view! {
         <div
-            class="pointer-events-none fixed inset-x-0 bottom-16 z-50 px-2.5 pb-2.5 md:bottom-0"
+            class="pointer-events-none fixed inset-x-0 bottom-16 z-50 px-2.5 pb-2.5 md:bottom-0 md:left-60"
             data-testid="selection-tray-dock"
         >
             <div class="pointer-events-auto mx-auto max-w-3xl">
@@ -549,3 +603,54 @@ fn UserMenu() -> impl IntoView {
 // `/my/collections/:id` for `crate::my::collection`, and the last two —
 // `/my/collections/:id/needs` and `/my/shopping` — for `crate::my::needs` and
 // `crate::my::shopping`. No placeholder route bodies remain.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two arms must differ, and both must clear the mobile tab bar. A
+    /// single shared offset was the pre-audit behaviour and it collided with
+    /// something at every width.
+    #[test]
+    fn toaster_offset_clears_whatever_is_docked_below_it() {
+        let resting = toaster_offset(false);
+        let with_tray = toaster_offset(true);
+        assert_ne!(resting, with_tray);
+
+        // Below `md` the bottom tab bar is always there, so neither arm may fall
+        // back to the toaster's own `bottom-6` base at phone width — that is the
+        // regression that had a toast painting over the tabs.
+        for offset in [resting, with_tray] {
+            let base = offset
+                .split_whitespace()
+                .find(|c| !c.contains(':'))
+                .expect("each arm states an unprefixed (phone-width) bottom");
+            assert!(
+                base.starts_with("bottom-["),
+                "phone-width offset must be an explicit clearance, got {base:?}",
+            );
+            assert_ne!(base, "bottom-6", "bottom-6 is under the tab bar");
+        }
+
+        // And the tray arm must sit higher than the resting arm at *both*
+        // widths, so it carries a `md:` override of its own rather than
+        // inheriting the resting desktop value.
+        assert!(
+            with_tray.contains("md:"),
+            "the tray arm needs its own desktop clearance: {with_tray}",
+        );
+    }
+
+    /// `?next=` is a same-origin path, and the guard builds it by hand.
+    #[test]
+    fn encode_path_for_query_keeps_slashes_and_escapes_the_rest() {
+        assert_eq!(
+            encode_path_for_query("/my/collections/x"),
+            "/my/collections/x"
+        );
+        assert_eq!(
+            encode_path_for_query("/my/all?q=a b"),
+            "/my/all%3Fq%3Da%20b"
+        );
+    }
+}

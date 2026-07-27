@@ -342,15 +342,18 @@ fn CardsTable(rows: Vec<AllCardsRow>) -> impl IntoView {
             <Table {..} data-testid="all-cards-table">
                 <TableHeader>
                     <TableRow>
-                        <TableHead class="w-8">
+                        // `w-11` below `md` is the select control's 44 px touch
+                        // target (`SelectionCheckbox`); WHERE joins WANTED and
+                        // OWNED on `px-1` at phone width to pay for it.
+                        <TableHead class="w-11 md:w-8">
                             <span class="sr-only">"Select"</span>
                         </TableHead>
                         <TableHead>"Card"</TableHead>
                         <TableHead class="hidden md:table-cell">"Type"</TableHead>
                         <TableHead class="hidden sm:table-cell">"Mana"</TableHead>
-                        <TableHead>"Where"</TableHead>
-                        <TableHead class="px-1 text-right sm:px-2">"Wanted"</TableHead>
-                        <TableHead class="px-1 text-right sm:px-2">"Owned"</TableHead>
+                        <TableHead class="px-1 md:px-2">"Where"</TableHead>
+                        <TableHead class="px-1 text-right md:px-2">"Wanted"</TableHead>
+                        <TableHead class="px-1 text-right md:px-2">"Owned"</TableHead>
                     </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -404,7 +407,9 @@ fn CardsRow(row: AllCardsRow) -> impl IntoView {
             data-oracle=oracle_id.to_string()
             data-state=move || selected.get().then_some("selected")
         >
-            <TableCell class="p-2">
+            // `p-0` below `md` so the 44 px select target *is* the column
+            // rather than 44 px plus 16 px of cell padding.
+            <TableCell class="p-0 md:p-2">
                 {selectable.map(|card| view! { <SelectionCheckbox selection card /> })}
             </TableCell>
             <TableCell class="p-2">
@@ -416,18 +421,18 @@ fn CardsRow(row: AllCardsRow) -> impl IntoView {
             </TableCell>
             <TableCell class="text-muted-foreground hidden p-2 md:table-cell">{type_line}</TableCell>
             <TableCell class="text-muted-foreground hidden p-2 sm:table-cell">{mana_cost}</TableCell>
-            <TableCell class="p-2">
+            <TableCell class="px-1 py-2 md:px-2">
                 <LocationSummary oracle_id owned locations />
             </TableCell>
             <TableCell
-                class="px-1 py-2 text-right tabular-nums sm:px-2"
+                class="px-1 py-2 text-right tabular-nums md:px-2"
                 {..}
                 data-testid="wanted-count"
             >
                 {count_or_dash(wanted)}
             </TableCell>
             <TableCell
-                class="px-1 py-2 text-right tabular-nums sm:px-2"
+                class="px-1 py-2 text-right tabular-nums md:px-2"
                 {..}
                 data-testid="owned-count"
             >
