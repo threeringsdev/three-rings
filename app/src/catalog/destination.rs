@@ -307,10 +307,50 @@ pub fn DestinationPicker() -> impl IntoView {
     }
 }
 
+/// The collection list, behind a **named field**.
+///
+/// `crate::list_collections()` answers `Result<Vec<CollectionSummary>, _>`, which
+/// serializes as a top-level array (`{"Ok":[…]}`). Two things make that worth
+/// wrapping, and the second was measured rather than argued:
+///
+/// 1. An array payload is *promiscuous in the same way a bare `null` is* — it
+///    decodes into any `Result<Vec<T>, _>` whose `T` accepts the elements, and
+///    into an empty `Vec<T>` for **any** `T` at all when the array is empty. So
+///    `{"Ok":[]}` is a universal key for every list-shaped resource in the app.
+/// 2. Flooding the serialized array with `{"Ok":[]}` and then opening this picker
+///    across an SPA navigation renders **0 of 10 collections with no error arm and
+///    no request** — the picker silently claiming the account has none, which is
+///    verbatim the dishonest state the states sweep went through the app to
+///    remove.
+///
+/// Whether that fires today: **not currently**, and stated so rather than implied.
+/// Nothing serializes an *empty* array — authed `/catalog` does serialize this very
+/// payload at slots 14, 16 and 18 (measured), but populated, which makes it the
+/// benign **same-type** case (identical query, no parameters). What the wrapper
+/// buys is that the question stops depending on that: with a named field there are
+/// no array-shaped payloads in the serialized array at all, so no future empty
+/// list can become the next collision.
+///
+/// The same-type hazard itself is untouched by this and needs the payload to echo
+/// its request — see [`crate::my::all_cards`].
+#[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CollectionListPayload {
+    pub(crate) collections: Vec<shared::CollectionSummary>,
+}
+
+/// One place both consumers of the collection list call, so the payload shape
+/// cannot drift between the catalog's sticky picker and the tray's move dialog.
+pub(crate) async fn collection_list() -> Result<CollectionListPayload, ServerFnError<String>> {
+    Ok(CollectionListPayload {
+        collections: crate::list_collections().await?,
+    })
+}
+
 #[component]
 fn PickerBody() -> impl IntoView {
     let state = expect_context::<DestinationState>().0;
-    let collections = Resource::new(|| (), |_| crate::list_collections());
+    let collections = Resource::new(|| (), |_| async { collection_list().await });
 
     // Re-resolve against every list the resource yields — seeding once was not
     // enough. The state outlives this widget (it is the shell's), so a
@@ -318,7 +358,7 @@ fn PickerBody() -> impl IntoView {
     // the trigger showing a stale name, or quick-add pointed at an id the
     // server will answer `NotFound` for.
     Effect::new(move |_| {
-        if let Some(Ok(list)) = collections.get() {
+        if let Some(Ok(list)) = collections.get().map(|r| r.map(|p| p.collections)) {
             let next = reconcile(&list, state.get_untracked(), stored_destination_id());
             // Only write on a real change: `set` notifies unconditionally, and
             // an identical write each refetch is churn every subscriber pays.
@@ -408,7 +448,7 @@ fn PickerBody() -> impl IntoView {
                             Ok(list) => {
                                 view! {
                                     <DestinationList>
-                                        {picker_order(list.clone())
+                                        {picker_order(list.collections.clone())
                                             .into_iter()
                                             .map(|c| {
                                                 let choice = DestinationChoice::plain(Destination {

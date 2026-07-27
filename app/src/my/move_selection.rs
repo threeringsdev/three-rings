@@ -544,13 +544,28 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
     let suggested = Resource::new(
         move || oracles.get(),
         |ids| async move {
+            // Deliberately NOT wrapped in a named payload, unlike its sibling
+            // `collections` below. It would be the right shape to wrap — it
+            // answers `Ok(vec![])` for the common case (an empty tray) and
+            // `{"Ok":[]}` is a universal key for every list-shaped resource — but
+            // two things rule it out. It is never serialized (the tray cannot
+            // server-render: `SelectionState` starts empty on every load, so this
+            // whole subtree is absent from the SSR output, confirmed by dumping
+            // every `/my/*` route's slots and finding no array payload), and
+            // wrapping it makes `Resource<Result<Wrapper, _>>` non-`Copy`, which
+            // turns the `Suspend` closure below into an `FnOnce` the view macro
+            // rejects. Paying a real restructuring cost to close a hole that has
+            // no payload behind it is the wrong trade; filed instead.
             if ids.is_empty() {
                 return Ok(Vec::new());
             }
             crate::selection_destinations(ids).await
         },
     );
-    let collections = Resource::new(|| (), |_| crate::list_collections());
+    let collections = Resource::new(
+        || (),
+        |_| async { crate::catalog::destination::collection_list().await },
+    );
 
     // Written by an `Effect`, never read in render: a resource read in plain
     // render is unresolved during SSR and already resolved at hydration, and
@@ -668,7 +683,7 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
                             // its failure is reported (`load_failed` → the list's
                             // own failed arm) rather than flattened into zero rows
                             // that read as "you have nowhere to move these".
-                            let all = collections.await.unwrap_or_default();
+                            let all = collections.await.unwrap_or_default().collections;
                             // Suggestions are a *ranking* hint — collections whose
                             // desired exceeds present for these cards. Losing them
                             // costs the wireframe's ordering, not the ability to
