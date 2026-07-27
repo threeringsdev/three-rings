@@ -458,6 +458,33 @@ pub fn TreeDialogs() -> impl IntoView {
     let navigate = use_navigate();
     let pathname = use_location().pathname;
 
+    // **Whether the tree read behind the move picker failed** — the third
+    // `DestinationList` consumer, and the one where the collapse did real damage.
+    //
+    // `move_rows` renders `⬆ Top level` unconditionally, so a failed tree read
+    // left the dialog listing exactly that one row, with `CommandEmpty` silent
+    // (its registry is non-empty) and no error line anywhere. The dialog then
+    // asserted that root is the only place this collection can go, and offered a
+    // reparent as the user's only move. That is worse than the two flattened
+    // lists this task's first pass fixed, because it is a *write* on a false
+    // picture — and it is reachable exactly when the rail is already showing
+    // "Couldn't load collections": `/my/collections/:id` reads `collection_view`,
+    // not the tree, so the page around it loads fine, and
+    // `MenuTarget::for_collection` deliberately degrades `forbidden` to `{self}`
+    // on a failed tree read, which keeps `Move to…` live.
+    //
+    // Effect-written, like the tray's: a resource read in plain render is
+    // unresolved during SSR and resolved at hydration, and hydration claims the
+    // server's text without rewriting it. Safe here because the dialog is behind
+    // `move_open`, a client signal that is false on every server render.
+    let load_failed = RwSignal::new(false);
+    Effect::new(move |_| {
+        let failed = matches!(tree.get(), Some(Some(Err(_))));
+        if failed != load_failed.get_untracked() {
+            load_failed.set(failed);
+        }
+    });
+
     let submit_create = move || {
         let Some(req) = manage.create_req.get_untracked() else {
             return;
@@ -773,6 +800,7 @@ pub fn TreeDialogs() -> impl IntoView {
                             <DestinationList
                                 placeholder="Search collections…"
                                 empty="No collection to move into."
+                                failed=load_failed
                                 input_id=Some(MOVE_INPUT_ID.to_string())
                             >
                                 // Same boundary the catalog picker and the tray
@@ -835,6 +863,12 @@ fn move_rows(
     req: MoveReq,
     rows: Vec<CollectionTreeRow>,
 ) -> impl IntoView {
+    // `⬆ Top level` is rendered unconditionally, and stays that way when the tree
+    // read failed: reparenting to root is the one destination that does not need
+    // the tree to name it, so it is the same `fallback_rows` discipline the `/my`
+    // root list follows. What it must not do is stand there *alone and unexplained*
+    // — with `TreeDialogs`' `load_failed` wired in, the list now says the rest is
+    // missing above it instead of implying root is the only place to go.
     let at_top = req.parent_id.is_none();
     let current = req.parent_id;
     let pick =

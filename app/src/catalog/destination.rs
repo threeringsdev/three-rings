@@ -21,6 +21,7 @@
 use leptos::prelude::*;
 use shared::{CollectionSummary, Id};
 
+use crate::components::states::ErrorNote;
 use crate::components::ui::command::{
     Command, CommandEmpty, CommandInput, CommandItem, CommandList,
 };
@@ -378,30 +379,28 @@ fn PickerBody() -> impl IntoView {
                         // read, so this arm is reached in normal use rather than
                         // only under fault injection.
                         match collections.await {
+                            // `ErrorNote`, not a hand-rolled banner. The first cut
+                            // of this arm printed the raw wire detail and offered
+                            // an unconditional retry, which for an
+                            // `unauthorized:` failure read "Couldn't load your
+                            // collections: invalid token" over a button that 401s
+                            // forever — the exact defect
+                            // `components::states` exists to refuse, reproduced
+                            // one file away from it. Adds still work while this is
+                            // on screen (the destination is the shell's state,
+                            // remembered in a cookie, and quick-add reads that and
+                            // not this list), so the banner names a failure to
+                            // *change* destination and the classifier decides
+                            // whether asking again could help.
                             Err(e) => {
                                 view! {
-                                    <div class="space-y-1.5 p-3" data-testid="destination-error">
-                                        <p role="alert" class="text-destructive text-sm">
-                                            {format!(
-                                                "Couldn't load your collections: {}",
-                                                crate::components::states::describe(&e).1,
-                                            )}
-                                        </p>
-                                        // Adds still work while this is on screen:
-                                        // the destination is the shell's state,
-                                        // remembered in a cookie, and quick-add
-                                        // reads that and not this list. So this is
-                                        // a failure to *change* destination, and
-                                        // saying only "no collection matches"
-                                        // misdescribed it twice over.
-                                        <button
-                                            type="button"
-                                            class="text-muted-foreground hover:text-foreground text-sm underline"
-                                            data-testid="destination-retry"
-                                            on:click=move |_| collections.refetch()
-                                        >
-                                            "Try again"
-                                        </button>
+                                    <div class="p-2">
+                                        <ErrorNote
+                                            what="Couldn't load your collections"
+                                            e
+                                            testid="destination-error"
+                                            retry=Callback::new(move |()| collections.refetch())
+                                        />
                                     </div>
                                 }
                                     .into_any()

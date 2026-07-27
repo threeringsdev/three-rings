@@ -193,7 +193,16 @@ pub fn MyRootNav() -> impl IntoView {
                             // `fallback_rows`: without them a phone's My-cards
                             // mode is a dead end, because this list is the only
                             // navigation it has here.
-                            Some(Err(_)) => {
+                            Some(Err(e)) => {
+                                // The same decision the rail makes about the same
+                                // read — one function, so the two cannot disagree
+                                // about whether asking again is possible. This
+                                // surface offered no retry at all before, which was
+                                // the wrong half of that disagreement: the read is
+                                // the shell's, a refetch re-renders both, and on a
+                                // phone this list is the only navigation `/my` has.
+                                let retryable = super::tree::tree_retryable(&e);
+                                let failure = crate::components::states::describe(&e).0;
                                 view! {
                                     // The `warning` tone is the badge for exactly
                                     // this shape: the list below is real and
@@ -201,7 +210,10 @@ pub fn MyRootNav() -> impl IntoView {
                                     // says "some of this is missing" to a reader
                                     // who skims past the sentence — which matters
                                     // most here, because the rows *look* complete.
-                                    <div class="flex flex-col gap-1 px-4 pb-1">
+                                    <div
+                                        class="flex flex-col items-start gap-1 px-4 pb-1"
+                                        data-failure=failure.slug()
+                                    >
                                         <StateBadge tone=Tone::Partial label="Partial" />
                                         <p
                                             role="alert"
@@ -210,6 +222,19 @@ pub fn MyRootNav() -> impl IntoView {
                                         >
                                             "Couldn't load your collections. Everything else here still works."
                                         </p>
+                                        {retryable
+                                            .then(|| {
+                                                view! {
+                                                    <button
+                                                        type="button"
+                                                        class="text-muted-foreground hover:text-foreground text-sm underline"
+                                                        data-testid="my-root-retry"
+                                                        on:click=move |_| tree.refetch()
+                                                    >
+                                                        "Try again"
+                                                    </button>
+                                                }
+                                            })}
                                     </div>
                                     <MyRootList rows=fallback_rows(&href) />
                                 }

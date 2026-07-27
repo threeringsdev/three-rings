@@ -255,8 +255,79 @@ test("@fast the destination picker blames the read, not the user's collections",
   // a testid, because the line came from `CommandEmpty` and had none.
   await expect(page.getByText("No collection matches.")).toHaveCount(0);
   await expect(page.getByTestId("destination-option")).toHaveCount(0);
-  // Retryable: this is a transport failure, and the picker owns a refetch.
-  await expect(err.locator("..").getByTestId("destination-retry")).toBeVisible();
+  // It goes through the shared classifier now, not a hand-rolled banner: the
+  // first cut printed the raw wire detail and offered an unconditional retry, so
+  // an `unauthorized:` failure got a button that 401s forever.
+  await expect(err).toHaveAttribute("data-failure", "transport");
+  await expect(err.getByTestId("state-retry")).toBeVisible();
+});
+
+test("@fast the move dialog says the tree is missing instead of offering only root", async ({
+  page,
+}) => {
+  // The third `DestinationList` consumer, and the one where the collapse wrote.
+  // `move_rows` renders `⬆ Top level` unconditionally, so a failed tree read left
+  // the dialog listing that one row with `CommandEmpty` silent (non-empty
+  // registry) and no error anywhere — asserting root was the only place this
+  // collection could go, and offering a reparent as the only move.
+  let treeReads = 0;
+  await page.route("**/api/collection_tree*", async (route) => {
+    treeReads++;
+    await route.fulfill({
+      status: 500,
+      contentType: "text/plain",
+      body: "induced: collection tree unavailable",
+    });
+  });
+
+  await intoShell(page);
+  expect(
+    treeReads,
+    "the tree read was never intercepted — the failure was not induced",
+  ).toBeGreaterThan(0);
+  // Control: the rail knows the tree is gone. This is the state in which the
+  // dialog below used to lie.
+  await expect(page.getByTestId("tree-error")).toBeVisible();
+
+  // A collection link on `/my/all` comes from `all_cards`, not from the tree —
+  // the one SPA route into a collection page that survives this failure, and the
+  // reason the scenario is reachable at all. Specifically the **single-location**
+  // shape, which renders a bare `<a>`; the multi-location shape hides its links
+  // inside a closed `Collapsible` whose trigger swallows the click.
+  const link = page.locator('a[data-testid="location-summary"]').first();
+  await expect(
+    link,
+    "fixture has no single-location card on /my/all — no SPA route into a collection survives the failed tree",
+  ).toBeVisible();
+  await link.click();
+  await page.waitForURL(/\/my\/collections\//);
+  // The page itself is fine (it reads `collection_view`), which is exactly why
+  // the kebab is live and the dialog reachable.
+  await expect(page.getByTestId("collection-page")).toBeVisible();
+  await expect(page.getByTestId("collection-error")).toHaveCount(0);
+
+  await page.locator('[data-testid="collection-actions"]').click();
+  const menu = page.locator("#context-menu-collection-header");
+  await expect.poll(() => menu.evaluate((el) => el.matches(":popover-open"))).toBe(
+    true,
+  );
+  await menu.locator('[role="menuitem"]').filter({ hasText: "Move to…" }).click();
+
+  const dialog = page.locator('[role="dialog"]#tree-move');
+  await expect(dialog).toBeVisible();
+  // The fix: the failure is named…
+  await expect(dialog.getByTestId("destination-error")).toBeVisible();
+  // …the line that would have spoken for it is gone…
+  await expect(dialog.getByText("No collection to move into.")).toHaveCount(0);
+  // …and `⬆ Top level` is still offered, because reparenting to root is the one
+  // destination that never needed the tree — the `fallback_rows` discipline.
+  // What it must not be is alone and unexplained, which the assertion above
+  // covers and this one's presence completes.
+  await expect(
+    dialog.locator('[data-testid="destination-option"]', {
+      hasText: "Top level",
+    }),
+  ).toBeVisible();
 });
 
 test("@fast the picker's healthy list is the positive control", async ({

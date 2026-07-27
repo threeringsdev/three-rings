@@ -86,9 +86,16 @@ else fail(`thumbnail box wrong: ${JSON.stringify(box)}`);
 // "Move to…" opens the destination picker — a `popover` positioned with CSS
 // anchor positioning, which is exactly the vendoring checklist's
 // native-webview item. What is proved here is that the panel opens and lands
-// **on screen** on the real WebView engine; what it lists is a session read
-// the dev proxy cannot make (it strips Cookie headers), so the honest
-// on-device rendering is the empty state.
+// **on screen** on the real WebView engine; what it lists is a session read the
+// dev proxy cannot make (it strips Cookie headers), so what renders is the
+// **failed** arm.
+//
+// This used to expect "No collection to move to." and call that "the honest
+// rendering". It was not: the read 401s, and an empty list is a claim about the
+// account rather than about the read — the same correction made in
+// tests/selection-tray.spec.ts. `DestinationList` now separates the two, and the
+// empty line is reserved for what it can actually speak about: a *filter* that
+// matched nothing.
 const move = page.locator('[data-testid="tray-move"]');
 if (!(await move.isDisabled())) ok("“Move to…” is live on-device");
 else fail("“Move to…” is still disabled on-device");
@@ -101,9 +108,16 @@ else fail("the picker did not open on-device");
 if ((await picker.locator('[data-name="CommandInput"]').count()) === 1)
   ok("the picker brings the catalog control's search box with it");
 else fail("no CommandInput inside the on-device picker");
-if ((await picker.textContent())?.includes("No collection to move to."))
-  ok("anonymous on-device picker shows its empty state");
-else fail(`unexpected picker content: ${await picker.textContent()}`);
+{
+  const text = (await picker.textContent()) ?? "";
+  if (!text.includes("Couldn't load your collections.")) {
+    fail(`unexpected picker content: ${text}`);
+  } else if (text.includes("No collection to move to.")) {
+    fail("the picker still claims the account has no collections");
+  } else {
+    ok("anonymous on-device picker blames the read, not the account");
+  }
+}
 const panel = await picker.boundingBox();
 const viewport = page.viewportSize() ?? (await page.evaluate(() => ({
   width: window.innerWidth,

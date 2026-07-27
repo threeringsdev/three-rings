@@ -438,8 +438,14 @@ pub fn CardDetailPage() -> impl IntoView {
                                 Failure::Missing(detail) => {
                                     view! { <NotFound detail=detail /> }.into_any()
                                 }
-                                Failure::Broken(detail) => {
-                                    view! { <LoadFailed detail=detail detail_res=detail_res /> }
+                                Failure::Broken(failure, detail) => {
+                                    view! {
+                                        <LoadFailed
+                                            failure
+                                            detail=detail
+                                            detail_res=detail_res
+                                        />
+                                    }
                                         .into_any()
                                 }
                             },
@@ -457,10 +463,12 @@ pub fn CardDetailPage() -> impl IntoView {
 enum Failure {
     /// The catalog answered, and this card genuinely isn't in it.
     Missing(String),
-    /// Something upstream broke — a different thing from "no such card", and
+    /// Something else went wrong — a different thing from "no such card", and
     /// telling a visitor their card doesn't exist because Neon is unreachable
-    /// is a lie they'd act on.
-    Broken(String),
+    /// is a lie they'd act on. Carries the **shared** classification alongside
+    /// the detail, so this page's affordances follow the same rule every
+    /// `ErrorNote` surface follows instead of a second, looser one.
+    Broken(states::Failure, String),
 }
 
 /// Split a read failure into the two things this page says differently.
@@ -476,7 +484,7 @@ fn classify(e: &ServerFnError<String>) -> Failure {
         (states::Failure::Missing, _) => {
             Failure::Missing("We don't have that card in the catalog.".into())
         }
-        (_, detail) => Failure::Broken(detail),
+        (failure, detail) => Failure::Broken(failure, detail),
     }
 }
 
@@ -486,23 +494,42 @@ fn classify(e: &ServerFnError<String>) -> Failure {
 /// people share, so the reader who lands here most often arrived from outside the
 /// app and has no history to go back through.
 ///
-/// Both affordances, because the two failures behind this arm want different
-/// ones: a retry for the transient upstream hiccup that put it here, and the
-/// catalog for the one that will not clear.
+/// The way out is unconditional and the **retry is not**, which is the same rule
+/// [`ErrorNote`](crate::components::states::ErrorNote) applies — this page keeps
+/// its own shape (a heading, not a banner) but must not keep its own policy. An
+/// unconditional retry here re-sent a `validation:`/`conflict:`/`forbidden:`
+/// request verbatim, forever, which is precisely what the shared classifier
+/// exists to stop. `data-failure` is carried for the same reason the five banner
+/// surfaces carry it: without the seam nothing can assert which arm this is.
 #[component]
 fn LoadFailed(
+    failure: states::Failure,
     #[prop(into)] detail: String,
     detail_res: Resource<Option<Result<CardDetail, ServerFnError<String>>>>,
 ) -> impl IntoView {
+    // Only "on our side" when it actually is. A refused request is not an outage,
+    // and inviting the reader to wait a moment for one they cannot fix by waiting
+    // is the small lie this arm used to tell every non-`upstream:` failure.
+    let sentence = if failure.retryable() {
+        "Something went wrong on our side — try again in a moment."
+    } else {
+        "That request can't be answered as it stands."
+    };
     view! {
-        <div class="space-y-2" data-testid="card-detail-error">
+        <div class="space-y-2" data-testid="card-detail-error" data-failure=failure.slug()>
             <h1 class="text-2xl font-bold">"We couldn't load this card"</h1>
             <p role="alert" class="text-muted-foreground text-sm">
-                "Something went wrong on our side — try again in a moment."
+                {sentence}
             </p>
             <p class="text-muted-foreground text-xs">{detail}</p>
             <div class="flex flex-wrap items-center gap-3 pt-1">
-                <RetryButton on_retry=Callback::new(move |()| detail_res.refetch()) />
+                {failure
+                    .retryable()
+                    .then(|| {
+                        view! {
+                            <RetryButton on_retry=Callback::new(move |()| detail_res.refetch()) />
+                        }
+                    })}
                 <a href="/catalog" class="text-primary text-sm font-medium hover:underline">
                     "Back to the catalog"
                 </a>
