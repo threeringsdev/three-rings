@@ -39,6 +39,7 @@ use shared::CardSummary;
 
 use crate::cards::CardPreview;
 use crate::components::query_bar::QueryBar;
+use crate::components::states::{StateBadge, Tone};
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::ui::skeleton::Skeleton;
@@ -481,7 +482,26 @@ fn Results(
                             {kept
                                 .filter(|c| !c.is_empty())
                                 .map(|cards| {
-                                    view! { <ResultCards cards list_view stale=true /> }
+                                    view! {
+                                        // The cards below are dimmed and inert,
+                                        // which says "not clickable" but not
+                                        // *why*. Unlabeled, a reader sees results
+                                        // sitting under an error and has no way to
+                                        // tell they answer the previous query —
+                                        // and the `aria-hidden` on the block means
+                                        // a screen reader is told nothing at all,
+                                        // so the label has to live out here. The
+                                        // `info` tone is the honest one: nothing
+                                        // failed and nothing is resolved, the
+                                        // content is simply not current.
+                                        <p class="pt-3">
+                                            <StateBadge
+                                                tone=Tone::Stale
+                                                label="Previous results"
+                                            />
+                                        </p>
+                                        <ResultCards cards list_view stale=true />
+                                    }
                                 })}
                         }
                             .into_any()

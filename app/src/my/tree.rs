@@ -19,6 +19,7 @@ use shared::{CollectionTreeRow, Id};
 use std::collections::{HashMap, HashSet};
 
 use super::tree_manage::{commit_drop, DragState, DropIntent, MenuTarget, TreeManage, TreeMenu};
+use crate::components::states::{StateBadge, Tone};
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::collapsible::{Collapsible, CollapsibleContent, CollapsibleTrigger};
 use crate::components::ui::context_menu::{use_context_menu, ContextMenu};
@@ -153,11 +154,29 @@ pub fn CollectionTreeNav() -> impl IntoView {
                 {move || Suspend::new(async move {
                     match tree.await {
                         Some(Ok(dto)) => assembled_view(assemble(dto), pathname).into_any(),
+                        // `warning`, not `destructive`: the rail failing does not
+                        // break the page beside it — every route under `/my` reads
+                        // its own data — so this is the *partial* tone, and the
+                        // one thing the line was missing is a way to ask again.
+                        // `role="alert"` because a quiet unannounced line is
+                        // invisible to a screen reader, which is the reader least
+                        // able to notice a nav that simply isn't there.
                         Some(Err(_)) => {
                             view! {
-                                <p class="text-muted-foreground px-2 text-xs">
-                                    "Couldn't load collections."
-                                </p>
+                                <div class="space-y-1.5 px-2" data-testid="tree-error">
+                                    <StateBadge tone=Tone::Partial label="Partial" />
+                                    <p role="alert" class="text-muted-foreground text-xs">
+                                        "Couldn't load collections."
+                                    </p>
+                                    <button
+                                        type="button"
+                                        class="text-muted-foreground hover:text-foreground text-xs underline"
+                                        data-testid="tree-retry"
+                                        on:click=move |_| tree.refetch()
+                                    >
+                                        "Try again"
+                                    </button>
+                                </div>
                             }
                                 .into_any()
                         }

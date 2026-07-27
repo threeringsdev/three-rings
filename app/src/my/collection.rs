@@ -65,6 +65,7 @@ use super::tree::{assemble, element_anchor, CollectionTreeResource, TreeNode};
 use super::tree_manage::{MenuTarget, TreeManage, TreeMenu};
 use crate::cards::CardPreview;
 use crate::components::quick_add::QuickAddPanel;
+use crate::components::states::ErrorNote;
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::breadcrumb::{
     Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator,
@@ -159,7 +160,14 @@ pub fn CollectionPage() -> impl IntoView {
         },
         |(id, q, cursor, _revision, _tree_revision)| async move {
             let id = Id::parse_str(&id).map_err(|_| {
-                ServerFnError::<String>::ServerError("that is not a collection id".into())
+                // `validation:` deliberately — the wire vocabulary is what the
+                // UI classifies on, and a malformed id in the URL is a *request*
+                // failure that will never resolve. Unprefixed it read as a
+                // transport failure and the error arm offered a "Try again" that
+                // re-parsed the same broken string forever.
+                ServerFnError::<String>::ServerError(
+                    "validation: that is not a collection id".into(),
+                )
             })?;
             let cursor = (!cursor.is_empty()).then_some(cursor);
             crate::collection_view(id, q, cursor).await
@@ -257,7 +265,9 @@ pub fn CollectionPage() -> impl IntoView {
                             }
                                 .into_any()
                         }
-                        Err(e) => view! { <LoadError e /> }.into_any(),
+                        Err(e) => {
+                            view! { <LoadError e view_res paged url_id url_q /> }.into_any()
+                        }
                     }
                 })}
             </Transition>
@@ -355,16 +365,49 @@ pub(crate) fn message_of(e: &ServerFnError<String>) -> String {
     }
 }
 
+/// The header's failed arm — and, because the header is what carries the
+/// breadcrumb and the mobile back link, the *only* thing on the page when the
+/// read fails (the body's own error arm renders nothing, deliberately: a second
+/// copy of one message).
+///
+/// That made it a dead end, and this route reaches it two ways that have nothing
+/// for the user to fix: a link to a **deleted** collection (`not found`, where a
+/// retry re-asks the same dead id), and a shared **`?cursor=`** gone stale — the
+/// case `/catalog`'s pager arm was given a way home for. So the way out is
+/// unconditional here rather than paged-only, and page one of the same collection
+/// is offered on top of it when there is a cursor to drop.
 #[component]
-fn LoadError(e: ServerFnError<String>) -> impl IntoView {
+fn LoadError(
+    e: ServerFnError<String>,
+    view_res: Resource<Result<CollectionView, ServerFnError<String>>>,
+    paged: Memo<bool>,
+    url_id: Memo<String>,
+    url_q: Memo<String>,
+) -> impl IntoView {
     view! {
-        <p
-            role="alert"
-            data-testid="collection-error"
-            class="border-destructive/40 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-sm"
+        <ErrorNote
+            what="Couldn't load this collection"
+            e
+            testid="collection-error"
+            retry=Callback::new(move |()| view_res.refetch())
         >
-            {format!("Couldn't load this collection: {}", message_of(&e))}
-        </p>
+            <Show when=move || paged.get()>
+                <a
+                    href=move || collection_url(&url_id.get(), &url_q.get(), None)
+                    class="text-destructive text-sm font-medium underline"
+                    data-testid="page-first"
+                >
+                    "← Back to the start"
+                </a>
+            </Show>
+            <a
+                href="/my"
+                class="text-destructive text-sm font-medium underline"
+                data-testid="collection-error-home"
+            >
+                "My cards"
+            </a>
+        </ErrorNote>
     }
 }
 

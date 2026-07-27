@@ -23,7 +23,7 @@
 use leptos::prelude::*;
 use shared::{ShoppingList, ShoppingRow};
 
-use super::collection::message_of;
+use crate::components::states::{ErrorNote, StateBadge, Tone};
 use crate::components::ui::button::{Button, ButtonVariant};
 use crate::components::ui::skeleton::Skeleton;
 use crate::components::ui::table::{
@@ -97,25 +97,33 @@ pub fn ShoppingPage() -> impl IntoView {
                     match list.await {
                         Ok(list) if list.rows.is_empty() => {
                             view! {
-                                <p
-                                    class="text-muted-foreground py-12 text-center text-sm"
+                                // `success`, like the needs page's own empty arm
+                                // and for the same reason: an empty shopping list
+                                // is the good kind of nothing (every wanted copy
+                                // is owned *somewhere*), not the absent kind. The
+                                // sentence says which, and the tone says it
+                                // without being read.
+                                <div
+                                    class="text-muted-foreground flex flex-col items-center gap-2 py-12 text-center text-sm"
                                     data-testid="shopping-empty"
                                 >
-                                    "Nothing to buy — every card your collections want is already owned."
-                                </p>
+                                    <StateBadge tone=Tone::Resolved label="All set" />
+                                    <p>
+                                        "Nothing to buy — every card your collections want is already owned."
+                                    </p>
+                                </div>
                             }
                                 .into_any()
                         }
                         Ok(list) => view! { <ShoppingBody list /> }.into_any(),
                         Err(e) => {
                             view! {
-                                <p
-                                    role="alert"
-                                    data-testid="shopping-error"
-                                    class="border-destructive/40 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-sm"
-                                >
-                                    {format!("Couldn't load the shopping list: {}", message_of(&e))}
-                                </p>
+                                <ErrorNote
+                                    what="Couldn't load the shopping list"
+                                    e
+                                    testid="shopping-error"
+                                    retry=Callback::new(move |()| list.refetch())
+                                />
                             }
                                 .into_any()
                         }

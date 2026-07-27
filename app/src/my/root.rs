@@ -32,6 +32,7 @@ use leptos_router::hooks::use_query_map;
 use shared::Id;
 
 use super::tree::{assemble, AssembledTree, CollectionTreeResource};
+use crate::components::states::{StateBadge, Tone};
 use crate::components::ui::item::{Item, ItemSize};
 use crate::components::ui::separator::Separator;
 use crate::components::ui::skeleton::Skeleton;
@@ -194,13 +195,22 @@ pub fn MyRootNav() -> impl IntoView {
                             // navigation it has here.
                             Some(Err(_)) => {
                                 view! {
-                                    <p
-                                        role="alert"
-                                        data-testid="my-root-error"
-                                        class="text-muted-foreground px-4 pb-1 text-sm"
-                                    >
-                                        "Couldn't load your collections. Everything else here still works."
-                                    </p>
+                                    // The `warning` tone is the badge for exactly
+                                    // this shape: the list below is real and
+                                    // usable, and shorter than it should be. It
+                                    // says "some of this is missing" to a reader
+                                    // who skims past the sentence — which matters
+                                    // most here, because the rows *look* complete.
+                                    <div class="flex flex-col gap-1 px-4 pb-1">
+                                        <StateBadge tone=Tone::Partial label="Partial" />
+                                        <p
+                                            role="alert"
+                                            data-testid="my-root-error"
+                                            class="text-muted-foreground text-sm"
+                                        >
+                                            "Couldn't load your collections. Everything else here still works."
+                                        </p>
+                                    </div>
                                     <MyRootList rows=fallback_rows(&href) />
                                 }
                                     .into_any()

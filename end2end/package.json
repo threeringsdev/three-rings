@@ -19,6 +19,7 @@
     "probe:android-tree-move": "node android-tree-move-check.mjs",
     "probe:android-my-root": "node android-my-root-check.mjs",
     "probe:android-header-kebab": "node android-header-kebab-check.mjs",
+    "probe:android-states": "node android-states-check.mjs",
     "diag:resource-ids": "node measure-resource-ids.mjs"
   },
   "keywords": [],

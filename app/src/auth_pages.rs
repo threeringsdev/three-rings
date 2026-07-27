@@ -22,6 +22,12 @@ const BUTTON: &str = "w-full rounded-lg bg-primary px-6 py-3 text-primary-foregr
 const BUTTON_GHOST: &str = "w-full rounded-lg border px-6 py-3 \
                             font-medium transition-all duration-200 hover:border-ring \
                             disabled:opacity-50";
+/// Every auth failure line. `role="alert"` is on each of the four `<p>`s that
+/// carry it rather than baked in here (a class cannot set a role): these
+/// messages appear *after* a submit, in place, with no navigation and no focus
+/// move, so without the live region a screen-reader user gets a form that went
+/// quiet. Every other error surface in the app already announces itself; these
+/// four were the exception.
 const ERROR_TEXT: &str = "text-sm text-destructive";
 const MUTED_TEXT: &str = "text-muted-foreground text-sm";
 
@@ -311,7 +317,7 @@ pub fn LoginPage() -> impl IntoView {
                         </ActionForm>
                         <GoogleButton set_error=set_error />
                         <Show when=move || error.get().is_some() || google_error().is_some()>
-                            <p class=ERROR_TEXT>
+                            <p role="alert" class=ERROR_TEXT>
                                 {move || error.get().or_else(|| google_error().map(str::to_string))}
                             </p>
                         </Show>
@@ -395,7 +401,7 @@ pub fn SignupPage() -> impl IntoView {
                     </ActionForm>
                     <GoogleButton set_error=set_error />
                     <Show when=move || error.get().is_some()>
-                        <p class=ERROR_TEXT>{move || error.get()}</p>
+                        <p role="alert" class=ERROR_TEXT>{move || error.get()}</p>
                     </Show>
                     <p class=MUTED_TEXT>
                         "Already have an account? "
@@ -532,7 +538,7 @@ fn ResetCard(set_reset_mode: WriteSignal<bool>) -> impl IntoView {
                 </ActionForm>
             </Show>
             <Show when=move || error.get().is_some()>
-                <p class=ERROR_TEXT>{move || error.get()}</p>
+                <p role="alert" class=ERROR_TEXT>{move || error.get()}</p>
             </Show>
             <p class=MUTED_TEXT>
                 <button class="underline" on:click=move |_| set_reset_mode.set(false)>
@@ -602,7 +608,7 @@ fn OtpCard(email: String) -> impl IntoView {
                 {move || if resent() { "Code re-sent" } else { "Re-send code" }}
             </button>
             <Show when=move || error.get().is_some()>
-                <p class=ERROR_TEXT>{move || error.get()}</p>
+                <p role="alert" class=ERROR_TEXT>{move || error.get()}</p>
             </Show>
             <BackHome />
         </div>

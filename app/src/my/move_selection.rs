@@ -552,6 +552,21 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
     );
     let collections = Resource::new(|| (), |_| crate::list_collections());
 
+    // Written by an `Effect`, never read in render: a resource read in plain
+    // render is unresolved during SSR and already resolved at hydration, and
+    // hydration *claims* the server's text without rewriting it (the wrong
+    // "Show results" label `ResultsToolbar` shipped before this was understood).
+    // The tray only exists once a selection does, and a selection starts empty on
+    // every load, so this surface is never server-rendered and the Effect is the
+    // whole story here.
+    let load_failed = RwSignal::new(false);
+    Effect::new(move |_| {
+        let failed = matches!(collections.get(), Some(Err(_)));
+        if failed != load_failed.get_untracked() {
+            load_failed.set(failed);
+        }
+    });
+
     let choose = Callback::new(move |dest: Destination| {
         if pending.get_untracked() {
             return;
@@ -639,7 +654,7 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
                 {move || if pending.get() { "Moving…" } else { "Move to…" }}
             </PopoverTrigger>
             <PopoverContent class="w-[280px] p-0">
-                <DestinationList empty="No collection to move to.">
+                <DestinationList empty="No collection to move to." failed=load_failed>
                     // Same boundary the catalog's picker uses, and for the same
                     // reason: the rows come from resources, and only a
                     // suspense boundary keeps a render in step with them.
@@ -649,7 +664,16 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
                         }
                     }>
                         {move || Suspend::new(async move {
+                            // The tree of collections is what this list *is*, so
+                            // its failure is reported (`load_failed` → the list's
+                            // own failed arm) rather than flattened into zero rows
+                            // that read as "you have nowhere to move these".
                             let all = collections.await.unwrap_or_default();
+                            // Suggestions are a *ranking* hint — collections whose
+                            // desired exceeds present for these cards. Losing them
+                            // costs the wireframe's ordering, not the ability to
+                            // move, and no arm here would be more honest than the
+                            // plain list: this one degrades on purpose.
                             let ranked = suggested.await.unwrap_or_default();
                             picker_options(&ranked, &all)
                                 .into_iter()

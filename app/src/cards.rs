@@ -23,6 +23,7 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 use shared::{CardDetail, CardSummary, OwnershipEntry, PrintingSummary, Ruling};
 
+use crate::components::states::{self, RetryButton};
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::ui::card::{Card, CardContent, CardHeader, CardTitle};
@@ -416,7 +417,7 @@ pub fn CardDetailPage() -> impl IntoView {
 
     // Parsing client-side means a malformed id renders "not found" without a
     // pointless round trip, and the server fn keeps a typed argument.
-    let detail = Resource::new(
+    let detail_res = Resource::new(
         move || oracle_id.get(),
         |id| async move {
             match id {
@@ -431,14 +432,15 @@ pub fn CardDetailPage() -> impl IntoView {
             <Transition fallback=|| view! { <CardDetailSkeleton /> }>
                 {move || {
                     Suspend::new(async move {
-                        match detail.await {
+                        match detail_res.await {
                             Some(Ok(card)) => view! { <CardDetailBody card=card /> }.into_any(),
                             Some(Err(e)) => match classify(&e) {
                                 Failure::Missing(detail) => {
                                     view! { <NotFound detail=detail /> }.into_any()
                                 }
                                 Failure::Broken(detail) => {
-                                    view! { <LoadFailed detail=detail /> }.into_any()
+                                    view! { <LoadFailed detail=detail detail_res=detail_res /> }
+                                        .into_any()
                                 }
                             },
                             None => {
@@ -461,31 +463,50 @@ enum Failure {
     Broken(String),
 }
 
-/// The Leptos error channel collapses every `ApiError` onto one variant
-/// carrying its `Display` string (the status-semantics gap queued in TODO), so
-/// the `not found: ` prefix is the only signal available here. Anything else is
-/// treated as breakage, which is the safe direction: a missing card
-/// misreported as an outage is recoverable, the reverse is not.
+/// Split a read failure into the two things this page says differently.
+///
+/// The prefix table itself is shared ([`crate::components::states::describe`]) —
+/// there is one wire format and it should be parsed in one place — but the copy
+/// is not: a card that genuinely isn't in the catalog wants naming as such,
+/// where every other surface's `Missing` means "your link is dead". Anything not
+/// `not found:` is treated as breakage, which is the safe direction: a missing
+/// card misreported as an outage is recoverable, the reverse is not.
 fn classify(e: &ServerFnError<String>) -> Failure {
-    let raw = match e {
-        ServerFnError::ServerError(msg) => msg.clone(),
-        other => other.to_string(),
-    };
-    match raw.strip_prefix("not found: ") {
-        Some(_) => Failure::Missing("We don't have that card in the catalog.".into()),
-        None => Failure::Broken(raw),
+    match crate::components::states::describe(e) {
+        (states::Failure::Missing, _) => {
+            Failure::Missing("We don't have that card in the catalog.".into())
+        }
+        (_, detail) => Failure::Broken(detail),
     }
 }
 
+/// The read broke. Unlike [`NotFound`] — which has offered a way out since it
+/// shipped — this arm had a page with no link and no control on it at all, which
+/// on a **public** URL is the worst place for one: `/cards/:id` is the surface
+/// people share, so the reader who lands here most often arrived from outside the
+/// app and has no history to go back through.
+///
+/// Both affordances, because the two failures behind this arm want different
+/// ones: a retry for the transient upstream hiccup that put it here, and the
+/// catalog for the one that will not clear.
 #[component]
-fn LoadFailed(#[prop(into)] detail: String) -> impl IntoView {
+fn LoadFailed(
+    #[prop(into)] detail: String,
+    detail_res: Resource<Option<Result<CardDetail, ServerFnError<String>>>>,
+) -> impl IntoView {
     view! {
         <div class="space-y-2" data-testid="card-detail-error">
             <h1 class="text-2xl font-bold">"We couldn't load this card"</h1>
-            <p class="text-muted-foreground text-sm">
+            <p role="alert" class="text-muted-foreground text-sm">
                 "Something went wrong on our side — try again in a moment."
             </p>
             <p class="text-muted-foreground text-xs">{detail}</p>
+            <div class="flex flex-wrap items-center gap-3 pt-1">
+                <RetryButton on_retry=Callback::new(move |()| detail_res.refetch()) />
+                <a href="/catalog" class="text-primary text-sm font-medium hover:underline">
+                    "Back to the catalog"
+                </a>
+            </div>
         </div>
     }
 }

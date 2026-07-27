@@ -215,7 +215,16 @@ impl DestinationChoice {
 /// server and N on the client, which is the tachys "expected an HTML `<div>`"
 /// panic (observed, on `/catalog`). The `Suspense`/`Transition` boundary that
 /// keeps the two in step has to sit around the rows, and it belongs to whoever
-/// owns the resource.
+/// owns the resource. (The sticky picker goes one further and puts *this whole
+/// component* inside its boundary — see [`PickerBody`] for why it has to.)
+///
+/// **`empty` can only ever speak about *filtering*.** `CommandEmpty` infers
+/// emptiness from the item registry, and zero registered items conflates three
+/// different worlds — not fetched, fetch failed, genuinely no collections — which
+/// is exactly the collapse the set picker's four arms exist to refuse. So a
+/// caller whose rows came from a **failed** read must say so through `failed`
+/// rather than let this line answer for it: "No collection matches." over an
+/// unreachable backend is a false claim about the user's own collections.
 #[component]
 pub fn DestinationList(
     /// The option rows — `DestinationOption`s, inside the caller's own
@@ -223,6 +232,18 @@ pub fn DestinationList(
     children: ChildrenFn,
     #[prop(into, default = String::from("Search collections…"))] placeholder: String,
     #[prop(into, default = String::from("No collection matches."))] empty: String,
+    /// True when the read behind `children` failed. Replaces the `empty` line —
+    /// which would otherwise be inferring from an empty registry — with the one
+    /// sentence that is true.
+    ///
+    /// **Effect-written by every caller, so this is for client-only pickers.**
+    /// Effects don't run during SSR, so a server render always takes the
+    /// not-failed branch; a picker that SSRs must decide inside its own `Suspend`
+    /// instead (again, [`PickerBody`]). The tray and the tree's `Move to…` both
+    /// live behind client-only state (an empty selection renders no tray, a
+    /// closed dialog renders no list), so neither is ever server-rendered.
+    #[prop(into, optional)]
+    failed: Signal<bool>,
     /// Deterministic DOM id for the search field, for a caller that focuses it
     /// itself. The tree's `Move to…` does: it opens in a dialog, and a dialog
     /// that focuses nothing leaves the keyboard path dead-ended. Omitted = no
@@ -230,6 +251,9 @@ pub fn DestinationList(
     #[prop(optional_no_strip)]
     input_id: Option<String>,
 ) -> impl IntoView {
+    // `Show`'s fallback is a `Fn`, so the line has to be cloneable out on every
+    // call rather than moved once.
+    let empty = StoredValue::new(empty);
     view! {
         <Command class="rounded-md">
             {match input_id {
@@ -238,7 +262,29 @@ pub fn DestinationList(
                 None => view! { <CommandInput placeholder=placeholder.clone() /> }.into_any(),
             }}
             <CommandList class="max-h-64 overflow-y-auto p-1">
-                <CommandEmpty class="text-muted-foreground p-3 text-sm">{empty}</CommandEmpty>
+                <Show
+                    when=move || failed.get()
+                    fallback=move || {
+                        view! {
+                            <CommandEmpty class="text-muted-foreground p-3 text-sm">
+                                {empty.get_value()}
+                            </CommandEmpty>
+                        }
+                    }
+                >
+                    // One sentence, here rather than at each call site, so two
+                    // pickers cannot describe the same outage differently. No
+                    // retry: closing the panel loses nothing (the selection and
+                    // the standing destination both outlive it), so unlike the
+                    // sticky picker this arm is not a dead end.
+                    <p
+                        role="alert"
+                        class="text-destructive p-3 text-sm"
+                        data-testid="destination-error"
+                    >
+                        "Couldn't load your collections."
+                    </p>
+                </Show>
                 {children()}
             </CommandList>
         </Command>
@@ -303,28 +349,84 @@ fn PickerBody() -> impl IntoView {
                 <span aria-hidden="true">"▾"</span>
             </PopoverTrigger>
             <PopoverContent class="w-[280px] p-0">
-                <DestinationList>
-                    <Transition fallback=|| {
-                        view! {
-                            <p class="text-muted-foreground p-3 text-sm">"Loading collections…"</p>
+                // **The whole list is inside the boundary, not just its rows** —
+                // the one picker of the three that has to be, because it is the
+                // one that SSRs (`/catalog` renders it for any session). A
+                // caller-side `failed` flag has to be Effect-written to stay off
+                // the read-in-render trap, Effects do not run during SSR, and so
+                // a server render of a failed read would emit the wrong arm into
+                // the HTML. Deciding inside the `Suspend` — where the resource is
+                // resolved on *both* sides — cannot disagree with itself.
+                //
+                // What that costs: a refetch rebuilds `CommandInput`, losing any
+                // typed filter. Acceptable here and nowhere else: this resource's
+                // source is `()`, so nothing refetches it except the retry below,
+                // where a rebuilt list is the point.
+                <Transition fallback=|| {
+                    view! {
+                        <p class="text-muted-foreground p-3 text-sm">"Loading collections…"</p>
+                    }
+                }>
+                    {move || Suspend::new(async move {
+                        // **Not `unwrap_or_default()`.** Collapsing the error into
+                        // an empty list left `DestinationList` nothing to
+                        // register, and its `CommandEmpty` then asserted "No
+                        // collection matches." — a failed fetch claiming the user
+                        // has no collections, the exact dishonesty the set
+                        // picker's four arms were built to refuse. On the native
+                        // backend an offline phone is the *ordinary* case for this
+                        // read, so this arm is reached in normal use rather than
+                        // only under fault injection.
+                        match collections.await {
+                            Err(e) => {
+                                view! {
+                                    <div class="space-y-1.5 p-3" data-testid="destination-error">
+                                        <p role="alert" class="text-destructive text-sm">
+                                            {format!(
+                                                "Couldn't load your collections: {}",
+                                                crate::components::states::describe(&e).1,
+                                            )}
+                                        </p>
+                                        // Adds still work while this is on screen:
+                                        // the destination is the shell's state,
+                                        // remembered in a cookie, and quick-add
+                                        // reads that and not this list. So this is
+                                        // a failure to *change* destination, and
+                                        // saying only "no collection matches"
+                                        // misdescribed it twice over.
+                                        <button
+                                            type="button"
+                                            class="text-muted-foreground hover:text-foreground text-sm underline"
+                                            data-testid="destination-retry"
+                                            on:click=move |_| collections.refetch()
+                                        >
+                                            "Try again"
+                                        </button>
+                                    </div>
+                                }
+                                    .into_any()
+                            }
+                            Ok(list) => {
+                                view! {
+                                    <DestinationList>
+                                        {picker_order(list.clone())
+                                            .into_iter()
+                                            .map(|c| {
+                                                let choice = DestinationChoice::plain(Destination {
+                                                    id: c.id,
+                                                    name: c.name,
+                                                    is_inbox: c.is_inbox,
+                                                });
+                                                view! { <DestinationOption choice chosen on_choose=choose /> }
+                                            })
+                                            .collect_view()}
+                                    </DestinationList>
+                                }
+                                    .into_any()
+                            }
                         }
-                    }>
-                        {move || Suspend::new(async move {
-                            let list = collections.await.unwrap_or_default();
-                            picker_order(list)
-                                .into_iter()
-                                .map(|c| {
-                                    let choice = DestinationChoice::plain(Destination {
-                                        id: c.id,
-                                        name: c.name,
-                                        is_inbox: c.is_inbox,
-                                    });
-                                    view! { <DestinationOption choice chosen on_choose=choose /> }
-                                })
-                                .collect_view()
-                        })}
-                    </Transition>
-                </DestinationList>
+                    })}
+                </Transition>
             </PopoverContent>
         </Popover>
     }

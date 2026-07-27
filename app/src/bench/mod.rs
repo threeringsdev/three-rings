@@ -37,6 +37,7 @@ mod separator;
 mod sheet;
 mod skeleton;
 mod sonner;
+mod states;
 mod table;
 mod theme_toggle;
 mod toggle_group;
@@ -180,6 +181,11 @@ const SECTIONS: &[BenchSection] = &[
         id: "collection-header-kebab",
         title: "Collection-header kebab (custom)",
         demo: header_kebab::demo,
+    },
+    BenchSection {
+        id: "states",
+        title: "State arms — error banner, retry, tones (custom)",
+        demo: states::demo,
     },
     BenchSection {
         id: "table",
