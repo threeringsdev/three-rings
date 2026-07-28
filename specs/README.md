@@ -6,7 +6,10 @@ Feature specifications and project planning for Three Rings.
 
 - One spec per file, named descriptively: `short-name.md`. The filename is the spec's stable identifier — never renamed once referenced.
 - Start from `TEMPLATE.md`.
-- Specs contain **no task lists**. All work tracking lives in [TODO.md](TODO.md); work needed to finish a draft goes in the spec's Open questions.
+- Specs contain **no task lists**. Work needed to finish a draft goes in the spec's Open questions. All work tracking lives in TODO files:
+   - [TODO.md](TODO.md)
+   - [TODO-Phase-5.md](Phase 5)
+   - [TODO-Phase-6.md](Phase 6)
 - A spec moves through: `draft` → `accepted` → `implemented` (status noted at the top of each file).
   * `draft` — under discussion; **no implementation work may be based on it**
   * `accepted` — design settled; tasks gated on it may proceed (accepting a spec is a human decision)
@@ -18,7 +21,7 @@ Feature specifications and project planning for Three Rings.
 
 Anyone told to "work on the next available task" follows this, with no other information required:
 
-1. Read `TODO.md`. Phases are ordered top to bottom; tasks within a phase are ordered top to bottom.
+1. Read `TODO.md`. Phases are ordered top to bottom; Later phases are separated into their own files; tasks within a phase are ordered top to bottom.
 2. **The next available task is the first task marked `[ ]`** in the topmost phase that contains one, skipping any task that is **blocked**. A task is blocked if:
    - a listed prerequisite task is not yet `[x]`, or
    - any spec in its `(specs: ...)` annotation does not have status `accepted` or `implemented`. Spec status is read from the spec file's header — it is never duplicated in TODO.md.
