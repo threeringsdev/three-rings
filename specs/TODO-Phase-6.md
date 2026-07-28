@@ -6,6 +6,8 @@
 
 **Severity.** This file is not yet ordered by priority. [TODO-Phase-6-triage.md](TODO-Phase-6-triage.md) classifies every id by severity (blockers, data integrity, correctness, missing capability, UX/a11y, performance, dev loop, hygiene) and records which entries are stale, duplicated, or need verifying before they are worth sizing. **Read the triage before picking a task from here.**
 
+**Verification is in progress — do not work a task from this file until its id is `settled`.** These entries were written by different review rounds over several weeks against code that has since changed, so each is being checked for whether it is still true before it is worked. State per id is in [TODO-Phase-6-verification.md](TODO-Phase-6-verification.md); the evidence is in [phase-6-probes/](phase-6-probes/); the pass is run by the `phase-6-review` skill.
+
 ## Phase 6
 
 - [ ] `P6-001` **Two pre-existing table overflows outside the nine frames' widths**, found while verifying the responsive audit's own fix and deliberately not fixed by it: **below ~385 px** (9–14 px of sideways scroll at 375, 64–69 px at 320) and **30–34 px at exactly 768 px**, where `md` adds the Type column back before the extra width is available. Neither belongs to the audit — measured by reverting its classes in the live DOM, that branch *reduces* the tables' intrinsic width by ~20 px at every width below `md` and resolves to exactly the pre-task values at ≥768. 375 px is a real device width (iPhone SE/mini), so the first one matters more than its absence from the frames suggests (specs: [app-ui](app-ui.md), [ui-design](ui-design.md))
