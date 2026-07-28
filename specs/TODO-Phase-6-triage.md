@@ -7,7 +7,7 @@ changed, and at least four are visibly stale or duplicated. Correctness review i
 the next stage; the "Verify first" list at the bottom is its input.
 
 **Counts.** 107 entries, ~200 distinct defects once the "minors" bundles are
-unpacked. 6 blockers · 15 data-integrity · 23 correctness · 14 missing capability
+unpacked. 4 blockers · 15 data-integrity · 25 correctness · 14 missing capability
 · 50 UX/a11y · 11 performance · 25 dev-loop · 32 hygiene/docs · 6 to close out.
 
 ## How to reference a task
@@ -63,12 +63,10 @@ and skip the expensive ones.
 
 | Id | Entry | Why blocker | Size |
 |---|---|---|---|
-| P6-010 | Idle tab reports "session expired" to a signed-in user — `fetch_current_user` falls back to `tr_session`, `user_id_from_headers` does not | Every `/my/*` surface makes a false claim about the user's session after 15 min idle. The guard passes and the data layer refuses the same request. This is the core signed-in experience failing on a timer. | M |
 | P6-102 | Web auth flow doesn't open a tab; the "you can close this tab" page doesn't return to the app | Sign-in on the **deployed** platform dead-ends. Desktop works, web doesn't — and web is what's live at Render. | M |
 | P6-105 | Full Scryfall ingest (catalog-ingestion) is unbuilt; dev catalog is ~3K printings | A collection manager that cannot find most cards is not a functional collection manager. Also silently moots P6-035 (set picker offering empty sets) and makes the parked full-catalog disambiguation work untestable. | L |
 | P6-092 | Merge gate never builds a Tauri **release** — the path that shipped a crash-on-launch to `latest` on 2026-07-20 | Already shipped a dead app once, to both the `.dmg` and the APK. Nothing in the gate exercises embedded-server startup. Fold P6-089 in: one `cargo build -p three_rings` step covers both, and the entry names a headless launch assertion as the real check. | S–M |
 | P6-059 | `scripts/migrate.sh` reported `migrations: up to date` on a run that had not embedded the new migration | The one manual step gating a **prod** deploy can report success having done nothing. Wrong failure mode for a schema gate. | S |
-| P6-068 | `/my/collections/:id` detaches and re-attaches its whole DOM subtree ~800 ms after every `?q=` navigation | Unexplained, and the blast radius is the reason it's here rather than in §3: it closes native popovers without firing `toggle` (desyncing Rust `open` signals), rebuilds the DOM per search, and blurs the focused field. One call site already carries a 120 ms focus-keeper workaround. Diagnose before building anything else on that route. | M, diagnosis first |
 
 ---
 
@@ -102,6 +100,8 @@ filed as "minor"** — I disagree with that placement and have said so per row.
 
 | Id | Entry | Size |
 |---|---|---|
+| P6-068 | `/my/collections/:id`'s setup-body reads of `view_res` re-suspend `RequireAuth`'s `<Suspense>`, unmounting the whole `/my/*` subtree on every `?q=` navigation. **Reclassified out of §1 2026-07-28** (verification): filed as a blocker because it was undiagnosed, and it now is — mechanism named, fix chosen (Option B, remove the mis-wiring). Flicker, lost focus and popover desync, not a functional stop | M |
+| P6-010 | Hosted `collection_backend` lacks the session fallback `fetch_current_user` already has, so an idle `/my/*` tab reports "session expired" to a still-signed-in user. **Reclassified out of §1 2026-07-28** (verification): self-heals on one reload, needs a 15-min idle window, and most users never hit it. Low priority | S |
 | P6-074 | Board-blind `needs()` contradicts board-aware rows on the same page: a Sideboard row reads HERE — / WANTED 1 while the needs chip is absent and `/needs` returns `[]`. Honest fix is `NeedRow.board` + a board-aware `needs()` | M |
 | P6-002 + P6-014 | Same-type resource-payload collisions (two consumers of one payload type can swap payloads). **Same item filed twice.** Latent at today's id layout; root cause is P6-013 | M (or 0, if P6-013 lands upstream) |
 | P6-013 | `initial_value()` ignores `during_hydration()` — the root cause of the `/my` empty-state bug, diagnosed to the line in `leptos_server-0.8.6`. Both app-side general fixes investigated and rejected as unsafe | **S to report upstream.** Highest leverage item in the file: retires a whole defect class |
@@ -328,8 +328,8 @@ Ordered by how much the classification above would move if the premise is wrong:
 1. **P6-064** — may already be fixed by the owned-badge task; P6-038a implies it.
 2. **P6-105** — confirm the dev catalog's actual size and whether the POC subset blocks the flows we care about, or only the long tail. This decides whether it's §1 or §4.
 3. **P6-102** — reproduce on the deployed Render app. If it's a config issue, it's S, not M.
-4. **P6-068** — the 800 ms detach/reattach is the only §1 entry with no diagnosis. Everything downstream of it (popover state, focus, quick-add's workaround) is guesswork until it's explained.
-5. **P6-010** — confirm the 15-minute window still reproduces, and whether the two candidate fixes are still both open.
+4. ~~**P6-068**~~ — **diagnosed 2026-07-28**, CONFIRMED. Setup-body resource reads re-suspend `RequireAuth`'s `<Suspense>`; not the router. Rescoped to a named Option-B fix (M) and reclassified §1 → §3; see `phase-6-probes/P6-068.md`.
+5. ~~**P6-010**~~ — **verified 2026-07-28**, CONFIRMED. Rescoped to a named S fix and reclassified §1 → §3; see `phase-6-probes/P6-010.md`.
 6. **P6-002/P6-013/P6-014** — the "measured not to fire at today's id layout" claim is layout-dependent and the layout has changed since. `npm run diag:resource-ids` re-measures it.
 7. **The seven `P6-055*` data-integrity sub-items** — all were filed as minors from one review round against `hosted.rs`; confirm each still exists before sizing.
 8. **P6-017a/P6-017d** — I elevated both out of a "minor" bundle. Worth a second opinion on whether the degraded-state precondition makes them rare enough to leave.
@@ -337,10 +337,10 @@ Ordered by how much the classification above would move if the premise is wrong:
 
 ## Suggested first cut, if we want a sequence out of this
 
-**Now:** P6-013 (report upstream — S, and it retires a class) · P6-092+P6-089 (one gate step, stops shipping a dead app) · P6-032 (one gate step, stops agents following a retired loop) · P6-059 (S, protects prod schema) · P6-010 and P6-102 (the two auth blockers).
+**Now:** P6-013 (report upstream — S, and it retires a class) · P6-092+P6-089 (one gate step, stops shipping a dead app) · P6-032 (one gate step, stops agents following a retired loop) · P6-059 (S, protects prod schema) · P6-102 (the remaining auth blocker; P6-010 left §1 on verification and is now a low-priority §3).
 
 **Then:** §2 in one sweep — most are S, they cluster in `hosted.rs` and the move/teardown paths, and they're the ones that cost the user something they can't get back.
 
-**Then:** P6-005+P6-103 (the add flow), P6-068 (diagnose), and the §7 items that make everything after them trustworthy (P6-060, P6-027, P6-037, P6-004-bundle).
+**Then:** P6-005+P6-103 (the add flow), P6-068 (diagnosed — now an M fix, no longer §1), and the §7 items that make everything after them trustworthy (P6-060, P6-027, P6-037, P6-004-bundle).
 
 P6-105 sits outside this — it's a week of ingestion work and it moots several entries below it, so it wants its own scheduling call.

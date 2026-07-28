@@ -26,14 +26,14 @@ between tasks.
 awk -F'|' 'NF>5 && $6 ~ /pending/' specs/TODO-Phase-6-verification.md | wc -l
 ```
 
-**105 of 107 pending.** The two already `settled` were `[x]` before the pass began.
+**102 of 107 pending.** Two of the five `settled` were `[x]` before the pass began; `P6-010`, `P6-059` and `P6-068` settled 2026-07-28.
 (Count the rows, not this page — a plain `grep` also matches the prose above.)
 
 | # | Id | Class | Classes | Status | Disposition |
 |---|---|---|---|---|---|
-| 1 | `P6-010` | 1 blocker | — | pending | — |
-| 2 | `P6-059` | 1 blocker | — | pending | — |
-| 3 | `P6-068` | 1 blocker | — | pending | — |
+| 1 | `P6-010` | 3 correctness (was 1 blocker) | — | settled | `RESCOPE` + `RECLASS` — CONFIRMED, but hosted-only and self-heals on one reload, so not a blocker (maintainer call, 2026-07-28). Entry rewritten as a named S fix at `lib.rs:834-842` with acceptance criteria; triage row moved §1 → §3. |
+| 2 | `P6-059` | 1 blocker | — | settled | `RESCOPE` — CONFIRMED, stays a blocker (maintainer call, 2026-07-28). Root cause found: no cargo dep edge on `migrations/`, not a flaky `touch`. Entry rewritten with **both** fixes required — `app/build.rs` `rerun-if-changed` *and* logging applied versions from the DB; the second is what removes the silent-success mode. |
+| 3 | `P6-068` | 3 correctness (was 1 blocker) | — | settled | `RESCOPE` + `RECLASS` — CONFIRMED and diagnosed, so the "undiagnosed" blocker premise is gone (maintainer call, 2026-07-28). Cause: setup-body reads of `view_res` re-suspend `RequireAuth`'s `<Suspense>`; not the router. **Option B chosen** over the one-token `<Transition>` swap — remove the mis-wiring, not the symptom. M. Latent `/catalog` fragility deliberately **not** split: revisit only if a `Suspense` is ever added above `AppShell`'s `<Outlet/>`. |
 | 4 | `P6-092` | 1 blocker | — | pending | — |
 | 5 | `P6-102` | 1 blocker | — | pending | — |
 | 6 | `P6-105` | 1 blocker | — | pending | — |
