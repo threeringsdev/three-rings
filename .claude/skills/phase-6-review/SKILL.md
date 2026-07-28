@@ -128,8 +128,8 @@ Then **stop and let them ask.** Answer from the probe report, reading only the
 section asked about. If a question needs code the report does not cover, dispatch
 a second narrow subagent rather than reading it yourself.
 
-There is no `grill-me` skill in this repo. Offer the grill in whichever
-direction is useful, and say which you are doing:
+Grilling itself is not a skill in this repo — only the reply shape is, below.
+Offer the grill in whichever direction is useful, and say which you are doing:
 
 - **They grill you** — the default. Answer from evidence; when the honest answer
   is "the probe did not establish that", say so rather than reasoning to a
@@ -141,6 +141,32 @@ direction is useful, and say which you are doing:
   its own sake.
 
 Do not propose the disposition until they are done asking.
+
+### Shape every Q&A reply with `i-have-adhd`
+
+Before your first reply in the Q&A, **invoke the `i-have-adhd` skill** and follow
+it for the rest of this task's grill, in both directions. That skill does not
+self-trigger — this instruction is what turns it on, so invoke it explicitly
+rather than waiting to feel the need.
+
+Skip it only when the maintainer has explicitly asked for something else — "stop
+adhd mode", "normal mode", or a request for prose or the long version. If the
+skill is not installed, say so in one line and follow the three-part shape below
+on its own; it is the part that matters here.
+
+Each reply, in this order:
+
+1. **The answer in the first line** — the verdict word, the `file:line`, or "the
+   probe did not establish that". Never a wind-up to it.
+2. The evidence behind it, one or two lines.
+3. If anything is still open, the one named check that would settle it.
+
+**The shape changes; the evidence discipline does not.** A caveat is the answer,
+not padding — "the probe did not establish that" survives every compression pass,
+and a hedge carrying real uncertainty is never traded away for a cleaner line.
+Where `i-have-adhd` asks for a closing next action, that action is the named check
+or their next question — **never the disposition**, which stays gated until they
+are done asking.
 
 ## Step 3 — dispose
 
