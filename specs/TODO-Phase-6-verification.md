@@ -26,7 +26,7 @@ between tasks.
 awk -F'|' 'NF>5 && $6 ~ /pending/' specs/TODO-Phase-6-verification.md | wc -l
 ```
 
-**102 of 107 pending.** Two of the five `settled` were `[x]` before the pass began; `P6-010`, `P6-059` and `P6-068` settled 2026-07-28.
+**96 of 107 pending** · 3 `probed` (`P6-105`, `P6-017`, `P6-024` — reports on disk, awaiting the maintainer) · 8 `settled`. Two of the eight `settled` were `[x]` before the pass began; `P6-010`, `P6-059`, `P6-068`, `P6-092`, `P6-102` and `P6-091` settled 2026-07-28.
 (Count the rows, not this page — a plain `grep` also matches the prose above.)
 
 | # | Id | Class | Classes | Status | Disposition |
@@ -34,11 +34,11 @@ awk -F'|' 'NF>5 && $6 ~ /pending/' specs/TODO-Phase-6-verification.md | wc -l
 | 1 | `P6-010` | 3 correctness (was 1 blocker) | — | settled | `RESCOPE` + `RECLASS` — CONFIRMED, but hosted-only and self-heals on one reload, so not a blocker (maintainer call, 2026-07-28). Entry rewritten as a named S fix at `lib.rs:834-842` with acceptance criteria; triage row moved §1 → §3. |
 | 2 | `P6-059` | 1 blocker | — | settled | `RESCOPE` — CONFIRMED, stays a blocker (maintainer call, 2026-07-28). Root cause found: no cargo dep edge on `migrations/`, not a flaky `touch`. Entry rewritten with **both** fixes required — `app/build.rs` `rerun-if-changed` *and* logging applied versions from the DB; the second is what removes the silent-success mode. |
 | 3 | `P6-068` | 3 correctness (was 1 blocker) | — | settled | `RESCOPE` + `RECLASS` — CONFIRMED and diagnosed, so the "undiagnosed" blocker premise is gone (maintainer call, 2026-07-28). Cause: setup-body reads of `view_res` re-suspend `RequireAuth`'s `<Suspense>`; not the router. **Option B chosen** over the one-token `<Transition>` swap — remove the mis-wiring, not the symptom. M. Latent `/catalog` fragility deliberately **not** split: revisit only if a `Suspense` is ever added above `AppShell`'s `<Outlet/>`. |
-| 4 | `P6-092` | 1 blocker | — | pending | — |
-| 5 | `P6-102` | 1 blocker | — | pending | — |
-| 6 | `P6-105` | 1 blocker | — | pending | — |
-| 7 | `P6-017` | 2 data-integrity | 2, 3, 5, 7, 8 | pending | — |
-| 8 | `P6-024` | 2 data-integrity | 2, 5, 8 | pending | — |
+| 4 | `P6-092` | 1 blocker | — | settled | `DROP` — CONFIRMED real, dropped anyway (maintainer call, 2026-07-28): **we are not gating CI on release builds.** No more crashes of that kind are expected, and a release-review step — likely manual — waits until the app is stable. Recreating it from scratch later was accepted as the tradeoff, so this id is retired permanently and must not be refiled. The probe also falsified the entry's "no GUI needed" clause (tauri 2.11.2 creates config windows *before* the setup hook, so a headless linux run needs xvfb) and the triage row's claim that one `cargo build -p three_rings` covers both this and P6-089 — no build at any profile catches a runtime panic. **P6-089 is unaffected and gets its own review.** |
+| 5 | `P6-102` | ~~1 blocker~~ → done | — | settled | `PROMOTE` + `RECLASS` (§1 blocker M → config-only S) — **and fixed the same day at the maintainer's request** (2026-07-28), the one exception taken to this pass's no-fix rule. Probe verdict `PARTLY`: clause (a) (no second tab on web) is true but *deliberate*; clause (b) ("close this tab" doesn't return) is **wrong about web** — that page is native/Android-only. Maintainer then established the real repro: local `cargo leptos watch`, caused by `TR_EMBEDDED_ORIGIN` in the workspace `.env`. Deployed Render and release desktop were never affected, so the blocker premise was false. Fix: var moved to `beforeDevCommand` in `src-tauri/tauri.conf.json`; entry marked `[x]`; findings in `specs/auth.md` (2026-07-28). Second probe at `phase-6-probes/P6-102-discriminator.md` killed the `cfg(feature = "native")` approach (`cargo tauri dev` is served by the `hosted` `server` bin). Paired `P6-091` dropped separately (row 66). |
+| 6 | `P6-105` | 1 blocker | — | probed | — |
+| 7 | `P6-017` | 2 data-integrity | 2, 3, 5, 7, 8 | probed | — |
+| 8 | `P6-024` | 2 data-integrity | 2, 5, 8 | probed | — |
 | 9 | `P6-031` | 2 data-integrity | — | pending | — |
 | 10 | `P6-046` | 2 data-integrity | 2, 3, 5, 6 | pending | — |
 | 11 | `P6-049` | 2 data-integrity | 2, 3, 5 | pending | — |
@@ -96,7 +96,7 @@ awk -F'|' 'NF>5 && $6 ~ /pending/' specs/TODO-Phase-6-verification.md | wc -l
 | 63 | `P6-084` | 5 ux-a11y | — | pending | — |
 | 64 | `P6-087` | 5 ux-a11y | — | pending | — |
 | 65 | `P6-088` | 5 ux-a11y | — | pending | — |
-| 66 | `P6-091` | 5 ux-a11y | — | pending | — |
+| 66 | `P6-091` | 5 ux-a11y | — | settled | `DROP` — not probed; dropped on maintainer observation (2026-07-28) while working `P6-102`, to which it was tied ("do with P6-102"). Judged a stale artifact: the unstyled raw-HTML auth pages were not observed during live local + deployed auth testing that day. Maintainer will refile if seen again — **that is this id's one sanctioned exception to the never-refile rule**, and a refile should cite this row. Caveat recorded at drop time: only the native "close this tab" page was actually exercised; `/auth/app-return` (Android deep-link bounce) was not. |
 | 67 | `P6-095` | 5 ux-a11y | — | pending | — |
 | 68 | `P6-098` | 5 ux-a11y | — | pending | — |
 | 69 | `P6-099` | 5 ux-a11y | — | pending | — |

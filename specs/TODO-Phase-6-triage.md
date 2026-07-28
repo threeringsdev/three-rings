@@ -63,9 +63,7 @@ and skip the expensive ones.
 
 | Id | Entry | Why blocker | Size |
 |---|---|---|---|
-| P6-102 | Web auth flow doesn't open a tab; the "you can close this tab" page doesn't return to the app | Sign-in on the **deployed** platform dead-ends. Desktop works, web doesn't — and web is what's live at Render. | M |
 | P6-105 | Full Scryfall ingest (catalog-ingestion) is unbuilt; dev catalog is ~3K printings | A collection manager that cannot find most cards is not a functional collection manager. Also silently moots P6-035 (set picker offering empty sets) and makes the parked full-catalog disambiguation work untestable. | L |
-| P6-092 | Merge gate never builds a Tauri **release** — the path that shipped a crash-on-launch to `latest` on 2026-07-20 | Already shipped a dead app once, to both the `.dmg` and the APK. Nothing in the gate exercises embedded-server startup. Fold P6-089 in: one `cargo build -p three_rings` step covers both, and the entry names a headless launch assertion as the real check. | S–M |
 | P6-059 | `scripts/migrate.sh` reported `migrations: up to date` on a run that had not embedded the new migration | The one manual step gating a **prod** deploy can report success having done nothing. Wrong failure mode for a schema gate. | S |
 
 ---
@@ -206,7 +204,6 @@ filed as "minor"** — I disagree with that placement and have said so per row.
 | P6-069c + P6-069f + P6-069g | Quick-add: the two early-return failure paths leave `count` set so a later `⏎` reuses it; the post-add `clear()` pushes a history entry per add; after Escape the field keeps focus so `focusin` can't re-fire and reopening needs a click away and back | S |
 | P6-084 | Google sign-in doesn't honor `?next` — carry the post-auth destination through the web OAuth callback (state param) and the Tauri poll path | M |
 | P6-087 | Rail sections don't spring open when a filter arrives from the query bar: `<details>` openness is seeded once, so typing `r:rare` shows only the collapsed Rarity summary badge. Decide whether a first-time-populated section should open | S, decision first |
-| P6-091 | `/auth/app-return` and the OAuth callback are raw HTML served without the stylesheet, so they can't take theme tokens and render unstyled under the dark default — and they're absent from the route map, so audits skip them. **Do with P6-102** | S |
 | P6-095 | A vendored `collapsible`'s `class` padding leaks height when closed — `min-h-0` zeroes the content box but not the padding, so `class="pt-1"` leaves a visible sliver of open track under every collapsed row. Apply `class` to the clipped region or document the constraint | S |
 | P6-088 | Overlay children are instantiated eagerly, and the V2 review's "revisit only if a specific overlay's content proves expensive" has now been triggered (card-detail previews duplicated every card name and broke three tests, fixed with a per-caller latch). Decide whether `dialog`/`popover`/`sheet` gate children on open by default | M, decision first |
 | P6-048 | Also §4 — the selection tray's missing keyboard entry point is an a11y gap as much as a capability gap | S |
@@ -233,15 +230,15 @@ filed as "minor"** — I disagree with that placement and have said so per row.
 
 ## 7. Dev loop, tests, and process
 
-Doesn't touch users; decides whether the next 100 tasks are correct. **P6-013 and
-P6-092 are in §1/§3 but are really this class too.**
+Doesn't touch users; decides whether the next 100 tasks are correct. **P6-013 is in §1/§3
+but is really this class too.** (P6-092 was here too; dropped 2026-07-28.)
 
 | Id | Entry | Size |
 |---|---|---|
 | P6-060 | `hydrated(page)` doesn't imply a streamed island is interactive — four tests flake, a different subset each run. Mitigated by `--workers=1`; the real fix is a hydration-aware click helper | M |
 | P6-027 | The `@fast` tier also has a **real data race** — specs share mutable fixture state on one seeded e2e user, so fixing hydration alone will not make the suite parallel-safe | M |
 | P6-032 | Nothing enforces `.claude/skills/` ⇄ `.agents/skills/` parity; four of six mirrors had silently gone stale and prescribed the retired ~1.44M-token loop. Cheapest fix is a `diff -rq` gate step | S |
-| P6-089 | `#![recursion_limit]` — all six clippy lines are structurally blind to it (codegen-time query). One `cargo build -p three_rings` closes it. **Same fix as P6-092** | S |
+| P6-089 | `#![recursion_limit]` — all six clippy lines are structurally blind to it (codegen-time query). One `cargo build -p three_rings` closes it. (Was paired with P6-092, dropped 2026-07-28 — this stands or falls on its own.) | S |
 | P6-082 | Assertion-strength sweep, deferred 2026-07-25: mutation passes are off, so vacuous tests are no longer caught when written | L |
 | P6-037 | The recurring **vacuous-test shape** — four instances in one session, all "a test cannot distinguish behaviors its fixture does not distinguish". Generalizable guards written out; promote into the `e2e-suite` skill | S |
 | P6-061g | A concrete instance of that pattern: `selection-tray.spec.ts` asserts the empty state with `toContainText`, which reads `textContent`, while `CommandEmpty` hides via `style:display` — **the assertion passes whether or not the element is shown** | S |
@@ -327,7 +324,7 @@ Ordered by how much the classification above would move if the premise is wrong:
 
 1. **P6-064** — may already be fixed by the owned-badge task; P6-038a implies it.
 2. **P6-105** — confirm the dev catalog's actual size and whether the POC subset blocks the flows we care about, or only the long tail. This decides whether it's §1 or §4.
-3. **P6-102** — reproduce on the deployed Render app. If it's a config issue, it's S, not M.
+3. ~~**P6-102** — reproduce on the deployed Render app. If it's a config issue, it's S, not M.~~ **Resolved 2026-07-28:** deployed Render is fine; the defect was local-dev only and config-only. Done.
 4. ~~**P6-068**~~ — **diagnosed 2026-07-28**, CONFIRMED. Setup-body resource reads re-suspend `RequireAuth`'s `<Suspense>`; not the router. Rescoped to a named Option-B fix (M) and reclassified §1 → §3; see `phase-6-probes/P6-068.md`.
 5. ~~**P6-010**~~ — **verified 2026-07-28**, CONFIRMED. Rescoped to a named S fix and reclassified §1 → §3; see `phase-6-probes/P6-010.md`.
 6. **P6-002/P6-013/P6-014** — the "measured not to fire at today's id layout" claim is layout-dependent and the layout has changed since. `npm run diag:resource-ids` re-measures it.
@@ -337,7 +334,7 @@ Ordered by how much the classification above would move if the premise is wrong:
 
 ## Suggested first cut, if we want a sequence out of this
 
-**Now:** P6-013 (report upstream — S, and it retires a class) · P6-092+P6-089 (one gate step, stops shipping a dead app) · P6-032 (one gate step, stops agents following a retired loop) · P6-059 (S, protects prod schema) · P6-102 (the remaining auth blocker; P6-010 left §1 on verification and is now a low-priority §3).
+**Now:** P6-013 (report upstream — S, and it retires a class) · P6-089 (one gate step; its former partner P6-092 was dropped 2026-07-28) · P6-032 (one gate step, stops agents following a retired loop) · P6-059 (S, protects prod schema) · P6-102 (done 2026-07-28 — was not a deployed blocker; P6-010 left §1 on verification and is now a low-priority §3).
 
 **Then:** §2 in one sweep — most are S, they cluster in `hosted.rs` and the move/teardown paths, and they're the ones that cost the user something they can't get back.
 
