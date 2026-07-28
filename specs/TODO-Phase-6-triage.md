@@ -63,7 +63,7 @@ and skip the expensive ones.
 
 | Id | Entry | Why blocker | Size |
 |---|---|---|---|
-| P6-105 | Full Scryfall ingest (catalog-ingestion) is unbuilt; dev catalog is ~3K printings | A collection manager that cannot find most cards is not a functional collection manager. Also silently moots P6-035 (set picker offering empty sets) and makes the parked full-catalog disambiguation work untestable. | L |
+| P6-108 (was P6-105) | **Run** the full Scryfall bulk load — the loader ships and is gate-tested; only the run remains. Catalog is 2,976 printings of ~116K, and cards outside five set codes are absent entirely, not clipped | A collection manager that cannot find most cards is not a functional collection manager. Also silently moots P6-035 (set picker offering empty sets) and makes the parked full-catalog disambiguation work untestable. Split 2026-07-28: the daily incremental left as `P6-109`, parked in TODO.md. | M (supervised run, not a build) |
 | P6-059 | `scripts/migrate.sh` reported `migrations: up to date` on a run that had not embedded the new migration | The one manual step gating a **prod** deploy can report success having done nothing. Wrong failure mode for a schema gate. | S |
 
 ---
@@ -120,7 +120,7 @@ filed as "minor"** — I disagree with that placement and have said so per row.
 | P6-049a | One `pending` signal shared by every Owned-elsewhere row — one in-flight Pull disables every row's button | S |
 | P6-049d | A Pull whose items resolve to nothing raises **no toast at all** — a silent no-op rather than a refusal | S |
 | P6-072c | The keywords badge row is card-level and doesn't participate in the DFC face swap, so a back face renders front-only keywords beside back-face oracle text | S |
-| P6-072f | `jsonb_array_elements(p.faces)` hard-errors the whole detail/search/summary query on a non-array where the old projection was shape-tolerant. Unreachable via today's ingester — note or harden before P6-105 changes the ingest | S |
+| P6-072f | `jsonb_array_elements(p.faces)` hard-errors the whole detail/search/summary query on a non-array where the old projection was shape-tolerant. Unreachable via today's ingester **only because the POC subset happens not to produce one** — a 116K-row load is what surfaces it. **Prerequisite of `P6-108`**, not a sibling | S |
 | P6-039 | Three definitions of "owned" in `hosted.rs` agree today and nothing enforces that they continue to | S |
 | P6-003 | `selection_destinations` stays a raw array payload; safe **only** because the tray can never SSR. Reopens if that changes. Keep as a documented constraint | 0 today |
 
@@ -188,7 +188,7 @@ filed as "minor"** — I disagree with that placement and have said so per row.
 | P6-020 | The All-cards 390 px fit is **data-dependent** — no cell carries `whitespace-nowrap`, so one space-free collection name (or a long single-word card name) re-exceeds the 356 px wrapper and reintroduces the sideways scroll the assertion exists to catch | S |
 | P6-033 | Set chips render the uppercase **code**, never the set name, unless that set happens to be in the current 25-row window. Resolving selected codes needs a by-codes read | M |
 | P6-036a | The server-side set search window is a silent **25 with no "N more"** — `q=commander` matches 108 and shows 25, so a set past the window is unreachable through the picker. `SetQuery::limit` exists; `list_sets` never passes one | S |
-| P6-035 | The set picker offers sets with **no ingested printings** (1045 sets, ~2976 printings), so most picks return zero results. A "has cards" filter would be a join | S, moot after P6-105 |
+| P6-035 | The set picker offers sets with **no ingested printings** (1045 sets, ~2976 printings), so most picks return zero results. A "has cards" filter would be a join | S, moot after `P6-108` |
 | P6-042a | The result count states *this page's* row count with no qualifier, so the last page of a 73-result search reads "23 results" while mid-pages read "50+". Same number feeds the mobile sheet's footer. Keyset has no offset, so "51–73 of 73" needs a count query or a page ordinal | M |
 | P6-042c + P6-042d | A "← Back to the start" control appears on the still-displayed page one before page two arrives, and an empty `<nav aria-label="Pagination">` renders on single-page results — a named landmark with no content | S |
 | P6-042e | `last_good` now retains page-N rows, so a grammar error on a fresh page-one query renders **page-N results** as the dimmed "stale" set underneath it | S |
@@ -223,7 +223,7 @@ filed as "minor"** — I disagree with that placement and have said so per row.
 | P6-090 | `CardPreview` runs a `match_media` + signal **per card** (~60 a page) for a global fact, with no change listener | S |
 | P6-036d | Two identical `list_sets` round trips per SSR of any `?q=s:…` — the rail and the sheet each own a `SetPicker`. Sharing needs shell-level provision | S |
 | P6-061k + P6-046 | Two independent `list_collections` resources live whenever the catalog picker and the tray are both mounted | S |
-| P6-104 | `needs()` and `shopping_list()` are unpaginated — bounded in practice; add keyset if profiling at real scale shows them hot | M, after P6-105 |
+| P6-104 | `needs()` and `shopping_list()` are unpaginated — bounded in practice; add keyset if profiling at real scale shows them hot | M, after `P6-108` |
 | P6-038e | `EXPLAIN` shows the `holdings` side as a Seq Scan per page — irrelevant at 101 rows, belongs with the large-collection aggregate work in `TODO.md` "Other" | 0 now |
 
 ---
@@ -314,7 +314,7 @@ deliberate sweep P6-082 already schedules.
 | P6-064 | **Verify, then likely delete.** Self-declares as a re-file of the card-detail item, and P6-038a describes `search` as having *gained* the ownership read — so this may already be fixed. If it isn't, it's §3 |
 | P6-073, P6-080 | Already `[x]`. Move both to a Phase 6 done-log section (or to `DECISION-LOG.md` — P6-080 is a maintainer decision, not a task) so the queue holds only open work |
 | P6-003 | Not a task — a documented constraint with no action while the tray can't SSR. Move to `app-ui.md` Findings |
-| *(the "Other" section)* | Unnumbered on purpose — it is roadmap, not queue: full-catalog disambiguation (gated on P6-105), keystroke-budget validation, large-collection profiling, decks/sharing, import/export, and the two app-update-delivery paths. Leave as-is, out of triage |
+| *(the "Other" section)* | Unnumbered on purpose — it is roadmap, not queue: full-catalog disambiguation (gated on `P6-108`), keystroke-budget validation, large-collection profiling, decks/sharing, import/export, and the two app-update-delivery paths. Leave as-is, out of triage |
 
 ---
 
@@ -323,7 +323,7 @@ deliberate sweep P6-082 already schedules.
 Ordered by how much the classification above would move if the premise is wrong:
 
 1. **P6-064** — may already be fixed by the owned-badge task; P6-038a implies it.
-2. **P6-105** — confirm the dev catalog's actual size and whether the POC subset blocks the flows we care about, or only the long tail. This decides whether it's §1 or §4.
+2. ~~**P6-105** — confirm the dev catalog's actual size and whether the POC subset blocks the flows we care about, or only the long tail. This decides whether it's §1 or §4.~~ **Resolved 2026-07-28:** 2,976 printings of ~116K, and the subset is five set codes — not a clipped long tail, so any card outside them is absent entirely. **§1 confirmed.**
 3. ~~**P6-102** — reproduce on the deployed Render app. If it's a config issue, it's S, not M.~~ **Resolved 2026-07-28:** deployed Render is fine; the defect was local-dev only and config-only. Done.
 4. ~~**P6-068**~~ — **diagnosed 2026-07-28**, CONFIRMED. Setup-body resource reads re-suspend `RequireAuth`'s `<Suspense>`; not the router. Rescoped to a named Option-B fix (M) and reclassified §1 → §3; see `phase-6-probes/P6-068.md`.
 5. ~~**P6-010**~~ — **verified 2026-07-28**, CONFIRMED. Rescoped to a named S fix and reclassified §1 → §3; see `phase-6-probes/P6-010.md`.
@@ -340,4 +340,4 @@ Ordered by how much the classification above would move if the premise is wrong:
 
 **Then:** P6-005+P6-103 (the add flow), P6-068 (diagnosed — now an M fix, no longer §1), and the §7 items that make everything after them trustworthy (P6-060, P6-027, P6-037, P6-004-bundle).
 
-P6-105 sits outside this — it's a week of ingestion work and it moots several entries below it, so it wants its own scheduling call.
+P6-105 sat outside this and was **split 2026-07-28**: the bulk load is already written, so `P6-108` is a supervised run (hours, not a week) and stays in Phase 6; stage 3, the daily incremental, is the actual build work and is parked in TODO.md as `P6-109` behind a user-visible-staleness trigger.
