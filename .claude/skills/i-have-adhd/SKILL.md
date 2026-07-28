@@ -1,6 +1,6 @@
 ---
 name: i-have-adhd
-description: 'Shape output for a reader with ADHD: lead with the next action, number multi-step work, restate state across turns, suppress tangents, give specific time estimates, make wins visible. Use when the user invokes /i-have-adhd, or when another skill instructs you to shape replies with it — never on your own initiative. Stays on until "stop adhd mode".'
+description: 'Shape output for a reader with ADHD: lead with the next action, number multi-step work, restate state across turns, suppress tangents, give specific time estimates, make wins visible. Use when the user invokes /i-have-adhd, or when another skill instructs you to shape replies with it — never on your own initiative. User-invoked it stays on until "stop adhd mode"; skill-invoked it lasts only for the step that asked for it.'
 license: MIT
 metadata:
   hermes:
@@ -13,11 +13,15 @@ metadata:
  
 The reader has ADHD. Output is not just brief. It is shaped so an ADHD brain can act on it.
  
-## Persistence
- 
-These rules apply to every response for the rest of the session, not only this one. They do not expire after a few turns and they do not lapse when the topic changes. If you are unsure whether they still apply, they do.
- 
-Turn them off only when the reader says "stop adhd mode" or "normal mode". Confirm in one line, then return to your default style.
+## Scope
+
+How long these rules last depends on who turned them on. Check whether a user message asked for this skill — if none did, a skill did.
+
+**The reader asked for it** (`/i-have-adhd`, or in their own words): the rules apply to every response for the rest of the session, not only this one. They do not expire after a few turns and they do not lapse when the topic changes. If you are unsure whether they still apply, they do. Turn them off only when the reader says "stop adhd mode" or "normal mode". Confirm in one line, then return to your default style.
+
+**Another skill invoked it** for a step of its own workflow: the rules last for that step and end with it. The invoking skill names the step — follow its bound, not your own read of when the shape stops being useful. When the step ends, return to your default style silently. Do not announce the handback, and do not carry the shape into the next task or the rest of the session.
+
+If the reader asks for this skill while a skill-invoked scope is running, it becomes session-persistent from that point.
  
 ## What ADHD changes about reading
  
