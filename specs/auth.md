@@ -382,7 +382,10 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     startup (dotenvy — host-side `cargo tauri dev`/`cargo leptos watch` get
     `DATABASE_URL`/`NEON_AUTH_BASE_URL` without shell gymnastics; dev-mode
     Google needs `TR_EMBEDDED_ORIGIN=http://localhost:3000` exported so the
-    watch server holds the handoff state).
+    watch server holds the handoff state). **Do not put that var in the
+    workspace `.env`** — it belongs to `cargo tauri dev` only, and `.env` is
+    read by the plain web `cargo leptos watch` too; see the 2026-07-28 finding
+    below.
 - 2026-07-13 (Android follow-up) — **Android Google return rebuilt as a deep
   link: a frozen backgrounded app cannot serve its loopback callback.**
   - **Diagnosis.** On-device test: the browser opened, Google authenticated,
@@ -474,3 +477,27 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
   accounts) is live and verified on all three platforms. Still riding other
   specs: `app_runtime` credential rotation (step 4 ops note) and the
   `SET LOCAL app.user_id` RLS wiring (data-model per-request transaction).
+- 2026-07-28 (`P6-102`) — **`TR_EMBEDDED_ORIGIN` in the workspace `.env` breaks
+  Google sign-in on the *web* dev server.** Reported as "auth is broken on web,
+  works on desktop" and triaged as a deployed-platform blocker; verification
+  found the opposite. Render and release desktop are both correct — the shell
+  exports the var itself at runtime (`src-tauri/src/lib.rs`), so the `.env` line
+  only ever served debug `cargo tauri dev`. But `server` loads that same `.env`
+  via `dotenvy` (`server/src/main.rs`), so a plain `cargo leptos watch` also saw
+  it, flipped `native` true at the `/auth/callback` branch, and served the
+  terminal "Signed in — you can close this tab" page instead of the 303 to `/`.
+  The failure mimics success, which is why it read as a deployed bug.
+  - **Fix:** the var moved out of the root `.env` into `beforeDevCommand`
+    (`src-tauri/tauri.conf.json`), which reaches the one dev process that needs
+    it and no other. Config only, no code.
+  - **A `#[cfg(feature = "native")]` guard on that branch would be wrong**, and
+    this is the non-obvious part: `cargo tauri dev` is served by the `hosted`
+    `server` bin, because the embedded server is `#[cfg(not(debug_assertions))]`.
+    The guard would gate out exactly the debug case it was meant to serve. Nor
+    do host/`x-forwarded-*`/loopback checks discriminate — webview, system
+    browser, and web dev browser all hit the same `localhost:3000` process.
+  - Only remaining in-code discriminator, if one is ever needed: challenge
+    provenance (cookie jar vs. in-memory stash), already computed in
+    `auth_callback` — the system browser is a different cookie jar, so it
+    necessarily falls to the memory arm. Not worth taking while the config
+    scoping holds.
