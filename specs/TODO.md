@@ -89,23 +89,16 @@ See [TODO-Phase-6.md](TODO Phase 6)
 
 ### UI / Performance issues noted during testing
 
-- [ ] Catalog first load is slow
-- [ ] Catalog card size adjustment (resizes with window, but default largest size should be capped, cards get too big currently)
-- [ ] Black background too dark, card borders blend in
-- [ ] DFC flip should be viewable on main catalog page (and everywhere the card is rendered besides hover view)
-- [ ] No back button from card detail view to catalog page
-- [ ] Auth flow on web doesn't open another browser tab, final "you can close this tab" doesn't redirect back to the app. Works for desktop, not on web 
-- [ ] Want / Have should work on card detail page
+**All seven moved into [TODO-Phase-6.md](TODO Phase 6) with permanent ids (2026-07-30) — do not re-file them here.** `P6-097` catalog first load (measure first) · `P6-098` uncapped card size · `P6-099` background too dark · `P6-100` DFC flip outside the hover view · `P6-101` no back button from card detail · `P6-103` Want/Have on card detail (merged into `P6-005`) · `P6-102` web auth-flow tab — **done 2026-07-28**, config only.
 
 ### Catalog & Collection updates
 
-- [ ] collection-api → keyset for needs / shopping-list (follow-up). `needs(collection)` and the global `shopping_list()` currently return full result sets — bounded in practice but unpaginated. If profiling at real scale shows them hot, add keyset paging like the other reads (specs: [collection-api](collection-api.md))
 - [ ] `P6-109` catalog-ingestion → **stage 3, the daily incremental**. Manifest-driven update flow: paged `/cards/manifest` sweep (~8 pages) diffed against `printings.manifest_data_updated_at` / `manifest_image_updated_at`, changed ids hydrated via `POST /cards/collection`, plus `/migrations` reconciliation (merge/delete applied iff the printing is unreferenced; absent-from-manifest is logged, never deleted), on a Render cron job running `server --ingest update`; all idempotent; then mark catalog-ingestion **implemented**. The schema half already exists (migrations/0007 adds both `manifest_*_updated_at` columns; nothing writes them), so this needs no migration. Two traps: the first sweep after a bulk load must run in **baseline mode**, recording timestamps *without* hydrating existing rows, or day one re-hydrates all ~116K; and the Scryfall client has **no rate limiting at all** today (the bulk path only hits the rate-limit-free CDN), while this path is 10 req/min on manifest and 2 req/s on collection — a 429 is a 30 s lockout and repeat offenders get banned. **Parked 2026-07-28** (maintainer): app stability and UI cleanup come first. **Unpark trigger:** the first time catalog staleness is user-visible — a Scryfall set releases after the bulk load and the catalog visibly lacks it. Prereq: `P6-108` (the bulk load actually run). Split from `P6-105`; probe evidence in phase-6-probes/P6-105.md (specs: [catalog-ingestion](catalog-ingestion.md))
-- [ ] card-tagging → per-card tag orphan cleanup (follow-up). When a card's **last** holding and desire leave a deck (quantity → 0 via the stepper / a move / teardown of a single line), drop its now-orphaned `card_tags` rows. Whole-collection teardown is already covered by the `ON DELETE CASCADE` on `card_tags.collection_id`; this is the per-line case on the holdings/desires write paths, surfaced only if a UI shows stale tags (specs: [card-tagging](card-tagging.md), [collection-api](collection-api.md))
-- [ ] Bundled read-only catalog for offline browsing on desktop/mobile (deliberately deferred)
+Three more are parked with triggers in [TODO-Phase-6.md](TODO Phase 6) rather than here: `P6-104` (keyset for needs/shopping-list), `P6-106` (per-card `card_tags` orphan cleanup), `P6-107` (bundled offline catalog).
+
 - [ ] Full-catalog quick-add disambiguation + list-perf validation — Phase 5 builds against the ~3K-printing POC subset (maintainer decision 2026-07-17), so type-ahead disambiguation realism and large-result-list performance can't be judged until the full ingest (`P6-108`, Phase 6) runs; re-exercise the quick-add and catalog screens then
 - [ ] Validate the add-flow keystroke budget against real usage (disambiguation frequency at 4–6 typed chars; ⇧⏎ set-count for playsets) — needs the implemented add flow; projected numbers in ui-design Findings
-- [ ] Large-collection aggregate performance — profile owned / present-rollup / needs at catalog-scale collections (~100K rows) and, if hot, promote `owned_by_card` to a materialized view + add collection-read indexes (data-model's named escape hatch). Needs the implemented collection endpoints + real-scale data ([collection-api](collection-api.md) §Read models, [data-model](data-model.md))
+- [ ] Large-collection aggregate performance — profile owned / present-rollup / needs at catalog-scale collections (~100K rows) and, if hot, promote `owned_by_card` to a materialized view + add collection-read indexes (data-model's named escape hatch). Needs the implemented collection endpoints + real-scale data. **Absorbed `P6-038e` on 2026-07-30**: `EXPLAIN` shows the `holdings` side of catalog search as a Seq Scan per page — irrelevant at 101 rows, so it belongs to this profiling run rather than to a catalog task ([collection-api](collection-api.md) §Read models, [data-model](data-model.md))
 
 ### Other
 

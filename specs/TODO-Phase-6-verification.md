@@ -1,140 +1,214 @@
 # Phase 6 verification ledger
 
-The state of the one-at-a-time verification pass over
-[TODO-Phase-6.md](TODO-Phase-6.md). **This file is the resume point** — the
-`phase-6-review` skill reads it to find the next task, and writes back the
-outcome. Nothing about the pass lives in a conversation; clear or compact freely
-between tasks.
+The record of the verification pass over [TODO-Phase-6.md](TODO-Phase-6.md).
+**The pass is complete.** Every entry that stood on 2026-07-28 has been checked
+against the code as it stands today, disposed of, and folded into the rewritten
+queue. This file is now the permanent record of *what was decided and why* —
+including, importantly, the ids that were **dropped**, so a dropped entry is not
+rediscovered and refiled.
 
-## Columns
+## How it ran
 
-- **#** — review order: triage class first, then id. Blockers before hygiene, so
-  a disposition that moots later entries happens early. Order is advisory; any
-  id can be reviewed out of turn.
-- **Classes** — set only when the entry's parts land in **more than one**
-  severity class. That is the signature of a bundle that cannot be one task, and
-  it is the primary `SPLIT` signal. 19 entries are marked.
-- **Status** — `pending` (untouched) · `probed` (a subagent report exists at
-  `phase-6-probes/<id>.md`, awaiting the maintainer) · `settled` (disposition
-  applied to the queue).
-- **Disposition** — one of `KEEP` · `RESCOPE` · `RECLASS` · `SPLIT` · `MERGE` ·
-  `DROP` · `PARK` · `PROMOTE`, with a one-line reason. Defined in the skill.
+Two passes, both read-only:
 
-## Progress
+1. **2026-07-28, one at a time** — `P6-010`, `P6-059`, `P6-068`, `P6-091`,
+   `P6-092`, `P6-102`, `P6-105`, plus probes for `P6-017` and `P6-024`. One
+   subagent per id, maintainer in the loop for each disposition. Reports at
+   `phase-6-probes/P6-0xx.md`.
+2. **2026-07-30, twelve parallel batches** — the remaining 96 entries, batched by
+   code area (A–L), one subagent per batch, dispositions applied by the
+   orchestrator under a standing instruction to use its own judgement. Reports at
+   `phase-6-probes/batch-<letter>-<topic>.md`. Two follow-up probes from the first
+   pass also landed in this window: `P6-017a-cascade.md` and
+   `P6-017d-confirm-copy.md`.
 
-```sh
-awk -F'|' 'NF>5 && $6 ~ /pending/' specs/TODO-Phase-6-verification.md | wc -l
-```
+**Nothing was fixed during either pass.** Every disposition is a queue edit.
 
-**96 of 107 pending** · 2 `probed` (`P6-017`, `P6-024` — reports on disk, awaiting the maintainer) · 9 `settled`. Two of the nine `settled` were `[x]` before the pass began; `P6-010`, `P6-059`, `P6-068`, `P6-092`, `P6-102`, `P6-091` and `P6-105` settled 2026-07-28. **Ids allocated beyond the original 107 by `SPLIT`:** `P6-108`, `P6-109` (both from `P6-105`). Next free id: `P6-110`. Split products are not re-verified — they inherit the probe that produced them.
-(Count the rows, not this page — a plain `grep` also matches the prose above.)
+## Outcome
 
-| # | Id | Class | Classes | Status | Disposition |
-|---|---|---|---|---|---|
-| 1 | `P6-010` | 3 correctness (was 1 blocker) | — | settled | `RESCOPE` + `RECLASS` — CONFIRMED, but hosted-only and self-heals on one reload, so not a blocker (maintainer call, 2026-07-28). Entry rewritten as a named S fix at `lib.rs:834-842` with acceptance criteria; triage row moved §1 → §3. |
-| 2 | `P6-059` | 1 blocker | — | settled | `RESCOPE` — CONFIRMED, stays a blocker (maintainer call, 2026-07-28). Root cause found: no cargo dep edge on `migrations/`, not a flaky `touch`. Entry rewritten with **both** fixes required — `app/build.rs` `rerun-if-changed` *and* logging applied versions from the DB; the second is what removes the silent-success mode. |
-| 3 | `P6-068` | 3 correctness (was 1 blocker) | — | settled | `RESCOPE` + `RECLASS` — CONFIRMED and diagnosed, so the "undiagnosed" blocker premise is gone (maintainer call, 2026-07-28). Cause: setup-body reads of `view_res` re-suspend `RequireAuth`'s `<Suspense>`; not the router. **Option B chosen** over the one-token `<Transition>` swap — remove the mis-wiring, not the symptom. M. Latent `/catalog` fragility deliberately **not** split: revisit only if a `Suspense` is ever added above `AppShell`'s `<Outlet/>`. |
-| 4 | `P6-092` | 1 blocker | — | settled | `DROP` — CONFIRMED real, dropped anyway (maintainer call, 2026-07-28): **we are not gating CI on release builds.** No more crashes of that kind are expected, and a release-review step — likely manual — waits until the app is stable. Recreating it from scratch later was accepted as the tradeoff, so this id is retired permanently and must not be refiled. The probe also falsified the entry's "no GUI needed" clause (tauri 2.11.2 creates config windows *before* the setup hook, so a headless linux run needs xvfb) and the triage row's claim that one `cargo build -p three_rings` covers both this and P6-089 — no build at any profile catches a runtime panic. **P6-089 is unaffected and gets its own review.** |
-| 5 | `P6-102` | ~~1 blocker~~ → done | — | settled | `PROMOTE` + `RECLASS` (§1 blocker M → config-only S) — **and fixed the same day at the maintainer's request** (2026-07-28), the one exception taken to this pass's no-fix rule. Probe verdict `PARTLY`: clause (a) (no second tab on web) is true but *deliberate*; clause (b) ("close this tab" doesn't return) is **wrong about web** — that page is native/Android-only. Maintainer then established the real repro: local `cargo leptos watch`, caused by `TR_EMBEDDED_ORIGIN` in the workspace `.env`. Deployed Render and release desktop were never affected, so the blocker premise was false. Fix: var moved to `beforeDevCommand` in `src-tauri/tauri.conf.json`; entry marked `[x]`; findings in `specs/auth.md` (2026-07-28). Second probe at `phase-6-probes/P6-102-discriminator.md` killed the `cfg(feature = "native")` approach (`cargo tauri dev` is served by the `hosted` `server` bin). Paired `P6-091` dropped separately (row 66). |
-| 6 | `P6-105` | 1 blocker | — | settled | `SPLIT` (maintainer call, 2026-07-28) — probe verdict `PARTLY`: parts (b)(c)(d) confirmed unbuilt, but part (a) is **STALE as written** — `Mode::Bulk` and `server --ingest bulk` already ship gate-tested, so only the *run* remains. Two very different priorities in one entry, so: **→ `P6-108`** (part a + e-bulk: run the bulk load dev→prod and verify stage-2 acceptance; stays §1 in TODO-Phase-6.md, sized down L→M since it is a supervised run, not a build) and **→ `P6-109`** (parts b, c, d, f: the stage-3 daily incremental + Render cron + `/migrations` reconciliation + the spec status flip; **PARKED** in `TODO.md`'s Later/Parked section at the maintainer's direction — app stability and UI cleanup first — with unpark trigger *"a Scryfall set releases after the bulk load and the catalog visibly lacks it"*). Part (g) prereq was already satisfied. Triage open question resolved in favor of §1: 2,976 printings of ~116K, five set codes, so cards outside them are absent entirely rather than a clipped long tail. `P6-072f` reclassified from sibling to **prerequisite of `P6-108`**. Six references repointed (`P6-035`, `P6-104`, `P6-072f`, the Other-section gate, and two prose lines). This id is retired; probe report stays at `phase-6-probes/P6-105.md`, cited from both new entries. |
-| 7 | `P6-017` | 2 data-integrity | 2, 3, 5, 7, 8 | probed | — |
-| 8 | `P6-024` | 2 data-integrity | 2, 5, 8 | probed | — |
-| 9 | `P6-031` | 2 data-integrity | — | pending | — |
-| 10 | `P6-046` | 2 data-integrity | 2, 3, 5, 6 | pending | — |
-| 11 | `P6-049` | 2 data-integrity | 2, 3, 5 | pending | — |
-| 12 | `P6-054` | 2 data-integrity | — | pending | — |
-| 13 | `P6-055` | 2 data-integrity | 2, 8 | pending | — |
-| 14 | `P6-061` | 2 data-integrity | 2, 5, 6, 7, 8 | pending | — |
-| 15 | `P6-002` | 3 correctness | — | pending | — |
-| 16 | `P6-003` | 3 correctness | 3, 9 | pending | — |
-| 17 | `P6-012` | 3 correctness | 3, 5, 8 | pending | — |
-| 18 | `P6-013` | 3 correctness | — | pending | — |
-| 19 | `P6-014` | 3 correctness | 3, 9 | pending | — |
-| 20 | `P6-030` | 3 correctness | 3, 8 | pending | — |
-| 21 | `P6-036` | 3 correctness | 3, 5, 6, 8 | pending | — |
-| 22 | `P6-038` | 3 correctness | 3, 6, 8 | pending | — |
-| 23 | `P6-039` | 3 correctness | — | pending | — |
-| 24 | `P6-041` | 3 correctness | — | pending | — |
-| 25 | `P6-042` | 3 correctness | 3, 5, 8 | pending | — |
-| 26 | `P6-072` | 3 correctness | 3, 5, 7 | pending | — |
-| 27 | `P6-074` | 3 correctness | — | pending | — |
-| 28 | `P6-083` | 3 correctness | — | pending | — |
-| 29 | `P6-086` | 3 correctness | — | pending | — |
-| 30 | `P6-096` | 3 correctness | — | pending | — |
-| 31 | `P6-005` | 4 capability | — | pending | — |
-| 32 | `P6-016` | 4 capability | — | pending | — |
-| 33 | `P6-019` | 4 capability | — | pending | — |
-| 34 | `P6-023` | 4 capability | — | pending | — |
-| 35 | `P6-044` | 4 capability | — | pending | — |
-| 36 | `P6-047` | 4 capability | — | pending | — |
-| 37 | `P6-048` | 4 capability | 4, 5 | pending | — |
-| 38 | `P6-053` | 4 capability | — | pending | — |
-| 39 | `P6-056` | 4 capability | — | pending | — |
-| 40 | `P6-057` | 4 capability | — | pending | — |
-| 41 | `P6-062` | 4 capability | — | pending | — |
-| 42 | `P6-063` | 4 capability | — | pending | — |
-| 43 | `P6-085` | 4 capability | — | pending | — |
-| 44 | `P6-100` | 4 capability | — | pending | — |
-| 45 | `P6-103` | 4 capability | — | pending | — |
-| 46 | `P6-001` | 5 ux-a11y | — | pending | — |
-| 47 | `P6-006` | 5 ux-a11y | — | pending | — |
-| 48 | `P6-007` | 5 ux-a11y | — | pending | — |
-| 49 | `P6-008` | 5 ux-a11y | — | pending | — |
-| 50 | `P6-009` | 5 ux-a11y | 5, 6, 7, 8 | pending | — |
-| 51 | `P6-011` | 5 ux-a11y | — | pending | — |
-| 52 | `P6-020` | 5 ux-a11y | — | pending | — |
-| 53 | `P6-021` | 5 ux-a11y | 5, 6 | pending | — |
-| 54 | `P6-022` | 5 ux-a11y | — | pending | — |
-| 55 | `P6-026` | 5 ux-a11y | — | pending | — |
-| 56 | `P6-028` | 5 ux-a11y | — | pending | — |
-| 57 | `P6-029` | 5 ux-a11y | 5, 6 | pending | — |
-| 58 | `P6-033` | 5 ux-a11y | — | pending | — |
-| 59 | `P6-034` | 5 ux-a11y | — | pending | — |
-| 60 | `P6-035` | 5 ux-a11y | — | pending | — |
-| 61 | `P6-045` | 5 ux-a11y | — | pending | — |
-| 62 | `P6-069` | 5 ux-a11y | 5, 8 | pending | — |
-| 63 | `P6-084` | 5 ux-a11y | — | pending | — |
-| 64 | `P6-087` | 5 ux-a11y | — | pending | — |
-| 65 | `P6-088` | 5 ux-a11y | — | pending | — |
-| 66 | `P6-091` | 5 ux-a11y | — | settled | `DROP` — not probed; dropped on maintainer observation (2026-07-28) while working `P6-102`, to which it was tied ("do with P6-102"). Judged a stale artifact: the unstyled raw-HTML auth pages were not observed during live local + deployed auth testing that day. Maintainer will refile if seen again — **that is this id's one sanctioned exception to the never-refile rule**, and a refile should cite this row. Caveat recorded at drop time: only the native "close this tab" page was actually exercised; `/auth/app-return` (Android deep-link bounce) was not. |
-| 67 | `P6-095` | 5 ux-a11y | — | pending | — |
-| 68 | `P6-098` | 5 ux-a11y | — | pending | — |
-| 69 | `P6-099` | 5 ux-a11y | — | pending | — |
-| 70 | `P6-101` | 5 ux-a11y | — | pending | — |
-| 71 | `P6-090` | 6 performance | — | pending | — |
-| 72 | `P6-097` | 6 performance | — | pending | — |
-| 73 | `P6-104` | 6 performance | — | pending | — |
-| 74 | `P6-004` | 7 dev-loop | — | pending | — |
-| 75 | `P6-025` | 7 dev-loop | — | pending | — |
-| 76 | `P6-027` | 7 dev-loop | — | pending | — |
-| 77 | `P6-032` | 7 dev-loop | — | pending | — |
-| 78 | `P6-037` | 7 dev-loop | — | pending | — |
-| 79 | `P6-040` | 7 dev-loop | — | pending | — |
-| 80 | `P6-043` | 7 dev-loop | — | pending | — |
-| 81 | `P6-050` | 7 dev-loop | — | pending | — |
-| 82 | `P6-052` | 7 dev-loop | — | pending | — |
-| 83 | `P6-058` | 7 dev-loop | — | pending | — |
-| 84 | `P6-060` | 7 dev-loop | — | pending | — |
-| 85 | `P6-065` | 7 dev-loop | — | pending | — |
-| 86 | `P6-070` | 7 dev-loop | — | pending | — |
-| 87 | `P6-075` | 7 dev-loop | — | pending | — |
-| 88 | `P6-076` | 7 dev-loop | — | pending | — |
-| 89 | `P6-077` | 7 dev-loop | — | pending | — |
-| 90 | `P6-078` | 7 dev-loop | — | pending | — |
-| 91 | `P6-079` | 7 dev-loop | — | pending | — |
-| 92 | `P6-081` | 7 dev-loop | — | pending | — |
-| 93 | `P6-082` | 7 dev-loop | — | pending | — |
-| 94 | `P6-089` | 7 dev-loop | — | pending | — |
-| 95 | `P6-094` | 7 dev-loop | — | pending | — |
-| 96 | `P6-015` | 8 hygiene | — | pending | — |
-| 97 | `P6-018` | 8 hygiene | — | pending | — |
-| 98 | `P6-051` | 8 hygiene | — | pending | — |
-| 99 | `P6-067` | 8 hygiene | — | pending | — |
-| 100 | `P6-071` | 8 hygiene | — | pending | — |
-| 101 | `P6-093` | 8 hygiene | — | pending | — |
-| 102 | `P6-106` | 8 hygiene | — | pending | — |
-| 103 | `P6-107` | 8 hygiene | — | pending | — |
-| 104 | `P6-064` | 9 close-out | — | pending | — |
-| 105 | `P6-066` | 9 close-out | — | pending | — |
-| 106 | `P6-073` | 9 close-out | — | settled | DROP from queue — done 2026-07-25, belongs in a done log |
-| 107 | `P6-080` | 9 close-out | — | settled | DROP from queue — done 2026-07-25, belongs in a done log |
+- **98 entries verified**, ~190 individual sub-claims.
+- **19 sub-claims came back STALE or WRONG** and were dropped — see the drop table
+  in [TODO-Phase-6.md](TODO-Phase-6.md), which is the authoritative never-refile
+  record.
+- **The bundles were split.** The 19 multi-class "minors from its review round"
+  entries became standalone tasks; the map is below.
+- **The queue was re-ordered** from severity classes into execution stages.
+- **137 active tasks** across ten stages, plus **11 parked** (each with a trigger),
+  3 done, and 22 rows in the never-refile drop table.
+
+**Ids.** Original ids `P6-001`…`P6-109` are all accounted for below. Split
+products took `P6-110`…`P6-187`. **Next free id: `P6-188`.** `P6-153` was
+allocated during the rewrite and released before publication (the task it named
+kept its original id `P6-047`) — treat it as retired and do not reuse it.
+
+Split products are **not** re-verified: each inherits the probe that produced it,
+named in the map below.
+
+## Bundle → task map
+
+Where a bundled entry became several standalone tasks. Cite the source report
+when working any of these.
+
+| Was | Now | Probe report |
+|---|---|---|
+| `P6-009` (a–g) | `P6-158` (d), `P6-169` (e), `P6-176` (c) · **dropped:** a, b, f · **merged:** g → `P6-065` | `batch-I-responsive.md` |
+| `P6-012` (a–g) | `P6-142` (c), `P6-157` (a), `P6-177` (d, e), `P6-178` (b), `P6-179` (g) · **dropped:** f | `batch-I-responsive.md` |
+| `P6-017` (a–h) | `P6-110` + `P6-111` (a), `P6-126` (b), `P6-127` (c), `P6-129` (d), `P6-155` (e, with `P6-024h`), `P6-128` (f), `P6-174` (g, h) | `P6-017.md`, `P6-017a-cascade.md`, `P6-017d-confirm-copy.md` |
+| `P6-021` (a–f) | `P6-154` (c), `P6-160` (d, e), `P6-165` (a), `P6-166` (b) · **dropped:** f | `batch-I-responsive.md` |
+| `P6-024` (a–j) | `P6-121` (a, b), `P6-155` (h, with `P6-017e`), `P6-156` (c, d), `P6-163` (g), `P6-174` (e), `P6-176` (i), `P6-184` (j), `P6-185` (f) | `P6-024.md` |
+| `P6-030` (a–h) | `P6-144` (c), `P6-145` (e), `P6-146` (a, b), `P6-176` (h), `P6-180` (d, f) · **dropped:** g | `batch-G-palette.md` |
+| `P6-036` (a–i) | `P6-136` (b, c), `P6-137` (a), `P6-138` (e), `P6-139` (f), `P6-168` (d), `P6-175` (g, h, i) | `batch-F-command.md` |
+| `P6-038` (a–g) | `P6-135` (a), `P6-175` (b, c, d), `P6-181` (f, g) · **merged:** e → `TODO.md` large-collection item | `batch-E-catalog.md` |
+| `P6-042` (a–f) | `P6-130` (b), `P6-131` (e), `P6-132` (a), `P6-133` (c, d), `P6-175` (f) | `batch-E-catalog.md` |
+| `P6-046` (a–h) | `P6-122` (g), `P6-150` (a, b, c), `P6-161` (f) · **dropped:** d, e · h folded into `P6-065` | `batch-B-tray.md` |
+| `P6-049` (a–j) | `P6-119` (b), `P6-120` (f), `P6-140` (a), `P6-141` (c, d), `P6-143` (i), `P6-182` (e, j), `P6-183` (g, h) | `batch-C-needs.md` |
+| `P6-055` (a–l) | `P6-112` (f), `P6-113` (h), `P6-114` (i), `P6-115` (j), `P6-116` (c), `P6-117` (a, b), `P6-118` (d, e), `P6-176` (l), `P6-177` (k) · **dropped:** g (→ `P6-031`) | `batch-D-moves.md` |
+| `P6-061` (a–l) | `P6-123` (a, b, h), `P6-152` (e, f), `P6-167` (c, k), `P6-186` (d, l) · **dropped:** g, i, j | `batch-B-tray.md` |
+| `P6-069` (a–k) | `P6-147` (a), `P6-148` (b, c, f, g), `P6-159` (h), `P6-180` (e, i), `P6-187` (j) · **dropped:** k | `batch-G-palette.md` |
+| `P6-072` (a–f) | `P6-124` (f), `P6-162` (e), `P6-164` (c, d), `P6-173` (a, b) | `batch-J-cards.md` |
+| `P6-078` (a–c) | kept whole as `P6-078` | `batch-K-e2e.md` |
+| `P6-028` (a–b) | `P6-125` (a), `P6-149` (b) | `batch-G-palette.md` |
+| `P6-029` | `P6-029` (scroll-into-view), `P6-172` (the O(n²) half) | `batch-F-command.md` |
+| `P6-105` | `P6-108` (a, e-bulk), `P6-109` (b, c, d, f — parked in `TODO.md`) | `P6-105.md` |
+
+Entries merged wholesale rather than split: `P6-014` → `P6-002`; `P6-041` +
+`P6-096` → `P6-134`; `P6-103` → `P6-005`; `P6-052` + `P6-075` + `P6-009g` →
+`P6-065`; `P6-004` + `P6-040b` + `P6-077` → `P6-170`; `P6-040a` → `P6-171`;
+`P6-062` → `P6-150`; `P6-063` → `P6-151`.
+
+## Per-id dispositions
+
+Every id that stood on 2026-07-28. `KEEP` means the entry survived intact
+(possibly with refreshed line references); `RESCOPE` means the text was rewritten
+because verification found the claim mis-stated.
+
+| Id | Verdict | Disposition |
+|---|---|---|
+| `P6-001` | UNVERIFIABLE | `KEEP` — mechanism consistent (`hidden md:table-cell`), pixel figures need re-measuring at 320/375/768 before the fix. Stage 7. |
+| `P6-002` | CONFIRMED | `KEEP` + absorbs `P6-014`. Two live same-type pairs found. The "not firing at today's id layout" claim is unverified — run `npm run diag:resource-ids` first. |
+| `P6-003` | CONFIRMED as a constraint | **`DROP`** — its own action (move the facts to `app-ui.md` Findings) is already done; all four facts are in `app-ui.md` and in a 14-line source comment. |
+| `P6-004` | CONFIRMED | `MERGE` → `P6-170` (three e2e traps, one commit). |
+| `P6-005` | CONFIRMED | `KEEP` + absorbs `P6-103`. Top of the capability class. |
+| `P6-006` | CONFIRMED | `KEEP` — Stage 6, needs a design ruling. |
+| `P6-007` | CONFIRMED | `KEEP` — Stage 6, needs a design ruling. |
+| `P6-008` | CONFIRMED | `KEEP` — no ruling needed, straightforward copy fix. |
+| `P6-009` | PARTLY (3 of 7 stale) | `SPLIT` — see map. a, b, f dropped. |
+| `P6-010` | CONFIRMED | `RESCOPE` + `RECLASS` (2026-07-28) — hosted-only, self-heals on one reload. Named S fix at `lib.rs:834-842`. |
+| `P6-011` | CONFIRMED | `KEEP` — Stage 3 (primitive-level). `P6-163` and `P6-152` are its visible instances. |
+| `P6-012` | PARTLY (1 of 7 stale) | `SPLIT` — see map. f dropped. |
+| `P6-013` | CONFIRMED, **entry's own claims corrected** | `KEEP` + `PROMOTE` — never actually filed upstream; version cites wrong (leptos 0.8.14 / hydration_context 0.3.0 per `Cargo.lock`); `leptos_server-0.8.7` is byte-identical so a bump is not a fix. |
+| `P6-014` | CONFIRMED | **`MERGE`** → `P6-002`. Id retired. |
+| `P6-015` | CONFIRMED | `KEEP` — Stage 6, needs a ruling (doc vs. server guard). |
+| `P6-016` | CONFIRMED | `KEEP` — per-row kebab still unbuilt. |
+| `P6-017` | CONFIRMED (8 of 8; (a) wording wrong) | `SPLIT` — and the (a) follow-up probe surfaced `P6-110`, the most severe item in the file. |
+| `P6-018` | CONFIRMED | `KEEP` — both route maps still omit `/my/all`. |
+| `P6-019` | CONFIRMED | `KEEP` — no icon crate in `Cargo.toml`. |
+| `P6-020` | CONFIRMED | `KEEP` — no `whitespace-nowrap` anywhere. |
+| `P6-021` | PARTLY (1 of 6 stale) | `SPLIT` — see map. f dropped. |
+| `P6-022` | CONFIRMED, **understated** | `RESCOPE` — five primitives, not one; root cause found upstream in `tw_merge`'s `get_collision_id.rs:617-627`. S → M. |
+| `P6-023` | CONFIRMED | **`PARK`** — trigger: a design decision defines the non-drag reorder affordance. |
+| `P6-024` | CONFIRMED (8 of 10; d, g PARTLY) | `SPLIT` — see map. |
+| `P6-025` | CONFIRMED (line refs rotted) | `KEEP` + `RESCOPE` — refreshed all three line references; the runtime check still has not been done. |
+| `P6-026` | CONFIRMED | `KEEP` — three independent a11y gaps, still all present. |
+| `P6-027` | CONFIRMED | **`PARK`** — trigger: before parallel workers are re-enabled. Recorded nowhere in `ui-work-loop.md` yet. |
+| `P6-028` | CONFIRMED | `SPLIT` → `P6-125` (a, the `dialog.rs` focus trap — reaches all 4 Dialog consumers, not Sheet/Popover) + `P6-149` (b). |
+| `P6-029` | CONFIRMED (both halves) | `SPLIT` → `P6-029` (scroll-into-view) + `P6-172` (the O(n²)). |
+| `P6-030` | PARTLY (1 of 8 stale) | `SPLIT` — see map. g dropped; f is stronger than filed. |
+| `P6-031` | CONFIRMED | `KEEP` + absorbs `P6-055g`. |
+| `P6-032` | CONFIRMED, **drift recurred** | `KEEP` + priority bump — the trees are out of sync again two days after the manual resync, which retires the "just resync it" argument. |
+| `P6-033` | CONFIRMED | `KEEP`. |
+| `P6-034` | CONFIRMED | `KEEP` — primitive-level. |
+| `P6-035` | CONFIRMED | **`PARK`** — trigger: `P6-108` lands, then re-triage. |
+| `P6-036` | PARTLY (a's mechanism wrong) | `SPLIT` — see map. (a) rescoped: the SQL *does* bind the limit; `lib.rs` always passes `None`. |
+| `P6-037` | PARTLY | `KEEP` + `RESCOPE` — the fixture-distinguishability guard already landed; the positive-control and shared-provenance guards did not, and the live instance still stands. |
+| `P6-038` | CONFIRMED (e unverifiable) | `SPLIT` — see map. e merged into `TODO.md`. |
+| `P6-039` | CONFIRMED, **worse** | `RESCOPE` — four definitions of "owned", not three. |
+| `P6-040` | CONFIRMED | `SPLIT` → `P6-171` (a, `vendor-component`) + `P6-170` (b, `e2e-suite`). |
+| `P6-041` | CONFIRMED | **`MERGE`** → `P6-134`, with `P6-096`. |
+| `P6-042` | CONFIRMED | `SPLIT` — see map. |
+| `P6-043` | CONFIRMED | `KEEP` — cheaper after `P6-083`. |
+| `P6-044` | CONFIRMED | `KEEP`. |
+| `P6-045` | **STALE** | **`DROP`** — fixed in `7649d80a` (2026-07-27); the span is `size-11 md:size-4`. |
+| `P6-046` | PARTLY (2 of 8 stale) | `SPLIT` — see map. d, e dropped. |
+| `P6-047` | CONFIRMED | `KEEP` — pairs with `P6-151` as the place to answer the grain question. |
+| `P6-048` | CONFIRMED | `KEEP`. |
+| `P6-049` | CONFIRMED (10 of 10) | `SPLIT` — see map. Nothing stale. |
+| `P6-050` | CONFIRMED | `KEEP`. |
+| `P6-051` | CONFIRMED | `KEEP`. |
+| `P6-052` | PARTLY | `MERGE` → `P6-065`. The mechanism is confirmed (`destination-picker.spec.ts` grows real desires with no cleanup); the "88 desires" count is unverified. |
+| `P6-053` | CONFIRMED | `KEEP`. |
+| `P6-054` | CONFIRMED | `KEEP` — still unreachable from the UI; spec-owner call. |
+| `P6-055` | CONFIRMED (11 of 12; g stale) | `SPLIT` — see map. Largest single source of Stage 1. |
+| `P6-056` | CONFIRMED | `RESCOPE` — struck the now-false "nothing undoes a teardown" tail; land after `P6-113`. |
+| `P6-057` | CONFIRMED, narrowed | `RESCOPE` — the move case is already covered by the tray; only remove and per-grain edit are missing. |
+| `P6-058` | PARTLY | `RESCOPE` — the undo-adapter half is **wrong** (`undo_selection_move` calls `undo_moves`, and `lib.rs:643-648` documents why each exists) and is dropped; the e2e-helper half is confirmed and worse (`createCollection` redefined in 9 files). |
+| `P6-059` | CONFIRMED | `RESCOPE` (2026-07-28) — stays a ship gate. Both fixes required. |
+| `P6-060` | CONFIRMED | `KEEP` — no per-island helper has been built. |
+| `P6-061` | PARTLY (3 of 12 stale) | `SPLIT` — see map. g, i, j dropped. |
+| `P6-062` | CONFIRMED | **`MERGE`** → `P6-150` (cannot be decided apart from the tray's grain semantics). |
+| `P6-063` | PARTLY | **`MERGE`** → `P6-151`, rescoped — the "until removal/teardown widens the write path" framing is obsolete. |
+| `P6-064` | **STALE** | **`DROP`** — `search` now fills `owned`; the cited `into_summary(None)` is gone. Live residue is `P6-135`. |
+| `P6-065` | CONFIRMED | `KEEP` + absorbs `P6-075`, `P6-052`, `P6-009g`. |
+| `P6-066` | CONFIRMED (delete is correct) | **`DROP`** — superseded by `P6-060`, which carries the full record. |
+| `P6-067` | CONFIRMED (decision unmade) | `KEEP` + `PROMOTE` — Stage 6; evidence complete, just needs the call. |
+| `P6-068` | CONFIRMED | `RESCOPE` + `RECLASS` (2026-07-28) — diagnosed; Option B chosen. |
+| `P6-069` | CONFIRMED (k accepted as-is) | `SPLIT` — see map. |
+| `P6-070` | CONFIRMED | `KEEP` — the task is "delete the file"; it is not portable enough to promote. |
+| `P6-071` | PARTLY | `RESCOPE` — the growth trigger **has already fired**: `AddToast` is 9 fields, not 8. Do it now. |
+| `P6-072` | CONFIRMED (6 of 6) | `SPLIT` — see map. (f) promoted to a `P6-108` prerequisite. |
+| `P6-073` | — | Already `[x]`; moved to the Done section. |
+| `P6-074` | CONFIRMED | `KEEP` — `hosted.rs:919` already comments on the discrepancy. |
+| `P6-075` | CONFIRMED | `MERGE` → `P6-065`. |
+| `P6-076` | PARTLY | `RESCOPE` — 11 of 21 probes are now registered and two unregistered ones postdate the entry; re-enumerate before registering. |
+| `P6-077` | CONFIRMED | `MERGE` → `P6-170`. |
+| `P6-078` | CONFIRMED (3 of 3) | `KEEP` whole. |
+| `P6-079` | CONFIRMED | `KEEP`. |
+| `P6-080` | — | Already `[x]`; moved to the Done section. |
+| `P6-081` | CONFIRMED | **`PARK`** — trigger: a pre-release desktop/WKWebView claim, or a decided cadence. Note the stale comment in `playwright.config.ts`. |
+| `P6-082` | CONFIRMED | **`PARK`** — trigger is the entry's own ("once Phase 5 spec work lands"); verify whether it has fired. |
+| `P6-083` | CONFIRMED exactly as written | `KEEP`. |
+| `P6-084` | CONFIRMED | `KEEP`. |
+| `P6-085` | CONFIRMED | `KEEP`. |
+| `P6-086` | CONFIRMED | `KEEP` — `rail.rs:952-956` names it as the still-open race. |
+| `P6-087` | CONFIRMED | `KEEP` — Stage 6, needs a ruling. |
+| `P6-088` | CONFIRMED | `KEEP` — Stage 6, needs a ruling; the latch precedent is already live in `cards.rs`. |
+| `P6-089` | CONFIRMED | `KEEP` + `PROMOTE` — `validate.yml` still has no `cargo build -p three_rings` step. |
+| `P6-090` | CONFIRMED | `KEEP`. |
+| `P6-091` | — | **`DROP`** (2026-07-28, maintainer observation). One sanctioned refile exception; see the drop table. |
+| `P6-092` | CONFIRMED, dropped anyway | **`DROP`** (2026-07-28, maintainer call) — not gating CI on release builds. Retired permanently. |
+| `P6-093` | CONFIRMED | **`PARK`** — trigger: an observed collision, or a path seeding fractional positions. |
+| `P6-094` | CONFIRMED | `KEEP` — `seed.rs:128-131` names the gap itself. |
+| `P6-095` | CONFIRMED | `KEEP` — documenting the constraint is likely sufficient. |
+| `P6-096` | CONFIRMED | **`MERGE`** → `P6-134`, with `P6-041`. |
+| `P6-097` | PARTLY / UNVERIFIABLE | `RESCOPE` → measure first. Three candidate causes named; profile before and after `P6-108`. |
+| `P6-098` | CONFIRMED | `KEEP`. |
+| `P6-099` | CONFIRMED (token pairing) | `KEEP` — route through a deliberate dark-theme contrast pass. |
+| `P6-100` | CONFIRMED | `KEEP`. |
+| `P6-101` | CONFIRMED | `KEEP`. |
+| `P6-102` | — | Done 2026-07-28 (config only); in the Done section. |
+| `P6-103` | CONFIRMED | **`MERGE`** → `P6-005`. |
+| `P6-104` | CONFIRMED | **`PARK`** — trigger: `P6-108` lands *and* profiling shows either read hot. |
+| `P6-105` | PARTLY | `SPLIT` (2026-07-28) → `P6-108` + `P6-109`. Id retired. |
+| `P6-106` | CONFIRMED | **`PARK`** — trigger is the spec's own: a UI surfaces stale tags. |
+| `P6-107` | CONFIRMED | **`PARK`** — no near-term trigger; roadmap. |
+| `P6-108` | — | Split product, inherits `P6-105.md`. Now gated on `P6-124`. |
+| `P6-109` | — | Split product, parked in `TODO.md` with an unpark trigger. |
+
+## What the pass did not settle
+
+Named here so nobody assumes it was checked:
+
+- **Every pixel measurement** in `P6-001` — the figures come from the original
+  audit and the code has moved. Re-measure before fixing.
+- **The `P6-002` latency claim** — "not firing at today's id layout" and "~50
+  slots of headroom" are layout-dependent and were not re-measured.
+  `npm run diag:resource-ids` is the tool.
+- **All database state** — the pass never connected to Neon. So the "88 desires"
+  figure in `P6-065`, the orphaned `zz-e2e-inb-src-w1-9` collection, and
+  `P6-038e`'s Seq Scan are all unconfirmed.
+- **Browser behavior** — `P6-185` (which engine fires `contextmenu` from keyup)
+  and `P6-025`'s three claims are code shapes confirmed, runtime unconfirmed.
+- **`P6-097`** — no profile was taken; the three candidate causes are read from
+  the code, not measured.
+- **`P6-187`** — whether the co-registration window that would make
+  `Candidate.index` and `nav.highlighted()` disagree actually exists.
