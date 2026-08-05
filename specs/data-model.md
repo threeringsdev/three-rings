@@ -269,6 +269,12 @@ about wiring the app to it, not provisioning. See [Migration plan](#migration-pl
 
 ### Collection schema (the tree)
 
+> **Deletion is soft, and this DDL predates it.** [collection-deletion](collection-deletion.md)
+> adds `deleted_at timestamptz` in migration `0010` and makes every read filter
+> on it. The `ON DELETE CASCADE` below stays — it is simply no longer reachable
+> by a user deleting a collection, which is what stops the `moves` ledger's
+> `ON DELETE SET NULL` from rewriting history into intakes and removals.
+
 ```sql
 CREATE TABLE collections (
     id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -377,6 +383,14 @@ on-demand aggregation is fine. If profiling later says otherwise, `owned_by_card
 is the first candidate for a materialized view.
 
 ### Move ledger
+
+> **The two `ON DELETE SET NULL`s below are load-bearing and dangerous.** NULL is
+> not "unknown" here — it *means* external intake (`from`) and removal (`to`). So
+> hard-deleting a collection does not leave history incomplete, it leaves it
+> **false**: past moves in and out of that collection silently rewrite themselves
+> into intakes and removals, and undoing one will not put the copies back
+> (`undo_one` skips a NULL end). [collection-deletion](collection-deletion.md)
+> resolves this by never hard-deleting a collection in the first place.
 
 ```sql
 CREATE TABLE moves (
