@@ -1,6 +1,6 @@
 # Collection deletion
 
-**Status:** draft
+**Status:** accepted
 **Depends on:** [data-model](data-model.md) (owns `collections`, `holdings`,
 `desires`, `moves` and the FKs this changes), [collection-api](collection-api.md)
 (owns the endpoint surface and the existing `teardown` this reuses),
@@ -152,6 +152,13 @@ pub enum WantDisposition {
 }
 ```
 
+**`Discard` is the internal name; the user never sees that word.** Both controls
+label this option **"Remove from Collection"** (resolved 2026-08-05). The variant
+keeps the shorter name because it is what the code and the ledger reasoning call
+it throughout this spec, but the label is not a free choice at implementation
+time — it is specified here, and it is the same string on the have side and the
+want side.
+
 The two are chosen **separately**, because a have and a want are not the same
 kind of thing: a have is a physical object that must be somewhere, a want is an
 intention that was very likely scoped to the deck being deleted.
@@ -245,8 +252,8 @@ fail the ownership check exactly as a non-existent one does.
 ```
 Delete "Mono-Red"?
 
-  12 cards       → [ Shoebox (parent)  ▾ ]
-   3 wants       → [ Discard           ▾ ]
+  12 cards       → [ Shoebox (parent)        ▾ ]
+   3 wants       → [ Remove from Collection  ▾ ]
    2 collections → move up to Shoebox
 
   [ Cancel ]   [ Delete ]
@@ -305,13 +312,16 @@ risky part lands under no time pressure.
 
 ## Open questions
 
-- **Should `Discard` be the word on the have-side control?** It hides rather than
-  destroys, so "Discard" may overstate it. Alternatives: "Leave with the
-  collection", "Keep hidden". The want-side default has the same question and
-  the same answer. *(Copy decision; does not block the design.)*
-- **Does a soft-deleted collection's name still block re-use?** There is no
+- *(resolved — 2026-08-05)*
+  **Should `Discard` be the word on the have-side control?** Use `Remove from Collection`
+  for both haves and wants for this action.
+
+- *(resolved — 2026-08-05)*
+  **Does a soft-deleted collection's name still block re-use?** There is no
   unique constraint on `(user_id, parent_id, name)` today, so creating a new
-  "Mono-Red" while a deleted one exists is already legal. Confirm that is the
-  intent before the Restore surface can produce two identically-named siblings.
-- **Retention.** No purge is specified. Decide a policy when the number of hidden
-  rows becomes a real number, not before.
+  "Mono-Red" while a deleted one exists is already legal.
+  This is intentional, _names_ of collections do not need to be unique (collection_ids
+  should already be unique).
+- *(resolved — 2026-08-05)*
+  **Retention.** No purge is specified. Policy will be decided once a fully working
+  POC of the app is implemented (currently there are no users).
