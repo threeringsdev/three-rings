@@ -261,3 +261,14 @@ commit them. Supply a token at runtime via a `GH_TOKEN` env var (or a mounted,
 read-only host git/gh config). Full pattern in
 [`.devcontainer/README.md`](.devcontainer/README.md) → "Git / GitHub auth".
 Once `GH_TOKEN` is set, `gh auth setup-git` makes `git push` work over HTTPS.
+
+<!-- workbook:begin generator=0.4.0 sha256=40cef0a79115cf7aa9e8c6ea6f5755b51b6d40366fb3e94237da5ddb6a9768ff -->
+## Workbook
+
+This project tracks tasks with the Workbook CLI. Read
+[`.workbook/guidelines.md`](.workbook/guidelines.md) for agent workflows and the
+canonical machine values this project accepts, such as `in-progress` rather
+than the `In Progress` display label.
+
+Refresh this section with `workbook docs update`.
+<!-- workbook:end -->
