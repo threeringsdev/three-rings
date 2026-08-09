@@ -120,6 +120,33 @@ fn owned_of(owned: &Option<HashMap<Uuid, i32>>, oracle_id: Uuid) -> Option<i32> 
 const COLLECTION_COLS: &str =
     "id, parent_id, kind::text AS kind, name, is_inbox, position::float8 AS position, format";
 
+/// SQL predicate: the row's collection is **live** — not soft-deleted
+/// (specs/collection-deletion.md → "The read path"). Deletion hides a
+/// collection *and everything hanging off it*: its holdings stop counting, its
+/// desires stop generating needs/shopping rows, and it is never a legal move
+/// destination or write target.
+///
+/// Written as a correlated `EXISTS` for the queries that read `holdings` or
+/// `desires` without already joining `collections`; where the join is already
+/// there, the filter is a plain `deleted_at IS NULL` on it instead.
+///
+/// **Owned-per-oracle is deliberately not filtered through here.** That filter
+/// lands exactly once, in the `owned_by_card` view
+/// (migrations/0010_collection_soft_delete.sql), which is what P6-039's collapse
+/// and its `owned_definition_guard` test bought. This helper is for the
+/// collection-scoped aggregations that are *not* re-derivations of that view —
+/// present-here / present-elsewhere, per-collection demand, per-location
+/// breakdowns — which the spec calls out as needing their own handling.
+///
+/// `collection_id_col` is always one of our own column expressions, never user
+/// input; the `live` alias is picked so it cannot collide with a caller's.
+fn in_live_collection(collection_id_col: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM collections live \
+         WHERE live.id = {collection_id_col} AND live.deleted_at IS NULL)"
+    )
+}
+
 impl CatalogStore for HostedBackend {
     async fn card_count(&self) -> ApiResult<CatalogCount> {
         // Public read; catalog RLS is off, so no scoped transaction needed.
@@ -177,12 +204,16 @@ impl CatalogStore for HostedBackend {
 
         let ownership = if self.session.is_some() {
             let mut tx = self.scoped_tx().await?;
+            // `c.deleted_at IS NULL`: the "you hold N copies, here" block on the
+            // card page is a per-collection breakdown, so a soft-deleted
+            // collection's copies must drop out of it exactly as they drop out
+            // of `owned` (specs/collection-deletion.md).
             let rows: Vec<OwnershipSql> = sqlx::query_as(
                 "SELECT h.collection_id, c.name AS collection_name, h.printing_id, \
                         sum(h.quantity)::int AS quantity \
                  FROM holdings h JOIN printings p ON p.id = h.printing_id \
                  JOIN collections c ON c.id = h.collection_id \
-                 WHERE p.oracle_id = $1 \
+                 WHERE p.oracle_id = $1 AND c.deleted_at IS NULL \
                  GROUP BY h.collection_id, c.name, h.printing_id",
             )
             .bind(oracle_id)
@@ -381,7 +412,8 @@ impl CollectionStore for HostedBackend {
         ensure_inbox(&mut tx, user_id).await?;
 
         let rows: Vec<CollectionRow> = sqlx::query_as(&format!(
-            "SELECT {COLLECTION_COLS} FROM collections ORDER BY position, name"
+            "SELECT {COLLECTION_COLS} FROM collections WHERE deleted_at IS NULL \
+             ORDER BY position, name"
         ))
         .fetch_all(&mut *tx)
         .await
@@ -396,12 +428,16 @@ impl CollectionStore for HostedBackend {
         let mut tx = self.scoped_tx().await?;
         ensure_inbox(&mut tx, user_id).await?;
 
+        // The `present` sub-select needs no live filter of its own: it is
+        // LEFT JOINed *from* the filtered `collections` scan, so a hidden
+        // collection's holdings have nothing to attach to.
         let rows: Vec<CollectionTreeSql> = sqlx::query_as(&format!(
             "SELECT {COLLECTION_COLS}, COALESCE(h.present, 0)::bigint AS present \
              FROM collections \
              LEFT JOIN (SELECT collection_id, sum(quantity) AS present \
                         FROM holdings GROUP BY collection_id) h \
                ON h.collection_id = collections.id \
+             WHERE collections.deleted_at IS NULL \
              ORDER BY position, name"
         ))
         .fetch_all(&mut *tx)
@@ -413,17 +449,22 @@ impl CollectionStore for HostedBackend {
         // `o` reads the `owned_by_card` view (security_invoker, RLS-scoped to
         // the caller inside this `scoped_tx`) rather than re-deriving the sum
         // from `holdings`/`printings` — the one shared source every "owned per
-        // card" query in this file reads (specs/collection-api.md Findings).
-        let (shopping_short,): (i64,) = sqlx::query_as(
+        // card" query in this file reads (specs/collection-api.md Findings), and
+        // where the soft-delete filter for `owned` therefore already lives.
+        // `d` is its own aggregation over `desires` and needs the filter here:
+        // a hidden collection's wants must stop shortening the badge.
+        let (shopping_short,): (i64,) = sqlx::query_as(&format!(
             "WITH d AS ( \
-               SELECT oracle_id, sum(quantity) AS desired_total FROM desires GROUP BY oracle_id \
+               SELECT oracle_id, sum(quantity) AS desired_total FROM desires \
+               WHERE {live} GROUP BY oracle_id \
              ), \
              o AS ( \
                SELECT oracle_id, owned FROM owned_by_card \
              ) \
              SELECT count(*) FROM d LEFT JOIN o ON o.oracle_id = d.oracle_id \
              WHERE d.desired_total > COALESCE(o.owned, 0)",
-        )
+            live = in_live_collection("desires.collection_id"),
+        ))
         .fetch_one(&mut *tx)
         .await
         .map_err(upstream)?;
@@ -453,25 +494,31 @@ impl CollectionStore for HostedBackend {
         let user_id = self.session_id()?;
         let mut tx = self.scoped_tx().await?;
 
-        // Parent must exist and be owned — RLS makes a non-owned parent invisible,
-        // so this EXISTS both validates ownership and rejects a bad id.
+        // Parent must exist, be owned and be **live** — RLS makes a non-owned
+        // parent invisible and `deleted_at IS NULL` makes a soft-deleted one
+        // invisible too, so this EXISTS validates ownership, rejects a bad id
+        // and refuses to nest a new collection under a hidden one.
         if let Some(parent_id) = req.parent_id {
-            let exists: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM collections WHERE id = $1")
-                .bind(parent_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(upstream)?;
+            let exists: Option<(i32,)> =
+                sqlx::query_as("SELECT 1 FROM collections WHERE id = $1 AND deleted_at IS NULL")
+                    .bind(parent_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(upstream)?;
             if exists.is_none() {
                 return Err(ApiError::NotFound("parent collection".into()));
             }
         }
 
-        // Append after the current siblings (max position + 1).
+        // Append after the current **live** siblings (max position + 1); a
+        // hidden sibling is not on screen, so it should not push the new row
+        // down past the end of the list the user can see.
         let row: CollectionRow = sqlx::query_as(&format!(
             "INSERT INTO collections (user_id, parent_id, kind, name, format, position) \
              VALUES ($1, $2, $3::collection_kind, $4, $5, \
                      COALESCE((SELECT max(position) FROM collections \
-                               WHERE parent_id IS NOT DISTINCT FROM $2), 0) + 1) \
+                               WHERE parent_id IS NOT DISTINCT FROM $2 \
+                                 AND deleted_at IS NULL), 0) + 1) \
              RETURNING {COLLECTION_COLS}"
         ))
         .bind(user_id)
@@ -491,8 +538,12 @@ impl CollectionStore for HostedBackend {
             return Err(ApiError::Validation("name is required".into()));
         }
         let mut tx = self.scoped_tx().await?;
+        // `deleted_at IS NULL` joins `NOT is_inbox` on every tree write below: a
+        // hidden collection is not a write target, and a miss reads as absent
+        // (NotFound) exactly as a non-existent id does.
         let updated: Option<CollectionRow> = sqlx::query_as(&format!(
-            "UPDATE collections SET name = $2 WHERE id = $1 AND NOT is_inbox \
+            "UPDATE collections SET name = $2 \
+             WHERE id = $1 AND NOT is_inbox AND deleted_at IS NULL \
              RETURNING {COLLECTION_COLS}"
         ))
         .bind(id)
@@ -510,12 +561,19 @@ impl CollectionStore for HostedBackend {
 
     async fn delete_collection(&self, id: Id) -> ApiResult<()> {
         let mut tx = self.scoped_tx().await?;
-        let affected = sqlx::query("DELETE FROM collections WHERE id = $1 AND NOT is_inbox")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(upstream)?
-            .rows_affected();
+        // Still the hard delete this method has always been — soft deletion is
+        // the *next* step of specs/collection-deletion.md and nothing sets
+        // `deleted_at` yet. The filter is here so that once something does, a
+        // second delete of an already-hidden collection reads as absent rather
+        // than cascading its subtree away for real.
+        let affected = sqlx::query(
+            "DELETE FROM collections WHERE id = $1 AND NOT is_inbox AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(upstream)?
+        .rows_affected();
         if affected == 0 {
             return Err(self.absent_or_inbox(&mut tx, id, "deleted").await);
         }
@@ -532,28 +590,37 @@ impl CollectionStore for HostedBackend {
         }
         let mut tx = self.scoped_tx().await?;
 
-        // Node must exist / be owned.
-        let node: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM collections WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(upstream)?;
+        // Node must exist / be owned / be live.
+        let node: Option<(i32,)> =
+            sqlx::query_as("SELECT 1 FROM collections WHERE id = $1 AND deleted_at IS NULL")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(upstream)?;
         if node.is_none() {
             return Err(ApiError::NotFound("collection".into()));
         }
 
         if let Some(parent_id) = new_parent {
-            // Parent must exist / be owned.
-            let parent: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM collections WHERE id = $1")
-                .bind(parent_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(upstream)?;
+            // Parent must exist / be owned / be live.
+            let parent: Option<(i32,)> =
+                sqlx::query_as("SELECT 1 FROM collections WHERE id = $1 AND deleted_at IS NULL")
+                    .bind(parent_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(upstream)?;
             if parent.is_none() {
                 return Err(ApiError::NotFound("parent collection".into()));
             }
             // Cycle check: walk the target parent's ancestors; if `id` is among
             // them, moving `id` under it would create a cycle.
+            //
+            // Deliberately **not** filtered on `deleted_at`: this is a safety
+            // guard, and walking hidden ancestors too can only reject more, never
+            // fewer, cycles. Filtering would cut the chain at a hidden node and
+            // let a cycle through it past the check — and by design the case
+            // cannot arise anyway (deleting a collection re-parents its children,
+            // so no live row keeps a hidden ancestor).
             let cycle: Option<(i32,)> = sqlx::query_as(
                 "WITH RECURSIVE anc AS ( \
                    SELECT id, parent_id FROM collections WHERE id = $1 \
@@ -577,14 +644,16 @@ impl CollectionStore for HostedBackend {
         // invariant) — nesting it would defeat the pin, so it joins the
         // rename/delete protections. Found by the tree task's review: the
         // sidebar pins Inbox only among the roots.
-        let affected =
-            sqlx::query("UPDATE collections SET parent_id = $2 WHERE id = $1 AND NOT is_inbox")
-                .bind(id)
-                .bind(new_parent)
-                .execute(&mut *tx)
-                .await
-                .map_err(upstream)?
-                .rows_affected();
+        let affected = sqlx::query(
+            "UPDATE collections SET parent_id = $2 \
+             WHERE id = $1 AND NOT is_inbox AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .bind(new_parent)
+        .execute(&mut *tx)
+        .await
+        .map_err(upstream)?
+        .rows_affected();
         if affected == 0 {
             return Err(self.absent_or_inbox(&mut tx, id, "reparented").await);
         }
@@ -594,13 +663,15 @@ impl CollectionStore for HostedBackend {
 
     async fn reorder_collection(&self, id: Id, req: Reorder) -> ApiResult<()> {
         let mut tx = self.scoped_tx().await?;
-        let affected = sqlx::query("UPDATE collections SET position = $2 WHERE id = $1")
-            .bind(id)
-            .bind(req.position)
-            .execute(&mut *tx)
-            .await
-            .map_err(upstream)?
-            .rows_affected();
+        let affected = sqlx::query(
+            "UPDATE collections SET position = $2 WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .bind(req.position)
+        .execute(&mut *tx)
+        .await
+        .map_err(upstream)?
+        .rows_affected();
         if affected == 0 {
             return Err(ApiError::NotFound("collection".into()));
         }
@@ -702,8 +773,13 @@ impl CollectionStore for HostedBackend {
         req: SetQuantity,
     ) -> ApiResult<Option<HoldingLine>> {
         let mut tx = self.scoped_tx().await?;
+        // The stepper addresses a holding by id, so the live-collection guard
+        // has to ride on the row itself: a holding left attached to a hidden
+        // collection is unreachable, and a stale id pointing at one reads as
+        // absent rather than silently mutating invisible data.
+        let live = in_live_collection("holdings.collection_id");
         if req.quantity <= 0 {
-            let affected = sqlx::query("DELETE FROM holdings WHERE id = $1")
+            let affected = sqlx::query(&format!("DELETE FROM holdings WHERE id = $1 AND {live}"))
                 .bind(holding_id)
                 .execute(&mut *tx)
                 .await
@@ -716,7 +792,8 @@ impl CollectionStore for HostedBackend {
             return Ok(None);
         }
         let row: Option<HoldingRow> = sqlx::query_as(&format!(
-            "UPDATE holdings SET quantity = $2 WHERE id = $1 RETURNING {HOLDING_COLS}"
+            "UPDATE holdings SET quantity = $2 WHERE id = $1 AND {live} \
+             RETURNING {HOLDING_COLS}"
         ))
         .bind(holding_id)
         .bind(req.quantity)
@@ -761,9 +838,12 @@ impl CollectionStore for HostedBackend {
     ) -> ApiResult<CollectionView> {
         let mut tx = self.scoped_tx().await?;
 
-        // Metadata (owned check via RLS) + immediate children.
+        // Metadata (owned check via RLS, live check via `deleted_at`) +
+        // immediate children. A soft-deleted collection 404s here exactly as a
+        // non-existent one does, which is also what makes the per-collection
+        // aggregates below safe to leave scoped to `$1` alone.
         let collection: CollectionRow = sqlx::query_as(&format!(
-            "SELECT {COLLECTION_COLS} FROM collections WHERE id = $1"
+            "SELECT {COLLECTION_COLS} FROM collections WHERE id = $1 AND deleted_at IS NULL"
         ))
         .bind(id)
         .fetch_optional(&mut *tx)
@@ -771,7 +851,8 @@ impl CollectionStore for HostedBackend {
         .map_err(upstream)?
         .ok_or_else(|| ApiError::NotFound("collection".into()))?;
         let children: Vec<CollectionRow> = sqlx::query_as(&format!(
-            "SELECT {COLLECTION_COLS} FROM collections WHERE parent_id = $1 \
+            "SELECT {COLLECTION_COLS} FROM collections \
+             WHERE parent_id = $1 AND deleted_at IS NULL \
              ORDER BY position, name"
         ))
         .bind(id)
@@ -806,9 +887,11 @@ impl CollectionStore for HostedBackend {
         qb.push(
             "::uuid AS cid), \
              descendants AS ( \
-               SELECT id FROM collections WHERE parent_id = (SELECT cid FROM me) \
+               SELECT id FROM collections \
+               WHERE parent_id = (SELECT cid FROM me) AND deleted_at IS NULL \
                UNION ALL \
                SELECT c.id FROM collections c JOIN descendants d ON c.parent_id = d.id \
+               WHERE c.deleted_at IS NULL \
              ), \
              present AS ( \
                SELECT printing_id, board, sum(quantity)::int AS present, \
@@ -925,11 +1008,18 @@ impl CollectionStore for HostedBackend {
         // honest fix is a board-aware `needs()` + a `board` on `NeedRow`, which
         // is collection-api's read model rather than this page's. Filed rather
         // than half-done here.
-        let totals: TotalsSql = sqlx::query_as(
+        //
+        // Soft delete (specs/collection-deletion.md): `descendants` skips hidden
+        // children, and `pe` — "held somewhere else" — skips holdings in hidden
+        // collections, since a card the user cannot reach is not pullable. `d`
+        // and `ph` are scoped to `$1`, which the metadata read above already
+        // proved live, so they need no filter of their own.
+        let totals: TotalsSql = sqlx::query_as(&format!(
             "WITH RECURSIVE descendants AS ( \
-               SELECT id FROM collections WHERE parent_id = $1 \
+               SELECT id FROM collections WHERE parent_id = $1 AND deleted_at IS NULL \
                UNION ALL \
                SELECT c.id FROM collections c JOIN descendants d ON c.parent_id = d.id \
+               WHERE c.deleted_at IS NULL \
              ), \
              d AS ( \
                SELECT oracle_id, sum(quantity)::int AS desired \
@@ -943,7 +1033,7 @@ impl CollectionStore for HostedBackend {
              pe AS ( \
                SELECT p.oracle_id, sum(h.quantity)::int AS elsewhere \
                FROM holdings h JOIN printings p ON p.id = h.printing_id \
-               WHERE h.collection_id <> $1 GROUP BY p.oracle_id \
+               WHERE h.collection_id <> $1 AND {live} GROUP BY p.oracle_id \
              ), \
              gap AS ( \
                SELECT (d.desired - COALESCE(ph.present_here, 0)) AS gap, \
@@ -961,7 +1051,8 @@ impl CollectionStore for HostedBackend {
                 WHERE collection_id = $1) AS desired, \
                (SELECT COALESCE(sum(gap), 0)::int FROM gap) AS missing, \
                (SELECT COALESCE(sum(LEAST(gap, elsewhere)), 0)::int FROM gap) AS owned_elsewhere",
-        )
+            live = in_live_collection("h.collection_id"),
+        ))
         .bind(id)
         .fetch_one(&mut *tx)
         .await
@@ -1051,7 +1142,8 @@ impl CollectionStore for HostedBackend {
         // check-then-act across two transactions, which is the window the
         // batch-move task could not close from outside.
         let row: Option<HoldingRow> = sqlx::query_as(&format!(
-            "SELECT {HOLDING_COLS} FROM holdings WHERE id = $1 FOR UPDATE"
+            "SELECT {HOLDING_COLS} FROM holdings WHERE id = $1 AND {live} FOR UPDATE",
+            live = in_live_collection("holdings.collection_id"),
         ))
         .bind(holding_id)
         .fetch_optional(&mut *tx)
@@ -1141,14 +1233,15 @@ impl CollectionStore for HostedBackend {
         // Ungrouped on purpose — see the trait doc. RLS scopes the rows to the
         // caller, the same way every other read in this impl is scoped.
         let mut tx = self.scoped_tx().await?;
-        let rows: Vec<HoldingRow> = sqlx::query_as(
+        let rows: Vec<HoldingRow> = sqlx::query_as(&format!(
             "SELECT h.id, h.collection_id, h.printing_id, h.finish::text AS finish, \
                     h.condition::text AS condition, h.language, h.board::text AS board, \
                     h.quantity \
              FROM holdings h JOIN printings p ON p.id = h.printing_id \
-             WHERE p.oracle_id = $1 \
+             WHERE p.oracle_id = $1 AND {live} \
              ORDER BY h.collection_id, h.printing_id, h.board, h.finish",
-        )
+            live = in_live_collection("h.collection_id"),
+        ))
         .bind(oracle_id)
         .fetch_all(&mut *tx)
         .await
@@ -1159,15 +1252,20 @@ impl CollectionStore for HostedBackend {
 
     async fn suggested_destinations(&self, oracle_id: Id) -> ApiResult<Vec<SuggestedDestination>> {
         let mut tx = self.scoped_tx().await?;
-        let rows: Vec<SuggestedRow> = sqlx::query_as(
+        // Both CTEs carry their own live filter (specs/collection-deletion.md is
+        // explicit that these per-collection aggregations are not covered by the
+        // `owned_by_card` view's one filter): a hidden collection must never be
+        // offered as a destination, and its copies must not count as already
+        // present there.
+        let rows: Vec<SuggestedRow> = sqlx::query_as(&format!(
             "WITH d AS ( \
                SELECT collection_id, sum(quantity)::int AS desired \
-               FROM desires WHERE oracle_id = $1 GROUP BY collection_id \
+               FROM desires WHERE oracle_id = $1 AND {live_d} GROUP BY collection_id \
              ), \
              p AS ( \
                SELECT h.collection_id, sum(h.quantity)::int AS present \
                FROM holdings h JOIN printings pr ON pr.id = h.printing_id \
-               WHERE pr.oracle_id = $1 GROUP BY h.collection_id \
+               WHERE pr.oracle_id = $1 AND {live_p} GROUP BY h.collection_id \
              ) \
              SELECT c.id AS collection_id, c.name AS collection_name, d.desired, \
                     COALESCE(p.present, 0) AS present \
@@ -1175,7 +1273,9 @@ impl CollectionStore for HostedBackend {
              LEFT JOIN p ON p.collection_id = c.id \
              WHERE d.desired > COALESCE(p.present, 0) \
              ORDER BY (d.desired - COALESCE(p.present, 0)) DESC, c.name",
-        )
+            live_d = in_live_collection("desires.collection_id"),
+            live_p = in_live_collection("h.collection_id"),
+        ))
         .bind(oracle_id)
         .fetch_all(&mut *tx)
         .await
@@ -1283,7 +1383,7 @@ impl CollectionStore for HostedBackend {
              ), \
              wanted AS ( \
                SELECT oracle_id, sum(quantity)::int AS wanted \
-               FROM desires GROUP BY oracle_id \
+               FROM desires WHERE {live_wanted} GROUP BY oracle_id \
              ), \
              mine AS ( \
                SELECT COALESCE(held.oracle_id, wanted.oracle_id) AS oracle_id, \
@@ -1293,6 +1393,11 @@ impl CollectionStore for HostedBackend {
              ) {select} JOIN mine ON mine.oracle_id = c.oracle_id{rep}WHERE true",
             select = summary_select_with(", mine.owned, mine.wanted"),
             rep = REPRESENTATIVE_PRINTING_JOIN,
+            // `held` needs no filter — `owned_by_card` carries it (migration
+            // 0010) — but `wanted` is this query's own aggregation over
+            // `desires`, so a hidden collection's wants would otherwise keep a
+            // card in the everything-view with `owned 0 / wanted N`.
+            live_wanted = in_live_collection("desires.collection_id"),
         );
         let mut qb: sqlx::QueryBuilder<'_, sqlx::Postgres> = sqlx::QueryBuilder::new(base);
         // Quick search: a plain name substring, not the catalog grammar (see the
@@ -1340,7 +1445,7 @@ impl CollectionStore for HostedBackend {
                     sum(h.quantity)::int AS quantity \
              FROM holdings h JOIN printings p ON p.id = h.printing_id \
              JOIN collections c ON c.id = h.collection_id \
-             WHERE p.oracle_id = ANY($1) \
+             WHERE p.oracle_id = ANY($1) AND c.deleted_at IS NULL \
              GROUP BY p.oracle_id, h.collection_id, c.name \
              ORDER BY quantity DESC, c.name",
         )
@@ -1377,7 +1482,13 @@ impl CollectionStore for HostedBackend {
     async fn needs(&self, collection_id: Id) -> ApiResult<NeedsView> {
         let mut tx = self.scoped_tx().await?;
         require_owned_collection(&mut tx, collection_id).await?;
-        let rows: Vec<NeedSql> = sqlx::query_as(
+        // `present_here` / `elsewhere` are collection-scoped aggregations in
+        // their own right, not re-derivations of `owned_by_card`, so the soft
+        // delete filter has to land here too (specs/collection-deletion.md is
+        // explicit about this pair). `d`/`ph` are scoped to `$1`, which
+        // `require_owned_collection` just proved live; `pe` spans every *other*
+        // collection and so carries the filter.
+        let rows: Vec<NeedSql> = sqlx::query_as(&format!(
             "WITH d AS ( \
                SELECT oracle_id, sum(quantity)::int AS desired \
                FROM desires WHERE collection_id = $1 GROUP BY oracle_id \
@@ -1390,7 +1501,7 @@ impl CollectionStore for HostedBackend {
              pe AS ( \
                SELECT p.oracle_id, sum(h.quantity)::int AS elsewhere \
                FROM holdings h JOIN printings p ON p.id = h.printing_id \
-               WHERE h.collection_id <> $1 GROUP BY p.oracle_id \
+               WHERE h.collection_id <> $1 AND {live} GROUP BY p.oracle_id \
              ) \
              SELECT d.oracle_id, c.name, d.desired, COALESCE(ph.present_here, 0) AS present_here, \
                     COALESCE(pe.elsewhere, 0) AS elsewhere \
@@ -1399,14 +1510,16 @@ impl CollectionStore for HostedBackend {
              LEFT JOIN pe ON pe.oracle_id = d.oracle_id \
              WHERE d.desired > COALESCE(ph.present_here, 0) \
              ORDER BY c.name",
-        )
+            live = in_live_collection("h.collection_id"),
+        ))
         .bind(collection_id)
         .fetch_all(&mut *tx)
         .await
         .map_err(upstream)?;
 
         // Per-location listing for the needed cards, in the user's OTHER
-        // collections — one query, grouped in Rust.
+        // **live** collections — one query, grouped in Rust. The rows here are
+        // "pull it from here" offers, so a hidden collection must not appear.
         let oracles: Vec<Uuid> = rows.iter().map(|r| r.oracle_id).collect();
         let locs: Vec<LocationSql> = sqlx::query_as(
             "SELECT p.oracle_id, h.collection_id, c.name AS collection_name, \
@@ -1414,6 +1527,7 @@ impl CollectionStore for HostedBackend {
              FROM holdings h JOIN printings p ON p.id = h.printing_id \
              JOIN collections c ON c.id = h.collection_id \
              WHERE h.collection_id <> $1 AND p.oracle_id = ANY($2) \
+               AND c.deleted_at IS NULL \
              GROUP BY p.oracle_id, h.collection_id, c.name \
              ORDER BY quantity DESC, c.name",
         )
@@ -1458,10 +1572,13 @@ impl CollectionStore for HostedBackend {
         let mut tx = self.scoped_tx().await?;
         // `o` reads the `owned_by_card` view — see the same note in
         // `all_cards`/`collection_tree` (specs/collection-api.md Findings): one
-        // shared "owned per card" source, not a re-derived sum here.
-        let rows: Vec<ShoppingSql> = sqlx::query_as(
+        // shared "owned per card" source, not a re-derived sum here, and the
+        // place the soft-delete filter for `owned` lives. `d` is this query's
+        // own aggregation over `desires` and carries its own.
+        let rows: Vec<ShoppingSql> = sqlx::query_as(&format!(
             "WITH d AS ( \
-               SELECT oracle_id, sum(quantity)::int AS desired_total FROM desires GROUP BY oracle_id \
+               SELECT oracle_id, sum(quantity)::int AS desired_total FROM desires \
+               WHERE {live} GROUP BY oracle_id \
              ), \
              o AS ( \
                SELECT oracle_id, owned FROM owned_by_card \
@@ -1471,7 +1588,8 @@ impl CollectionStore for HostedBackend {
              LEFT JOIN o ON o.oracle_id = d.oracle_id \
              WHERE d.desired_total > COALESCE(o.owned, 0) \
              ORDER BY c.name",
-        )
+            live = in_live_collection("desires.collection_id"),
+        ))
         .fetch_all(&mut *tx)
         .await
         .map_err(upstream)?;
@@ -1480,7 +1598,8 @@ impl CollectionStore for HostedBackend {
         let wants: Vec<WantedBySql> = sqlx::query_as(
             "SELECT de.oracle_id, c.name AS collection_name \
              FROM desires de JOIN collections c ON c.id = de.collection_id \
-             WHERE de.oracle_id = ANY($1) GROUP BY de.oracle_id, c.name ORDER BY c.name",
+             WHERE de.oracle_id = ANY($1) AND c.deleted_at IS NULL \
+             GROUP BY de.oracle_id, c.name ORDER BY c.name",
         )
         .bind(&oracles)
         .fetch_all(&mut *tx)
@@ -1750,7 +1869,7 @@ impl CollectionStore for HostedBackend {
                     h.condition::text AS condition, h.language, h.board::text AS board, \
                     h.quantity, col.kind::text AS kind \
              FROM holdings h JOIN collections col ON col.id = h.collection_id \
-             WHERE h.id = $1",
+             WHERE h.id = $1 AND col.deleted_at IS NULL",
         )
         .bind(holding_id)
         .fetch_optional(&mut *tx)
@@ -1804,7 +1923,7 @@ impl CollectionStore for HostedBackend {
             "SELECT d.collection_id, d.oracle_id, d.printing_id, d.board::text AS board, \
                     d.quantity, col.kind::text AS kind \
              FROM desires d JOIN collections col ON col.id = d.collection_id \
-             WHERE d.id = $1",
+             WHERE d.id = $1 AND col.deleted_at IS NULL",
         )
         .bind(desire_id)
         .fetch_optional(&mut *tx)
@@ -2199,19 +2318,37 @@ fn at_item(index: usize, e: ApiError) -> ApiError {
     }
 }
 
-/// The most-recent collection this card was moved *into* the given collection
-/// from (for teardown "return to previous"), or `None` if there's no history.
+/// The most-recent **live** collection this card was moved *into* the given
+/// collection from (for teardown "return to previous"), or `None` if there's no
+/// such history — in which case the caller falls back to the Inbox.
+///
+/// The live filter matters more here than anywhere else in this file: this is
+/// the one read whose result becomes a *write destination*. Returning a
+/// soft-deleted collection would relocate real copies into a place the user
+/// cannot see (specs/collection-deletion.md), and `ReturnToPrevious` is reused
+/// verbatim as a delete disposition in the next step of that spec.
+///
+/// **Precisely what a hidden source does here:** the filter sits in the `WHERE`,
+/// ahead of `ORDER BY created_at DESC LIMIT 1`, so a hidden previous location is
+/// *skipped over* and the next-most-recent **live** source wins — it does not
+/// abort the lookup. The Inbox fallback fires only when the card has no live
+/// source in its whole history. That is the intended reading of "return to
+/// previous" (the most recent place the copies could actually go back to), but
+/// it is not the same as "treat a hidden source as no history", so step 3 should
+/// plan against this behaviour rather than the simpler one.
 async fn previous_location(
     tx: &mut Transaction<'static, Postgres>,
     collection_id: Id,
     grain: &Grain,
 ) -> ApiResult<Option<Uuid>> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
+    let row: Option<(Uuid,)> = sqlx::query_as(&format!(
         "SELECT from_collection_id FROM moves \
          WHERE to_collection_id = $1 AND printing_id = $2 AND finish = $3::card_finish \
            AND condition = $4::card_condition AND language = $5 AND from_collection_id IS NOT NULL \
+           AND {live} \
          ORDER BY created_at DESC LIMIT 1",
-    )
+        live = in_live_collection("moves.from_collection_id"),
+    ))
     .bind(collection_id)
     .bind(grain.printing_id)
     .bind(&grain.finish)
@@ -2234,10 +2371,16 @@ async fn inbox_id(tx: &mut Transaction<'static, Postgres>, user_id: Uuid) -> Api
     .execute(&mut **tx)
     .await
     .map_err(upstream)?;
-    let (id,): (Uuid,) = sqlx::query_as("SELECT id FROM collections WHERE is_inbox")
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(upstream)?;
+    // `deleted_at IS NULL` is belt-and-braces: the Inbox is undeletable, so a
+    // soft-deleted one cannot exist (the `collections_one_inbox` index is left
+    // unfiltered for exactly that reason). If one ever did, this read failing is
+    // the right outcome — silently handing out a hidden Inbox as the fallback
+    // destination for teardown and `ToParent` would not be.
+    let (id,): (Uuid,) =
+        sqlx::query_as("SELECT id FROM collections WHERE is_inbox AND deleted_at IS NULL")
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(upstream)?;
     Ok(id)
 }
 
@@ -2502,18 +2645,21 @@ const REPRESENTATIVE_PRINTING_JOIN: &str = " LEFT JOIN LATERAL ( \
 
 impl HostedBackend {
     /// Disambiguate a write that affected no rows: an existing-but-Inbox row is a
-    /// `Conflict` (Inbox is protected), an absent/not-owned row is `NotFound`.
-    /// `op` is the past-tense verb for the message ("renamed", "deleted", …).
+    /// `Conflict` (Inbox is protected), an absent/not-owned/**soft-deleted** row
+    /// is `NotFound`. `op` is the past-tense verb for the message ("renamed",
+    /// "deleted", …).
     async fn absent_or_inbox(
         &self,
         tx: &mut Transaction<'static, Postgres>,
         id: Id,
         op: &str,
     ) -> ApiError {
-        match sqlx::query_as::<_, (bool,)>("SELECT is_inbox FROM collections WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&mut **tx)
-            .await
+        match sqlx::query_as::<_, (bool,)>(
+            "SELECT is_inbox FROM collections WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
         {
             Ok(Some((true,))) => ApiError::Conflict(format!("the Inbox cannot be {op}")),
             Ok(Some((false,))) => ApiError::NotFound("collection".into()),
@@ -2815,10 +2961,6 @@ fn decode_cursor<T: serde::de::DeserializeOwned>(s: &str) -> ApiResult<T> {
     serde_json::from_slice(&bytes).map_err(|_| ApiError::Validation("invalid cursor".into()))
 }
 
-/// Reject an operation targeting a collection the caller doesn't own — RLS makes
-/// a non-owned collection invisible, so this EXISTS both checks ownership and
-/// rejects a bad id. (The `holdings`/`desires` RLS policies only gate on their
-/// own `user_id`, not the collection's, so this guard is load-bearing.)
 /// Lazily provision the caller's one Inbox (idempotent via the
 /// `collections_one_inbox` partial unique index). Every "first `/my` request"
 /// read runs this — `list_collections` and `collection_tree`
@@ -2836,15 +2978,28 @@ async fn ensure_inbox(tx: &mut Transaction<'static, Postgres>, user_id: Uuid) ->
     Ok(())
 }
 
+/// Reject an operation targeting a collection the caller doesn't own **or that
+/// has been soft-deleted** — RLS makes a non-owned collection invisible and
+/// `deleted_at IS NULL` makes a hidden one invisible, so this EXISTS settles
+/// ownership, liveness and a bad id in one read, with one answer: `NotFound`.
+/// (The `holdings`/`desires` RLS policies only gate on their own `user_id`, not
+/// the collection's, so this guard is load-bearing.)
+///
+/// A soft-deleted collection failing here *exactly* as a non-existent one does
+/// is what stops it ever being a move destination or any other write target
+/// (specs/collection-deletion.md → "The read path"), and the doc comment this
+/// function had lost — it had drifted onto `ensure_inbox` above — is restored
+/// here with it.
 async fn require_owned_collection(
     tx: &mut Transaction<'static, Postgres>,
     collection_id: Id,
 ) -> ApiResult<()> {
-    let found: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM collections WHERE id = $1")
-        .bind(collection_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(upstream)?;
+    let found: Option<(i32,)> =
+        sqlx::query_as("SELECT 1 FROM collections WHERE id = $1 AND deleted_at IS NULL")
+            .bind(collection_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(upstream)?;
     if found.is_none() {
         return Err(ApiError::NotFound("collection".into()));
     }
@@ -3036,5 +3191,78 @@ mod owned_definition_guard {
              filter (specs/collection-deletion.md) lands in exactly one place. See \
              specs/collection-api.md Findings for the collapse this test guards."
         );
+    }
+}
+
+/// Guards for collection soft deletion (specs/collection-deletion.md, step 2).
+/// Both are structural — they read this file's and the migration's own source —
+/// so they run under plain `cargo test` with no `DATABASE_URL`, the same trick
+/// `owned_definition_guard` above uses.
+#[cfg(test)]
+mod soft_delete_guard {
+    /// Every ownership/existence lookup of a collection by id must exclude
+    /// soft-deleted rows. This is the guard the spec singles out: a hidden
+    /// collection has to fail `require_owned_collection` (and the create/reparent
+    /// parent checks, which share the idiom) *exactly* as a non-existent one
+    /// does, or it stays reachable as a move destination and a write target.
+    ///
+    /// The needle is assembled at runtime, not written as one literal:
+    /// `include_str!` pulls in this test's own source, and a contiguous literal
+    /// would match itself.
+    #[test]
+    fn collection_ownership_lookups_exclude_soft_deleted() {
+        let src = include_str!("hosted.rs");
+        let normalized = src
+            .replace('\\', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let lookup = format!("{} {}", "SELECT 1 FROM collections", "WHERE id = $1");
+        let filtered = format!("{lookup} AND deleted_at IS NULL");
+        let total = normalized.matches(&lookup).count();
+        let guarded = normalized.matches(&filtered).count();
+
+        assert!(
+            total > 0,
+            "sanity: `{lookup}` is the ownership-check idiom and should still exist in hosted.rs"
+        );
+        assert_eq!(
+            total,
+            guarded,
+            "{} of {total} collection ownership lookups in hosted.rs are missing \
+             `AND deleted_at IS NULL`. A soft-deleted collection must be as invisible \
+             to an ownership check as a non-existent one (specs/collection-deletion.md \
+             → \"The read path\"), otherwise it stays usable as a move destination or \
+             a write target.",
+            total - guarded,
+        );
+    }
+
+    /// The owned-per-oracle filter lives in exactly one place — the
+    /// `owned_by_card` view — so that one place is worth pinning. Two ways to
+    /// break it silently: drop the `WHERE c.deleted_at IS NULL` (hidden cards
+    /// keep counting as owned everywhere at once), or restate the view without
+    /// `security_invoker` (it then runs as its RLS-exempt owner and every user
+    /// sees every user's counts).
+    #[test]
+    fn migration_0010_filters_and_invoker_scopes_the_owned_view() {
+        let sql = include_str!("../../../migrations/0010_collection_soft_delete.sql");
+        let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        for needle in [
+            "ALTER TABLE collections ADD COLUMN deleted_at timestamptz",
+            "CREATE INDEX collections_user_parent_live_idx",
+            "CREATE OR REPLACE VIEW owned_by_card WITH (security_invoker = true)",
+            "WHERE c.deleted_at IS NULL",
+        ] {
+            assert!(
+                normalized.contains(needle),
+                "migrations/0010_collection_soft_delete.sql no longer contains `{needle}`. \
+                 Soft deletion's column, its partial index, and the single filtered + \
+                 invoker-scoped `owned_by_card` definition are what the whole read-path \
+                 story rests on (specs/collection-deletion.md → Data model)."
+            );
+        }
     }
 }

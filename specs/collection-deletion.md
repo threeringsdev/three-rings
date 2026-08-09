@@ -329,3 +329,123 @@ risky part lands under no time pressure.
 - *(resolved — 2026-08-05)*
   **Retention.** No purge is specified. Policy will be decided once a fully working
   POC of the app is implemented (currently there are no users).
+
+- *(open — raised 2026-08-09, step 2)*
+  **What should `undo_move` do when the move's other end is now hidden?**
+  `undo_one` reverses a ledger row by writing straight into
+  `from_collection_id` / `to_collection_id` — it is the one write path in
+  `hosted.rs` that never goes through `require_owned_collection`, because the
+  ids come from the ledger rather than the caller. Undoing an *old, unrelated*
+  move whose source or destination has since been soft-deleted would therefore
+  put copies back into a collection the user cannot see. Step 2 deliberately did
+  not guess: the delete's **own** undo clears `deleted_at` first (so it is
+  unaffected), and the three plausible answers for the unrelated case — refuse,
+  redirect to the Inbox, or restore the collection — are a product decision, not
+  an implementation detail. Needs a ruling before step 3 ships, since that is
+  when `deleted_at` starts being set.
+
+## Findings
+
+- 2026-08-09 — **Step 2 landed: migration `0010` + the read-path filter, inert**
+  (`P6-110`, after `P6-039`'s owned collapse). Nothing sets `deleted_at`, so
+  every filter is currently a no-op — verified as such on the dev branch by
+  setting the column by hand and putting it back (transcript below).
+  - **Migration `0010_collection_soft_delete.sql`** is exactly the spec's DDL —
+    `deleted_at timestamptz`, the partial `collections_user_parent_live_idx` —
+    plus the **`owned_by_card` redefinition** the spec's own "the filter lands
+    once, in the view" rule requires. `CREATE OR REPLACE VIEW` (not DROP +
+    CREATE) so 0003's `GRANT SELECT … TO app_runtime` survives, and
+    `WITH (security_invoker = true)` restated explicitly rather than assumed:
+    reloptions come from the statement, and a view that silently lost the
+    invoker flag would run as its RLS-exempt owner and show every user every
+    user's counts. Confirmed post-apply on dev: `pg_class.reloptions` is still
+    `{security_invoker=true}` and `pg_get_viewdef` carries
+    `WHERE c.deleted_at IS NULL`.
+  - **Applied to dev the project way** — `scripts/migrate.sh`'s path
+    (`server --migrate`, sqlx embedded migrations, owner role) — so
+    `_sqlx_migrations` now records version 10 and the migration stays applied.
+    Applying it by hand in `psql` would have left sqlx's ledger out of step and
+    broken the next `--migrate`.
+  - **Filtered read sites**, beyond the ones the task named
+    (`collection_tree`, `list_collections`, `require_owned_collection`,
+    `inbox_id`, `needs`, `suggested_destinations`, `search` via the view):
+    `card_detail`'s ownership block, `collection_view` (metadata, children, the
+    `descendants` CTE in both its page query and its totals, and the totals'
+    `elsewhere` half — the same board-blind arithmetic `needs` uses, so it needed
+    the same treatment), `all_cards` (`wanted` + the per-location read),
+    `shopping_list` (`d` + `wanted_by`), `holdings_of_oracle`,
+    `set_holding_quantity`, `move_holding`, `set_holding_board`,
+    `set_desire_board`, `absent_or_inbox`, the tree writes
+    (`rename`/`delete`/`reparent`/`reorder`, plus `create`'s parent check and
+    its `max(position)` sibling scan), and — the one that matters most —
+    **`previous_location`**, which is the only read in the file whose result
+    becomes a *write destination*. Unfiltered it would have sent
+    `ReturnToPrevious` copies into a hidden collection, and that mode is reused
+    verbatim as a delete disposition in step 3.
+  - **Deliberately left unfiltered**, with the reasons in comments:
+    `reparent_collection`'s ancestor walk (a cycle guard is strictly safer
+    walking hidden ancestors too — filtering could cut the chain and let a cycle
+    through), and every aggregate already scoped to a single `collection_id`
+    that a `require_owned_collection` / `collection_view` metadata read has just
+    proved live (`teardown`'s snapshot, `holding_take`/`holding_add`, the
+    `present`/`want` CTEs, `assign_tag`'s in-deck check). The tree's `present`
+    sub-select needs nothing either: it is LEFT JOINed *from* the filtered
+    `collections` scan.
+  - **Shape of the filter.** Where a query already joins `collections`, it is a
+    plain `c.deleted_at IS NULL`. Where it reads `holdings`/`desires` alone, it
+    is a correlated `EXISTS` built by one helper (`in_live_collection`) so the
+    predicate has a single definition and a single doc comment.
+  - **Tests (no DB, so they run in CI):** `soft_delete_guard` in `hosted.rs` —
+    (a) every `SELECT 1 FROM collections WHERE id = $1` ownership lookup carries
+    `AND deleted_at IS NULL` (the guard the spec singles out; needle assembled at
+    runtime so `include_str!` can't self-match, the same trap `P6-039` hit), and
+    (b) migration `0010` still contains the column, the partial index, and the
+    filtered + invoker-scoped view. `owned_definition_guard` stays green.
+  - **Dev-branch evidence** (as `app_runtime`, RLS FORCED, each pass inside one
+    transaction opening with `set_config('app.user_id', …, true)` — i.e.
+    `scoped_tx` exactly). Subject: "Depth Box", holding *Amped Raptor* ×2 (held
+    **nowhere else**) and *Altar of the Goyf* ×2 (4 elsewhere), wanting *Amped
+    Raptor* ×3, with a child chain Depth Shelf → Depth Drawer.
+    | Read | live | `deleted_at = now()` | restored |
+    |---|---|---|---|
+    | `list_collections` / `collection_tree` rows | 10 (Depth Box present 4) | 9, gone | 10 |
+    | tree `shopping_short` badge | 4 | 3 | 4 |
+    | `require_owned_collection` | 1 row (OK) | **0 rows → NotFound** | 1 row |
+    | `collection_view` metadata | 1 row | 0 rows → 404 | 1 row |
+    | `owned_by_card` | Raptor 2, Altar 6 | **Raptor: no row**, Altar 4 | 2 / 6 |
+    | `card_detail` ownership block | 2 rows | 0 rows | 2 rows |
+    | `all_cards` (owned/wanted) | 2 / 3 | row gone entirely | 2 / 3 |
+    | `shopping_list` row | desired 3, owned 2 | row gone | desired 3, owned 2 |
+    | `needs`/totals `elsewhere` | Raptor 2, Altar 6 | Raptor gone, Altar 4 | 2 / 6 |
+    | `suggested_destinations` | Depth Box offered | **no destinations** | offered |
+    | `holdings_of_oracle` | 2 rows / 2 copies | 0 / 0 | 2 / 2 |
+    | `inbox_id` | 1 | 1 | 1 |
+    A second pass hid the *child* (Depth Shelf) instead: `collection_view`'s
+    children 1 → 0, `descendants` 2 → 0 and `present_rollup` 4 → 0, restored on
+    clearing the column. Data left exactly as found (14 collections, 0
+    soft-deleted, holdings/desires/moves untouched).
+  - **Surprise worth writing down:** `SELECT … FOR UPDATE` with the correlated
+    `EXISTS` appended (`move_holding`) is accepted by Postgres — the lock applies
+    to `holdings`, the subquery is not locked — and returns zero rows for a
+    holding in a hidden collection, so the call maps to `NotFound("holding")`.
+    Checked live rather than assumed, because `FOR UPDATE` rejects several other
+    query shapes outright.
+  - **Also fixed in passing:** `require_owned_collection`'s doc comment had
+    drifted onto `ensure_inbox` (two doc blocks had merged above the wrong
+    function); it is back on the function it describes, now stating the liveness
+    rule too.
+  - **Known interim state, by design:** because nothing re-parents children yet,
+    a hand-set `deleted_at` on a parent leaves its children visible in the tree
+    with a hidden parent. Step 3's re-parenting is what closes that, and it is
+    unreachable in the shipped app until then.
+  - **Interim-state notes for steps 3–5** (from the review, all reachable only
+    once something sets the column): the `descendants` recursive CTE **cuts at a
+    hidden node**, so a live grandchild under a hidden parent drops out of
+    `present_rollup` while still rendering in the tree — the same
+    hidden-parent gap as above, seen from the counts side, and re-parenting
+    closes both at once. A hypothetically hidden Inbox would surface as an opaque
+    500, since `inbox_id`'s `fetch_one` has no row to return rather than a typed
+    error, so step 3 must keep the Inbox undeletable rather than rely on a nice
+    message. And `create_collection`'s `max(position)` scan now ignores hidden
+    siblings, so a step-5 restore can hand two live siblings the same `position`
+    — harmless, because `ORDER BY position, name` breaks the tie.
