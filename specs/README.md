@@ -6,39 +6,35 @@ Feature specifications and project planning for Three Rings.
 
 - One spec per file, named descriptively: `short-name.md`. The filename is the spec's stable identifier — never renamed once referenced.
 - Start from `TEMPLATE.md`.
-- Specs contain **no task lists**. Work needed to finish a draft goes in the spec's Open questions. All work tracking lives in TODO files:
-   - [TODO.md](TODO.md)
-   - [TODO-Phase-5.md](Phase 5)
-   - [TODO-Phase-6.md](Phase 6)
+- Specs contain **no task lists**. Work needed to finish a draft goes in the spec's Open questions. Work tracking:
+   - **Workbook** — the active execution queue (`workbook next`; see "Working the queue" below and [.workbook/guidelines.md](../.workbook/guidelines.md))
+   - [TODO.md](TODO.md) — phase history (0–4) and the parked "Later" items
+   - [TODO-Phase-5.md](TODO-Phase-5.md) — the Phase 5 record
+   - [TODO-Phase-6.md](TODO-Phase-6.md) — the Phase 6 historical record (queue migrated to Workbook 2026-08-06)
 - A spec moves through: `draft` → `accepted` → `implemented` (status noted at the top of each file).
   * `draft` — under discussion; **no implementation work may be based on it**
   * `accepted` — design settled; tasks gated on it may proceed (accepting a spec is a human decision)
   * `implemented` — built; kept as reference
 - An `accepted` spec may retain open questions **only** if each is annotated *(resolved during execution — <where>)*; unannotated open questions block acceptance.
-- **Execution order lives in exactly one place: [TODO.md](TODO.md).** This index is a registry, not a schedule.
+- **Execution order lives in exactly one place: the Workbook queue** (rank order, walked by `workbook next`). This index is a registry, not a schedule.
 
 ## Working the queue — process for agents (and humans)
 
-Anyone told to "work on the next available task" follows this, with no other information required:
+Anyone told to "work on the next available task" follows this, with no other information required. The queue lives in **Workbook**; canonical statuses, priorities and the CLI lifecycle are in [.workbook/guidelines.md](../.workbook/guidelines.md).
 
-1. Read `TODO.md`. Phases are ordered top to bottom; Later phases are separated into their own files; tasks within a phase are ordered top to bottom.
-2. **The next available task is the first task marked `[ ]`** in the topmost phase that contains one, skipping any task that is **blocked**. A task is blocked if:
-   - a listed prerequisite task is not yet `[x]`, or
-   - any spec in its `(specs: ...)` annotation does not have status `accepted` or `implemented`. Spec status is read from the spec file's header — it is never duplicated in TODO.md.
-
-   Tasks with no `(specs: ...)` annotation are ungated. Tasks marked `[~]` are in progress — do not start them without being asked; do not skip past a `[~]` task's phase, work the next `[ ]` in it.
-
-   **If every `[ ]` task is blocked by a `draft` spec**, the queue's real next action is spec review: report which specs are blocking, offer to resolve their open questions and finalize the draft, and wait for the human to flip the status to `accepted`. Never change a spec's status to `accepted` yourself.
-3. Before starting: change the task's `[ ]` to `[~]` and commit that change with message `start: <task summary>`.
-4. Read the spec the task links to (and its `Depends on:` specs) before writing any code.
-5. Definition of done — ALL of:
+1. Run `workbook next --json`. It returns the next available task: the highest-priority `ready` task in rank order whose dependencies are all `done` (rank order preserves the migrated Phase 6 execution sequence). Read the full task with `workbook show <id> --json` — the description carries the original entry's evidence, file:line references and acceptance criteria.
+2. **Spec gating still applies.** The description's header line names the task's specs (`Specs: specs/....md`); every one must have status `accepted` or `implemented`, read from the spec file's header. If a needed spec is `draft`, the queue's real next action is spec review: report which spec blocks, offer to resolve its open questions, and wait for the human to flip the status. Never change a spec's status to `accepted` yourself.
+3. Two statuses are deliberately not offered by `next`: `blocked` tasks labeled `decision-first` are waiting on a maintainer ruling — surface them, do not work them; `backlog` tasks labeled `parked` are deliberately deferred, each description carrying the trigger that unparks it.
+4. Before starting: claim the task with `workbook update <id> --status in-progress --json`.
+5. Read the spec the task links to (and its `Depends on:` specs) before writing any code.
+6. Definition of done — ALL of:
    - The work is committed (conventional message describing the change).
-   - The task's `[~]` is changed to `[x]` in the same commit as the final work.
    - Any findings, decisions, or surprises are recorded in the linked spec (Findings/Open questions sections).
-   - New follow-up work discovered is added as new `[ ]` tasks in the appropriate phase — never silently absorbed.
-6. If a task is ambiguous after reading its spec, **stop and ask** — do not guess. Record the question in the spec's Open questions first.
+   - New follow-up work discovered is filed as a new Workbook task (`workbook create … --status backlog`) — never silently absorbed.
+   - The task is moved to `in-review` when the PR is ready for human review, and to `done` only after the work is accepted and merged.
+7. If a task is ambiguous after reading its spec, **stop and ask** — do not guess. Record the question in the spec's Open questions first.
 
-Task state legend: `[ ]` available · `[~]` in progress · `[x]` done.
+The retired TODO files keep their `[ ]`/`[~]`/`[x]` checkbox legend as historical record. The only still-live checkbox entries are TODO.md's parked "Later" items; promote one by filing it in Workbook.
 
 ## Index
 

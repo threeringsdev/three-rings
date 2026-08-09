@@ -11,7 +11,7 @@ Authoritative sources, in order:
 
 - [`README.md`](README.md) — what the product is and the crate architecture.
 - [`specs/README.md`](specs/README.md) — how to pick the next task ("Working the queue").
-- [`specs/TODO.md`](specs/TODO.md) — the execution queue (single source of truth for *what next*).
+- **Workbook** — the execution queue (single source of truth for *what next*): `workbook next`; lifecycle in [`.workbook/guidelines.md`](.workbook/guidelines.md). ([`specs/TODO.md`](specs/TODO.md) keeps phase history and parked items.)
 - [`specs/`](specs/) — one spec per feature; the linked spec is required reading before its task.
 - [`specs/delivery-pipeline.md`](specs/delivery-pipeline.md) — CI, artifacts, deploy, this contract.
 - [`specs/dev-environment.md`](specs/dev-environment.md) + [`.devcontainer/README.md`](.devcontainer/README.md) — the environment and in-container auth.
@@ -182,43 +182,41 @@ CI now owns the delivery artifacts; host builds are optional local development,
 ## Working the queue
 
 Full rules in [`specs/README.md`](specs/README.md) ("Working the queue"); the
-queue itself is [`specs/TODO.md`](specs/TODO.md). Summary:
+queue lives in **Workbook** (see the Workbook section below). Summary:
 
-- **Selection.** Phases run top→bottom, tasks within a phase top→bottom. The
-  next available task is the **first `[ ]`** in the topmost phase containing one,
-  skipping **blocked** tasks. A task is blocked if a listed prerequisite isn't
-  `[x]`, or any spec in its `(specs: ...)` annotation is not `accepted` or
-  `implemented` (spec status is read from the spec file header, never duplicated
-  in TODO.md). Tasks without a `(specs: ...)` annotation are ungated.
-- **`[~]` = in progress.** Don't start one unasked, and don't skip past its
-  phase — work the next `[ ]` within it.
-- **All `[ ]` blocked by a `draft` spec** → the real next action is spec review:
-  report which specs block, offer to resolve their open questions, and wait for
-  the human to flip status to `accepted`. **Never** set a spec to `accepted`
-  yourself.
-- **Before starting:** change the task's `[ ]` to `[~]` and commit that alone with
-  message `start: <task summary>`.
+- **Selection.** `workbook next --json` returns the next available task — the
+  highest-priority `ready` task in rank order whose dependencies are all
+  `done`. Rank order preserves the Phase 6 execution sequence. Read the full
+  task with `workbook show <id> --json`; the description carries the original
+  entry's evidence and names its gating specs.
+- **Spec gating.** Every spec in the description's `Specs:` header must be
+  `accepted` or `implemented` (status read from the spec file header). A
+  `draft` spec blocks the task; the real next action is then spec review, and
+  only the human flips a spec to `accepted`.
+- **`blocked` + `decision-first`** = waiting on a maintainer ruling — report,
+  don't work. **`backlog` + `parked`** = deferred until the trigger in its
+  description fires. `next` offers neither.
+- **Before starting:** claim with `workbook update <id> --status in-progress --json`.
 - **Read the linked spec and its `Depends on:` specs** before writing any code.
-- **Definition of done — ALL of:** work committed (conventional message); the
-  task's `[~]` → `[x]` in the *same commit* as the final work; findings/decisions/
-  surprises recorded in the linked spec (Findings / Open questions); newly
-  discovered follow-up work added as new `[ ]` tasks in the right phase (never
-  silently absorbed).
+- **Definition of done — ALL of:** work committed (conventional message);
+  findings/decisions/surprises recorded in the linked spec (Findings / Open
+  questions); newly discovered follow-up work filed as new Workbook tasks
+  (never silently absorbed); the task moved to `in-review` when the PR is
+  ready, and to `done` only after the work is accepted and merged.
 - **Ambiguous after reading the spec?** Stop and ask — do not guess. Record the
   question in the spec's Open questions first.
-
-State legend: `[ ]` available · `[~]` in progress · `[x]` done.
 
 ## Commit convention
 
 Conventional Commits — `type(scope): summary`, imperative and lowercase; scope
 optional. Types in use in this repo: `docs`, `design`, `chore`, plus `feat` /
 `fix` as code lands (e.g. `docs(specs): …`, `design(wireframes): …`,
-`chore(design): …`). Two repo-specific rules:
+`chore(design): …`). One repo-specific rule:
 
-- Flipping a task to in-progress is its own commit: `start: <task summary>`.
-- The commit that finishes a task flips its `[~]` → `[x]` in TODO.md **in that
-  same commit**.
+- Task state lives in Workbook, not in commits: claim with
+  `workbook update <id> --status in-progress`, then `in-review` → `done`. The
+  old `start:` commit and the TODO.md `[~]`/`[x]` flips are retired with the
+  markdown queue.
 
 PRs are **squash-merged**, so the PR *title* becomes the commit message on
 `main` — format it as a conventional commit too. (History shows leaked GitHub

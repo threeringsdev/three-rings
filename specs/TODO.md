@@ -1,8 +1,8 @@
-# Project TODO — execution queue
+# Project TODO — phase history
 
-**This file is the single source of truth for what to work on next.** The selection algorithm, spec gating, and definition of done are in [README.md](README.md) ("Working the queue"). State legend: `[ ]` available · `[~]` in progress · `[x]` done.
+**The active execution queue lives in Workbook** (`workbook next`; selection process in [README.md](README.md) "Working the queue", CLI lifecycle in [.workbook/guidelines.md](../.workbook/guidelines.md)). This file remains the record of phases 0–4 and holds the parked "Later" items at the bottom — promote one by filing it in Workbook. State legend: `[ ]` available · `[~]` in progress · `[x]` done.
 
-Phases execute top to bottom; tasks within a phase top to bottom. A task's `(specs: ...)` lists every spec it is gated on — all must be `accepted` (status is read from the spec files, not recorded here). Tasks without a specs annotation are ungated.
+A task's `(specs: ...)` lists every spec it is gated on — all must be `accepted` (status is read from the spec files, not recorded here). Tasks without a specs annotation are ungated.
 
 ## Phase 0 — dev environment (devcontainer)
 
@@ -81,9 +81,9 @@ is done — spec `implemented`.)
 
 See [TODO-Phase-5.md](TODO Phase 5)
 
-## Phase 5 discoveries
+## Phase 5 discoveries (Phase 6)
 
-See [TODO-Phase-6.md](TODO Phase 6)
+Migrated to the **Workbook queue** on 2026-08-06 — every task is `P6-NNN: …` there, labeled `phase-6`. [TODO-Phase-6.md](TODO-Phase-6.md) keeps the historical record (Done/Dropped ledgers, provenance, unsettled measurements).
 
 ## Later / Parked (review before promoting to a new phase)
 
