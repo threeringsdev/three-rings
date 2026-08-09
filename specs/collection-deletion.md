@@ -221,23 +221,27 @@ touching `collections`, `holdings` or `desires` must exclude soft-deleted
 collections**, or a deleted collection's cards keep counting toward totals the
 user can no longer see or reach.
 
-The highest-risk sites are the **four independent definitions of "owned"**
-(`P6-039`):
+**`P6-039` closed this out.** Owned-per-oracle now comes from exactly **one**
+source: the `owned_by_card` SQL view (`migrations/0003_collections.sql`,
+`security_invoker`). `search`/`card_summary` (via `owned_by_oracle`) and
+`collection_view` already read it directly; `collection_tree`'s
+`shopping_short` badge, `all_cards`, and `shopping_list` were each re-deriving
+`sum(holdings.quantity)` joined through `printings`, grouped by oracle id —
+`P6-039` collapsed all three onto `SELECT oracle_id, owned FROM owned_by_card`.
+A structural test (`owned_definition_guard` in `hosted.rs`) fails `cargo test`
+if an inline copy of that aggregation reappears.
 
-| Site | What it is |
-|---|---|
-| `hosted.rs:100` | the `owned_by_card` view — `search` and `card_summary` |
-| `hosted.rs:1274` | `all_cards`' inline `held` CTE |
-| `hosted.rs:417` | `collection_tree`'s `shopping_short` `o` CTE |
-| `hosted.rs:1458` | `shopping_list`'s `o` CTE |
+So the future `deleted_at IS NULL` filter for owned-per-oracle lands **exactly
+once, in the view definition** (a migration), not scattered across `hosted.rs`.
 
-They agree today with nothing enforcing that they continue to. Adding the same
-filter to four places and missing one produces owned counts that silently
-disagree between the catalog, `/my`, the tree and the shopping list — a bug with
-no error and no failing test.
-
-**Therefore `P6-039` is a prerequisite, not a sibling.** Collapse the four onto
-one shared source first, then add the filter once.
+**Caution — "one place" covers owned-per-oracle only.** `needs`'
+`present_here`/`elsewhere` CTEs and `suggested_destinations`' `desired`/
+`present` CTEs are collection-scoped aggregations over `holdings` in their own
+right (present-in-this-collection, present-elsewhere, per-collection demand) —
+they are not re-derivations of `owned_by_card` and `P6-039` deliberately left
+them alone (see specs/collection-api.md Findings, 2026-08-09). Each of these
+still needs its own `deleted_at IS NULL` handling when this task lands; do not
+assume the view fix covers them.
 
 Other sites needing the filter: `collection_tree`, `list_collections`,
 `require_owned_collection`, `inbox_id`, `needs`, `suggested_destinations`, and

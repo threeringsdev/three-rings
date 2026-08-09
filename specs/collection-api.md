@@ -362,3 +362,26 @@ resolves.
   - **Follow-ups filed in TODO:** keyset for needs/shopping if they grow; the
     native `401` silent-refresh (data-access-backends' open item) now has real
     session endpoints to exercise it against.
+
+- 2026-08-09 — **Collapsed the four "owned per card" definitions onto
+  `owned_by_card`** (P6-039, prep for [collection-deletion](collection-deletion.md)'s
+  `deleted_at IS NULL` filter, which now only has to land once). `hosted.rs`
+  had **four definitions total, counting the view itself**: the canonical
+  `owned_by_card` view (read via the shared `owned_by_oracle` helper, backing
+  `card_summary`/`search`) plus **three inline copies** that each re-derived
+  "sum holdings quantity, joined through printings, grouped by oracle id" by
+  hand — `collection_tree`'s shopping-short badge, `all_cards`, and
+  `shopping_list`. All three now select `oracle_id, owned FROM owned_by_card`
+  instead. `collection_view`'s `held` CTE (near its own
+  `LEFT JOIN owned_by_card`) turned out **not** to be a fourth inline copy —
+  it is collection-scoped `present`-in-this-collection data joined to
+  `printings` for its `oracle_id`, a different computation from the global
+  `owned` aggregate, and was left alone (`collection_view` already read
+  `owned_by_card` directly for its actual `owned` column). Added a structural
+  regression test
+  (`owned_definition_guard` in `hosted.rs`) that greps the file's own source
+  (via `include_str!`, whitespace-normalized) for the unfiltered
+  `holdings`⋈`printings` grouped-by-oracle idiom and fails `cargo test` if it
+  reappears — no DB needed, so it runs in CI. The one surprise: the guard's own
+  literal needle self-matched on first pass (`include_str!` includes the test
+  itself), fixed by assembling the needle from two halves at runtime.

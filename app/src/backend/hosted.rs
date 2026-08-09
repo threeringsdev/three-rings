@@ -410,13 +410,16 @@ impl CollectionStore for HostedBackend {
 
         // The badge is a COUNT over the same short-card rule `shopping_list`
         // renders (total desired − owned > 0, per oracle) — keep them in step.
+        // `o` reads the `owned_by_card` view (security_invoker, RLS-scoped to
+        // the caller inside this `scoped_tx`) rather than re-deriving the sum
+        // from `holdings`/`printings` — the one shared source every "owned per
+        // card" query in this file reads (specs/collection-api.md Findings).
         let (shopping_short,): (i64,) = sqlx::query_as(
             "WITH d AS ( \
                SELECT oracle_id, sum(quantity) AS desired_total FROM desires GROUP BY oracle_id \
              ), \
              o AS ( \
-               SELECT p.oracle_id, sum(h.quantity) AS owned \
-               FROM holdings h JOIN printings p ON p.id = h.printing_id GROUP BY p.oracle_id \
+               SELECT oracle_id, owned FROM owned_by_card \
              ) \
              SELECT count(*) FROM d LEFT JOIN o ON o.oracle_id = d.oracle_id \
              WHERE d.desired_total > COALESCE(o.owned, 0)",
@@ -1267,14 +1270,16 @@ impl CollectionStore for HostedBackend {
         // shopping list is made of, and the collection view lists desired rows
         // the same way). Such a row is owned 0 / no locations / wanted N.
         //
-        // Neither CTE filters by user — both tables are RLS-scoped and this
-        // runs inside `scoped_tx`, so the caller's own rows are all that exist
-        // here. The catalog joins (`cards`, `printings`) are unscoped by design.
+        // Neither CTE filters by user — `wanted` reads the RLS-scoped `desires`
+        // table directly, `held` reads the security-invoker `owned_by_card`
+        // view (itself over RLS-scoped `holdings`/`collections` — the one
+        // shared "owned per card" source, specs/collection-api.md Findings),
+        // and this all runs inside `scoped_tx`, so the caller's own rows are
+        // all that exist here. The catalog joins (`cards`, `printings`) are
+        // unscoped by design.
         let base = format!(
             "WITH held AS ( \
-               SELECT p.oracle_id, sum(h.quantity)::int AS owned \
-               FROM holdings h JOIN printings p ON p.id = h.printing_id \
-               GROUP BY p.oracle_id \
+               SELECT oracle_id, owned FROM owned_by_card \
              ), \
              wanted AS ( \
                SELECT oracle_id, sum(quantity)::int AS wanted \
@@ -1451,13 +1456,15 @@ impl CollectionStore for HostedBackend {
 
     async fn shopping_list(&self) -> ApiResult<ShoppingList> {
         let mut tx = self.scoped_tx().await?;
+        // `o` reads the `owned_by_card` view — see the same note in
+        // `all_cards`/`collection_tree` (specs/collection-api.md Findings): one
+        // shared "owned per card" source, not a re-derived sum here.
         let rows: Vec<ShoppingSql> = sqlx::query_as(
             "WITH d AS ( \
                SELECT oracle_id, sum(quantity)::int AS desired_total FROM desires GROUP BY oracle_id \
              ), \
              o AS ( \
-               SELECT p.oracle_id, sum(h.quantity)::int AS owned \
-               FROM holdings h JOIN printings p ON p.id = h.printing_id GROUP BY p.oracle_id \
+               SELECT oracle_id, owned FROM owned_by_card \
              ) \
              SELECT d.oracle_id, c.name, d.desired_total, COALESCE(o.owned, 0) AS owned \
              FROM d JOIN cards c ON c.oracle_id = d.oracle_id \
@@ -2976,5 +2983,58 @@ mod search_live {
             ApiError::Validation(msg) => assert!(msg.contains("pow>3"), "{msg}"),
             other => panic!("expected Validation, got {other:?}"),
         }
+    }
+}
+
+/// Regression guard for the "owned per card" collapse onto the `owned_by_card`
+/// view (specs/collection-api.md Findings): `owned_by_oracle` (backing
+/// `card_summary`/`search`) and `collection_view` already read the view
+/// directly; `collection_tree`'s shopping-short badge, `all_cards`, and
+/// `shopping_list` each had their own inline copy of `sum(h.quantity)` joined
+/// through `printings` and grouped by oracle id — three inline copies,
+/// collapsed onto the one `owned_by_card` SQL view
+/// (migrations/0003_collections.sql). Structural, not live-DB — it greps
+/// this file's own source, so it runs under plain `cargo test` with no
+/// `DATABASE_URL`.
+#[cfg(test)]
+mod owned_definition_guard {
+    #[test]
+    fn owned_per_oracle_is_never_rederived_inline() {
+        let src = include_str!("hosted.rs");
+
+        // Collapse all whitespace — including the `\` line-continuations the
+        // SQL string literals use to stay readable — to single spaces, so
+        // reformatting (line wraps, indentation) can't dodge the check.
+        let normalized = src
+            .replace('\\', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // The exact idiom every one of the three collapsed inline copies
+        // shared: an *unfiltered* aggregate over `holdings` joined to
+        // `printings`, grouped by oracle id alone. This is deliberately
+        // narrower than "any holdings/printings join with sum(h.quantity)" —
+        // `present_here`/`elsewhere`/per-location breakdowns elsewhere in
+        // this file legitimately re-derive sums scoped by `collection_id` (a
+        // `WHERE` sits between the join and the `GROUP BY` there), which is a
+        // different computation, not a duplicate of `owned`.
+        //
+        // Assembled from two halves at runtime, not one literal: `include_str!`
+        // pulls in this very test function, and a single contiguous literal
+        // here would match itself.
+        let holdings_join_printings = "FROM holdings h JOIN printings p ON p.id = h.printing_id";
+        let grouped_by_oracle_only = "GROUP BY p.oracle_id";
+        let forbidden = format!("{holdings_join_printings} {grouped_by_oracle_only}");
+        assert!(
+            !normalized.contains(&forbidden),
+            "found an inline, unfiltered owned-per-oracle aggregate (`{forbidden}`) in \
+             hosted.rs. \"Owned per card\" has exactly one source: the `owned_by_card` SQL \
+             view (migrations/0003_collections.sql). Select from that view — e.g. \
+             `SELECT oracle_id, owned FROM owned_by_card` — instead of re-deriving \
+             sum(h.quantity) grouped by oracle_id, so the upcoming `deleted_at IS NULL` \
+             filter (specs/collection-deletion.md) lands in exactly one place. See \
+             specs/collection-api.md Findings for the collapse this test guards."
+        );
     }
 }
