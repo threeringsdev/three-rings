@@ -1098,6 +1098,22 @@ fn stale_commit_should_be_dropped(row_removed: bool) -> bool {
     row_removed
 }
 
+/// Whether a card row's selection checkbox should be selectable right now
+/// (P6-118, app-ui.md → Findings: "Removed rows stay selectable").
+///
+/// Pure over the two facts that decide it, so the truth table is checkable
+/// without a reactive runtime; `CardTableRow` calls this from inside a
+/// `style:display` closure reading the live `removed` signal, which is the
+/// same one `HereCount`'s `remove`/`undo_removal` flip — a row cannot become
+/// unselectable without that signal saying so, and Undo cannot restore it
+/// without the same signal saying the opposite. Whether the checkbox mounts
+/// **at all** is a separate, non-reactive decision (`CardTableRow`'s own
+/// `present > 0`, static) — see that component's doc for why the reactive
+/// half is a style toggle rather than a second mount/unmount.
+fn row_selectable(removed: bool, present: i32) -> bool {
+    !removed && present > 0
+}
+
 /// A deck section: one board's slice of one card type.
 #[derive(Clone, PartialEq)]
 struct DeckSection {
@@ -1195,6 +1211,47 @@ fn section_slots(rows: &[ViewRow]) -> i32 {
     slots
 }
 
+/// A deck section header's live count (P6-118, app-ui.md → Findings:
+/// "Section header contradiction"): `slots` as computed once at payload load
+/// by [`section_slots`], adjusted by this section's own running delta. The
+/// delta itself must already be in **slots**, not copies — see
+/// [`section_slot_delta`], the only thing that should ever be pushed into it.
+fn section_slots_live(slots: i32, delta: i32) -> i32 {
+    slots + delta
+}
+
+/// The section header's slot-count delta for one row's present-copy change,
+/// from `old` to `new`, given the row's own `desired` (P6-118 review round 1
+/// — the first cut of this fix pushed the raw *copy* delta and was wrong).
+///
+/// `section_slots` is not a copy count: per `(oracle, board)` it is
+/// `held + max(desired - held, 0)`, which is exactly `max(held, desired)`
+/// (`section_slots_count_a_split_card_once`'s "desire 4, three held → 4
+/// slots" pins this). A raw copy delta corrupts that the moment the row is
+/// wanted and under-held — the *ordinary* deck row, since decks are
+/// Want-led: a 4-held/4-desired row stepped to 2 must leave the header at 4
+/// (2 held + 2 still lacking, same total), not push it to 2 — a refetch
+/// would snap the header straight back. (The WANTED cell reads 4 only in
+/// the under-held variant; at 4-held/4-desired it collapses to "—".) Only
+/// when `desired` is 0 does the slot delta reduce to the copy delta this
+/// replaces.
+///
+/// `desired` is read at commit time from the row itself (`CardRow::desired`
+/// is oracle-grained, so every row already carries the group's true value —
+/// no cross-row aggregation needed). This is deliberately per-row, not
+/// per-`(oracle, board)`-group: a row's own commit only ever changes its own
+/// `present`, so treating this row's held count as standing in for the
+/// group's is exact whenever the row is the group's only holding (the
+/// overwhelmingly common case). For a wanted card held under two printings
+/// in one section it is an approximation introduced *here* (`section_slots`
+/// re-sums the whole group and is exact): the delta under-shoots — never
+/// overshoots, since `max(·, desired)` grows at most 1:1 with a row-local
+/// change — so the header is never *worse* than the static value it
+/// replaces, and the next refetch makes it exact.
+fn section_slot_delta(old: i32, new: i32, desired: i32) -> i32 {
+    new.max(desired) - old.max(desired)
+}
+
 #[component]
 fn CollectionTable(
     view: CollectionView,
@@ -1248,6 +1305,15 @@ fn CollectionTable(
                                 let label_attr = section.label.clone();
                                 let label = section.label.clone();
                                 let slots = section.slots;
+                                // This section's own present-copy delta — the
+                                // section-scoped twin of `here_delta`. Created
+                                // fresh here rather than zeroed by an Effect:
+                                // this whole branch is rebuilt every time
+                                // `view_res` resolves (see `CollectionPage`'s
+                                // module doc on why a commit never refetches
+                                // it), so a new payload already starts every
+                                // section back at zero.
+                                let section_delta = RwSignal::new(0);
                                 view! {
                                     <TableRow {..} data-testid="deck-section">
                                         <TableCell
@@ -1256,14 +1322,25 @@ fn CollectionTable(
                                             colspan="7"
                                             data-section=label_attr
                                         >
-                                            {label} " · " {slots.to_string()}
+                                            {label} " · "
+                                            {move || {
+                                                section_slots_live(slots, section_delta.get())
+                                                    .to_string()
+                                            }}
                                         </TableCell>
                                     </TableRow>
                                     {section
                                         .rows
                                         .into_iter()
                                         .map(|row| {
-                                            view! { <CardTableRow row here_delta collection_id /> }
+                                            view! {
+                                                <CardTableRow
+                                                    row
+                                                    here_delta
+                                                    collection_id
+                                                    section_delta=section_delta
+                                                />
+                                            }
                                         })
                                         .collect_view()}
                                 }
@@ -1347,7 +1424,17 @@ fn count_or_dash(n: i32) -> String {
 }
 
 #[component]
-fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>, collection_id: Id) -> impl IntoView {
+fn CardTableRow(
+    row: ViewRow,
+    here_delta: RwSignal<i32>,
+    collection_id: Id,
+    /// This row's deck section, when it has one — threaded straight through to
+    /// [`HereCount`] so a section header can react to this row's own commits
+    /// and removals the same way the page header already reacts via
+    /// `here_delta`. `None` in a binder, which has no sections.
+    #[prop(optional)]
+    section_delta: Option<RwSignal<i32>>,
+) -> impl IntoView {
     let wanted = wanted_cell(&row);
     let owned = owned_cell(&row.row);
     let CardRow {
@@ -1358,6 +1445,7 @@ fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>, collection_id: Id) -> i
         mana_cost,
         type_line,
         present,
+        desired,
         owned: owned_total,
         present_rollup,
         board,
@@ -1366,10 +1454,26 @@ fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>, collection_id: Id) -> i
         ..
     } = row.row;
 
+    // Owned here, not inside `HereCount` (which used to create it): the
+    // checkbox below has to withdraw the instant a removal flips it, not only
+    // once an unrelated refetch remounts the row (P6-118, app-ui.md →
+    // Findings, "Removed rows stay selectable").
+    let removed = RwSignal::new(false);
+
     // Selectable only where copies are actually here to move: a desire-only row
     // (`present == 0`) holds nothing, and a rolled-up count belongs to a child
     // collection, not to this one. This is the grain-complete surface — the
     // key names the collection, the printing *and* the board.
+    //
+    // Whether a checkbox exists **at all** is still decided once, from the
+    // payload's own `present` — unchanged from before P6-118. What's new is
+    // the *reactive* half below: once mounted, its visibility tracks
+    // `removed`. An *existing* selection on a row that gets removed is
+    // deliberately left alone here (not force-cleared): the tray already has
+    // a name and a toast for a selection that outlived its copies
+    // (`SkipReason::NoCopies`, `move_selection.rs`), and "the stepper" is
+    // named there explicitly as one of the causes — this is that case
+    // reaching the mechanism that was already built for it, not a new one.
     let selection = use_selection();
     let key = SelectionKey::Held {
         collection_id,
@@ -1377,7 +1481,7 @@ fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>, collection_id: Id) -> i
         board,
     };
     let selected = selection.selected(key);
-    let selectable = (present > 0).then(|| SelectedCard {
+    let selectable_card = (present > 0).then(|| SelectedCard {
         key,
         oracle_id,
         name: name.clone(),
@@ -1412,7 +1516,43 @@ fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>, collection_id: Id) -> i
             // `p-0` below `md` so the 44 px select target *is* the column
             // rather than 44 px plus 16 px of cell padding (`SelectionCheckbox`).
             <TableCell class="p-0 md:p-2">
-                {selectable.map(|card| view! { <SelectionCheckbox selection card /> })}
+                {selectable_card
+                    .map(|card| {
+                        view! {
+                            // A `style:display` toggle, not a mount/unmount:
+                            // `HereCount`'s own `<Show>` already disposes the
+                            // count stepper's reactive scope on this same
+                            // `removed` flip, and `count_stepper.rs` carries a
+                            // documented, pre-existing disposal race in its
+                            // deferred blur-commit handling (app-ui.md →
+                            // Findings, P6-117's "genuine, pre-existing,
+                            // unrelated wasm panic"). This task's first cut
+                            // used a second structural mount/unmount here
+                            // instead and a naive repro script made that race
+                            // look far worse under it — but a real A/B test
+                            // (the actual e2e test, several runs each way)
+                            // measured comparable failure rates with and
+                            // without it, so the script was a poor proxy, not
+                            // evidence of a regression (app-ui.md →
+                            // Findings). Kept as a `style:display` toggle
+                            // anyway: patching one style property is the more
+                            // defensible choice over tearing down and
+                            // rebuilding a component subtree, even though it
+                            // does not measurably change the pre-existing
+                            // rate. `contents` rather than a base style, so
+                            // the wrapper adds no box of its own for
+                            // `SelectionCheckbox`'s own sizing to fight.
+                            <span style:display=move || {
+                                if row_selectable(removed.get(), present) {
+                                    "contents"
+                                } else {
+                                    "none"
+                                }
+                            }>
+                                <SelectionCheckbox selection card />
+                            </span>
+                        }
+                    })}
             </TableCell>
             <TableCell class="p-2">
                 <CardPreview card=preview>
@@ -1433,7 +1573,15 @@ fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>, collection_id: Id) -> i
                 data-testid="here-cell"
             >
                 <div class="flex items-center justify-end gap-1">
-                    <HereCount name=name.clone() present holding_id here_delta />
+                    <HereCount
+                        name=name.clone()
+                        present
+                        desired
+                        holding_id
+                        here_delta
+                        section_delta
+                        removed
+                    />
                     // Italic + dimmed, per the spec: copies a child collection
                     // holds are *here* only in the rolled-up sense.
                     {(present_rollup > 0)
@@ -1474,8 +1622,24 @@ fn CardTableRow(row: ViewRow, here_delta: RwSignal<i32>, collection_id: Id) -> i
 fn HereCount(
     name: String,
     present: i32,
+    /// The row's own oracle-grained desire count — needed only to compute
+    /// [`section_slot_delta`] correctly (a wanted, under-held row's slot
+    /// count does not move copy-for-copy with its present count).
+    desired: i32,
     holding_id: Option<Id>,
     here_delta: RwSignal<i32>,
+    /// This row's deck section delta, when it has one (`None` in a binder) —
+    /// see [`CardTableRow`]. Not `#[prop(optional)]`: that sugar unwraps a
+    /// bare `T` into `Some(T)` for the caller, which is wrong here — the
+    /// caller (`CardTableRow`) already holds an `Option<RwSignal<i32>>` of
+    /// its own and is forwarding it as-is, not deciding presence itself.
+    /// Every push into it must go through [`section_slot_delta`], never a raw
+    /// copy delta (P6-118 review round 1) — see that function's doc.
+    section_delta: Option<RwSignal<i32>>,
+    /// Owned by the caller (`CardTableRow`), not here, so the row's selection
+    /// checkbox can react to the same flag `remove`/`undo_removal` below
+    /// flip — see that component's doc.
+    removed: RwSignal<bool>,
 ) -> impl IntoView {
     let Some(holding_id) = holding_id else {
         // Either a desire-only row (nothing here to step) or a cell summing
@@ -1502,10 +1666,11 @@ fn HereCount(
     // failed with "not found: holding" (app-ui.md → Findings).
     let holding_id = RwSignal::new(holding_id);
     let value = RwSignal::new(present);
-    // The holding is gone and its id is dead — see `remove` below. The stepper
-    // is withdrawn rather than left showing 0, because every further write it
-    // could issue is addressed at a row that no longer exists.
-    let removed = RwSignal::new(false);
+    // `removed` arrives as a prop now (owned by `CardTableRow`, which also
+    // reads it for the selection checkbox — P6-118, app-ui.md → Findings).
+    // What it's *for* here is unchanged: the stepper is withdrawn rather than
+    // left showing 0, because every further write it could issue is
+    // addressed at a row that no longer exists.
     let toast = expect_context::<ToastHandle>();
     let tree = expect_context::<CollectionTreeResource>().0;
     // Bumping this refetches the page's view (it is one of the resource's
@@ -1534,6 +1699,9 @@ fn HereCount(
                     // refetch below is what actually restores the truth on
                     // screen; these are the optimistic half.
                     let _ = here_delta.try_update(|d| *d += copies);
+                    if let Some(d) = section_delta {
+                        let _ = d.try_update(|d| *d += section_slot_delta(0, copies, desired));
+                    }
                     let _ = removed.try_set(false);
                     let _ = value.try_set(copies);
                     // Rewire to the *live* id immediately — undoing a removal
@@ -1567,6 +1735,9 @@ fn HereCount(
     // this commit — so the message and the undo are both this callback's.
     let remove = move |copies: i32| {
         here_delta.update(|d| *d -= copies);
+        if let Some(d) = section_delta {
+            d.update(|d| *d += section_slot_delta(copies, 0, desired));
+        }
         removed.set(true);
         spawn_local(async move {
             // `try_*`, like everywhere else in this file: a toast (or now, a
@@ -1602,6 +1773,9 @@ fn HereCount(
                     removed.set(false);
                     value.set(copies);
                     here_delta.update(|d| *d += copies);
+                    if let Some(d) = section_delta {
+                        d.update(|d| *d += section_slot_delta(0, copies, desired));
+                    }
                     toast.show(
                         ToastOptions::message(format!("Couldn't remove: {}", message_of(&e)))
                             .kind(ToastKind::Error),
@@ -1624,8 +1798,12 @@ fn HereCount(
             return;
         }
         // Optimistic on both numbers at once: the stepper already wrote `value`,
-        // so the header must move with it or the two disagree on screen.
+        // so the header must move with it or the two disagree on screen. The
+        // section header (when there is one) follows the same commit.
         here_delta.update(|d| *d += c.to - c.from);
+        if let Some(d) = section_delta {
+            d.update(|d| *d += section_slot_delta(c.from, c.to, desired));
+        }
         spawn_local(async move {
             // `try_*`, like `remove` above: a signal read at the top of a
             // spawned future can outlive its row.
@@ -1642,6 +1820,9 @@ fn HereCount(
                 Err(e) => {
                     value.set(c.from);
                     here_delta.update(|d| *d -= c.to - c.from);
+                    if let Some(d) = section_delta {
+                        d.update(|d| *d += section_slot_delta(c.to, c.from, desired));
+                    }
                     toast.show(
                         ToastOptions::message(format!("Couldn't save: {}", message_of(&e)))
                             .kind(ToastKind::Error),
@@ -1959,6 +2140,59 @@ mod tests {
         // A live row's commits — including its very first one — must never be
         // dropped, or the stepper could never save anything.
         assert!(!stale_commit_should_be_dropped(false));
+    }
+
+    #[test]
+    fn row_selectable_withdraws_once_removed_and_returns_on_undo() {
+        // The defect (P6-118): a removed row's checkbox stayed interactive
+        // and ticking it earned a `NoCopies` refusal from the tray.
+        assert!(row_selectable(false, 3));
+        assert!(!row_selectable(true, 3));
+        // A desire-only / never-held row (`holding_id: None`) was never
+        // selectable to begin with — `removed` alone must not flip it on.
+        assert!(!row_selectable(false, 0));
+        assert!(!row_selectable(true, 0));
+        // Undo flips `removed` back to `false` — selectability returns with
+        // it, the same signal, no separate restore path to fall out of sync.
+        assert!(row_selectable(false, 3));
+    }
+
+    #[test]
+    fn section_slots_live_adds_the_pushed_delta() {
+        // The combiner itself is just addition — whether what's pushed into
+        // it is honest is `section_slot_delta`'s job, tested below.
+        assert_eq!(section_slots_live(5, 0), 5);
+        assert_eq!(section_slots_live(5, -2), 3);
+        assert_eq!(section_slots_live(3, 2), 5);
+    }
+
+    #[test]
+    fn section_slot_delta_holds_a_wanted_under_held_row_at_its_desired_count() {
+        // The bug this review round caught: a raw copy delta corrupts the
+        // header the moment the row is wanted and under-held — the ordinary
+        // deck row, since decks are Want-led. 4 held, 4 desired: stepping to
+        // 2 must leave the section's contribution at 4 (2 held + 2 still
+        // lacking — the WANTED cell on this row still reads 4), not push it
+        // to 2.
+        assert_eq!(section_slot_delta(4, 2, 4), 0);
+        // Removing the lot (held 4 → 0) is the same story: the slots are
+        // still wanted, so the header must not move at all.
+        assert_eq!(section_slot_delta(4, 0, 4), 0);
+        // Undo is the exact reverse and must land back at zero too.
+        assert_eq!(section_slot_delta(0, 4, 4), 0);
+        // Over-held (5 held, 4 desired) stepped down to 3: only the 1 truly
+        // surplus copy (5 → 4) counts against the header, not the full 2.
+        assert_eq!(section_slot_delta(5, 3, 4), -1);
+    }
+
+    #[test]
+    fn section_slot_delta_is_a_plain_copy_delta_when_nothing_is_desired() {
+        // `desired == 0` is the case the first (wrong) cut of this fix
+        // implicitly assumed applied everywhere: here the slot delta and the
+        // copy delta genuinely coincide.
+        assert_eq!(section_slot_delta(3, 1, 0), -2);
+        assert_eq!(section_slot_delta(0, 3, 0), 3);
+        assert_eq!(section_slot_delta(3, 0, 0), -3);
     }
 
     #[test]

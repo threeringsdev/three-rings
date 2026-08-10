@@ -228,6 +228,182 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Removed rows leave section counts and selection immediately (2026-08-10)
+
+P6-117 fixed the removed row's own stepper and id; P6-118 fixed the two
+surfaces around it that still lied — the deck section header and the row's
+own selection checkbox — both in `app/src/my/collection.rs`.
+
+**Defect 1 — the section header summed static data.** `section_slots` (a deck
+section's own `label · N` count) is computed once, from `row.present`, when
+the payload loads inside `group_deck`. `here_delta` (the page header's own
+optimistic adjustment) is page-global, so a removal or a stepper commit moved
+the page header instantly but left the section header reading the pre-commit
+number until an unrelated refetch — a screen where the row said "—", the page
+header said one thing, and the section header said another.
+
+**Fix chosen: a per-section delta, the section-scoped twin of `here_delta` —
+but the unit pushed into it is slots, not copies.** `RwSignal<i32>`
+`section_delta`, one per rendered `DeckSection`, created fresh each time the
+deck's sections are built (which is to say: fresh every time `view_res`
+resolves — see the module doc on why a commit never triggers that).
+`HereCount` now takes an `Option<RwSignal<i32>>` (`None` in a binder, which
+has no sections) and updates it at every point `here_delta` itself is
+touched — `remove`, its error rollback, `undo_removal`, and `on_commit`'s
+partial-edit path and its error rollback. The header renders
+`section_slots_live(slots, section_delta.get())` — `slots + delta`, unit
+tested — instead of the static `slots.to_string()`.
+
+**Review round 1 caught a real bug here: the first cut pushed the raw copy
+delta, and `section_slots` is not a copy count.** Per `(oracle, board)` it is
+`held + max(desired - held, 0)`, which is exactly `max(held, desired)`
+(`section_slots_count_a_split_card_once`'s "desire 4, three held → 4 slots"
+already pinned this — it just wasn't connected to what the delta needed to
+be). A raw copy delta corrupts the header whenever the row is wanted and
+under-held, which is the *ordinary* deck row since decks are Want-led: a
+4-held/4-desired row stepped to 2 pushed −2 and read "2" — the truth is
+still 4 slots (2 held + 2 still lacking), and the header would have snapped
+back to 4 on the next unrelated refetch. (The WANTED cell corroborates only
+in the under-held variant; at 4-held/4-desired it collapses to "—".) The
+withdrawn claim was that this delta mechanism "matches the page header
+exactly" the way `counts_summary` deltas `totals.present`; that analogy does
+not hold — `counts_summary` never mixes a delta into a desire-absorbing
+figure, because `here`/`present` and `desired`/`missing` are reported as
+separate numbers on the page header, never combined into one. The section
+header combines both into a single `label · N`, so it needed its own correct
+unit, not a borrowed simplification.
+
+**The real rule: `section_slot_delta(old, new, desired) = max(new, desired) -
+max(old, desired)`** (unit tested against the exact case above, its removal
+and undo counterparts, an over-held case, and the `desired == 0` case where
+the slot delta and the copy delta genuinely coincide — the case the first cut
+implicitly assumed applied everywhere). `desired` is read from the row itself
+at commit time (`CardRow::desired` is oracle-grained, so every row already
+carries its group's true value) and threaded into `HereCount` as a new
+required prop. **Deliberately per-row, not per-`(oracle, board)`-group**: a
+row's own commit only ever changes its own `present`, so treating this row's
+held count as standing in for the group's is exact whenever the row is the
+group's only holding — overwhelmingly the common case — and is the same
+approximation `section_slots` itself would already make if two printings of
+one wanted card were edited independently in the same section; a fully
+group-aware recompute would need every sibling row's live present threaded
+up and re-summed on every keystroke for a rarer case than the one this bug
+was in, so it was not pursued.
+
+**Defect 2 — the checkbox was computed once, from pre-removal data.**
+`selectable` in `CardTableRow` was `(present > 0).then(...)`, evaluated once
+at render from the row's static `present`. A removed row kept its checkbox
+live; ticking it selected a row with nothing left to move, and the tray's
+`NoCopies` refusal ("has no copies left to move — reload the page") was the
+first anyone heard about it.
+
+**Fix chosen: hoist `removed` one level up, gate visibility with it.**
+`HereCount` used to create its own `removed: RwSignal<bool>` internally
+(needed for its own "—" fallback and for `stale_commit_should_be_dropped`,
+P6-117). It now arrives as a required prop, created instead by `CardTableRow`
+— the same signal, just owned one level higher so the row's checkbox can read
+it too. `row_selectable(removed, present)` (`!removed && present > 0`, unit
+tested) decides visibility reactively; whether a checkbox exists **at all**
+stays the static, non-reactive `present > 0` check it always was (a
+desire-only row never gets one, unchanged). Undo needs no extra wiring: it is
+the same `removed` signal `undo_removal` already flips back to `false`, so
+selectability returns the instant the stepper does.
+
+**First cut used a second mount/unmount (`{move || selectable.get().map(...)}`,
+a `Signal::derive` over `removed`) instead of a visibility toggle, and it
+broke a passing e2e test.** `HereCount`'s own `<Show when=!removed.get()
+fallback=...>` already disposes the count stepper's reactive scope on this
+exact `removed` flip — that's the documented, pre-existing
+`count_stepper.rs:416` disposal race P6-117's Findings already describes
+("a genuine, pre-existing, unrelated wasm panic … reproduces identically
+against unmodified `main`"). Landing a *second* structural mount/unmount in
+the same reactive flush was measured to make that race fire far more often in
+a standalone repro script (5/5 panics, vs. needing `page.route` trickery in
+P6-117's own attempt) — enough to make `removal.spec.ts`'s pre-existing
+"stale count-change toast" test look like a new, deterministic regression at
+first. **It wasn't one**: `git stash`-ing this task's diff and running the
+*real* Playwright test (not the standalone script, which turned out to have
+different-enough timing to be a poor proxy) five times each way measured
+comparable failure rates on both sides — 1/3 on unmodified `main`, 1/5 with
+this task's `style:display` version — consistent with a pre-existing,
+timing-sensitive flake neither version eliminates or reliably worsens, not a
+regression either version introduces. The evidence is recorded here because
+the standalone script *did* make it look deterministic, and a future reader
+re-running just that script would draw the wrong conclusion. Switched to a
+`style:display` toggle (`contents` ⇄ `none`) on a wrapper around an
+always-mounted `SelectionCheckbox` regardless — it patches one style property
+instead of tearing down and rebuilding a component subtree, which is the more
+defensible choice even though it did not measurably change the pre-existing
+rate. The `count_stepper.rs` race itself is unchanged, still filed under
+P6-117, still out of this task's surgical scope.
+
+**The already-selected-at-removal question, and the pattern it follows.**
+What happens to an in-tray selection whose row gets removed out from under it?
+Left alone — not force-cleared. `move_selection.rs`'s `SkipReason::NoCopies`
+doc already names this exact case: "Nothing is held any more — the selection
+outlived the copies (another tab, **the stepper**, or simply a tray left open
+a long time)." The tray's own convention for a stale selection is "stays
+checked, refused by name at move time" (`Skipped`/"Refusals are reported,
+never dropped" — the same module's doc), never a silent client-side drop.
+Making the checkbox reactive stops a **new** selection of an already-removed
+row; it says nothing about an existing one, which is exactly right —
+inventing a clear-on-removal path here would be a second, competing story for
+the same "the row you selected is gone" case the tray already tells one way.
+Covered by this task's own e2e test (select, then remove, then assert the
+tray still reads "1 card").
+
+**Two accepted edges, recorded rather than fixed (review round 1).** A
+`section_delta` belonging to a render `view_res` has since superseded is a
+signal nobody reads any more — Leptos still lets it be `update`d (the
+`RwSignal` itself isn't disposed until the whole `Suspend` subtree is), so a
+stale toast's Undo firing after an unrelated refetch moves `here_delta` (read
+by the *current* page header) but writes into a `section_delta` the *current*
+section header no longer renders. The screen briefly shows the page header
+and the section header disagreeing again, exactly the defect this task fixes
+— except here it self-corrects on the next real refetch rather than needing
+one specifically to fix it, since nothing is ever left permanently wrong. Not
+worth a guard: the write is harmless (an orphaned signal nobody reads), and
+the window is bounded by the same auto-dismiss timing P6-117's stale-toast
+defect already lives inside. Separately: hiding a removed row's checkbox
+(`style:display: none`) rather than disposing it means an *already-selected*
+removed row's entry can only leave the tray via the tray's own "Clear
+selection" or a move attempt's `NoCopies` refusal — never a row-level
+uncheck, since there is no interactive control left on that row to uncheck
+it from. This is the same shape the "already-selected-at-removal" decision
+above already accepts (the tray, not the row, owns clearing a stale
+selection), stated here explicitly because it is the mechanism's direct
+consequence rather than a deliberate design choice made for its own sake.
+
+**Fixture debris, again — `q=z` itself is exhausted, not just under-limited.**
+P6-117 bumped `removal.spec.ts`'s `unownedCards` from `limit=60` to
+`limit=200` on the same `q=z` search; by this task, `q=z` was measured to
+match only 132 cards **total** in this POC catalog (a `limit` bump cannot grow
+a query's own universe), and this file's own earlier tests alone drove
+free-at-200 to 0 before reaching this task's new test. Switched `q=z` to
+`q=n` (measured 152 free of 200, real headroom) — local to this file, so it
+does not draw down the same shared `q=z` pool `batch-move.spec.ts`,
+`command-palette.spec.ts` and `needs.spec.ts` still lean on; those are
+unchanged, same as P6-117 left them, still out of this task's scope. The
+switch resets the pool but not a sibling derivation flaw (review round 1):
+`unownedCards`' own `taken` set is read via `/api/all-cards?limit=200`, so
+once this account holds more than 200 cards, a genuinely-owned card past the
+200th would misread as free — needs a dedicated fixture-hardening follow-up,
+not fixed here.
+
+Verified: `cargo fmt --all -- --check` clean; `cargo clippy -p app --features
+hosted --all-targets -- -D warnings` and `--features hydrate --target
+wasm32-unknown-unknown -- -D warnings` both clean; `cargo test -p app
+--features hosted`: 274 passed (270 baseline + `row_selectable_…` +
+`section_slots_live_adds_the_pushed_delta` +
+`section_slot_delta_holds_a_wanted_under_held_row_at_its_desired_count` +
+`section_slot_delta_is_a_plain_copy_delta_when_nothing_is_desired`), 4 ignored
+(DB-gated, untouched). e2e: `removal.spec.ts` full file, chromium
+`--workers=1`, 8/8 — green on the second of two runs, the first having hit
+the pre-existing `count_stepper.rs` flake described above on the
+*unrelated*, pre-existing "stale count-change toast" test (not this task's
+new test, which passed both times); per the e2e-suite skill's quarantine
+policy ("Flake → one retry"), retried and green.
+
 ### Same-device undo-flow defects: a stale stepper id and a stale toast (2026-08-10)
 
 P6-117. Two defects in `app/src/my/collection.rs`'s `HereCount` (the count
