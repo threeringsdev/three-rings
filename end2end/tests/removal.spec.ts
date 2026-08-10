@@ -155,7 +155,21 @@ async function unownedCards(
   // longer clears the front (measured 0 free at 60, 51 free at 200 — the same
   // reason `collection-undo-restore.spec.ts` and
   // `collection-tree-manage.spec.ts` already made this switch).
-  const res = await request.get("/api/catalog/search?q=z&limit=200");
+  //
+  // P6-118: `q=z` itself is now exhausted, not just under-limited — `z` only
+  // ever matches 132 cards total in this POC catalog (a `limit` bump cannot
+  // grow a query's own universe), and by the time this task ran, this file's
+  // *other* tests alone had driven free-at-200 to 0. `q=n` was measured with
+  // real headroom (152 free of 200) and is local to this file, so it does not
+  // draw down the same shared pool `batch-move.spec.ts`,
+  // `command-palette.spec.ts` and `needs.spec.ts` still lean on — those are
+  // unchanged, same as P6-117 left them, still out of this task's scope.
+  // The `q=n` switch resets the pool but not a sibling derivation flaw: `mine`
+  // below is *also* capped at `limit=200`, so once this account holds more
+  // than 200 cards, `taken` silently drops the rest and a genuinely-owned
+  // card past the 200th would misread as free — needs a dedicated
+  // fixture-hardening follow-up, not fixed here.
+  const res = await request.get("/api/catalog/search?q=n&limit=200");
   expect(res.status(), "catalog search").toBe(200);
   const { cards } = (await res.json()) as { cards: Card[] };
   const free = cards
@@ -455,6 +469,90 @@ test("@fast a stale count-change toast's Undo does nothing once the row has been
 // the database rather than waiting for a reload" assertions above (the
 // *eventual* consistency of the rewired id) and by the unit-level type
 // threading in `shared::UndoReceipt` / `hosted::undo_one`.
+
+// --------------------------- P6-118: section header + selection track it ---
+//
+// Two more defects `here_delta` alone did not cover. `section_slots` (a deck
+// section header's own count) summed the *static* `row.present` at payload
+// load, so it kept the removed copies until an unrelated refetch — a number
+// contradicting both the row's own "—" and the page header on the same
+// screen. And `selectable` was computed once from pre-removal data, so a
+// removed row's checkbox stayed interactive and ticking it earned a
+// `NoCopies` refusal from the tray ("has no copies left to move — reload the
+// page"). Both are now reactive on the same `removed` signal `HereCount`
+// already flips for its own "—" fallback, so this test is deterministic — no
+// `toPass()` polling for either assertion, because a refetch is not what
+// fixes them.
+//
+// The checkbox assertion is on *visibility*, not DOM presence: the fix is a
+// `style:display` toggle (`contents` ⇄ `none`) on a wrapper around an
+// always-mounted `SelectionCheckbox`, not a mount/unmount — see
+// `CardTableRow`'s doc for why a second structural mount/unmount was
+// rejected (it landed in the same reactive flush as `HereCount`'s own
+// `<Show>`, which made the pre-existing `count_stepper.rs` disposal race
+// this file's Findings already documents (P6-117) fire far more often in
+// practice). `toBeHidden()`/`toBeVisible()` correctly see through
+// `display:none` on an ancestor, unlike the `Sheet` transform trap the
+// e2e-suite skill warns about.
+
+test("@fast removing a deck row drops the section count and its own checkbox immediately, and Undo restores both", async ({
+  page,
+  request,
+}) => {
+  const [card] = await unownedCards(request, 1, 11);
+  const deck = await createCollection(request, "deck", "section");
+  try {
+    await addHave(request, deck.id, card.printing_id as string, 2);
+
+    await page.goto(`/my/collections/${deck.id}`);
+    await hydrated(page);
+    const row = rowFor(page, card.printing_id as string);
+    await expect(row.locator(STEPPER_VALUE)).toHaveText("2");
+
+    // One card in a fresh scratch deck is one section, so its header is
+    // unambiguously this row's own count.
+    const section = page.locator('[data-testid="deck-section"]');
+    await expect(section).toHaveCount(1);
+    await expect(section).toHaveText(/· 2$/);
+
+    const checkbox = row.locator('[data-testid="row-select"]');
+    await expect(checkbox).toBeVisible();
+    // Select before removing: an in-flight selection must survive the
+    // removal rather than vanish silently. The tray already has a name and a
+    // toast for a selection that outlived its copies — `SkipReason::NoCopies`
+    // in `move_selection.rs` names "the stepper" explicitly as one of the
+    // causes — so this is that mechanism being reached, not new UX.
+    await checkbox.click();
+    const trayCount = page.locator('[data-testid="tray-count"]');
+    await expect(trayCount).toHaveText("1 card");
+
+    await commitZero(row);
+
+    // The section header agrees the moment the row does — no refetch, no
+    // reload, and `slots` reactively summed here would have caught nothing
+    // since the delta is what moves it.
+    await expect(section).toHaveText(/· 0$/);
+    // The checkbox withdraws with the stepper: ticking a removed row only
+    // ever earned a refusal. `toBeHidden()` alone would pass vacuously if the
+    // node detached instead of just going invisible (a style toggle is the
+    // load-bearing claim here, not a mount/unmount — see `CardTableRow`'s
+    // doc), so pin the node is still there too.
+    await expect(checkbox).toBeHidden();
+    await expect(checkbox).toHaveCount(1);
+    // The pre-existing selection is left alone, not silently dropped.
+    await expect(trayCount).toHaveText("1 card");
+
+    const toast = page.locator(TOAST, { hasText: "Removed" });
+    await toast.getByRole("button", { name: "Undo" }).click();
+
+    // Undo restores both together — the same `removed` signal that hid the
+    // checkbox is what the count stepper's own restore flips back.
+    await expect(section).toHaveText(/· 2$/);
+    await expect(checkbox).toBeVisible();
+  } finally {
+    await deleteCollection(request, deck.id);
+  }
+});
 
 // --------------------------------------------------------------- teardown ---
 
