@@ -117,20 +117,29 @@ pub struct CreateReq {
 pub struct DeleteReq {
     pub id: Id,
     pub name: String,
-    /// Self plus every descendant — the ids this delete cascades away. Carried
-    /// (rather than just a count) because **the route may be inside it**: see
-    /// [`route_after_delete`].
+    /// Self plus every descendant — the shape of the tree under this node when
+    /// the dialog opened. **Nothing cascades any more**
+    /// (specs/collection-deletion.md: delete hides one node and moves its
+    /// children up a level), so this describes what *survives*, not what dies:
+    /// the dialog uses it to say whether there is anything nested at all.
     pub subtree: HashSet<Id>,
-    /// Where the deleted node lived, so a page standing on it knows where to
-    /// go. `None` = top level.
+    /// Where the deleted node lived — where its cards and children are about to
+    /// move, and where a page standing on it goes. `None` = top level (the
+    /// cards go to the Inbox).
     pub parent_id: Option<Id>,
-    /// Rolled-up present copies that cascade with it.
+    /// Rolled-up present copies in the whole subtree.
+    ///
+    /// **Not what this delete relocates** — only the node's *own* copies move,
+    /// and the surviving children keep theirs — which is why the confirm copy
+    /// no longer states a number. Kept for `P6-189`, the task that gives the
+    /// dialog honest per-node counts.
     pub cards: i64,
 }
 
 impl DeleteReq {
-    /// Nested collections that cascade with it (for the confirm copy) — the
-    /// subtree minus the node itself.
+    /// How many collections are nested under this one — the subtree minus the
+    /// node itself. They survive the delete by moving up a level; the confirm
+    /// copy mentions that only when there are any.
     fn descendants(&self) -> usize {
         self.subtree.len().saturating_sub(1)
     }
@@ -143,19 +152,26 @@ impl DeleteReq {
 /// subject *is* the current route. Nothing refetches `/my/collections/:id` on a
 /// delete, so without this the page keeps rendering a collection the database no
 /// longer has — stale rows, a breadcrumb that has already dropped the node, and
-/// a reload that 404s. The cascade makes it wider than the one node: every
-/// descendant goes too, so `/my/collections/<a child>` is just as dead.
+/// a reload that 404s.
 ///
-/// The destination is the deleted node's parent (which by construction is *not*
-/// in the subtree), or `/my` at the top level — the same "back walks up the tree"
-/// rule the mobile header's back link follows.
+/// **Exactly one node, since specs/collection-deletion.md**. This used to flee
+/// the whole `subtree`, because the delete cascaded and every descendant died
+/// with it. Delete now removes one node and re-parents its live children, so a
+/// descendant's page is still a real page showing real cards — navigating away
+/// from it would be throwing the user out of a collection that still exists.
+/// (`subtree` stays on [`DeleteReq`]: the move picker's cycle guard and the
+/// dialog copy both still need it.)
+///
+/// The destination is the deleted node's parent, or `/my` at the top level — the
+/// same "back walks up the tree" rule the mobile header's back link follows, and
+/// the place the deleted node's cards and children have just moved to.
 pub fn route_after_delete(pathname: &str, req: &DeleteReq) -> Option<String> {
     // `/my/collections/{id}` and its subpages (`…/needs`) — anything else is not
     // standing on a collection and has nothing to flee.
     let rest = pathname.strip_prefix("/my/collections/")?;
     let id = rest.split('/').next()?;
     let id = Id::parse_str(id).ok()?;
-    if !req.subtree.contains(&id) {
+    if id != req.id {
         return None;
     }
     Some(match req.parent_id {
@@ -329,9 +345,10 @@ impl TreeManage {
             }) => DeleteReq {
                 id,
                 name,
-                // Self *and* every descendant: the confirm counts the nested ones
-                // (`descendants()`), and `route_after_delete` needs the whole set
-                // because the route may be standing on any of them.
+                // Self *and* every descendant — the same set the move picker
+                // forbids. The confirm reads it for whether anything is nested
+                // (`descendants()`); `route_after_delete` no longer needs it at
+                // all, since only the node itself stops existing.
                 subtree: forbidden,
                 parent_id,
                 cards,
@@ -565,16 +582,21 @@ pub fn TreeDialogs() -> impl IntoView {
         let leaving = route_after_delete(&pathname.get_untracked(), &req);
         let navigate = navigate.clone();
         spawn_local(async move {
+            // The receipt (`move_ids` + `reparented`) is what a future undo
+            // toast reverses — step 5 of specs/collection-deletion.md. Nothing
+            // holds it yet, so it is dropped here rather than stashed in a
+            // signal no one reads.
             match crate::delete_collection(req.id).await {
-                Ok(()) => {
+                Ok(_receipt) => {
                     manage.busy.set(false);
                     manage.delete_open.set(false);
                     tree.refetch();
                     match leaving {
-                        // Deleting the collection you are standing on (or an
-                        // ancestor of it) leaves the page rendering a dead id —
-                        // `route_after_delete` sends it up to the parent, which
-                        // remounts the page and refetches on its own.
+                        // Deleting the collection you are standing on — and only
+                        // that one, since its descendants survive — leaves the
+                        // page rendering a dead id. `route_after_delete` sends
+                        // it up to the parent, which remounts the page and
+                        // refetches on its own.
                         Some(to) => navigate(&to, Default::default()),
                         // Deleting anything *else* still changes what this page
                         // says. Standing on a parent and deleting one of its
@@ -734,23 +756,31 @@ pub fn TreeDialogs() -> impl IntoView {
                                     .unwrap_or_else(|| "Delete?".to_string())
                             }}
                         </DialogTitle>
+                        // Interim copy for the **default dispositions**, and
+                        // deliberately number-free (specs/collection-deletion.md
+                        // → step 3; the dialog with its two pickers and corrected
+                        // counts is step 4, `P6-189`).
+                        //
+                        // What was here — "This permanently deletes {N nested
+                        // collections and }{M cards} inside it. This cannot be
+                        // undone." — is now false three times over: nothing is
+                        // destroyed, the nested collections survive by moving up
+                        // a level, and `M` was the rolled-up subtree total, whose
+                        // cards this delete does not touch at all. No number
+                        // beats a wrong number, so the counts wait for the task
+                        // that can compute honest ones.
                         <DialogDescription>
                             {move || {
                                 delete_subject()
-                                    .map(|(_, descendants, cards)| {
-                                        let mut what = String::new();
-                                        if descendants > 0 {
-                                            what.push_str(&format!(
-                                                "{descendants} nested collection{} and ",
-                                                if descendants == 1 { "" } else { "s" },
-                                            ));
-                                        }
-                                        what.push_str(&format!(
-                                            "{cards} card{}",
-                                            if cards == 1 { "" } else { "s" },
-                                        ));
+                                    .map(|(_, descendants, _)| {
+                                        let nested = if descendants > 0 {
+                                            " Nested collections move up a level."
+                                        } else {
+                                            ""
+                                        };
                                         format!(
-                                            "This permanently deletes {what} inside it. This cannot be undone.",
+                                            "Its cards move up to the parent collection — your \
+                                             Inbox if it is top-level.{nested} No cards are deleted.",
                                         )
                                     })
                                     .unwrap_or_default()
@@ -1551,19 +1581,22 @@ mod tests {
         );
     }
 
+    /// The inverse of what this used to assert. Deleting `Moved`(9) no longer
+    /// takes `Inside Moved`(10) with it — 10 re-parents to 9's parent and keeps
+    /// its cards (specs/collection-deletion.md → "Children survive") — so a page
+    /// standing on 10 must **stay**. Navigating away would eject the user from a
+    /// collection that still exists.
     #[test]
-    fn a_cascaded_descendant_is_just_as_dead() {
-        // Deleting `Moved`(9) takes `Inside Moved`(10) with it, so a page
-        // standing on 10 must leave too — and it goes to 9's parent, since 9 is
-        // gone as well.
+    fn a_surviving_descendant_keeps_its_page() {
         let req = del(9, Some(3), &[9, 10]);
+        assert_eq!(route_after_delete(&path_of(10), &req), None);
         assert_eq!(
-            route_after_delete(&path_of(10), &req).as_deref(),
-            Some(path_of(3).as_str())
+            route_after_delete(&format!("{}/needs", path_of(10)), &req),
+            None
         );
-        // …including from a collection subpage.
+        // …while the deleted node's own subpage still leaves, to its parent.
         assert_eq!(
-            route_after_delete(&format!("{}/needs", path_of(10)), &req).as_deref(),
+            route_after_delete(&format!("{}/needs", path_of(9)), &req).as_deref(),
             Some(path_of(3).as_str())
         );
     }

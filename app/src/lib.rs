@@ -752,17 +752,28 @@ pub async fn rename_collection(
     }
 }
 
-/// Delete a collection (tree context menu). The DB cascades the whole
-/// subtree — child collections, holdings, desires — which is why the UI
-/// fronts this with a confirm dialog naming those counts.
+/// Delete a collection (tree context menu) — which since
+/// specs/collection-deletion.md **relocates rather than destroys**: the node is
+/// hidden, its children re-parent to its parent, and its cards move out through
+/// the real ledger. Returns the receipt (the handles a future undo toast
+/// reverses), never a count.
+///
+/// **Takes the id alone, so the dispositions are the spec's defaults**
+/// (`ToParent` for haves, `Discard` for wants). The confirm dialog's two pickers
+/// are step 4 of that spec; when they land, this adapter grows **scalar**
+/// parameters for them rather than the tagged enums — the server-fn POST codec
+/// mangles nested/tagged DTOs (app-ui Findings, and why `teardown_collection`
+/// above takes an `Option<Id>` instead of `shared::Teardown`).
 #[server(prefix = "/api", endpoint = "delete_collection")]
-pub async fn delete_collection(id: shared::Id) -> Result<(), ServerFnError<String>> {
+pub async fn delete_collection(
+    id: shared::Id,
+) -> Result<shared::DeleteCollectionReceipt, ServerFnError<String>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
         collection_backend()
             .await?
-            .delete_collection(id)
+            .delete_collection(shared::DeleteCollectionReq::defaults(id))
             .await
             .map_err(api_err)
     }

@@ -67,8 +67,17 @@ pub async fn run(user_id: Uuid) -> Result<Stats, ApiError> {
     // The store methods each commit independently (deliberately — the seed
     // exercises the real per-request paths), so a mid-seed failure would
     // otherwise strand a partial tree behind the sentinel. On error, delete
-    // the root collections this run created (cascades to children/holdings);
-    // Inbox arrivals may linger, which a re-run tolerates (add_holding upserts).
+    // the root collections this run created; Inbox arrivals may linger, which a
+    // re-run tolerates (add_holding upserts).
+    //
+    // **This rollback is now best-effort rather than complete.** Delete used to
+    // hard-delete and cascade the whole subtree; since
+    // specs/collection-deletion.md it hides exactly one node and re-parents its
+    // children, so a failed seed leaves the created *children* behind as
+    // top-level collections. `Discard` on both sides at least keeps the seeded
+    // cards attached to the hidden roots instead of spilling them into the
+    // user's Inbox. Recorded as a follow-up in that spec's Findings; the real
+    // fix is a bottom-up sweep, which needs the seed to track more than roots.
     let mut stats = Stats::default();
     let mut roots: Vec<Id> = Vec::new();
     let result = async {
@@ -95,7 +104,13 @@ pub async fn run(user_id: Uuid) -> Result<Stats, ApiError> {
         Ok(()) => Ok(stats),
         Err(e) => {
             for id in roots {
-                let _ = be.delete_collection(id).await;
+                let _ = be
+                    .delete_collection(shared::DeleteCollectionReq {
+                        collection_id: id,
+                        haves: shared::HaveDisposition::Discard,
+                        wants: shared::WantDisposition::Discard,
+                    })
+                    .await;
             }
             Err(e)
         }

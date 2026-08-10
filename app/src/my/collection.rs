@@ -51,9 +51,11 @@
 //! one `menu_target`, one `TreeMenu`, one set of dialogs, a second `context_menu`
 //! instance. Two consequences land in *this* file. The page takes
 //! `TreeManage::revision` as a resource source, because a rename/create/move
-//! changes what `collection_view` says and no tree refetch can tell it. And a
-//! delete whose cascade contains this route navigates up instead of leaving the
-//! page on a dead id — `tree_manage::route_after_delete`.
+//! changes what `collection_view` says and no tree refetch can tell it. And
+//! deleting *this* collection navigates up instead of leaving the page on a
+//! dead id — `tree_manage::route_after_delete`. Only this one: deleting an
+//! ancestor no longer takes the route with it, because the children survive by
+//! moving up a level (specs/collection-deletion.md).
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;

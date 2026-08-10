@@ -330,21 +330,198 @@ risky part lands under no time pressure.
   **Retention.** No purge is specified. Policy will be decided once a fully working
   POC of the app is implemented (currently there are no users).
 
-- *(open — raised 2026-08-09, step 2)*
+- *(resolved — 2026-08-09, maintainer ruling by Dylan; raised 2026-08-09, step 2)*
   **What should `undo_move` do when the move's other end is now hidden?**
-  `undo_one` reverses a ledger row by writing straight into
-  `from_collection_id` / `to_collection_id` — it is the one write path in
-  `hosted.rs` that never goes through `require_owned_collection`, because the
-  ids come from the ledger rather than the caller. Undoing an *old, unrelated*
-  move whose source or destination has since been soft-deleted would therefore
-  put copies back into a collection the user cannot see. Step 2 deliberately did
-  not guess: the delete's **own** undo clears `deleted_at` first (so it is
-  unaffected), and the three plausible answers for the unrelated case — refuse,
-  redirect to the Inbox, or restore the collection — are a product decision, not
-  an implementation detail. Needs a ruling before step 3 ships, since that is
-  when `deleted_at` starts being set.
+  **Redirect the copies to the user's Inbox.** Cards always come back, and they
+  never silently land in a collection the user cannot see. The other two
+  candidates were considered and rejected: *refuse* leaves the user holding a
+  toast that does nothing, and *restore the collection* un-deletes something
+  they deliberately deleted as a side effect of an unrelated undo.
+
+  The question, for the record: `undo_one` reverses a ledger row by writing
+  straight into `from_collection_id` / `to_collection_id` — it is the one write
+  path in `hosted.rs` that never goes through `require_owned_collection`,
+  because the ids come from the ledger rather than the caller. Undoing an *old,
+  unrelated* move whose source has since been soft-deleted would otherwise put
+  copies back into a hidden collection. The delete's **own** undo is unaffected
+  either way: it clears `deleted_at` first, so the source is live again by the
+  time the moves are reversed. Implemented in step 3 (`live_or_inbox`, applied
+  to `undo_one`'s write-back, so `undo_move` / `undo_moves` / `undo_last_move`
+  all inherit it).
 
 ## Findings
+
+- 2026-08-09 — **Step 3 landed: delete relocates instead of destroying**
+  (`P6-188`, on top of `P6-110`'s inert machinery). The hard
+  `DELETE FROM collections` is gone; `delete_collection` now reads a snapshot,
+  plans against it, and executes the plan in one transaction, stamping
+  `deleted_at` **last**.
+  - **Shape: read → plan → write.** The rules ("which children re-parent
+    where, and which grain goes to which destination") live in a pure
+    `app/src/backend/delete_plan.rs` — `plan_delete(&DeleteSnapshot, haves,
+    wants) -> DeletePlan` — with the hosted transaction reduced to a loop with
+    no decisions in it. Same split as `plan_move`/`plan_drop`, for the same
+    reason: every rule here is an edge case (top-level, no history, discard, a
+    surviving child as the destination) and none of them need a database to be
+    right. The module imports no sqlx at all, so the boundary is structural
+    rather than a convention.
+  - **The Inbox refusal moved into the planner**, deliberately, so the rule has
+    exactly one statement and that statement is a unit test rather than a
+    dev-branch transcript. The message is unchanged
+    (`Conflict("the Inbox cannot be deleted")`), and the executor's earlier
+    read still answers absent / not-owned / already-hidden with the one
+    `NotFound` every other path uses.
+  - **Every destination is re-validated, not just the user's pick.** The
+    executor runs `require_owned_collection` over `DeletePlan::destinations()`
+    — the `To` target, the parent, each previous location, the Inbox — so "a
+    soft-deleted collection is never a write target" holds for all four
+    dispositions at once instead of only the explicit one. The case should be
+    unreachable once this ships (delete re-parents children, so no live row
+    keeps a hidden ancestor), which is exactly why it is a cheap assertion
+    rather than a comment.
+  - **Holdings leave through the same take/add/append triple `teardown` uses**,
+    per board, so a delete's relocations are indistinguishable from any other
+    move to undo, to history and to every count. `Discard` runs zero
+    statements — the loop skips a `None` destination — which is what makes it
+    reversible rather than a delete in disguise.
+  - **Desires move as a merge-and-drop** (`INSERT … SELECT … ON CONFLICT ON
+    CONSTRAINT desires_uniq DO UPDATE`, then delete the source rows). They have
+    no ledger to ride, so `WantDisposition::To` is **not** reversible by the
+    step-5 undo the way holdings are — the receipt cannot carry a handle that
+    does not exist. Noted as an open item for step 5 below.
+  - **Endpoint shape.** `POST /api/collections/{id}/delete` keeps its path (the
+    per-collection op convention in specs/collection-api.md); the body is the
+    spec's `DeleteCollectionReq`, whose two dispositions are `#[serde(default)]`
+    so the pre-step-4 caller posts nothing and gets `ToParent`/`Discard`. The
+    DTO also names the collection, as this spec writes it, and the route
+    **refuses** a body that disagrees with the path rather than picking a winner
+    — silently deleting the other collection is the worst available answer.
+    The Leptos server fn still takes the id alone and now returns the receipt;
+    when step 4 adds the pickers it should grow **scalar** parameters, not the
+    tagged enums (the server-fn POST codec mangles those — app-ui Findings, and
+    why `teardown_collection` takes an `Option<Id>`).
+  - **`undo_one` redirects to the Inbox** when its write-back target is hidden
+    (the ruling above), via a `live_or_inbox` helper; a missing row takes the
+    same branch as a hidden one, since both mean "nowhere of its own to go
+    back to". The redirect is deliberately *not* recorded as a new ledger row:
+    appending one would make it "the last move" and change what ⌘K's
+    `Undo last move` reverses next.
+  - **Tests (no DB, so they run in CI):** thirteen planner unit tests covering
+    all four `HaveDisposition`s, both `WantDisposition`s, the children-reparent
+    rule at both levels, the Inbox refusal, a disposition pointing at the
+    collection being deleted, a surviving child as a legal destination — and
+    **the regression that matters most**, modelled against a miniature
+    `owned_by_card` (sum over live collections): a card held only in the
+    deleted collection is still owned at the destination under *every*
+    non-`Discard` disposition, and not owned — but still present, attached to
+    the hidden row — under `Discard`. Two serde tests in `shared` pin the
+    defaults and the `{"mode": …}` wire shape. `owned_definition_guard` and
+    `soft_delete_guard` stay green (the new `live_or_inbox` lookup carries the
+    filter the latter counts).
+  - **Dev-branch evidence** (Neon `dev`, the e2e user, as `app_runtime` with
+    `app.user_id` set — `scoped_tx` exactly). A committed `#[ignore]`d
+    integration test (`delete_live` in `hosted.rs`, the `search_live`
+    precedent) builds `root → subject(deck) → child → grandchild` plus
+    `source`/`elsewhere`, using two printings of cards the user owns **none**
+    of; card A reaches `subject` by a real move out of `source` (so it is held
+    nowhere else *and* has a live previous location), card B by an intake (so
+    it has none). Inspected independently in `psql` at each phase:
+    | Disposition | one node hidden | children | ledger rows | `owned_by_card` A / B |
+    |---|---|---|---|---|
+    | `ToParent` | subject only (5 live) | child → root, grandchild → child | 2, both ends non-NULL, subject → root | **2** / 5 |
+    | `ReturnToPrevious` | subject only | same | 2 → `source` and Inbox | **2** / 5 |
+    | `To { elsewhere }` | subject only | same | 2 → elsewhere (+ the wants) | **2** / 5 |
+    | `Discard` | subject only | same | **0** | **0** / 4 |
+    Under `Discard` the copies are still *there* (2 + 1 rows attached to the
+    hidden subject) — hidden, not destroyed. The undo redirect was checked with
+    a hand-hidden `source` and an unrelated older move `source → elsewhere`:
+    after `undo_move`, the hidden source received **0** and the Inbox gained
+    exactly the 3 copies, with the ledger row keeping both real ends and its
+    `undone_at` stamp. Cleanup verified: collections/holdings/desires/moves
+    back to `10 / 87 / 6 / 2698`, 0 soft-deleted, 0 scratch rows, and no `moves`
+    row created in the run's window survives.
+  - **Surprise worth writing down:** the dev branch already carries **2416
+    `moves` rows with *both* ends NULL**, all dated 2026-07-24…27 — the
+    falsified ledger this spec's Problem section describes, left by the old
+    hard delete cascading `ON DELETE SET NULL` over historical rows. It is
+    pre-existing damage, unrecoverable (the ids are gone), and it is the
+    concrete evidence that the hole was real rather than theoretical. Nothing
+    in this step adds to it: soft delete never fires the referential action.
+  - **`SELECT … FOR UPDATE` on `collections` works under FORCE'd RLS** as
+    `app_runtime` — checked live rather than assumed, the same caution P6-110
+    used for the `FOR UPDATE` + correlated-`EXISTS` shape. The delete holds its
+    subject row for the whole operation, so a concurrent second delete
+    serializes behind it instead of racing the holdings snapshot.
+  - **Follow-ups, filed rather than absorbed:**
+    - `seed.rs`'s failure rollback is now **best-effort**: it deleted its root
+      collections and relied on the cascade, and delete no longer cascades — a
+      failed seed leaves the created children behind as top-level rows. It
+      passes `Discard`/`Discard` so at least nothing spills into the Inbox. The
+      real fix is a bottom-up sweep, which needs the seed to track more than
+      roots.
+    - **`card_tags` stay attached** to the hidden collection when its holdings
+      move out. card-tagging's rule ("remove a card's tags when its last
+      holding *and* desire leave the deck") is not applied here on purpose:
+      the collection is going hidden anyway, `card_tags.collection_id` is
+      `ON DELETE CASCADE` (never fired by a soft delete), and leaving them is
+      what lets a restore bring the deck back intact.
+    - **Step 5's undo cannot reverse `WantDisposition::To`** — desires have no
+      ledger, so the receipt has no handle for them. Either the receipt grows a
+      desire-relocation record, or the undo's contract says so out loud.
+    - **The other e2e specs' cleanup helpers still assume the cascade.**
+      `collection-tree-manage.spec.ts`'s is now subtree-aware (deepest-first);
+      `collection-header-kebab`, `collection-tree-move`, `command-palette`,
+      `needs`, `quick-add`, `batch-move`, `collection-view` and `removal` each
+      keep their own one-liner. Any of those that deletes a collection with
+      children now strands them as top-level scratch rows on the dev branch.
+      A shared helper is the fix, and it is a test-hygiene task rather than
+      part of this one.
+
+- 2026-08-09 — **Review fixes on top of the above** (adversarial review of the
+  P6-188 commit; the server-side write path came back clean).
+  - **The confirm dialog was still lying.** It read "This permanently deletes
+    {N nested collection(s) and }{M cards} inside it. This cannot be undone." —
+    false three times over after this change: nothing is destroyed, the nested
+    collections survive by moving up a level, and `M` was the *rolled-up*
+    subtree total, whose cards a delete does not touch at all. Replaced with
+    interim, number-free copy that is true for the default dispositions ("Its
+    cards move up to the parent collection — your Inbox if it is top-level.
+    Nested collections move up a level. No cards are deleted."). **No number
+    beats a wrong number**: the honest per-node counts and the two pickers are
+    `P6-189`'s, and the count *fields* are left on `DeleteReq` for it.
+  - **`route_after_delete` fled too far.** It navigated away whenever the
+    current route was anywhere in the deleted node's `subtree`, which was right
+    when the delete cascaded and is wrong now — a descendant's page still shows
+    a real collection with real cards, and ejecting the user from it is a
+    worse bug than the stale page it was written to prevent. It now leaves only
+    when the route *is* the deleted node. Its test asserted the old behaviour
+    and now asserts the inverse.
+  - **`ReturnToPrevious` could corrupt a stack, silently.** It was the one
+    disposition that skipped the self-destination check, and a previous location
+    *can* resolve to the collection being deleted: `teardown` has no
+    `from != to` guard, so an "empty this deck into itself" writes a ledger row
+    with both ends equal, and `previous_location` hands it straight back.
+    Nothing downstream catches that — the same-collection guard lives in
+    `apply_move`, and `delete_collection` does not call it, driving
+    `holding_take` / `holding_add` / `append_move` directly instead. The write
+    would therefore **succeed**: the stack taken off its own board and re-added
+    on `main` in the same collection (a sideboard collapsed into the mainboard),
+    plus a ledger row pointing at itself, all inside a collection hidden a
+    moment later and so invisible to inspect. The planner now treats
+    `prev == the subject` as no source and falls back to the Inbox, with a test.
+    *(First written up here as "would 500 the delete" — wrong, and worth the
+    correction: the real failure mode is quiet corruption, which is the stronger
+    argument for refusing it in the planner rather than trusting the write.)*
+  - **The delete endpoint had quietly become body-mandatory**, which would have
+    broken every existing caller: the operation took no body at all before the
+    dispositions existed, and the e2e cleanup helpers post either nothing (three
+    files) or `{}` (six). Both are now valid again — `Option<Json<…>>` for the
+    no-body case, `#[serde(default)]` on every field for `{}` — and
+    `DeleteCollectionReq::resolve_path_id` fills an unstated `collection_id`
+    from the path while still **refusing** a stated one that disagrees. This is
+    the "give `collection_id` a default derived from the path" option the review
+    floated and set aside as unnecessary; the nine call sites are why it was
+    necessary after all.
 
 - 2026-08-09 — **Step 2 landed: migration `0010` + the read-path filter, inert**
   (`P6-110`, after `P6-039`'s owned collapse). Nothing sets `deleted_at`, so
