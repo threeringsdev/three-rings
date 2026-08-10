@@ -24,11 +24,11 @@
 use shared::{
     AddHave, AddLine, AddWant, AllCardsView, ApiResult, BatchMove, CardDetail, CardSummary,
     CatalogCount, CollectionSummary, CollectionTree, CollectionView, DeckCommanders,
-    DeleteCollectionReceipt, DeleteCollectionReq, DesireLine, HoldingLine, HoldingMove, Id,
-    LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection, NewTag, Page, Rename,
-    RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard, SetQuantity, SetQuery,
-    SetSummary, ShoppingList, SuggestedDestination, Tag, TagAssignment, TaggedCard, Teardown,
-    TeardownReceipt,
+    DeleteCollectionReceipt, DeleteCollectionReq, DeletedCollectionRow, DesireLine, HoldingLine,
+    HoldingMove, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection, NewTag, Page,
+    Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard, SetQuantity,
+    SetQuery, SetSummary, ShoppingList, SuggestedDestination, Tag, TagAssignment, TaggedCard,
+    Teardown, TeardownReceipt,
 };
 
 #[cfg(feature = "hosted")]
@@ -71,6 +71,10 @@ pub mod paths {
     /// GET the sidebar-tree read model (rows + counts). Static, so it cannot
     /// collide with the `/api/collections/{id}/<op>` templates.
     pub const COLLECTION_TREE: &str = "/api/collections/tree";
+    /// GET the caller's soft-deleted collections (specs/collection-deletion.md
+    /// → step 5, "Recently deleted"). Static, same reason as
+    /// [`COLLECTION_TREE`]: it cannot collide with `/api/collections/{id}/<op>`.
+    pub const RECENTLY_DELETED: &str = "/api/collections/recently-deleted";
 
     /// Card detail / summary (by oracle id).
     pub const CARD_DETAIL_ROUTE: &str = "/api/cards/{id}";
@@ -87,6 +91,13 @@ pub mod paths {
     pub mod op {
         pub const RENAME: &str = "rename";
         pub const DELETE: &str = "delete";
+        /// Undo a delete whole, from its own receipt (specs/collection-deletion.md
+        /// → step 5, "Undo").
+        pub const UNDO_DELETE: &str = "undo-delete";
+        /// Restore a soft-deleted collection from the "Recently deleted" list —
+        /// the weaker recovery path, deliberately (specs/collection-deletion.md
+        /// → step 5, "Restore").
+        pub const RESTORE: &str = "restore";
         pub const REPARENT: &str = "reparent";
         pub const REORDER: &str = "reorder";
         pub const HAVE: &str = "have";
@@ -274,6 +285,30 @@ pub trait CollectionStore {
         &self,
         req: DeleteCollectionReq,
     ) -> ApiResult<DeleteCollectionReceipt>;
+
+    /// **Undo** a delete whole, from its own receipt — the misclick path, on
+    /// the delete toast (specs/collection-deletion.md → step 5). Clears
+    /// `deleted_at` **first**, then reverses every `move_id` (the same
+    /// [`Self::undo_moves`]), re-parents every id in `reparented` back, and
+    /// re-inserts every relocated desire. A stale receipt (the collection
+    /// already restored, or its parent deleted in the meantime) is a real
+    /// error, not a silent no-op — see [`Self::restore_collection`] for the
+    /// weaker, later path this is deliberately not.
+    async fn undo_delete(&self, receipt: DeleteCollectionReceipt) -> ApiResult<()>;
+
+    /// **Restore** a soft-deleted collection from the "Recently deleted" list,
+    /// potentially days later (specs/collection-deletion.md → step 5). Clears
+    /// `deleted_at`, re-attaches to the original parent if it is still live —
+    /// otherwise top level — and leaves cards and children exactly where they
+    /// now are. Not a time machine: unlike [`Self::undo_delete`] it does not
+    /// reverse anything that happened to the collection's contents.
+    async fn restore_collection(&self, id: Id) -> ApiResult<()>;
+
+    /// The caller's soft-deleted collections, newest first — the "Recently
+    /// deleted" list's read model (specs/collection-deletion.md → step 5).
+    /// Deliberately thin: name, kind, when. No counts, no purge, no permanent
+    /// delete.
+    async fn recently_deleted(&self) -> ApiResult<Vec<DeletedCollectionRow>>;
 
     /// Move a collection under a new parent (or to top level). Rejects a cycle —
     /// the target being the node itself or one of its descendants (`Conflict`).

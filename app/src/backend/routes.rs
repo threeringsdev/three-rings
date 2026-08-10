@@ -14,9 +14,9 @@ use axum::routing::{get, post};
 use axum::Json;
 use http::StatusCode;
 use shared::{
-    AddHave, AddLine, AddWant, ApiResult, BatchMove, DeleteCollectionReq, HoldingMove, Id,
-    MoveRequest, NewCollection, NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery,
-    SetBoard, SetQuantity, SetQuery, TagAssignment, Teardown,
+    AddHave, AddLine, AddWant, ApiResult, BatchMove, DeleteCollectionReceipt, DeleteCollectionReq,
+    HoldingMove, Id, MoveRequest, NewCollection, NewTag, Page, Rename, RenameTag, Reorder,
+    Reparent, SearchQuery, SetBoard, SetQuantity, SetQuery, TagAssignment, Teardown,
 };
 
 use super::paths;
@@ -41,6 +41,7 @@ where
             get(list_collections).post(create_collection),
         )
         .route(paths::COLLECTION_TREE, get(collection_tree))
+        .route(paths::RECENTLY_DELETED, get(recently_deleted))
         .route(
             &paths::collection_op_route(op::RENAME),
             post(rename_collection),
@@ -48,6 +49,14 @@ where
         .route(
             &paths::collection_op_route(op::DELETE),
             post(delete_collection),
+        )
+        .route(
+            &paths::collection_op_route(op::UNDO_DELETE),
+            post(undo_delete),
+        )
+        .route(
+            &paths::collection_op_route(op::RESTORE),
+            post(restore_collection),
         )
         .route(
             &paths::collection_op_route(op::REPARENT),
@@ -245,6 +254,64 @@ async fn delete_collection(
             HostedBackend::for_user(user.user_id)
                 .await?
                 .delete_collection(req.resolve_path_id(id)?)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/collections/{id}/undo-delete` — reverse a delete whole, from its
+/// own receipt (specs/collection-deletion.md → step 5, "Undo"). The receipt is
+/// client-held (the caller already got it back from `delete_collection`), so
+/// the whole body **is** the receipt; the id in the path is not trusted alone
+/// — `receipt.collection_id` must agree with it, the same "stated and
+/// different is refused" rule `delete_collection`'s own path/body pair
+/// follows, so a client cannot undo one delete while a stale path names
+/// another.
+async fn undo_delete(
+    user: AuthUser,
+    Path(id): Path<Id>,
+    Json(receipt): Json<DeleteCollectionReceipt>,
+) -> Response {
+    if receipt.collection_id != id {
+        return json_result::<()>(Err(shared::ApiError::Validation(
+            "collection_id does not match the path".into(),
+        )));
+    }
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .undo_delete(receipt)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/collections/{id}/restore` — the "Recently deleted" list's
+/// Restore button (specs/collection-deletion.md → step 5). No body: unlike
+/// undo, restore carries no receipt to reverse — it only names the collection.
+async fn restore_collection(user: AuthUser, Path(id): Path<Id>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .restore_collection(id)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `GET /api/collections/recently-deleted` — the caller's soft-deleted
+/// collections, newest first.
+async fn recently_deleted(user: AuthUser) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .recently_deleted()
                 .await
         }
         .await,

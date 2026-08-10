@@ -349,9 +349,381 @@ risky part lands under no time pressure.
   to `undo_one`'s write-back, so `undo_move` / `undo_moves` / `undo_last_move`
   all inherit it).
 
+- *(resolved — 2026-08-10, maintainer ruling by Dylan; raised 2026-08-09, step 3
+  — "Step 5's undo cannot reverse `WantDisposition::To`")*
+  **Should the receipt grow a desire-relocation record, or should undo's
+  contract just say out loud that it doesn't reverse wants?**
+  **The receipt grows.** Undo must fully reverse `WantDisposition::To` — a
+  delete that explicitly relocated a want and was then undone must not leave
+  that want stranded at the destination while everything else (the
+  collection, its cards, its children) goes back. `DeleteCollectionReceipt`
+  gains `desires: Vec<RelocatedDesire>` (additive, `#[serde(default)]`, so a
+  receipt encoded before this field existed still decodes as an empty list).
+  Implemented in step 5 (`P6-190`).
+
 ## Findings
 
-- 2026-08-09 — **Step 4 review fixes** (adversarial review of the `P6-189`
+- 2026-08-10 — **Step 5 review fixes, round 2: a BLOCKER in round 1's own
+  cycle guard** (adversarial review of the `P6-190` commit below; the
+  reviewer's degenerate case, missed by round 1's `reparent_is_safe`).
+  - **The bug.** Round 1 closed the two-node cycle (naming the restored
+    collection's own parent) but the guard never received the restored
+    collection's *own* id, so it could not express "and not itself." A
+    receipt `{collection_id: S, reparented: [S]}` — naming `S` in its own
+    receipt — sailed through: `S`'s current parent trivially equals
+    `reparent_to` (it *is* `reparent_to`'s child), so the parent-match half
+    of the old guard passed, and the write bound
+    `UPDATE collections SET parent_id = S WHERE id = S` — a one-node
+    self-parent cycle. Same fallout as the two-node case (`assemble` drops
+    it from the sidebar *and* the phone root list since it's unreachable
+    either way; it's live so "Recently deleted" doesn't show it either;
+    `collection_view`'s `descendants` CTE recurses forever) — and
+    `reparent_collection` already refuses exactly this shape by id equality
+    (`new_parent == Some(id)`) elsewhere in this same file, which the
+    original guard should have mirrored from the start.
+  - **The fix.** `reparent_is_safe` now takes the restored collection's id
+    (`restored`) as an explicit parameter and refuses `child_id == restored`
+    before the parent comparison ever runs — pure, so the rule stays a unit
+    test rather than something only a live hang would have shown. Two new
+    tests pin the exact crafted-receipt shape end to end (`plan_undo` →
+    `reparent_is_safe`), nested and top-level `S`, mirroring round 1's own
+    "prove it against the real receipt shape" test rather than only the
+    predicate in isolation.
+  - **The doc comment overclaimed, and the reviewer named that as its own
+    finding, not just the missed case.** The original proof ("`child_current_
+    parent == reparent_to` proves `child` is a sibling of `restored`, never
+    an ancestor") is true for every `child_id != restored` — but a node is
+    not its own sibling, and the proof never stated that precondition, so it
+    read as covering a case it silently assumed away. Rewritten to state
+    both halves of the rule (`child_id != restored`, *then* the parent
+    match) and what each one closes, rather than one proof that happened to
+    have a gap-shaped hole in it.
+  - **The accepted widening, written down rather than tightened.** At the
+    top level (`reparent_to = None`), the guard admits *every* top-level
+    non-Inbox collection, not only `S`'s actual former children — the
+    delete that hid `S` is the one place that ever recorded "these ids were
+    its children," and that fact is gone by the time undo runs, so the
+    guard cannot check against it. Still acyclic (a sibling is a sibling
+    regardless of whether it was ever *this* collection's child) and
+    drag-repairable if it mis-nests something; round 2 confirmed this is
+    accepted rather than a second bug and left it alone, now stated
+    explicitly in the function's own doc so a future pass doesn't "fix" it
+    into a false sense of precision.
+  - **Verification.** `cargo fmt --check`, `cargo clippy -p app --features
+    hosted --all-targets -- -D warnings`, and `cargo test -p app --features
+    hosted` all green — 269 passed (up from 267), 3 ignored, 0 failed (two
+    new tests: `a_crafted_receipt_naming_itself_is_refused_not_applied_nested`,
+    `a_crafted_receipt_naming_itself_is_refused_not_applied_top_level`).
+    `collection-undo-restore.spec.ts` re-run at `--workers=1` (unaffected by
+    this fix's own endpoint — restore doesn't reparent anything, undo's own
+    e2e coverage doesn't happen to name `S` in its own receipt — kept green
+    as a regression check, not because this round changed its behavior).
+
+- 2026-08-10 — **Step 5 review fixes** (adversarial review of the `P6-190`
+  commit below; one major, six minors, all fixed here).
+  1. **MAJOR — the `Reparent` step trusted the client-held receipt's
+     `reparented` list, and a crafted one could commit a cycle.**
+     `{collection_id: S (hidden), reparented: [R]}` where `R` is `S`'s own
+     live parent: `Unhide` leaves `S.parent_id == R` untouched, and applying
+     `Reparent(R)` blindly would then set `R.parent_id = S` — a committed
+     two-node cycle `assemble` silently drops from the sidebar and that
+     `collection_view`/`collection_totals`'s uncapped `WITH RECURSIVE` CTEs
+     (no `CYCLE` clause, no depth cap) would hang walking into. Fixed with a
+     structural guard, [`reparent_is_safe`](../app/src/backend/delete_plan.rs):
+     an id is only reparented back if its **current** `parent_id` equals
+     `reparent_to` (the restored collection's own current parent, read once
+     by `Unhide`) — which proves it is *right now* a sibling of the restored
+     collection, never one of its ancestors, so the write can never create a
+     cycle — and is not the Inbox (mirroring `reparent_collection`'s own
+     protection). A guard failure **Conflicts the whole undo** rather than
+     silently dropping the one bad step, the same "put it back exactly or say
+     why not" rule the stale-parent check already followed. Pinned with four
+     no-DB tests, including the exact crafted-receipt shape from the review
+     (`a_crafted_receipt_naming_its_own_parent_is_refused_not_applied`).
+  2. **The stale-parent check swallowed real errors into a false "it was
+     deleted" message.** `require_owned_collection(pid).await.map_err(|_|
+     Conflict(...))` mapped *any* error — including a genuine `Upstream`/DB
+     failure — onto the same Conflict. Now matches only `Err(NotFound(_))`
+     into the honest Conflict and propagates everything else as itself.
+  3. **`RelocatedDesire.quantity` was an unvalidated client `i32`.** A
+     negative value would make `desire_take_clamp`'s `qty <= want` branch
+     invert sign-wise (incrementing the merge destination instead of
+     decrementing it) while the re-insert still wrote that same negative
+     quantity at the source; an unbounded positive inflates the source's want
+     with nothing to stop it. Fixed with `validate_receipt` — pure, checked
+     before the transaction even opens — mirroring the `desires` table's own
+     `CHECK (quantity > 0)`. An invalid receipt is a `Validation` error,
+     nothing written.
+  4. **Two overlapping `undo_delete` calls carrying the same receipt could
+     both pass `require_deleted_collection`'s plain `SELECT` before either
+     committed.** `undo_one` is idempotent; `RestoreDesire` is not — a
+     scripted retry landing inside that window would double the relocated
+     desire's quantity at the source. `require_deleted_collection` now takes
+     `FOR UPDATE` on the row: the second caller blocks on the first, then
+     re-evaluates the same `WHERE` against the committed result — once the
+     first call's `Unhide` clears `deleted_at`, the second sees a live row,
+     fails `deleted_at IS NOT NULL` honestly, and its whole transaction
+     refuses.
+  5. **`recently_deleted` had no bound.** Added `ORDER BY deleted_at DESC
+     LIMIT 50`, consistent with the spec's own "small list" framing — no
+     purge exists yet to keep it small over months of use on its own.
+  6. **The phone `/my` drill-down root list (`app/src/my/root.rs`) had no
+     "Recently deleted" row** — reachable on desktop (the sidebar's
+     `PinnedLinkRow`) but not below `md`, where the rail drawer is the only
+     other way in. Added `recently_deleted_row()`, joining `Shopping list`'s
+     divider group (no count, per the spec, in both `root_rows` and
+     `fallback_rows` — it needs the tree read no more than Shopping list
+     does). Every existing `root.rs` test that asserted an exact row shape,
+     href list, or count updated for the third pinned row.
+  7. **The dead-parent-fallback e2e test was untagged**, so `@fast` runs
+     never exercised it — now `@fast`. (Also caught in this pass: the prior
+     Findings entry below claimed "4/4 green" for a three-test file —
+     corrected to 3/3, and a sentence on the receipt's `desires` list scaling
+     with the collection's own wants count was added where the receipt
+     growth is described.)
+  - **A self-inflicted e2e flake found while re-verifying, fixed alongside.**
+    This file's own repeated local re-runs during this task and this review
+    round left several soft-deleted rows sharing the exact same
+    `scratchName` across separate process invocations (the counter resets
+    every run; this suite's convention is deliberately non-wall-clock
+    elsewhere, where every lookup resolves by id off the live tree — but
+    `/my/recently-deleted` is the first surface in this suite that lists
+    soft-deleted history indefinitely, so a name collision there is real).
+    The two Restore tests located their row with `{ hasText: subject.name }`,
+    which then matched more than one row. Switched both to
+    `[data-collection-id="${subject.id}"]` — unambiguous regardless of how
+    much same-named debris a name accumulates over repeated runs.
+  - **Verification.** `cargo fmt --check`, clippy (hosted, native, hydrate)
+    and `cargo test -p app --features hosted` / `cargo test -p shared` all
+    green — see the numbers folded into the entry below (this pass added 6
+    more no-DB tests: 4 for `reparent_is_safe`, 2 for `validate_receipt`, plus
+    `root.rs`'s existing suite updated in place rather than grown). Full
+    `collection-undo-restore.spec.ts` re-run, all tiers, after the fixes
+    (the endpoint they touch): `--workers=1` (this suite's own gating tier)
+    green twice consecutively (4/4, the setup dependency plus this file's 3);
+    the parallel `@fast`-only tier (default workers, the *iteration* tier per
+    the e2e-suite skill) flaked once on worker pressure and passed clean on
+    an immediate retry — the exact class of flake the skill's own docs
+    already name ("a different subset each run, all passing in isolation"),
+    not chased further per its quarantine policy since the gating tier is
+    clean.
+
+- 2026-08-10 — **Step 5 landed: undo reverses a delete whole, restore brings
+  back the collection alone** (`P6-190`, the final task of the deletion
+  chain, on top of `P6-188`'s relocating delete and `P6-189`'s confirm
+  dialog).
+  - **The receipt grows a desire handle** (maintainer ruling above).
+    `RelocatedDesire { to_collection_id, oracle_id, printing_id, board,
+    quantity }` is captured in `delete_collection` **before** the
+    merge-and-drop that relocates `WantDisposition::To` — the source rows are
+    gone (`DELETE FROM desires WHERE collection_id = $1`) the moment the
+    merge runs, so this snapshot is undo's only way back. One entry per
+    source row; `Discard` still produces none, since it writes nothing.
+    **The receipt's size scales with the deleted collection's own distinct
+    wants count** (one `RelocatedDesire` per source `desires` row, same as
+    `move_ids` already scales with its holding stacks) — fine at this app's
+    current alpha scale (a deck's wants are a human-curated list, not a bulk
+    import), worth revisiting if desires per collection ever grow large
+    enough to make the receipt itself, or the `undo_delete` transaction that
+    walks it, a size concern.
+  - **Undo's shape is `plan_undo` (`app/src/backend/delete_plan.rs`) executed
+    literally, not paralleled.** `plan_undo(&receipt) -> Vec<UndoStep>` is
+    pure — `Unhide`, then one `UndoMove`/`Reparent`/`RestoreDesire` per
+    handle in the receipt — and the hosted `undo_delete` is a `for step in
+    plan_undo(&receipt) { match step { … } }` loop with no ordering decision
+    of its own. That is what makes "un-hide first" structural rather than a
+    convention two people could drift apart on: the plan a unit test asserts
+    against *is* the sequence the executor runs, not a second description of
+    it. `Unhide` first is the one property the spec names by name — reversing
+    the moves has to land on a *live* collection, or `undo_one`'s Inbox
+    redirect (the 2026-08-09 ruling above) fires on the delete's own undo and
+    sends the copies to the Inbox instead of back where they came from.
+  - **The receipt is client-held, exactly as the task's own steer said to
+    prefer.** It is already the return value of `delete_collection`; the
+    delete toast's `on_action` closure holds its own `.clone()` and posts the
+    whole thing back on Undo (`app/src/lib.rs`'s `undo_delete_collection`,
+    `input = Json` — the same fix `undo_selection_move`/`pull_needs` use for
+    a `Vec<…>` argument, since `DeleteCollectionReceipt` carries no tagged
+    enum this time, just ids and a list of plain structs). Nothing is stashed
+    server-side between delete and undo.
+  - **Stale-receipt honesty has two different answers, on purpose, because
+    undo and restore are different operations with different tolerances.**
+    `undo_delete`'s `Unhide` step re-validates the receipt's own collection
+    (`require_deleted_collection`: caller's, still hidden) and, if it had a
+    parent, that parent's liveness (`require_owned_collection`) — a parent
+    soft-deleted in the interim is refused with a `Conflict` naming Restore
+    as the alternative, not silently reparented to the Inbox or top level.
+    Undo promises to put the collection back *exactly* where it was; when it
+    can't, it says so instead of guessing. `restore_collection` makes the
+    opposite call for the identical fact (`restore_parent`, pure, in
+    `delete_plan.rs`): a dead parent by the time Restore is used is the
+    *expected* shape of "later," not a surprise, so it falls back to top
+    level rather than erroring. Same underlying check
+    (`require_owned_collection` on the parent), two different responses —
+    which is the "undo and restore are different operations" property made
+    concrete rather than just asserted in copy.
+  - **`require_deleted_collection`** is the mirror image of
+    `require_owned_collection` (`SELECT 1 FROM collections WHERE id = $1 AND
+    deleted_at IS NOT NULL`) and the one place in `hosted.rs` that
+    legitimately looks for a **hidden** row — undo and restore's shared
+    existence/ownership check. `soft_delete_guard`'s structural test grew a
+    third count (`exempted`) alongside `total`/`guarded`: it asserts there is
+    **exactly one** occurrence of this exact inverted idiom, so the guard
+    still fails on any *new*, undocumented unfiltered lookup while allowing
+    this one documented exception — the "allowlist, not a weakened needle"
+    the task asked for.
+  - **`restore_collection` touches nothing but the row itself.** Clear
+    `deleted_at`, set `parent_id` to `restore_parent`'s answer, done — no read
+    of holdings, desires, or children at all. That silence *is* the weaker
+    semantics: cards and children are wherever the delete (and anything since)
+    left them, because restore never looks.
+  - **Desires reverse through a decrement-then-reinsert, mirroring the
+    delete's own merge-and-drop in reverse.** `desire_take_clamp` (new,
+    beside the existing `holding_take_clamp`) takes back up to the relocated
+    `quantity` from the merge destination — identified the way
+    `desires_uniq` identifies a row (`collection_id, oracle_id, printing_id,
+    board`) — clamped to what's actually still there, since the destination's
+    want may have changed since the delete that merged into it. Then the
+    same `INSERT … ON CONFLICT ON CONSTRAINT desires_uniq DO UPDATE SET
+    quantity = quantity + EXCLUDED.quantity` `delete_collection` already uses
+    re-attaches it at the source.
+  - **Undo's `Reparent` step is unconditional — no `deleted_at IS NULL`
+    filter — on purpose.** A child independently soft-deleted in the gap
+    between delete and undo stays invisible either way (its own row is
+    filtered), but writing its `parent_id` back to the just-restored
+    collection now is what lets a *future* Restore of that child compute the
+    right "original parent" instead of the intermediate one the delete's own
+    re-parent had left it at.
+  - **The "Recently deleted" list is deliberately thin.** New route
+    `/my/recently-deleted` (`app/src/my/recently_deleted.rs`): name, kind,
+    deleted-when, a Restore button — no counts, no purge control, no
+    permanent-delete control, matching the spec's explicit "NO counts"
+    line and the scope's exclusions. `DeletedCollectionRow.deleted_at` is a
+    server-formatted string (`to_char(... AT TIME ZONE 'UTC', 'Mon DD, YYYY
+    "at" HH12:MI AM "UTC"')`), not a raw timestamp — `shared` carries no date
+    library by design (wasm-safe, dependency-free), and this list needs
+    nothing more precise than a string the server already rendered. New
+    sidebar entry (`PinnedLinkRow` in `tree.rs`, next to "All cards" and
+    "Shopping list") — a `PinnedRow` without the count badge, since a badge
+    here would be exactly the count the spec says not to show.
+  - **The copy is deliberately unequal.** The delete toast's Undo carries no
+    extra sentence (the existing "Deleted {name}" success toast, same shape
+    every other undo toast in this app uses); the Restore page's intro reads
+    "Restore brings the collection back — its cards and any nested
+    collections stay wherever they ended up since," and the per-row success
+    toast after Restore carries **no** Undo action of its own — offering one
+    would only re-delete the collection, a different operation with
+    different copy, not this one played backwards.
+  - **Tests, no DB (run under plain `cargo test`).** `shared`: two new tests
+    on `DeleteCollectionReceipt` (an old receipt without `desires` still
+    decodes; a populated `desires` list round-trips byte-for-byte) — 34
+    passed. `app`: `delete_plan.rs` grew from 14 to 27 planner tests — three
+    pin `plan_undo`'s ordering (un-hide first, even off an empty receipt;
+    every handle in the receipt becomes exactly one step; un-hide precedes
+    every other step), two pin `restore_parent`'s fallback rule (live parent
+    wins; dead parent or no parent at all falls back to top level), and
+    eight more from the two adversarial-review passes below
+    (`reparent_is_safe`'s two-node-cycle and self-parent-cycle shapes, plus
+    `validate_receipt`). `soft_delete_guard`'s extended test and everything
+    else: 269 passed (up from 261 pre-review), 3 ignored (up from 2 — the
+    new dev-branch integration test below), 0 failed.
+  - **e2e** (`end2end/tests/collection-undo-restore.spec.ts`, new file, this
+    suite's per-file-self-contained convention): Undo — delete a parent with
+    a child, a have, and a want explicitly relocated to a third collection
+    (exercising the receipt's new `desires` handle through the real wants
+    picker, not just `Discard`'s default), confirm the toast's Undo restores
+    the collection, the child back under it, the card at its original
+    quantity, and the want back on the parent and gone from where it was
+    relocated to. Restore — delete a `subject` under a `grandparent` with its
+    own child, confirm the "Recently deleted" list shows the row (name,
+    kind, non-empty deleted-when) and that Restore reattaches `subject` under
+    `grandparent` while its child and its card stay exactly where the delete
+    left them (the weaker-semantics assertion the spec is explicit about).
+    A third test pins the dead-parent fallback live in the browser (hide the
+    parent, then the child; restoring the child lands it at the top level).
+    Three tests total in the file, all tagged `@fast` — **3/3 green**, both
+    in an `@fast`-only run and a full `--workers=1` run of the file (an
+    earlier draft of this entry miscounted this as "4/4"; corrected in the
+    adversarial-review pass). **Fixture hygiene, per this task's own
+    instruction to design around the known catalog-pool exhaustion rather
+    than feed it**: the Undo test's card ends the test still attached to a
+    live scratch collection (Undo put it back, not the Inbox), so cleanup
+    calls `POST /api/holdings/{id}/move` with `to_collection_id: null` — a
+    real removal, the same one `remove_holding`'s toast uses — to release it
+    back to "owned nowhere" before deleting the scratch collections, instead
+    of letting a relocating delete strand it in the Inbox forever the way
+    this file's sibling (`collection-tree-manage.spec.ts`) already
+    documented as a self-inflicted drain on repeated local runs.
+  - **Regression check on the two files nearest this one**
+    (`collection-tree-manage.spec.ts`, `collection-header-kebab.spec.ts`),
+    `--workers=1`: 24/26 passed. The two failures are both pre-existing and
+    unrelated to this task's diff (confirmed against `git diff origin/main`:
+    neither touches `move_destinations`/`have_destinations`/the subtree
+    exclusion these two exercise) — `collection-header-kebab.spec.ts`'s "Move
+    to… resolves the subtree off the route" is the *exact* flake `P6-189`'s
+    own Findings already named as "intermittently failed mid-suite… not
+    chased to ground, filed… as a quarantine candidate." Reproduced here
+    **3/3 in isolation** rather than only mid-suite, which is a stronger
+    signal than P6-189 had and is worth a follow-up to actually chase or tag
+    `@flaky` — not done here since the code path (`MenuTarget::for_collection`
+    reading the sidebar tree by id) is untouched by this task. "New binder
+    inside… adds a folder row to the page it was run from" failed once mid
+    full-file run and passed twice in isolation immediately after — ordinary
+    worker-pressure flake, the class this suite's own skill already
+    documents, not chased further.
+  - **Dev-branch evidence** (Neon `dev`, the e2e user, `HostedBackend::for_user`
+    — `scoped_tx` exactly, the `delete_live` module's established pattern
+    extended with a new `#[ignore]`d `undo_and_restore_live`, run via
+    `DATABASE_URL=… TR_DEV_USER_ID=… cargo test -p app --features hosted --
+    --ignored undo_and_restore_live`). Fixture: `root → subject(deck) →
+    child → grandchild`, card A moved into `subject` from `source` (a real
+    previous location) and held only there, a want on `subject` for A.
+    | Phase | haves / wants | result |
+    |---|---|---|
+    | delete | `ToParent` / `To { elsewhere }` | subject hidden, child → root, card A (2) → root, want (3) → elsewhere, `receipt.desires.len() == 1` |
+    | `undo_delete(receipt)` | — | subject live again under root, child back under subject, card A back in subject (2, none at root), want back on subject (3, none at elsewhere), every `move_id` in the receipt shows `undone_at`, `owned_by_card` for A unchanged at 2 throughout |
+    | delete (defaults) | `ToParent` / `Discard` | subject hidden again, child → root, card A (2) → root |
+    | `restore_collection(subject)` | — | subject live again, reattached under root (still live) — but child **stays** at root and card A **stays** at root: restore did not reverse either |
+    Cleanup (`sweep`, the existing helper) verified by the test's own final
+    assertion and independently in `psql` (owner credential, read-only):
+    collections/holdings/desires/moves counts identical to pre-run, zero rows
+    matching the test's own scratch-name prefix. Also confirmed independently
+    that this task's e2e run left only the expected soft-deleted debris (14
+    `zz-e2e-undo…` rows, consistent with this suite's established
+    no-purge-by-design pattern every other file's cleanup already leaves).
+  - **Surprise: two live `#[ignore]`d tests back-to-back in one process
+    intermittently exhaust the connection pool.** Running
+    `delete_relocates_instead_of_destroying` immediately followed by the new
+    `undo_and_restore_live` in the same `cargo test -- --ignored delete_live`
+    invocation failed the second test with "pool timed out while waiting for
+    an open connection" — even with the local dev server stopped. Each test
+    alone is reliable (confirmed by running each in isolation, repeatedly).
+    Not chased further — plausibly Neon's serverless connection pooler
+    needing a moment to reclaim slots after ~heavy first test's burst of
+    short-lived connections, a test-harness characteristic rather than a
+    product defect, and pre-existing (the first test alone is unmodified
+    behavior). Filed here rather than silently retried past.
+  - **Surprise, environment-only, not code:** this worktree's
+    `.devcontainer/.env` is missing `NEON_AUTH_BASE_URL` (present, non-secret,
+    in `.env.example`) — sign-in 500s without it, exactly as
+    specs/ui-work-loop.md already documents. Filled from the example's
+    documented default for local verification only; not a repo change.
+    Separately, `.devcontainer/.env`'s `DATABASE_URL` contains an unescaped
+    `&` (`sslmode=require&channel_binding=require`) — a plain `bash source`
+    of the file silently drops everything from the `&` onward (`&`
+    backgrounds an assignment-only "command," so the value never reaches the
+    parent shell), leaving `DATABASE_URL` completely unset with no error.
+    `cargo-leptos`/docker's own env-file loading is unaffected (this is
+    specific to sourcing the file as a shell script, which nothing in this
+    repo's documented workflow does); worth a `.devcontainer/README.md` note
+    for the next agent tempted to `source .env` directly on a host outside
+    the container.
+  - **Follow-ups, filed rather than absorbed:** the `collection-header-kebab.spec.ts`
+    "Move to… resolves the subtree off the route" flake (above) — reproduced
+    3/3 in isolation this session, stronger than P6-189's "intermittent";
+    worth actually chasing or tagging `@flaky` as its own task. Automatic
+    purge / permanent-delete-from-trash remain out of scope per this spec's
+    own Scope section, unchanged by this task.
   commit below; zero majors, six smaller findings, all fixed here).
   1. **The pinned "(parent)" row's search value was the literal string
      `"Parent"`, not the parent's name.** `command`'s typed-text filter

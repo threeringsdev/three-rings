@@ -12,7 +12,10 @@
 //! expressed against [`DeleteSnapshot`], the fix is to read one more fact into
 //! the snapshot, not to reach for the database from here.
 
-use shared::{ApiError, ApiResult, HaveDisposition, Id, WantDisposition};
+use shared::{
+    ApiError, ApiResult, DeleteCollectionReceipt, HaveDisposition, Id, RelocatedDesire,
+    WantDisposition,
+};
 
 /// Everything the delete transaction has read about the collection, gathered
 /// before anything is written.
@@ -193,6 +196,158 @@ fn check_destination(snapshot: &DeleteSnapshot, dest: Id, what: &str) -> ApiResu
     Ok(())
 }
 
+/// One write **undo** makes, in the order [`plan_undo`] emits it — a value the
+/// hosted executor walks with no decisions left in it, the same discipline
+/// [`DeletePlan`] gives the delete itself
+/// (specs/collection-deletion.md → step 5, "Undo").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UndoStep {
+    /// Clear `deleted_at` — **always first**. Reversing the moves below has to
+    /// target a live collection, or `undo_one`'s Inbox redirect (the
+    /// maintainer ruling `undo_move` follows for an *unrelated* old move whose
+    /// source has since been hidden) fires on the delete's own undo and sends
+    /// the copies to the Inbox instead of back where they came from.
+    Unhide,
+    /// Reverse one holdings relocation (the hosted `undo_one`, exactly as
+    /// `undo_moves` calls it).
+    UndoMove(Id),
+    /// Re-parent one child back to the restored collection.
+    Reparent(Id),
+    /// Reverse one relocated desire: decrement it off the merge destination,
+    /// re-insert it at the source.
+    RestoreDesire(RelocatedDesire),
+}
+
+/// Plan an undo from a delete's own receipt — pure, no I/O, so the ordering
+/// invariant above (`Unhide` first) is a direct unit test rather than
+/// something only a dev-branch transcript could show. The hosted `undo_delete`
+/// executes this list step by step, so the plan *is* the execution order —
+/// there is no second copy of the ordering to drift from it.
+///
+/// **Deliberately does not validate `receipt.reparented`.** The receipt is
+/// client-held (specs/collection-deletion.md → step 5), so a caller can name
+/// anything there; this function's only job is "what would each named id
+/// mean, mechanically" — whether a given id is *safe* to act on is
+/// [`reparent_is_safe`]'s job, checked by the executor against the database
+/// facts this pure function has no access to.
+pub fn plan_undo(receipt: &DeleteCollectionReceipt) -> Vec<UndoStep> {
+    let mut steps = vec![UndoStep::Unhide];
+    steps.extend(receipt.move_ids.iter().copied().map(UndoStep::UndoMove));
+    steps.extend(receipt.reparented.iter().copied().map(UndoStep::Reparent));
+    steps.extend(receipt.desires.iter().copied().map(UndoStep::RestoreDesire));
+    steps
+}
+
+/// Whether reparenting `child_id` back onto `restored` (the collection undo
+/// is restoring — [`UndoStep::Reparent`]) is safe to apply.
+///
+/// **The guard that closes a real cycle** (adversarial review, `P6-190`): a
+/// client-held receipt's `reparented` list is untrusted, and it can name
+/// anything, including ids that would commit a cycle if the write ran
+/// unguarded. Two shapes were found, and the rule below is sized to both —
+/// not just the first one found, which is exactly how the first draft of
+/// this function under-covered the second.
+///
+/// - **Naming `restored`'s own current parent.** `{collection_id: S (hidden),
+///   reparented: [R]}` where `R` is `S`'s live parent. `Unhide` leaves
+///   `S.parent_id == R` untouched, and applying `Reparent(R)` unguarded would
+///   set `R.parent_id = S`: a two-node cycle.
+/// - **Naming `restored` itself.** `{collection_id: S, reparented: [S]}`.
+///   `S`'s own current parent trivially equals `reparent_to` (it *is*
+///   `reparent_to`'s child), so a guard that only compared parents would
+///   wave this through and bind `UPDATE collections SET parent_id = S WHERE
+///   id = S` — a one-node self-parent cycle, the exact case
+///   `reparent_collection` already refuses by id equality
+///   (`new_parent == Some(id)`) elsewhere in this file. The first version of
+///   this guard missed it: its proof ("`child_current_parent == reparent_to`
+///   proves `child` is a sibling of `restored`, never an ancestor") is true
+///   for every `child_id != restored`, but a node is not its own sibling —
+///   the proof silently assumed the case away instead of covering it.
+///
+/// Either shape, applied to any page that then walks the cycle
+/// (`collection_view`/`collection_totals`'s `WITH RECURSIVE` CTEs, no
+/// `CYCLE` clause, no depth cap) hangs; `assemble` (the client's tree
+/// builder) silently drops the cycle's members from the sidebar and the
+/// phone root list first, so the hang is the *second* symptom, reachable
+/// only by hitting the page directly.
+///
+/// **The rule, and why each half is sufficient.** `child_id != restored`
+/// rules out the self-parent shape outright — nothing past this point can
+/// resurrect it. `child_current_parent == reparent_to` **for `child_id !=
+/// restored`** then does prove `child_id` is *right now* a sibling of
+/// `restored` — both children of the same `reparent_to` — never one of its
+/// ancestors, and turning a sibling into a child cannot create a cycle (a
+/// cycle needs `child_id` to already be an ancestor of the thing it's about
+/// to become a child of, which a sibling structurally is not). The two
+/// conditions compose: neither alone is the guard, both together are.
+///
+/// **The accepted widening, left alone on purpose.** At the top level
+/// (`reparent_to = None`), "sibling of `restored`" reduces to "also
+/// top-level", so this admits *every* top-level, non-Inbox collection, not
+/// only ids that were actually `restored`'s own former children — the delete
+/// that hid `restored` is the one thing that could have recorded "these
+/// exact ids were its children," and that fact no longer exists to check
+/// against by the time undo runs. Still acyclic (verified above) and
+/// drag-repairable if it ever mis-nests something, so round 2 of this
+/// review kept it rather than narrowing it further.
+///
+/// `NOT is_inbox` mirrors `reparent_collection`'s own protection: nesting the
+/// Inbox under anything is refused there by name, and a receipt naming the
+/// Inbox (reachable when it currently happens to be a live sibling of
+/// `restored`) must not smuggle that past undo instead.
+pub fn reparent_is_safe(
+    child_id: Id,
+    child_current_parent: Option<Id>,
+    child_is_inbox: bool,
+    restored: Id,
+    reparent_to: Option<Id>,
+) -> bool {
+    child_id != restored && !child_is_inbox && child_current_parent == reparent_to
+}
+
+/// Reject a receipt whose relocated-desire quantities fall outside what the
+/// `desires` table itself allows (`CHECK (quantity > 0)`,
+/// migrations/0003_collections.sql) — checked before any write, not
+/// discovered as a constraint violation partway through undo.
+///
+/// A client-held receipt is untrusted input (adversarial review, `P6-190`):
+/// a zero-or-negative quantity would make `desire_take_clamp` *increment* the
+/// merge destination instead of decrementing it (its `qty <= want` branch
+/// inverts sign-wise) and would still write that same non-positive quantity
+/// into the re-inserted source row, so validating here — pure, before the
+/// transaction even opens — is what keeps a crafted receipt from writing
+/// anything at all rather than writing something wrong.
+pub fn validate_receipt(receipt: &DeleteCollectionReceipt) -> ApiResult<()> {
+    for d in &receipt.desires {
+        if d.quantity < 1 {
+            return Err(ApiError::Validation(format!(
+                "a relocated desire's quantity must be positive (the `desires` \
+                 table requires it), got {}",
+                d.quantity
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// **Restore**'s parent-fallback rule (specs/collection-deletion.md → step 5):
+/// re-attach to the original parent if it is still live, otherwise top level.
+/// Pure — the "still live" fact is the one thing the caller has to read from
+/// the database (`require_owned_collection`); everything past that is this
+/// one match, which is what makes the rule itself a unit test rather than
+/// only a dev-branch transcript.
+///
+/// Deliberately **not** an error path, unlike [`UndoStep::Unhide`]'s own
+/// dead-parent refusal above: restore is the later, weaker recovery — a dead
+/// parent by the time it's used is the expected shape of things, not a
+/// surprise to refuse.
+pub fn restore_parent(parent_id: Option<Id>, parent_is_live: bool) -> Option<Id> {
+    match parent_id {
+        Some(pid) if parent_is_live => Some(pid),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +364,7 @@ mod tests {
     const CHILD_B: u128 = 5;
     const ELSEWHERE: u128 = 6;
     const OLD_HOME: u128 = 7;
+    const GRANDPARENT: u128 = 8;
 
     /// A deck under a parent, two children, two holding stacks (the first has a
     /// live previous location, the second has none) and desires attached.
@@ -602,5 +758,315 @@ mod tests {
             6,
             "relocated, not lost"
         );
+    }
+
+    // --- undo (step 5) -----------------------------------------------------
+
+    fn receipt(moves: &[u128], reparented: &[u128], desires: &[u128]) -> DeleteCollectionReceipt {
+        DeleteCollectionReceipt {
+            collection_id: id(SUBJECT),
+            move_ids: moves.iter().map(|n| id(*n)).collect(),
+            reparented: reparented.iter().map(|n| id(*n)).collect(),
+            desires: desires
+                .iter()
+                .map(|n| RelocatedDesire {
+                    to_collection_id: id(ELSEWHERE),
+                    oracle_id: id(*n),
+                    printing_id: None,
+                    board: shared::Board::Main,
+                    quantity: 1,
+                })
+                .collect(),
+        }
+    }
+
+    /// The one ordering property the spec pins by name: **un-hide first,
+    /// always** — including when there is nothing else to undo at all (an
+    /// all-`Discard` delete's receipt is empty apart from the collection id).
+    #[test]
+    fn undo_un_hides_before_anything_else_even_with_an_empty_receipt() {
+        let steps = plan_undo(&receipt(&[], &[], &[]));
+        assert_eq!(steps, vec![UndoStep::Unhide]);
+    }
+
+    /// With every kind of handle present, `Unhide` still leads, and every
+    /// handle in the receipt turns into exactly one step — none dropped, none
+    /// duplicated.
+    #[test]
+    fn undo_un_hides_before_reversing_moves_reparents_or_desires() {
+        let steps = plan_undo(&receipt(&[10, 11], &[12], &[13]));
+        assert_eq!(steps[0], UndoStep::Unhide);
+        assert_eq!(
+            steps[1..],
+            vec![
+                UndoStep::UndoMove(id(10)),
+                UndoStep::UndoMove(id(11)),
+                UndoStep::Reparent(id(12)),
+                UndoStep::RestoreDesire(RelocatedDesire {
+                    to_collection_id: id(ELSEWHERE),
+                    oracle_id: id(13),
+                    printing_id: None,
+                    board: shared::Board::Main,
+                    quantity: 1,
+                }),
+            ]
+        );
+    }
+
+    /// Every `move_id`/child id/desire in the receipt survives into the plan —
+    /// nothing here silently thins the list the receipt promised the toast it
+    /// would reverse.
+    #[test]
+    fn undo_carries_every_handle_the_receipt_names() {
+        let r = receipt(&[1, 2, 3], &[4, 5], &[6, 7]);
+        let steps = plan_undo(&r);
+        let moves = steps
+            .iter()
+            .filter(|s| matches!(s, UndoStep::UndoMove(_)))
+            .count();
+        let reparents = steps
+            .iter()
+            .filter(|s| matches!(s, UndoStep::Reparent(_)))
+            .count();
+        let desires = steps
+            .iter()
+            .filter(|s| matches!(s, UndoStep::RestoreDesire(_)))
+            .count();
+        assert_eq!((moves, reparents, desires), (3, 2, 2));
+        assert_eq!(
+            steps.len(),
+            1 + 3 + 2 + 2,
+            "one Unhide plus one step per handle"
+        );
+    }
+
+    // --- the reparent cycle guard (adversarial review, P6-190, rounds 1&2) --
+
+    /// **Round 1's crafted receipt.** `S` (`SUBJECT`) is hidden, its live
+    /// parent is `R` (`PARENT`), and the receipt claims `reparented: [R]` —
+    /// asking undo to make `S`'s own parent a child of `S`. `plan_undo`
+    /// mechanically turns that into `UndoStep::Reparent(R)` (it does not
+    /// validate — see its own doc), but `reparent_is_safe` — fed `R`'s
+    /// *real* current parent (its grandparent `G`, not `S`) — refuses it,
+    /// because `R`'s current parent is `G`, not `reparent_to` (`R` itself
+    /// would have to be its own parent for this to pass, which nothing in
+    /// this codebase ever allows). This is the end-to-end proof the
+    /// two-node cycle is impossible: the step the plan would hand the
+    /// executor is exactly the dangerous one, and the guard rejects it
+    /// using only facts a real database read would supply.
+    #[test]
+    fn a_crafted_receipt_naming_its_own_parent_is_refused_not_applied() {
+        let crafted = receipt(&[], &[PARENT], &[]);
+        let steps = plan_undo(&crafted);
+        assert_eq!(
+            steps,
+            vec![UndoStep::Unhide, UndoStep::Reparent(id(PARENT))],
+            "the plan itself does not filter anything — that is the guard's job"
+        );
+
+        // R's (PARENT's) real current parent is G (GRANDPARENT), not S — so it
+        // fails the "currently a sibling of S" test that makes the reparent
+        // safe. `restored` is S, `reparent_to` is `Some(PARENT)` — S's own
+        // current parent (what `Unhide` reads and the legitimate case checks
+        // against).
+        assert!(!reparent_is_safe(
+            id(PARENT),
+            Some(id(GRANDPARENT)),
+            false,
+            id(SUBJECT),
+            Some(id(PARENT)),
+        ));
+    }
+
+    /// **Round 2's crafted receipt — the one round 1's guard missed.** `S`
+    /// (`SUBJECT`, nested under live parent `R`) is hidden, and the receipt
+    /// claims `reparented: [S]` — naming itself. `S`'s own current parent
+    /// trivially equals `reparent_to` (it *is* `reparent_to`'s child), so a
+    /// guard that only compared parents would wave this through and bind
+    /// `UPDATE collections SET parent_id = S WHERE id = S`: a one-node
+    /// self-parent cycle. `reparent_is_safe` now takes `restored` explicitly
+    /// and refuses by id equality before the parent comparison ever runs.
+    #[test]
+    fn a_crafted_receipt_naming_itself_is_refused_not_applied_nested() {
+        let crafted = receipt(&[], &[SUBJECT], &[]);
+        let steps = plan_undo(&crafted);
+        assert_eq!(
+            steps,
+            vec![UndoStep::Unhide, UndoStep::Reparent(id(SUBJECT))],
+            "the plan itself does not filter anything — that is the guard's job"
+        );
+
+        // S's own current parent (PARENT) genuinely equals `reparent_to`
+        // (also PARENT) — the parent-match half would pass on its own,
+        // which is exactly why the id-equality half has to run too.
+        assert!(!reparent_is_safe(
+            id(SUBJECT),
+            Some(id(PARENT)),
+            false,
+            id(SUBJECT),
+            Some(id(PARENT)),
+        ));
+    }
+
+    /// The same self-reference attack, top-level: `S` has no parent
+    /// (`reparent_to = None`), and its own current parent (`None`) still
+    /// trivially equals `reparent_to`. Pinned separately from the nested
+    /// case because `reparent_to = None` is also the shape of the accepted
+    /// widening (see the function's own doc) — this proves the id-equality
+    /// check refuses the self-reference regardless, rather than the
+    /// widening accidentally re-admitting it.
+    #[test]
+    fn a_crafted_receipt_naming_itself_is_refused_not_applied_top_level() {
+        let crafted = DeleteCollectionReceipt {
+            collection_id: id(SUBJECT),
+            move_ids: vec![],
+            reparented: vec![id(SUBJECT)],
+            desires: vec![],
+        };
+        let steps = plan_undo(&crafted);
+        assert_eq!(
+            steps,
+            vec![UndoStep::Unhide, UndoStep::Reparent(id(SUBJECT))],
+        );
+
+        assert!(!reparent_is_safe(
+            id(SUBJECT),
+            None,
+            false,
+            id(SUBJECT),
+            None,
+        ));
+    }
+
+    /// The legitimate case the guard must still allow: a real child of the
+    /// deleted collection, sitting exactly where the delete's own reparent
+    /// step left it (a sibling of the restored collection, both under
+    /// `reparent_to`) — and critically, a *different* id from `restored`.
+    #[test]
+    fn a_real_former_child_still_sitting_where_the_delete_left_it_is_safe() {
+        assert!(reparent_is_safe(
+            id(CHILD_A),
+            Some(id(PARENT)),
+            false,
+            id(SUBJECT),
+            Some(id(PARENT)),
+        ));
+        // Top-level case: the child, and the restored collection, both have
+        // no parent (`reparent_to = None`) — the accepted widening's own
+        // shape, still safe because `child_id != restored`.
+        assert!(reparent_is_safe(
+            id(CHILD_A),
+            None,
+            false,
+            id(SUBJECT),
+            None
+        ));
+    }
+
+    /// The Inbox is refused by name, mirroring `reparent_collection`'s own
+    /// protection — even when it currently happens to be a live sibling of
+    /// the collection being restored (so the parent-match half of the check
+    /// would otherwise pass).
+    #[test]
+    fn the_inbox_is_never_a_safe_reparent_target_even_as_a_sibling() {
+        assert!(!reparent_is_safe(
+            id(INBOX),
+            Some(id(PARENT)),
+            true,
+            id(SUBJECT),
+            Some(id(PARENT)),
+        ));
+    }
+
+    /// An id that is neither a sibling of the restored collection, the
+    /// restored collection itself, nor the Inbox — some unrelated node the
+    /// receipt names — is refused too.
+    #[test]
+    fn an_unrelated_id_is_not_a_safe_reparent_target() {
+        assert!(!reparent_is_safe(
+            id(PARENT),
+            Some(id(GRANDPARENT)),
+            false,
+            id(SUBJECT),
+            Some(id(PARENT)),
+        ));
+        assert!(!reparent_is_safe(
+            id(CHILD_A),
+            None,
+            false,
+            id(SUBJECT),
+            Some(id(PARENT)),
+        ));
+        assert!(!reparent_is_safe(
+            id(CHILD_A),
+            Some(id(PARENT)),
+            false,
+            id(SUBJECT),
+            None,
+        ));
+    }
+
+    // --- receipt validation (adversarial review, P6-190) --------------------
+
+    fn desire(qty: i32) -> RelocatedDesire {
+        RelocatedDesire {
+            to_collection_id: id(ELSEWHERE),
+            oracle_id: id(OLD_HOME),
+            printing_id: None,
+            board: shared::Board::Main,
+            quantity: qty,
+        }
+    }
+
+    #[test]
+    fn a_positive_desire_quantity_validates() {
+        let r = DeleteCollectionReceipt {
+            collection_id: id(SUBJECT),
+            move_ids: vec![],
+            reparented: vec![],
+            desires: vec![desire(1), desire(9999)],
+        };
+        assert!(validate_receipt(&r).is_ok());
+    }
+
+    /// Zero and negative quantities are refused before any write — the
+    /// `desires` table's own `CHECK (quantity > 0)` mirrored here, and the
+    /// reason it matters: `desire_take_clamp`'s `qty <= want` branch inverts
+    /// sign-wise on a non-positive `want`, so a negative quantity would
+    /// *increment* the merge destination instead of decrementing it.
+    #[test]
+    fn a_non_positive_desire_quantity_is_refused() {
+        for bad in [0, -1, -100] {
+            let r = DeleteCollectionReceipt {
+                collection_id: id(SUBJECT),
+                move_ids: vec![],
+                reparented: vec![],
+                desires: vec![desire(bad)],
+            };
+            assert!(
+                matches!(validate_receipt(&r), Err(ApiError::Validation(_))),
+                "quantity {bad} should be refused"
+            );
+        }
+    }
+
+    // --- restore (step 5) ---------------------------------------------------
+
+    /// The spec's own two cases: a live parent wins; a dead one falls back to
+    /// top level rather than refusing (restore is the weaker path — unlike
+    /// undo, a gone parent is not treated as an error here).
+    #[test]
+    fn restore_reattaches_to_a_live_parent_but_falls_back_to_top_level_off_a_dead_one() {
+        assert_eq!(restore_parent(Some(id(PARENT)), true), Some(id(PARENT)));
+        assert_eq!(restore_parent(Some(id(PARENT)), false), None);
+    }
+
+    /// A collection that was already top-level when it was deleted has no
+    /// parent to check liveness for at all — it stays top-level regardless of
+    /// the (irrelevant) liveness flag.
+    #[test]
+    fn restore_of_a_top_level_collection_has_no_parent_to_lose() {
+        assert_eq!(restore_parent(None, true), None);
+        assert_eq!(restore_parent(None, false), None);
     }
 }

@@ -658,12 +658,43 @@ impl DeleteCollectionReq {
     }
 }
 
+/// One relocated desire, enough to reverse a `WantDisposition::To` on undo
+/// (specs/collection-deletion.md → step 5; maintainer ruling 2026-08-10,
+/// Dylan: "undo must fully reverse `WantDisposition::To`").
+///
+/// Desires have no ledger — `WantDisposition::To` is a merge-and-drop
+/// (`INSERT … ON CONFLICT ON CONSTRAINT desires_uniq DO UPDATE SET quantity =
+/// desires.quantity + EXCLUDED.quantity`, then `DELETE` the source rows), so
+/// there is no `move_id` for undo to hand to `undo_moves`. This is the undo
+/// handle instead: `desires_uniq` is `UNIQUE NULLS NOT DISTINCT (collection_id,
+/// oracle_id, printing_id, board)`, so `(oracle_id, printing_id, board)` plus
+/// [`to_collection_id`](Self::to_collection_id) is the row's exact identity at
+/// both ends, and `quantity` is the exact amount to move back. The source
+/// collection is not repeated here — it is
+/// [`DeleteCollectionReceipt::collection_id`], the same one every other handle
+/// in the receipt reverses against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelocatedDesire {
+    /// Where the delete merged this row into (`WantDisposition::To`'s
+    /// destination). Undo decrements *this* row (clamped — the destination's
+    /// want may have changed since) before re-inserting `quantity` at the
+    /// source, mirroring how [`HaveDisposition::To`]'s `move_id`s reverse
+    /// through the real ledger.
+    pub to_collection_id: Id,
+    pub oracle_id: Id,
+    /// `None` = "any printing" (`desires.printing_id`'s own meaning).
+    pub printing_id: Option<Id>,
+    pub board: Board,
+    pub quantity: i32,
+}
+
 /// What a delete wrote — **handles, not counts**, for the same reason
 /// [`TeardownReceipt`] carries ids: the undo behind the toast has to reverse
 /// exactly this operation (clear `deleted_at`, reverse every `move_id`,
-/// re-parent every id in `reparented` back), and a count cannot do that.
+/// re-parent every id in `reparented` back, re-insert every relocated desire),
+/// and a count cannot do that.
 ///
-/// `Discard`ed rows produce no ids because they produce no writes.
+/// `Discard`ed rows produce no ids/handles because they produce no writes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeleteCollectionReceipt {
     /// The collection that was hidden.
@@ -673,6 +704,14 @@ pub struct DeleteCollectionReceipt {
     /// Children whose `parent_id` changed (they survive — delete removes
     /// exactly one node).
     pub reparented: Vec<Id>,
+    /// Relocated desires (`WantDisposition::To` only — `Discard` writes
+    /// nothing and needs no handle). Additive since `P6-188` shipped this
+    /// receipt without it: `#[serde(default)]` so a receipt encoded before
+    /// this field existed still decodes, as an empty list — undo just has
+    /// nothing to reverse on the want side, which is the honest reading of an
+    /// old receipt rather than a decode failure.
+    #[serde(default)]
+    pub desires: Vec<RelocatedDesire>,
 }
 
 /// A row of the virtual "All cards" view (specs/collection-api.md → AllCardsView):
@@ -769,6 +808,21 @@ pub struct ShoppingRow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShoppingList {
     pub rows: Vec<ShoppingRow>,
+}
+
+/// One row of the "Recently deleted" list (specs/collection-deletion.md →
+/// step 5). Deliberately thin — name, kind, when — the spec is explicit that
+/// this list carries **no counts**: it exists so a soft delete is reachable
+/// after its toast is gone, not to describe what's inside it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeletedCollectionRow {
+    pub id: Id,
+    pub name: String,
+    pub kind: CollectionKind,
+    /// Server-formatted, not a raw timestamp — this crate is wasm-safe and
+    /// dependency-free by design (no date library), and "deleted when" needs
+    /// nothing more precise than a string the server already rendered.
+    pub deleted_at: String,
 }
 
 #[cfg(test)]
@@ -881,5 +935,49 @@ mod tests {
         assert_eq!(batch_item_index("unauthorized"), None);
         assert_eq!(batch_item_index("item x: nope"), None);
         assert_eq!(batch_item_index("item 2"), None);
+    }
+
+    /// The receipt's `desires` field is additive (`P6-190`, step 5): a receipt
+    /// encoded before it existed must still decode, as an empty list — not a
+    /// decode failure. `#[serde(default)]` is what makes that true; this pins
+    /// it against a future edit that drops the attribute.
+    #[test]
+    fn an_old_receipt_without_desires_still_decodes() {
+        let wire = r#"{"collection_id":"00000000-0000-0000-0000-000000000001",
+                        "move_ids":[],"reparented":[]}"#;
+        let receipt: DeleteCollectionReceipt = serde_json::from_str(wire).expect("old receipt");
+        assert_eq!(receipt.desires, Vec::new());
+    }
+
+    /// The receipt round-trips a populated `desires` list byte-for-byte — the
+    /// shape undo actually reverses: `to_collection_id` (where the delete
+    /// merged the want into), the row's identity
+    /// (`oracle_id`/`printing_id`/`board`), and the `quantity` to move back.
+    #[test]
+    fn the_receipt_round_trips_relocated_desires() {
+        let receipt = DeleteCollectionReceipt {
+            collection_id: Id::from_u128(1),
+            move_ids: vec![Id::from_u128(2)],
+            reparented: vec![Id::from_u128(3)],
+            desires: vec![
+                RelocatedDesire {
+                    to_collection_id: Id::from_u128(4),
+                    oracle_id: Id::from_u128(5),
+                    printing_id: Some(Id::from_u128(6)),
+                    board: Board::Main,
+                    quantity: 3,
+                },
+                RelocatedDesire {
+                    to_collection_id: Id::from_u128(4),
+                    oracle_id: Id::from_u128(7),
+                    printing_id: None,
+                    board: Board::Side,
+                    quantity: 1,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&receipt).expect("serializes");
+        let back: DeleteCollectionReceipt = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, receipt);
     }
 }
