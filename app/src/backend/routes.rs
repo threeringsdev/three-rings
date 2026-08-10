@@ -23,6 +23,7 @@ use super::paths;
 use super::paths::op;
 use super::{CatalogStore, CollectionStore, HostedBackend};
 use crate::auth::AuthUser;
+use crate::my::needs::PullItem;
 
 /// Add the hosted data-access routes to `router`. Generic over the router state
 /// so it composes with the Leptos-options-stated app router.
@@ -83,6 +84,7 @@ where
         .route(paths::ALL_CARDS, get(all_cards))
         .route(paths::SHOPPING_LIST, get(shopping_list))
         .route(&paths::collection_op_route(op::NEEDS), get(needs))
+        .route(&paths::collection_op_route(op::PULL), post(pull_needs))
         // Tags & boards (specs/card-tagging.md).
         .route(paths::TAGS, post(create_tag))
         .route(&paths::tag_op_route(op::RENAME), post(rename_tag))
@@ -583,6 +585,26 @@ async fn all_cards(user: AuthUser, Query(p): Query<SearchParams>) -> Response {
 /// `GET /api/collections/{id}/needs` — a collection's needs.
 async fn needs(user: AuthUser, Path(id): Path<Id>) -> Response {
     json_result(async { HostedBackend::for_user(user.user_id).await?.needs(id).await }.await)
+}
+
+/// `POST /api/collections/{id}/pull` — fill this collection's needs from the
+/// caller's other collections, one transaction (P6-120). The destination id
+/// stays in the path like every other per-collection op; the items ride
+/// whole in the body, same shape as `batch_add`.
+async fn pull_needs(
+    user: AuthUser,
+    Path(id): Path<Id>,
+    Json(items): Json<Vec<PullItem>>,
+) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .pull_needs(id, items)
+                .await
+        }
+        .await,
+    )
 }
 
 /// `GET /api/shopping-list` — the global shopping list.

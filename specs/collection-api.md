@@ -393,3 +393,179 @@ resolves.
   destination; pinned with a live-DB test that calls `previous_location`
   directly after a delete → undo cycle (`previous_location_ignores_an_undone_move`
   in `hosted.rs`).
+
+- 2026-08-10 — **`pull_needs` plans and writes in one transaction** (P6-120).
+  Before: the `pull_needs` server fn (`lib.rs`) composed three independently
+  committed calls — `needs()`, a per-card `holdings_of_oracle()`, then
+  `move_batch()` — so the plan could be built from rows the write no longer
+  held by the time it ran (same-device reachable: per-row busy guards let two
+  ticks overlap, per `app-ui.md`'s P6-119 Findings). Fixed with the read →
+  plan → write-one-tx house pattern `delete_collection`/`delete_plan.rs`
+  already established.
+
+  **Planner/executor split, ported faithfully.** New
+  `app/src/backend/pull_plan.rs` (hosted-only, same `#[cfg]` as
+  `delete_plan`): `PullSnapshot` (fresh needs rows + a locked
+  `oracle_id -> Vec<HoldingLine>` map), `plan_pull_needs` (pure — classifies
+  each item `AlreadyThere` / `NoLongerNeeded` / `NoCopies` / pulled, exactly
+  the loop the server fn used to run inline) and `oracle_ids_of` (the
+  canonical lock-order helper, below). **The allocation arithmetic itself was
+  not re-implemented** — `allocate`/`gap_of`/`dedupe`/`plan_pull` stay in
+  `my::needs.rs` (unconditionally compiled, since the client's pick list
+  calls them directly) and `pull_plan` imports them rather than duplicating,
+  honoring that module's own "same function over its own fresh read" rule.
+  Zero behavior delta versus the pre-P6-120 loop: same three skip reasons,
+  same per-(oracle, source) dedup, same default-grain-first stack order.
+
+  **`HostedBackend::pull_needs`** (new `CollectionStore` method) does the
+  actual read → plan → write: `read_needs_rows` (extracted from `needs()`,
+  now shared by both) supplies the fresh gap; then, for each **distinct**
+  oracle id `items` names — in **sorted, not caller-supplied, order** — one
+  `SELECT … FOR UPDATE OF h` locks every holdings stack of that card across
+  every live collection (the same breadth `holdings_of_oracle` reads); then
+  `plan_pull_needs` runs over exactly what got locked; then every planned
+  line writes through the existing `holding_take`/`holding_add`/`append_move`
+  trio (the same triple `delete_collection`/`teardown` use). One commit.
+  `needs()` itself is now `read_needs_rows` + the `require_owned_collection`
+  guard + commit — unchanged output, less code.
+
+  **Locking.** Only the `holdings` row is locked (`FOR UPDATE OF h`), never
+  the joined `printings` catalog row — first draft locked both by omitting
+  `OF h` and (unrelated to that, but caught by the same first e2e run) hit a
+  real bug: `HOLDING_COLS`'s bare `id` column is ambiguous once `printings`
+  (which also has an `id`) is joined in, surfacing as "column reference `id`
+  is ambiguous" — `holdings_of_oracle`'s own hand-qualified column list
+  (`h.id`, `h.collection_id`, …) was copied instead of reusing the constant.
+  **Canonical lock order** (`pull_plan::oracle_ids_of`, sorted distinct
+  oracle ids): the deliberately-unfixed P6-114 finding is that `move_batch`
+  locks rows in **caller-supplied** item order, so two concurrent batches
+  whose item lists overlap but arrive in opposite order can deadlock. Free to
+  close for this one new operation since it already has to enumerate the ids
+  — sorted before the lock loop rather than iterating `items` as given. This
+  is *not* the general cross-operation ordering machinery P6-114 itself
+  declined to build (a `pull_needs` call can still theoretically deadlock
+  against an unrelated `move_batch`/`move_holding` touching an overlapping
+  row set in a different order — Postgres's own detector aborts one side with
+  a retryable error in that case, same safety net as everywhere else in this
+  file; not attempted to remove here).
+
+  **Review round: the read/lock *order* mattered, not just "one
+  transaction."** The first draft read the destination's fresh gap
+  (`read_needs_rows`) *before* the lock loop — still inside one transaction,
+  still an improvement on three, but not enough. Two overlapping pulls into
+  the same destination sharing an oracle id would each read the *same* stale
+  gap up front, then serialize on the lock loop (the second blocks until the
+  first commits), but by then each had already fixed its own `want` from the
+  pre-lock read — so both would plan against the original, larger gap and,
+  once both committed, overshoot `desired` at the destination. Fixed by
+  swapping the order: lock first, read the gap second. Because the lock query
+  is bulk over the whole oracle (previous paragraph), a second overlapping
+  pull cannot even *start* its own gap read until it has acquired those same
+  rows, which cannot happen before the first pull commits — so the gap read
+  is now guaranteed no older than the locks, not merely coincident with them
+  in the same transaction. `pull_plan.rs`'s module doc was corrected to state
+  this precisely ("every row a write might touch was locked before the gap
+  that sized the plan was read") rather than the looser "the plan and the
+  write are always looking at the same rows," which was true of the
+  mechanism (one transaction) but not sufficient on its own to prove the
+  guarantee.
+
+  **The lock footprint is deliberately wider than the pre-P6-120 path, and
+  that is a real tradeoff, not free.** The old composition's only lock was
+  `holding_take`'s own — one row, at write time, exactly the stack being
+  decremented. This method now locks **every live holdings row of each
+  requested oracle, for the whole transaction** (bulk per oracle id, not
+  filtered to the item's own `from_collection_id` — see the comment in
+  `hosted.rs`), because that bulk breadth is what makes two overlapping
+  `pull_needs` calls sharing a card serialize correctly (previous paragraph).
+  The cost: `pull_needs`'s blocking surface against an unrelated `move_batch`
+  (or another `pull_needs`) touching *any* holding of that same oracle, in
+  *any* of the caller's collections, grows accordingly — a `move_batch`
+  moving a wholly different stack of the same card, in a collection this
+  pull never names, can now be made to wait behind it, where before the two
+  operations' single-row locks would never have collided unless they named
+  the literal same stack. Accepted as the shape of the fix rather than
+  narrowed further (e.g. to only the `from_collection_id`s the items name):
+  narrowing would silently reopen the pull-vs-pull race the bulk lock
+  exists to close, for the source-collection-not-named case.
+
+  **Endpoint.** No pull endpoint existed before this task (checked). Added
+  `POST /api/collections/{id}/pull` (`op::PULL`), body = `Vec<PullItem>`,
+  mirroring `batch_add`'s exact shape (destination id in the path, items
+  whole in the body) rather than inventing a new top-level path. `native.rs`
+  forwards the whole call in one POST — previously the native backend made
+  the pre-P6-120 *three* separate HTTP round trips (via `needs`,
+  `holdings_of_oracle`, `move_batch`), each its own hosted transaction, an
+  even wider window than the in-process hosted case.
+
+  **Wire types stayed in `app::my`, not moved to `shared`.** `PullItem` /
+  `Pulled` / `PullOutcome` (and `Skipped`/`SkipReason` from
+  `my::move_selection`) already crossed the wire as a Leptos server-fn's
+  argument/return types before this method existed, without living in
+  `shared` — same placement `move_selection`'s own `Skipped`/`SkipReason`
+  already established for an analogous adapter. `backend::mod.rs` /
+  `hosted.rs` / `native.rs` / `routes.rs` import them from `crate::my::needs`
+  / `crate::my::move_selection` directly (`my` is unconditionally compiled,
+  so this is available to every target `backend` builds for); `PullOutcome`'s
+  JSON shape is byte-for-byte unchanged, so P6-119's client keeps working
+  with zero changes to `my/needs.rs`'s UI call sites. `lib.rs`'s
+  `pull_needs` server fn is now a thin wrapper: the `SELECTION_MOVE_MAX` cap
+  check (mechanical, no DB) stays there, matching where `move_selection`'s
+  identical cap check already lives — `move_batch`'s own hosted route has no
+  such cap either (P6-123, a separately tracked gap, not touched here).
+
+  **Who else calls `needs()`/`holdings_of_oracle()` — left alone.** `needs()`
+  still backs `GET /api/collections/{id}/needs` (`routes.rs`) and the
+  `collection_needs` server fn (`lib.rs`) — the needs page's own read.
+  `holdings_of_oracle()` still backs `GET /api/cards/{id}/holdings`
+  (`routes.rs`) and, unfixed here, `move_selection`'s server fn (`lib.rs`,
+  ~1200): the selection tray's batch move has the **same** three-transaction
+  shape (`holdings_of_oracle` read, then `move_batch` write, no lock
+  carried between them) — same class of defect as this task, on a different
+  operation. Out of this task's surgical scope; recorded rather than
+  silently absorbed, no Workbook task filed per this task's own
+  no-workbook-commands instruction.
+
+  **Tests.** `pull_plan.rs` gained 7 unit tests: the three skip reasons
+  (`AlreadyThere`/`NoLongerNeeded`/`NoCopies`), a multi-source allocation, a
+  duplicate-item no-multiply case, `oracle_ids_of`'s sort+dedup, and the
+  concurrency shape this task exists for —
+  `a_source_with_fewer_copies_than_the_ask_plans_the_honest_partial`: a
+  snapshot whose locked `holdings` (simulating another operation having
+  already drained some stock between the pick list's own snapshot and this
+  transaction's lock) holds fewer copies than the fresh allocation's `want`,
+  asserting the plan reports the honest partial (`Pulled { copies: 1 }` off
+  an ask of 2) rather than erring or moving more than is there. No new
+  `#[ignore]`d live-DB test added — the existing `needs.spec.ts` e2e (which
+  already exercises Pull, Pull-all, and P6-119's own partial-pull-via-an-out-
+  of-band-drain scenario against the real dev branch) covers the unified
+  endpoint end to end; adding a redundant live-DB unit test on top was judged
+  not worth it (task said "only if it fits naturally; not required"). **The
+  native `/api/collections/{id}/pull` route itself has no automated
+  coverage** — the planner tests are pure (no HTTP), and `needs.spec.ts`
+  drives the web UI, which calls `HostedBackend` in-process and never touches
+  `native.rs`/`routes.rs`'s new wire path at all. That path only gets
+  exercised by an on-device (Tauri/APK) smoke pass against a running hosted
+  deployment, which this task did not run.
+
+  **Verified:** `cargo fmt --all -- --check` clean; `cargo clippy -p app`
+  clean (`-D warnings`) across `--features hosted --all-targets`,
+  `--features native --all-targets`, `--features hydrate --target
+  wasm32-unknown-unknown`, and both `component-bench` combos; `cargo test -p
+  app --features hosted`: 284 passed (277 baseline + 7 new `pull_plan`
+  tests), 4 ignored (DB-gated, untouched); `cargo test -p shared`: 34 passed
+  (no wire types changed). e2e: `needs.spec.ts` full file, chromium
+  `--workers=1`, 7/7, run twice for stability (both green) — including the
+  P6-119 partial-pull test, which now exercises the *unified* endpoint
+  rather than the three-transaction one it was originally written against,
+  and still passes unchanged.
+
+  **Surprise.** The ambiguous-`id` SQL error above only exists because of a
+  half-step in porting `holdings_of_oracle`'s pattern: that method's own
+  query already hand-qualifies every column for exactly this reason (it also
+  joins `printings`), and the fix here is simply to have copied that
+  qualification instead of reaching for the `HOLDING_COLS` constant (which is
+  safe only in `move_holding`'s and the two `RETURNING` sites' single-table
+  contexts). Caught immediately by the first e2e run against the real
+  database — a `cargo test`-only pass would not have caught it, since no unit
+  test exercises real SQL.

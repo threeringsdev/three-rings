@@ -23,6 +23,7 @@ use shared::{
 use tokio::sync::OnceCell;
 
 use super::{CatalogStore, CollectionStore};
+use crate::my::needs::{PullItem, PullOutcome};
 
 /// The hosted API origin release builds fall back to (non-secret, matches
 /// auth's baked default). An exported `TR_WEB_ORIGIN` wins, so a dev build can
@@ -499,6 +500,24 @@ impl CollectionStore for NativeBackend {
             collection_id,
             super::paths::op::NEEDS,
         ))
+        .await
+    }
+
+    /// The whole pull rides one request: the destination id in the path (like
+    /// every other per-collection op), the items whole in the body (like
+    /// `batch_add`) — a single hosted round trip runs the read/plan/write
+    /// transaction P6-120 unified, rather than the three separate calls this
+    /// method used to make against `needs`/`holdings_of_oracle`/`move_batch`.
+    async fn pull_needs(
+        &self,
+        to_collection_id: Id,
+        items: Vec<PullItem>,
+    ) -> ApiResult<PullOutcome> {
+        self.require_session()?;
+        self.post(
+            &super::paths::collection_op(to_collection_id, super::paths::op::PULL),
+            &items,
+        )
         .await
     }
 
