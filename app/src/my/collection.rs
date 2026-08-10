@@ -657,13 +657,28 @@ fn CollectionHeader(
     // `Provider` above a `Suspense` does not reach a `use_context_menu()` call
     // made inside it (the rule that forced the tree's own menu wrapper inside its
     // boundary), so the kebab could not find its panel from in there.
-    let cards_here = i64::from(totals.present_total());
+    // **Own counts, not rolled up** (specs/collection-deletion.md → step 4):
+    // `totals.present`/`totals.desired` are this collection alone, unlike
+    // `present_total()` which folds in every descendant's copies — a delete
+    // relocates only this node's own holdings/desires, so the confirm's
+    // count must not overstate that. `children.len()` is the same read's
+    // **immediate** children, which is what actually re-parents; sourcing it
+    // from `collection_view` rather than the sidebar tree is the fix for the
+    // stale/failed-tree-read gap (specs/collection-deletion.md Problem
+    // section, absorbed P6-111): this is the very payload that already
+    // renders the header, so it cannot disagree with what's on screen the
+    // way a second, independently-fetched tree read could.
+    let cards_here = i64::from(totals.present);
+    let wants_here = i64::from(totals.desired);
+    let children_here = view.children.len() as i64;
     let aim = Callback::new(move |()| {
         let roots = assembled_roots(tree.get_untracked().flatten());
         manage.menu_target.set(Some(MenuTarget::for_collection(
             &collection.get_value(),
             &roots,
             cards_here + i64::from(here_delta.get_untracked()),
+            wants_here,
+            children_here,
         )));
     });
 
@@ -1997,6 +2012,7 @@ mod tests {
                 format: None,
             },
             present,
+            desired: 0,
         }
     }
 

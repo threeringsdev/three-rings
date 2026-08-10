@@ -358,6 +358,7 @@ mod tests {
                 format: None,
             },
             present,
+            desired: 0,
         }
     }
 

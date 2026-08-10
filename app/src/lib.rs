@@ -758,28 +758,60 @@ pub async fn rename_collection(
 /// the real ledger. Returns the receipt (the handles a future undo toast
 /// reverses), never a count.
 ///
-/// **Takes the id alone, so the dispositions are the spec's defaults**
-/// (`ToParent` for haves, `Discard` for wants). The confirm dialog's two pickers
-/// are step 4 of that spec; when they land, this adapter grows **scalar**
-/// parameters for them rather than the tagged enums — the server-fn POST codec
-/// mangles nested/tagged DTOs (app-ui Findings, and why `teardown_collection`
-/// above takes an `Option<Id>` instead of `shared::Teardown`).
+/// **Scalar dispositions, not the tagged enums** (the quick_add convention,
+/// and the reason `teardown_collection` above takes an `Option<Id>` instead of
+/// `shared::Teardown`: the server-fn POST codec mangles nested/tagged DTOs —
+/// app-ui Findings). The confirm dialog's two pickers (`P6-189`) offer three of
+/// `HaveDisposition`'s four states and both of `WantDisposition`'s:
+///
+/// - `haves_to = Some(id)` → `HaveDisposition::To { collection_id: id }`.
+/// - `haves_to = None, haves_discard = true` → `HaveDisposition::Discard`
+///   ("Remove from Collection" on the have side); `haves_discard` wins over an
+///   unset `haves_to`, since the dialog only ever sends one or the other.
+/// - `haves_to = None, haves_discard = false` → `HaveDisposition::ToParent`,
+///   the spec's default and the only reading of "neither was stated" — which
+///   is also what a caller with no picker at all still gets (every call site
+///   before this task, and every e2e cleanup helper today).
+/// - `wants_to = Some(id)` → `WantDisposition::To { collection_id: id }`;
+///   `None` → `WantDisposition::Discard`, the spec's default.
+///
+/// `HaveDisposition::ReturnToPrevious` stays reachable on the wire (the hosted
+/// route is unchanged, per specs/collection-deletion.md step 4's "must not
+/// change") but this adapter has no parameter for it — the confirm dialog's
+/// wireframe offers exactly two controls, not a third for a mode
+/// `teardown_collection` already covers elsewhere.
 #[server(prefix = "/api", endpoint = "delete_collection")]
 pub async fn delete_collection(
     id: shared::Id,
+    haves_to: Option<shared::Id>,
+    haves_discard: bool,
+    wants_to: Option<shared::Id>,
 ) -> Result<shared::DeleteCollectionReceipt, ServerFnError<String>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
+        let haves = match (haves_to, haves_discard) {
+            (_, true) => shared::HaveDisposition::Discard,
+            (Some(collection_id), false) => shared::HaveDisposition::To { collection_id },
+            (None, false) => shared::HaveDisposition::ToParent,
+        };
+        let wants = match wants_to {
+            Some(collection_id) => shared::WantDisposition::To { collection_id },
+            None => shared::WantDisposition::Discard,
+        };
         collection_backend()
             .await?
-            .delete_collection(shared::DeleteCollectionReq::defaults(id))
+            .delete_collection(shared::DeleteCollectionReq {
+                collection_id: id,
+                haves,
+                wants,
+            })
             .await
             .map_err(api_err)
     }
     #[cfg(not(feature = "ssr"))]
     {
-        let _ = id;
+        let _ = (id, haves_to, haves_discard, wants_to);
         Err(ServerFnError::ServerError("server-only".into()))
     }
 }

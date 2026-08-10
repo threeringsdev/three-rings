@@ -430,15 +430,24 @@ impl CollectionStore for HostedBackend {
         let mut tx = self.scoped_tx().await?;
         ensure_inbox(&mut tx, user_id).await?;
 
-        // The `present` sub-select needs no live filter of its own: it is
-        // LEFT JOINed *from* the filtered `collections` scan, so a hidden
-        // collection's holdings have nothing to attach to.
+        // The `present`/`desired` sub-selects need no live filter of their
+        // own: both are LEFT JOINed *from* the filtered `collections` scan,
+        // so a hidden collection's holdings/desires have nothing to attach
+        // to. `desired` rides the same read as `present` (rather than a
+        // second round-trip) so the delete confirm's honest wants count
+        // (specs/collection-deletion.md → step 4) is available wherever the
+        // sidebar tree already is — the row opened from has no
+        // `collection_view` to read it from instead.
         let rows: Vec<CollectionTreeSql> = sqlx::query_as(&format!(
-            "SELECT {COLLECTION_COLS}, COALESCE(h.present, 0)::bigint AS present \
+            "SELECT {COLLECTION_COLS}, COALESCE(h.present, 0)::bigint AS present, \
+                    COALESCE(d.desired, 0)::bigint AS desired \
              FROM collections \
              LEFT JOIN (SELECT collection_id, sum(quantity) AS present \
                         FROM holdings GROUP BY collection_id) h \
                ON h.collection_id = collections.id \
+             LEFT JOIN (SELECT collection_id, sum(quantity) AS desired \
+                        FROM desires GROUP BY collection_id) d \
+               ON d.collection_id = collections.id \
              WHERE collections.deleted_at IS NULL \
              ORDER BY position, name"
         ))
@@ -479,6 +488,7 @@ impl CollectionStore for HostedBackend {
                     Ok(CollectionTreeRow {
                         summary: r.row.into_summary()?,
                         present: r.present,
+                        desired: r.desired,
                     })
                 })
                 .collect::<ApiResult<Vec<_>>>()?,
@@ -2890,12 +2900,14 @@ impl HostedBackend {
 /// A `collections` row as decoded by sqlx. `kind` and `position` are read via
 /// SQL casts (`kind::text`, `position::float8`): sqlx without the decimal
 /// feature can't decode `numeric`, and the enum decodes cleanly as text.
-/// [`CollectionRow`] plus the own-present count of the sidebar-tree read.
+/// [`CollectionRow`] plus the own-present and own-desired counts of the
+/// sidebar-tree read.
 #[derive(sqlx::FromRow)]
 struct CollectionTreeSql {
     #[sqlx(flatten)]
     row: CollectionRow,
     present: i64,
+    desired: i64,
 }
 
 #[derive(sqlx::FromRow)]

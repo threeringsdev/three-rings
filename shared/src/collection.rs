@@ -148,6 +148,15 @@ pub struct CollectionTreeRow {
     pub summary: CollectionSummary,
     /// Copies held in this collection alone (`SUM(holdings.quantity)`).
     pub present: i64,
+    /// Copies desired in this collection alone (`SUM(desires.quantity)`),
+    /// never rolled up — a want is scoped to the deck that states it, unlike
+    /// a have there is no "the child's wants also belong to the parent"
+    /// reading. Added for the delete confirm's honest wants count
+    /// (specs/collection-deletion.md → step 4, `P6-189`): a delete opened
+    /// from a sidebar row has no `collection_view` to read it from, so it
+    /// has to ride the same tree read `present` already does.
+    #[serde(default)]
+    pub desired: i64,
 }
 
 /// The My-cards sidebar in one round-trip (specs/app-ui.md → Collection tree):

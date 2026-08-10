@@ -35,6 +35,7 @@ use crate::components::ui::dialog::{
     DialogTitle,
 };
 use crate::components::ui::input::Input;
+use crate::components::ui::popover::{use_popover_open, Popover, PopoverContent, PopoverTrigger};
 use crate::components::ui::separator::Separator;
 use crate::components::ui::sonner::{ToastHandle, ToastKind, ToastOptions};
 
@@ -57,10 +58,21 @@ pub enum MenuTarget {
         parent_id: Option<Id>,
         /// Self + every descendant: the drop targets this row may not take and
         /// the destinations the move picker may not offer (the client-side
-        /// cycle guard). Its `len() - 1` is the delete confirm's subtree count.
+        /// cycle guard).
         forbidden: HashSet<Id>,
-        /// Rolled-up present copies (for the delete confirm).
+        /// This node's own present count (for the delete confirm's card
+        /// count) — **not** rolled up (specs/collection-deletion.md → step 4:
+        /// children survive a delete, so folding their copies in would
+        /// overstate what is being relocated).
         cards: i64,
+        /// This node's own desired count (for the delete confirm's wants
+        /// count) — same "own, not rolled up" rule as `cards`.
+        wants: i64,
+        /// This node's immediate children (for the delete confirm's
+        /// child-collections line) — direct children only, since those are
+        /// what actually re-parent when this node is deleted; a deeper
+        /// descendant's own parent does not change.
+        children: i64,
     },
     Background,
 }
@@ -78,12 +90,22 @@ impl MenuTarget {
     /// is the terminus, exactly the standing a [`MoveReq`] snapshot has after a
     /// refetch lands under it.
     ///
-    /// `cards` is passed in rather than read off the tree because the page has a
-    /// better number: the view's own whole-collection totals, plus any stepper
-    /// delta the header is already showing. A delete confirm that named a
-    /// different count than the counts line two rows above it would be its own
-    /// small lie.
-    pub fn for_collection(c: &CollectionSummary, roots: &[TreeNode], cards: i64) -> MenuTarget {
+    /// `cards`/`wants`/`children` are passed in rather than read off the tree
+    /// because the page has better numbers: `collection_view`'s own
+    /// whole-collection totals (present, desired, immediate children), plus
+    /// any stepper delta the header is already showing for `cards`. A delete
+    /// confirm that named a different count than the counts line two rows
+    /// above it would be its own small lie — and, for `children` specifically,
+    /// sourcing it from the same read as the rest closes the stale/failed
+    /// tree-read gap `forbidden` below still tolerates for its own, lower-
+    /// stakes purpose (specs/collection-deletion.md → step 4).
+    pub fn for_collection(
+        c: &CollectionSummary,
+        roots: &[TreeNode],
+        cards: i64,
+        wants: i64,
+        children: i64,
+    ) -> MenuTarget {
         let mut forbidden = HashSet::new();
         match find_node(roots, c.id) {
             Some(node) => subtree_ids(node, &mut forbidden),
@@ -98,6 +120,8 @@ impl MenuTarget {
             parent_id: c.parent_id,
             forbidden,
             cards,
+            wants,
+            children,
         }
     }
 }
@@ -117,32 +141,31 @@ pub struct CreateReq {
 pub struct DeleteReq {
     pub id: Id,
     pub name: String,
-    /// Self plus every descendant — the shape of the tree under this node when
-    /// the dialog opened. **Nothing cascades any more**
-    /// (specs/collection-deletion.md: delete hides one node and moves its
-    /// children up a level), so this describes what *survives*, not what dies:
-    /// the dialog uses it to say whether there is anything nested at all.
+    /// Self plus every descendant — the two pickers' cycle-guard exclusion
+    /// set, mirroring the move picker's `forbidden` exactly
+    /// (specs/collection-deletion.md → step 4: "reuse the move-picker
+    /// machinery/pattern"). **Not** the source of the child-collections
+    /// count any more — see `children` for that, and for why.
     pub subtree: HashSet<Id>,
-    /// Where the deleted node lived — where its cards and children are about to
-    /// move, and where a page standing on it goes. `None` = top level (the
-    /// cards go to the Inbox).
+    /// Where the deleted node lived. `None` = top level. Both pickers' default
+    /// destination and the child-collections line resolve against this.
     pub parent_id: Option<Id>,
-    /// Rolled-up present copies in the whole subtree.
-    ///
-    /// **Not what this delete relocates** — only the node's *own* copies move,
-    /// and the surviving children keep theirs — which is why the confirm copy
-    /// no longer states a number. Kept for `P6-189`, the task that gives the
-    /// dialog honest per-node counts.
+    /// This node's own present count — **not** rolled up
+    /// (specs/collection-deletion.md → step 4: children survive, so folding
+    /// their copies in would overstate what this delete relocates).
     pub cards: i64,
-}
-
-impl DeleteReq {
-    /// How many collections are nested under this one — the subtree minus the
-    /// node itself. They survive the delete by moving up a level; the confirm
-    /// copy mentions that only when there are any.
-    fn descendants(&self) -> usize {
-        self.subtree.len().saturating_sub(1)
-    }
+    /// This node's own desired count — same "own, not rolled up" rule as
+    /// `cards`. Stated in the dialog for the first time (`P6-111`: today it is
+    /// never mentioned at all).
+    pub wants: i64,
+    /// This node's **immediate** children — the count the child-collections
+    /// line states. Sourced per open-path from the same read that produced
+    /// `cards`/`wants` (the sidebar tree row's own `children`, or the header
+    /// kebab's `collection_view.children`) rather than from a *second*,
+    /// possibly stale-or-failed tree read, which is the fix for `P6-111`'s
+    /// degraded-state bug: the count and the write can no longer disagree
+    /// because they no longer have two different sources to disagree from.
+    pub children: i64,
 }
 
 /// Where the app must go once a delete succeeds, or `None` to stay put.
@@ -243,6 +266,64 @@ impl DropIntent {
     }
 }
 
+/// The delete confirm's **haves** picker — where this collection's present
+/// copies go. Mirrors [`shared::HaveDisposition`] minus `ReturnToPrevious`:
+/// the confirm's wireframe (specs/collection-deletion.md → step 4) offers
+/// exactly two controls, not a third for a mode `teardown_collection` already
+/// covers elsewhere; `ReturnToPrevious` stays reachable on the wire (the
+/// hosted route is unchanged) but this dialog does not expose it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum HaveChoice {
+    /// The nearest surviving parent (Inbox at the top level) — resolved
+    /// **server-side** at write time, not hardcoded to an id the client
+    /// might have stale, which is why this stays a distinct choice rather
+    /// than collapsing into `To` the moment a name is known.
+    #[default]
+    ToParent,
+    /// "Remove from Collection" — [`shared::HaveDisposition::Discard`].
+    Discard,
+    /// An explicit pick.
+    To(Id),
+}
+
+impl HaveChoice {
+    /// The wire shape `delete_collection` takes: `(haves_to, haves_discard)`
+    /// — see its doc comment for why these are scalars rather than
+    /// [`shared::HaveDisposition`] itself (the server-fn POST codec mangles
+    /// internally-tagged DTOs; `teardown_collection` takes `Option<Id>` for
+    /// the same reason).
+    fn to_wire(self) -> (Option<Id>, bool) {
+        match self {
+            HaveChoice::ToParent => (None, false),
+            HaveChoice::Discard => (None, true),
+            HaveChoice::To(id) => (Some(id), false),
+        }
+    }
+}
+
+/// The delete confirm's **wants** picker — where this collection's desires
+/// go. Mirrors [`shared::WantDisposition`] exactly (it only has two states).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum WantChoice {
+    /// "Remove from Collection" — [`shared::WantDisposition::Discard`], and
+    /// the default: a want is an intention scoped to the deck being deleted
+    /// (specs/collection-deletion.md → step 4), unlike a have there is no
+    /// "it has to be somewhere" pressure to relocate it.
+    #[default]
+    Discard,
+    /// An explicit pick.
+    To(Id),
+}
+
+impl WantChoice {
+    fn to_wire(self) -> Option<Id> {
+        match self {
+            WantChoice::Discard => None,
+            WantChoice::To(id) => Some(id),
+        }
+    }
+}
+
 /// Management state shared by the rows, the menu, and the dialogs.
 #[derive(Clone, Copy)]
 pub struct TreeManage {
@@ -257,6 +338,11 @@ pub struct TreeManage {
     rename_name: RwSignal<String>,
     delete_req: RwSignal<Option<DeleteReq>>,
     delete_open: RwSignal<bool>,
+    /// The haves picker's current choice — reset to [`HaveChoice::default`]
+    /// whenever the confirm opens.
+    delete_haves: RwSignal<HaveChoice>,
+    /// The wants picker's current choice — reset to [`WantChoice::default`].
+    delete_wants: RwSignal<WantChoice>,
     move_req: RwSignal<Option<MoveReq>>,
     pub move_open: RwSignal<bool>,
     /// An op in flight (disables dialog submits).
@@ -306,6 +392,8 @@ pub fn provide_tree_manage() {
         rename_name: RwSignal::new(String::new()),
         delete_req: RwSignal::new(None),
         delete_open: RwSignal::new(false),
+        delete_haves: RwSignal::new(HaveChoice::default()),
+        delete_wants: RwSignal::new(WantChoice::default()),
         move_req: RwSignal::new(None),
         move_open: RwSignal::new(false),
         busy: RwSignal::new(false),
@@ -341,21 +429,29 @@ impl TreeManage {
                 parent_id,
                 forbidden,
                 cards,
+                wants,
+                children,
                 ..
             }) => DeleteReq {
                 id,
                 name,
                 // Self *and* every descendant — the same set the move picker
-                // forbids. The confirm reads it for whether anything is nested
-                // (`descendants()`); `route_after_delete` no longer needs it at
-                // all, since only the node itself stops existing.
+                // forbids. `route_after_delete` no longer needs it at all,
+                // since only the node itself stops existing; the two pickers
+                // use it to exclude their own subtree as a destination.
                 subtree: forbidden,
                 parent_id,
                 cards,
+                wants,
+                children,
             },
             _ => return,
         };
         self.delete_req.set(Some(subject));
+        // The dialog's own defaults, reset on every open — a leftover pick
+        // from a previous delete must not silently carry into this one.
+        self.delete_haves.set(HaveChoice::default());
+        self.delete_wants.set(WantChoice::default());
         self.error.set(None);
         self.delete_open.set(true);
     }
@@ -495,10 +591,22 @@ pub fn TreeDialogs() -> impl IntoView {
     // server's text without rewriting it. Safe here because the dialog is behind
     // `move_open`, a client signal that is false on every server render.
     let load_failed = RwSignal::new(false);
+    // The same tree read's **rows**, snapshotted the same Effect-written way
+    // and for the same reason — the delete confirm's two pickers (below) need
+    // them for their trigger labels *and* their row lists, and a `Popover`
+    // trigger sits outside any `Suspense`/`Transition` its content could hide
+    // behind (a trigger has to show something before the user has opened
+    // anything to await). Plain `Vec::new()` while unresolved/failed: the
+    // pickers already have `load_failed` for the failure arm, and an unloaded
+    // list degrades to "no destinations yet" rather than a panic.
+    let tree_rows = RwSignal::new(Vec::<CollectionTreeRow>::new());
     Effect::new(move |_| {
         let failed = matches!(tree.get(), Some(Some(Err(_))));
         if failed != load_failed.get_untracked() {
             load_failed.set(failed);
+        }
+        if let Some(Some(Ok(dto))) = tree.get() {
+            tree_rows.set(dto.collections);
         }
     });
 
@@ -581,12 +689,17 @@ pub fn TreeDialogs() -> impl IntoView {
         // Decided *before* the await, off the route the confirm was answered on.
         let leaving = route_after_delete(&pathname.get_untracked(), &req);
         let navigate = navigate.clone();
+        // The pickers' choices, translated to the server-fn's scalar wire
+        // shape (`HaveChoice`/`WantChoice::to_wire`) — see `delete_collection`
+        // in `lib.rs` for why scalars rather than the tagged enums.
+        let (haves_to, haves_discard) = manage.delete_haves.get_untracked().to_wire();
+        let wants_to = manage.delete_wants.get_untracked().to_wire();
         spawn_local(async move {
             // The receipt (`move_ids` + `reparented`) is what a future undo
             // toast reverses — step 5 of specs/collection-deletion.md. Nothing
             // holds it yet, so it is dropped here rather than stashed in a
             // signal no one reads.
-            match crate::delete_collection(req.id).await {
+            match crate::delete_collection(req.id, haves_to, haves_discard, wants_to).await {
                 Ok(_receipt) => {
                     manage.busy.set(false);
                     manage.delete_open.set(false);
@@ -620,14 +733,6 @@ pub fn TreeDialogs() -> impl IntoView {
         manage.error.get().map(|msg| {
             view! { <p class="text-destructive text-sm" data-tree-dialog-error>{msg}</p> }
         })
-    };
-
-    // Delete-confirm copy, from the snapshot taken when the dialog opened.
-    let delete_subject = move || {
-        manage
-            .delete_req
-            .get()
-            .map(|r| (r.name.clone(), r.descendants(), r.cards))
     };
 
     // Put the caret in the move picker's field when it opens. Without this the
@@ -749,44 +854,48 @@ pub fn TreeDialogs() -> impl IntoView {
             <DialogContent aria_label="Delete collection">
                 <DialogBody>
                     <DialogHeader>
+                        // Unchanged property, verified in
+                        // phase-6-probes/P6-017d-confirm-copy.md: the title reads
+                        // the snapshot taken when the dialog opened, never the
+                        // live `menu_target` — so it can never name a different
+                        // collection than `submit_delete` deletes.
                         <DialogTitle>
                             {move || {
-                                delete_subject()
-                                    .map(|(name, _, _)| format!("Delete {name}?"))
+                                manage
+                                    .delete_req
+                                    .get()
+                                    .map(|r| format!("Delete {}?", r.name))
                                     .unwrap_or_else(|| "Delete?".to_string())
                             }}
                         </DialogTitle>
-                        // Interim copy for the **default dispositions**, and
-                        // deliberately number-free (specs/collection-deletion.md
-                        // → step 3; the dialog with its two pickers and corrected
-                        // counts is step 4, `P6-189`).
-                        //
-                        // What was here — "This permanently deletes {N nested
-                        // collections and }{M cards} inside it. This cannot be
-                        // undone." — is now false three times over: nothing is
-                        // destroyed, the nested collections survive by moving up
-                        // a level, and `M` was the rolled-up subtree total, whose
-                        // cards this delete does not touch at all. No number
-                        // beats a wrong number, so the counts wait for the task
-                        // that can compute honest ones.
+                        // Step 4's one sentence of copy the dialog needs
+                        // beyond the two pickers (Adversarial review, this
+                        // task, which caught its absence): nothing here is
+                        // destroyed — "This cannot be undone" is gone for
+                        // good, per specs/collection-deletion.md — and
+                        // "Remove from Collection" is a real disposition
+                        // choice, not a euphemism for delete. Deliberately
+                        // silent on *how* to get it back: the "Recently
+                        // deleted" restore list is step 5 (`P6-190`), not
+                        // built yet, so this promises only what is already
+                        // true — not gone — not a UI that doesn't exist.
                         <DialogDescription>
-                            {move || {
-                                delete_subject()
-                                    .map(|(_, descendants, _)| {
-                                        let nested = if descendants > 0 {
-                                            " Nested collections move up a level."
-                                        } else {
-                                            ""
-                                        };
-                                        format!(
-                                            "Its cards move up to the parent collection — your \
-                                             Inbox if it is top-level.{nested} No cards are deleted.",
-                                        )
-                                    })
-                                    .unwrap_or_default()
-                            }}
+                            "Nothing here is deleted. \"Remove from Collection\" leaves cards and wants attached to the hidden collection, not gone."
                         </DialogDescription>
                     </DialogHeader>
+                    // Client-only gate, mirroring the move picker's own
+                    // `<Show when=move_open>` below: `delete_open` is `false` on
+                    // every server render, so SSR and initial hydration agree and
+                    // reading `tree_rows` inside here (a plain resource
+                    // snapshot, not an `.await`) cannot diverge between them.
+                    <Show when=move || manage.delete_open.get()>
+                        {move || {
+                            manage
+                                .delete_req
+                                .get()
+                                .map(|req| delete_dispositions(manage, tree_rows, load_failed, req))
+                        }}
+                    </Show>
                     {error_line}
                     <DialogFooter>
                         <DialogClose>"Cancel"</DialogClose>
@@ -871,6 +980,428 @@ pub fn TreeDialogs() -> impl IntoView {
                 </DialogBody>
             </DialogContent>
         </Dialog>
+    }
+}
+
+/// `"1 card"` / `"3 cards"` — the plain-English plural the two counts rows
+/// and the child-collections line all need.
+fn plural(n: i64) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+/// `"{n} {noun}(s)"` — see [`plural`].
+fn count_label(n: i64, noun: &str) -> String {
+    format!("{n} {noun}{}", plural(n))
+}
+
+/// Subject-verb agreement for the child-collections line's verb — the noun
+/// half is [`count_label`]'s job, this is the other half.
+fn moves_verb(n: i64) -> &'static str {
+    if n == 1 {
+        "moves"
+    } else {
+        "move"
+    }
+}
+
+/// Where the delete confirm's **haves** picker defaults to: the deleted
+/// node's parent, or the Inbox at the top level
+/// (specs/collection-deletion.md → `HaveDisposition::ToParent`: "a have is a
+/// physical object that must be somewhere"). `None` only when the tree read
+/// hasn't resolved it yet (or failed) — the picker's trigger degrades to a
+/// generic label in that case rather than lying about a name.
+fn resolve_parent(rows: &[CollectionTreeRow], parent_id: Option<Id>) -> Option<Destination> {
+    let found = match parent_id {
+        Some(pid) => rows.iter().find(|r| r.summary.id == pid),
+        None => rows.iter().find(|r| r.summary.is_inbox),
+    }?;
+    Some(Destination {
+        id: found.summary.id,
+        name: found.summary.name.clone(),
+        is_inbox: found.summary.is_inbox,
+    })
+}
+
+/// Where the delete confirm's **children** actually land — deliberately
+/// *not* [`resolve_parent`]. A have needs a real collection to sit in (the
+/// Inbox, when the deleted node was top-level); a child collection can
+/// legitimately *be* top-level itself
+/// (specs/collection-deletion.md → "Children survive": "A child re-parents
+/// to the deleted collection's parent, **or becomes top-level** if the
+/// deleted collection was top-level") — so substituting the Inbox here would
+/// misname where they are actually going.
+///
+/// `None` only when `parent_id` names a real collection but the tree read
+/// hasn't caught up with it yet — reachable via the header kebab, where
+/// `collection_view` can succeed while the sidebar's *separate* tree read is
+/// stale or failed. The caller drops "to …" entirely in that case
+/// ([`delete_dispositions`]) rather than falling back to a name like "its
+/// former parent", which would read as the children staying put under the
+/// deleted collection instead of moving up a level (Adversarial review, this
+/// task).
+fn children_destination_label(rows: &[CollectionTreeRow], parent_id: Option<Id>) -> Option<String> {
+    match parent_id {
+        Some(pid) => rows.iter().find(|r| r.summary.id == pid).map(|r| {
+            Destination {
+                id: pid,
+                name: r.summary.name.clone(),
+                is_inbox: r.summary.is_inbox,
+            }
+            .label()
+        }),
+        None => Some("the top level".to_string()),
+    }
+}
+
+/// The haves picker's plain-collection rows: [`move_destinations`]'s
+/// self+descendant exclusion, further excluding the resolved parent (or
+/// Inbox at the top level) — that destination is already offered by the
+/// picker's pinned "(parent)" row, and listing it a second time under its
+/// bare name would show the same place twice.
+///
+/// **Excludes by the *known* id, not by [`resolve_parent`]'s success.**
+/// (Adversarial review, this task.) When `parent_id` is `Some(pid)` there is
+/// nothing to look up — `pid` is already the id to exclude — so this no
+/// longer routes that case through `resolve_parent` at all. The old code
+/// excluded by `resolve_parent(rows, parent_id).map(|d| d.id)` for both
+/// cases, which meant a stale tree read that hadn't caught up with `pid` yet
+/// left it unexcluded here even though the caller never needed a lookup to
+/// know `pid` in the first place. Only the top-level case genuinely has no
+/// id to start from (the Inbox's id isn't known ahead of a tree read) and
+/// still resolves through it.
+fn have_destinations(
+    rows: &[CollectionTreeRow],
+    subtree: &HashSet<Id>,
+    parent_id: Option<Id>,
+) -> Vec<CollectionSummary> {
+    let parent_target = parent_id.or_else(|| resolve_parent(rows, None).map(|d| d.id));
+    move_destinations(rows, subtree)
+        .into_iter()
+        .filter(|c| Some(c.id) != parent_target)
+        .collect()
+}
+
+/// The haves picker trigger's label for the current choice — pure so it can
+/// be unit-tested without a reactive graph.
+fn have_trigger_label(
+    choice: HaveChoice,
+    rows: &[CollectionTreeRow],
+    parent_id: Option<Id>,
+) -> String {
+    match choice {
+        HaveChoice::Discard => "Remove from Collection".to_string(),
+        HaveChoice::ToParent => resolve_parent(rows, parent_id)
+            .map(|d| format!("{} (parent)", d.label()))
+            .unwrap_or_else(|| "Parent".to_string()),
+        HaveChoice::To(id) => rows
+            .iter()
+            .find(|r| r.summary.id == id)
+            .map(|r| {
+                Destination {
+                    id,
+                    name: r.summary.name.clone(),
+                    is_inbox: r.summary.is_inbox,
+                }
+                .label()
+            })
+            .unwrap_or_else(|| "…".to_string()),
+    }
+}
+
+/// The wants picker trigger's label for the current choice.
+fn want_trigger_label(choice: WantChoice, rows: &[CollectionTreeRow]) -> String {
+    match choice {
+        WantChoice::Discard => "Remove from Collection".to_string(),
+        WantChoice::To(id) => rows
+            .iter()
+            .find(|r| r.summary.id == id)
+            .map(|r| {
+                Destination {
+                    id,
+                    name: r.summary.name.clone(),
+                    is_inbox: r.summary.is_inbox,
+                }
+                .label()
+            })
+            .unwrap_or_else(|| "…".to_string()),
+    }
+}
+
+/// The delete confirm's body: the two disposition pickers plus the
+/// child-collections line, all reading the snapshot [`DeleteReq`] taken when
+/// the dialog opened (specs/collection-deletion.md → step 4).
+fn delete_dispositions(
+    manage: TreeManage,
+    tree_rows: RwSignal<Vec<CollectionTreeRow>>,
+    load_failed: RwSignal<bool>,
+    req: DeleteReq,
+) -> impl IntoView {
+    let cards = req.cards;
+    let wants = req.wants;
+    let children = req.children;
+    let parent_id = req.parent_id;
+    let subtree = req.subtree;
+
+    view! {
+        <div class="space-y-3" data-testid="delete-dispositions">
+            <div class="flex items-center justify-between gap-3">
+                <span class="text-sm" data-testid="delete-cards-count">
+                    {count_label(cards, "card")}
+                </span>
+                {haves_picker(manage, tree_rows, load_failed, parent_id, subtree.clone())}
+            </div>
+            <div class="flex items-center justify-between gap-3">
+                <span class="text-sm" data-testid="delete-wants-count">
+                    {count_label(wants, "want")}
+                </span>
+                {wants_picker(manage, tree_rows, load_failed, subtree)}
+            </div>
+            {(children > 0)
+                .then(|| {
+                    view! {
+                        <p class="text-muted-foreground text-sm" data-testid="delete-children-line">
+                            {move || {
+                                let rows = tree_rows.get();
+                                let count = count_label(children, "collection");
+                                let verb = moves_verb(children);
+                                match children_destination_label(&rows, parent_id) {
+                                    Some(dest) => format!("{count} {verb} up to {dest}."),
+                                    // The name isn't resolvable yet — say
+                                    // only what's certain (they move up a
+                                    // level) rather than a fallback name
+                                    // that could misread as "stays put".
+                                    None => format!("{count} {verb} up a level."),
+                                }
+                            }}
+                        </p>
+                    }
+                })}
+        </div>
+    }
+}
+
+/// The haves picker: a small `Popover` combobox, reusing the move picker's
+/// `DestinationList`/`DestinationRow` machinery (specs/collection-deletion.md
+/// → step 4: "reuse the move-picker machinery/pattern"). Pinned rows for the
+/// default (`ToParent`, labeled with the resolved parent's name) and for
+/// "Remove from Collection" (`Discard`), then every other live,
+/// non-self/non-descendant collection.
+fn haves_picker(
+    manage: TreeManage,
+    tree_rows: RwSignal<Vec<CollectionTreeRow>>,
+    load_failed: RwSignal<bool>,
+    parent_id: Option<Id>,
+    subtree: HashSet<Id>,
+) -> impl IntoView {
+    let choice = manage.delete_haves;
+    // `Copy`-wrapped so the `Fn` (not `FnOnce`) closure `DestinationList`
+    // needs for its children can be invoked more than once — the same
+    // reason `RowShell` stores its own `forbidden` set this way.
+    let subtree = StoredValue::new(subtree);
+    view! {
+        <Popover id="tree-delete-haves">
+            <PopoverTrigger attr:data-testid="delete-haves-trigger" class="h-8 gap-1.5 px-2 text-xs">
+                <span data-testid="delete-haves-label">
+                    {move || have_trigger_label(choice.get(), &tree_rows.get(), parent_id)}
+                </span>
+                <span aria-hidden="true">"▾"</span>
+            </PopoverTrigger>
+            <PopoverContent class="w-[260px] p-0">
+                {
+                    // Called synchronously, inside the `Popover`'s own
+                    // `Provider` — a body read, not one made from inside a
+                    // `Suspend` (the trap `move_rows`'s own comment names: a
+                    // `Provider` above a `Suspense`/async boundary does not
+                    // reach a `use_context()` call made *inside* it). The
+                    // resulting `Option<RwSignal<bool>>` is then just a value
+                    // captured by the row closures below, so nothing further
+                    // needs a context lookup.
+                    let popover_open = use_popover_open();
+                    view! {
+                        <DestinationList
+                            placeholder="Search collections…"
+                            empty="No collection to move to."
+                            failed=load_failed
+                        >
+                            {move || {
+                                haves_rows(
+                                    manage,
+                                    tree_rows.get(),
+                                    parent_id,
+                                    subtree.get_value(),
+                                    popover_open,
+                                )
+                            }}
+                        </DestinationList>
+                    }
+                }
+            </PopoverContent>
+        </Popover>
+    }
+}
+
+/// The haves picker's rows: the pinned "(parent)" default, "Remove from
+/// Collection", then [`have_destinations`]'s plain list.
+fn haves_rows(
+    manage: TreeManage,
+    rows: Vec<CollectionTreeRow>,
+    parent_id: Option<Id>,
+    subtree: HashSet<Id>,
+    popover_open: Option<RwSignal<bool>>,
+) -> impl IntoView {
+    let choice = manage.delete_haves;
+    let parent_dest = resolve_parent(&rows, parent_id);
+    let parent_label = parent_dest
+        .as_ref()
+        .map(|d| format!("{} (parent)", d.label()))
+        .unwrap_or_else(|| "Parent".to_string());
+    // `command`'s filter matches typed text against `value`, not `label`
+    // (Adversarial review, this task) — the row's *search* value has to be
+    // the parent's plain name, or typing the parent's own name (the most
+    // obvious thing to type for the default destination) filters this row
+    // out along with everything else `have_destinations` already excludes,
+    // leaving "No collection to move to." over the picker's own default.
+    // The "(parent)" affordance stays label-only.
+    let parent_value = parent_dest
+        .as_ref()
+        .map(|d| d.name.clone())
+        .unwrap_or_else(|| "Parent".to_string());
+    let pick = move |c: HaveChoice| {
+        Callback::new(move |()| {
+            choice.set(c);
+            if let Some(open) = popover_open {
+                open.set(false);
+            }
+        })
+    };
+
+    view! {
+        <DestinationRow
+            label=parent_label
+            value=parent_value
+            chosen=Signal::derive(move || choice.get() == HaveChoice::ToParent)
+            on_select=pick(HaveChoice::ToParent)
+        />
+        <DestinationRow
+            label="Remove from Collection"
+            value="Remove from Collection"
+            chosen=Signal::derive(move || choice.get() == HaveChoice::Discard)
+            on_select=pick(HaveChoice::Discard)
+        />
+        {have_destinations(&rows, &subtree, parent_id)
+            .into_iter()
+            .map(|c| {
+                let id = c.id;
+                let value = c.name.clone();
+                let label = Destination {
+                    id: c.id,
+                    name: c.name,
+                    is_inbox: c.is_inbox,
+                }
+                    .label();
+                view! {
+                    <DestinationRow
+                        label=label
+                        value=value
+                        chosen=Signal::derive(move || choice.get() == HaveChoice::To(id))
+                        on_select=pick(HaveChoice::To(id))
+                    />
+                }
+            })
+            .collect_view()}
+    }
+}
+
+/// The wants picker: same machinery as [`haves_picker`], minus the "(parent)"
+/// pin — a want has no "must be somewhere" pressure, so there is no default
+/// destination to pin, only the default *action* ("Remove from Collection").
+fn wants_picker(
+    manage: TreeManage,
+    tree_rows: RwSignal<Vec<CollectionTreeRow>>,
+    load_failed: RwSignal<bool>,
+    subtree: HashSet<Id>,
+) -> impl IntoView {
+    let choice = manage.delete_wants;
+    // See `haves_picker`'s identical `StoredValue` wrap for why.
+    let subtree = StoredValue::new(subtree);
+    view! {
+        <Popover id="tree-delete-wants">
+            <PopoverTrigger attr:data-testid="delete-wants-trigger" class="h-8 gap-1.5 px-2 text-xs">
+                <span data-testid="delete-wants-label">
+                    {move || want_trigger_label(choice.get(), &tree_rows.get())}
+                </span>
+                <span aria-hidden="true">"▾"</span>
+            </PopoverTrigger>
+            <PopoverContent class="w-[260px] p-0">
+                {
+                    let popover_open = use_popover_open();
+                    view! {
+                        <DestinationList
+                            placeholder="Search collections…"
+                            empty="No collection to move to."
+                            failed=load_failed
+                        >
+                            {move || {
+                                wants_rows(manage, tree_rows.get(), subtree.get_value(), popover_open)
+                            }}
+                        </DestinationList>
+                    }
+                }
+            </PopoverContent>
+        </Popover>
+    }
+}
+
+/// The wants picker's rows: "Remove from Collection", then the plain
+/// (self+descendant-excluded) destination list.
+fn wants_rows(
+    manage: TreeManage,
+    rows: Vec<CollectionTreeRow>,
+    subtree: HashSet<Id>,
+    popover_open: Option<RwSignal<bool>>,
+) -> impl IntoView {
+    let choice = manage.delete_wants;
+    let pick = move |c: WantChoice| {
+        Callback::new(move |()| {
+            choice.set(c);
+            if let Some(open) = popover_open {
+                open.set(false);
+            }
+        })
+    };
+
+    view! {
+        <DestinationRow
+            label="Remove from Collection"
+            value="Remove from Collection"
+            chosen=Signal::derive(move || choice.get() == WantChoice::Discard)
+            on_select=pick(WantChoice::Discard)
+        />
+        {move_destinations(&rows, &subtree)
+            .into_iter()
+            .map(|c| {
+                let id = c.id;
+                let value = c.name.clone();
+                let label = Destination {
+                    id: c.id,
+                    name: c.name,
+                    is_inbox: c.is_inbox,
+                }
+                    .label();
+                view! {
+                    <DestinationRow
+                        label=label
+                        value=value
+                        chosen=Signal::derive(move || choice.get() == WantChoice::To(id))
+                        on_select=pick(WantChoice::To(id))
+                    />
+                }
+            })
+            .collect_view()}
     }
 }
 
@@ -1214,6 +1745,7 @@ mod tests {
                 format: None,
             },
             present: 0,
+            desired: 0,
         }
     }
 
@@ -1492,7 +2024,8 @@ mod tests {
         .roots
     }
 
-    fn row_parts(t: &MenuTarget) -> (Id, &str, bool, Option<Id>, Vec<u128>, i64) {
+    #[allow(clippy::type_complexity)]
+    fn row_parts(t: &MenuTarget) -> (Id, &str, bool, Option<Id>, Vec<u128>, i64, i64, i64) {
         match t {
             MenuTarget::Row {
                 id,
@@ -1501,10 +2034,21 @@ mod tests {
                 parent_id,
                 forbidden,
                 cards,
+                wants,
+                children,
             } => {
                 let mut ids: Vec<u128> = forbidden.iter().map(|i| i.as_u128()).collect();
                 ids.sort_unstable();
-                (*id, name.as_str(), *is_inbox, *parent_id, ids, *cards)
+                (
+                    *id,
+                    name.as_str(),
+                    *is_inbox,
+                    *parent_id,
+                    ids,
+                    *cards,
+                    *wants,
+                    *children,
+                )
             }
             MenuTarget::Background => panic!("the header always aims at a row"),
         }
@@ -1515,14 +2059,20 @@ mod tests {
         // `Moved`(9) holds `Inside Moved`(10). Both are forbidden destinations
         // for a `Move to…` opened from *its own page*, exactly as they are from
         // its tree row — the cycle guard cannot be weaker on the second surface.
-        let t = MenuTarget::for_collection(&summary(9, Some(3), "Moved", false), &roots(), 42);
-        let (id, name, is_inbox, parent, forbidden, cards) = row_parts(&t);
+        let t =
+            MenuTarget::for_collection(&summary(9, Some(3), "Moved", false), &roots(), 42, 5, 1);
+        let (id, name, is_inbox, parent, forbidden, cards, wants, children) = row_parts(&t);
         assert_eq!(id, Id::from_u128(9));
         assert_eq!(name, "Moved");
         assert!(!is_inbox);
         assert_eq!(parent, Some(Id::from_u128(3)));
         assert_eq!(forbidden, [9, 10]);
         assert_eq!(cards, 42);
+        // Passed straight through from `collection_view`'s own totals/children
+        // — the honest-count fields (specs/collection-deletion.md → step 4),
+        // not re-derived from the tree the way `forbidden` still is.
+        assert_eq!(wants, 5);
+        assert_eq!(children, 1);
     }
 
     #[test]
@@ -1531,8 +2081,8 @@ mod tests {
         // the guard degrades to "not itself" and the server's ancestor check is
         // the terminus. The menu must still open — a header with no actions is
         // worse than one whose picker can be told no.
-        let t = MenuTarget::for_collection(&summary(404, None, "Fresh", false), &roots(), 0);
-        let (_, _, _, parent, forbidden, _) = row_parts(&t);
+        let t = MenuTarget::for_collection(&summary(404, None, "Fresh", false), &roots(), 0, 0, 0);
+        let (_, _, _, parent, forbidden, ..) = row_parts(&t);
         assert_eq!(parent, None);
         assert_eq!(forbidden, [404]);
     }
@@ -1542,8 +2092,8 @@ mod tests {
         // `/my/collections/:id` can be an Inbox id, and the menu withholds
         // move/rename/delete on that flag — all three are refused by the server
         // (`AND NOT is_inbox` on rename, delete and reparent alike).
-        let t = MenuTarget::for_collection(&summary(4, None, "Inbox", true), &roots(), 7);
-        let (_, name, is_inbox, _, forbidden, _) = row_parts(&t);
+        let t = MenuTarget::for_collection(&summary(4, None, "Inbox", true), &roots(), 7, 0, 0);
+        let (_, name, is_inbox, _, forbidden, ..) = row_parts(&t);
         assert_eq!(name, "Inbox");
         assert!(is_inbox);
         // Nothing is nested under it here, so it forbids only itself.
@@ -1559,6 +2109,8 @@ mod tests {
             subtree: subtree.iter().map(|&i| Id::from_u128(i)).collect(),
             parent_id: parent.map(Id::from_u128),
             cards: 0,
+            wants: 0,
+            children: 0,
         }
     }
 
@@ -1628,5 +2180,178 @@ mod tests {
             DropIntent::Before,
         );
         assert_eq!(plan, Some((Some(Id::from_u128(3)), Some(0.0))));
+    }
+
+    // ------------------------------ delete confirm: dispositions & copy --
+
+    #[test]
+    fn have_choice_and_want_choice_default_to_the_spec() {
+        // specs/collection-deletion.md → The two dispositions: `ToParent` for
+        // haves (a have must be somewhere), `Discard` for wants (an intention
+        // scoped to the deck being deleted) — the same defaults
+        // `DeleteCollectionReq::defaults` pins on the wire.
+        assert_eq!(HaveChoice::default(), HaveChoice::ToParent);
+        assert_eq!(WantChoice::default(), WantChoice::Discard);
+    }
+
+    #[test]
+    fn have_choice_to_wire_matches_the_server_fns_scalar_shape() {
+        // `delete_collection`'s `(haves_to, haves_discard)` — see its doc
+        // comment (and `WantDisposition`'s `Option<Id>` shape below) for why
+        // scalars rather than the tagged `HaveDisposition`/`WantDisposition`.
+        assert_eq!(HaveChoice::ToParent.to_wire(), (None, false));
+        assert_eq!(HaveChoice::Discard.to_wire(), (None, true));
+        let id = Id::from_u128(7);
+        assert_eq!(HaveChoice::To(id).to_wire(), (Some(id), false));
+    }
+
+    #[test]
+    fn want_choice_to_wire_is_a_plain_option() {
+        assert_eq!(WantChoice::Discard.to_wire(), None);
+        let id = Id::from_u128(7);
+        assert_eq!(WantChoice::To(id).to_wire(), Some(id));
+    }
+
+    #[test]
+    fn count_label_and_moves_verb_agree_on_number() {
+        assert_eq!(count_label(0, "card"), "0 cards");
+        assert_eq!(count_label(1, "card"), "1 card");
+        assert_eq!(count_label(2, "card"), "2 cards");
+        assert_eq!(moves_verb(1), "moves");
+        assert_eq!(moves_verb(0), "move");
+        assert_eq!(moves_verb(2), "move");
+    }
+
+    #[test]
+    fn resolve_parent_finds_the_named_collection_or_the_inbox() {
+        let rows = nested();
+        // Trade(3) is Moved(9)'s parent.
+        assert_eq!(
+            resolve_parent(&rows, Some(Id::from_u128(3))).map(|d| d.name),
+            Some("Trade".to_string())
+        );
+        // Top-level (`parent_id: None`) resolves to the Inbox — a have needs
+        // somewhere real to sit, unlike a re-parented child (see
+        // `children_destination_label_differs_from_resolve_parent_at_top_level`
+        // below).
+        let inbox = resolve_parent(&rows, None).unwrap();
+        assert_eq!(inbox.name, "Inbox");
+        assert!(inbox.is_inbox);
+    }
+
+    #[test]
+    fn resolve_parent_degrades_to_none_off_an_empty_tree_read() {
+        // A stale/failed/not-yet-loaded tree read: the picker's trigger falls
+        // back to a generic label rather than lying about a name (see
+        // `have_trigger_label_falls_back_without_a_name` below) instead of
+        // panicking or fabricating one.
+        assert_eq!(resolve_parent(&[], Some(Id::from_u128(3))), None);
+        assert_eq!(resolve_parent(&[], None), None);
+    }
+
+    #[test]
+    fn children_destination_label_differs_from_resolve_parent_at_top_level() {
+        // The one place haves and children disagree on purpose
+        // (specs/collection-deletion.md → "Children survive": a re-parented
+        // child can legitimately *become* top-level, where a have cannot —
+        // it has to land in a real collection, the Inbox at the top level).
+        let rows = nested();
+        assert_eq!(
+            children_destination_label(&rows, None).as_deref(),
+            Some("the top level")
+        );
+        assert_eq!(
+            children_destination_label(&rows, Some(Id::from_u128(3))).as_deref(),
+            Some("🗂 Trade")
+        );
+    }
+
+    #[test]
+    fn children_destination_label_degrades_to_none_off_a_stale_tree_read() {
+        // Reachable via the header kebab: `collection_view` can succeed
+        // (naming a real `parent_id`) while the sidebar's separate tree read
+        // is stale or failed, so the parent's row isn't in `rows` yet. The
+        // caller drops "to …" entirely rather than falling back to a name
+        // that could misread as "stays put" (Adversarial review, this task).
+        assert_eq!(
+            children_destination_label(&[], Some(Id::from_u128(3))),
+            None
+        );
+    }
+
+    #[test]
+    fn have_destinations_excludes_self_descendants_and_the_parent() {
+        // Deleting Moved(9), parented under Trade(3): the picker's plain list
+        // must not offer Moved's own subtree (9, 10 — the move-picker cycle
+        // guard, reused verbatim) *or* Trade again under its own name (it is
+        // already pinned as the "(parent)" default row).
+        let rows = nested();
+        let subtree: HashSet<Id> = [9, 10].into_iter().map(Id::from_u128).collect();
+        let names: Vec<String> = have_destinations(&rows, &subtree, Some(Id::from_u128(3)))
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["Inbox", "Rares", "Shoebox"]);
+    }
+
+    #[test]
+    fn have_destinations_excludes_the_inbox_at_the_top_level() {
+        // Deleting Trade(3) itself (top-level, with its own subtree 3/9/10 —
+        // the real `forbidden` a `DeleteReq` would carry): the resolved
+        // parent is the Inbox, so the plain list must not repeat it — it is
+        // already the pinned default row here too.
+        let rows = nested();
+        let subtree: HashSet<Id> = [3, 9, 10].into_iter().map(Id::from_u128).collect();
+        let names: Vec<String> = have_destinations(&rows, &subtree, None)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert!(!names.iter().any(|n| n == "Inbox"));
+        assert_eq!(names, ["Rares", "Shoebox"]);
+    }
+
+    #[test]
+    fn have_trigger_label_names_the_current_choice() {
+        let rows = nested();
+        let parent_id = Some(Id::from_u128(3));
+        assert_eq!(
+            have_trigger_label(HaveChoice::ToParent, &rows, parent_id),
+            "🗂 Trade (parent)"
+        );
+        assert_eq!(
+            have_trigger_label(HaveChoice::Discard, &rows, parent_id),
+            "Remove from Collection"
+        );
+        assert_eq!(
+            have_trigger_label(HaveChoice::To(Id::from_u128(1)), &rows, parent_id),
+            "🗂 Shoebox"
+        );
+    }
+
+    #[test]
+    fn have_trigger_label_falls_back_without_a_name() {
+        // An empty/failed tree read must not panic or fabricate a name — see
+        // `resolve_parent_degrades_to_none_off_an_empty_tree_read`.
+        assert_eq!(
+            have_trigger_label(HaveChoice::ToParent, &[], Some(Id::from_u128(3))),
+            "Parent"
+        );
+        assert_eq!(
+            have_trigger_label(HaveChoice::To(Id::from_u128(404)), &[], None),
+            "…"
+        );
+    }
+
+    #[test]
+    fn want_trigger_label_names_the_current_choice() {
+        let rows = nested();
+        assert_eq!(
+            want_trigger_label(WantChoice::Discard, &rows),
+            "Remove from Collection"
+        );
+        assert_eq!(
+            want_trigger_label(WantChoice::To(Id::from_u128(2)), &rows),
+            "🗂 Rares"
+        );
     }
 }

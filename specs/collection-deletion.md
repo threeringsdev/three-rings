@@ -351,6 +351,240 @@ risky part lands under no time pressure.
 
 ## Findings
 
+- 2026-08-09 — **Step 4 review fixes** (adversarial review of the `P6-189`
+  commit below; zero majors, six smaller findings, all fixed here).
+  1. **The pinned "(parent)" row's search value was the literal string
+     `"Parent"`, not the parent's name.** `command`'s typed-text filter
+     matches against `value`, not `label` — so typing the parent's *actual*
+     name (the single most obvious thing to type for the picker's own
+     default) matched nothing, since the real row for that collection is
+     also excluded from the plain list. `value` is now the parent's plain
+     name; the "(parent)" affordance stays label-only.
+  2. **`have_destinations` excluded the parent by routing `Some(pid)` through
+     `resolve_parent` too**, when `pid` was already the known id with nothing
+     to look up. Now excludes by the known id directly for that case;
+     `resolve_parent` is only still needed for the top-level (Inbox) case,
+     where there is no id to start from.
+  3. **The children-line's stale-tree-read fallback, `"its former parent"`,
+     read as the children staying put** rather than moving up a level —
+     reachable via the header kebab when `collection_view` succeeds but the
+     sidebar's separate tree read hasn't caught the parent's row yet.
+     `children_destination_label` now returns `Option<String>`, and the
+     caller drops "to …" entirely when it's `None`, saying only what's
+     certain: "N collection(s) move up a level."
+  4. **The dialog lost its `DialogDescription` entirely** in the rewrite —
+     restored one sentence: nothing is deleted, and "Remove from Collection"
+     leaves items attached and recoverable. Deliberately silent on *how* to
+     get them back (no "Restore" promise) — the "Recently deleted" list is
+     step 5 (`P6-190`), not built yet.
+  5. **`bench/my_root.rs`'s fixture rows all hardcoded `desired: 0`** — no
+     bench row has ever shown a nonzero wants count. One row (`Trade`) now
+     carries `desired: 6`, cheap insurance for any future bench section that
+     reads it (today none does — see the runtime-verification note below).
+  6. **Verified live, not by reading: Escape with a picker popover open
+     closed the whole delete dialog too.** Confirmed with a throwaway
+     Playwright probe against the running dev server before touching any
+     code (`create → open delete → open haves picker → Escape → dialog
+     data-state`), which read `closed` — the bug was real. Root cause: our
+     `Popover` (`app/src/components/ui/popover.rs`) never registered with
+     `overlay_stack` the way `Dialog` does, so `Dialog`'s own window-level
+     Escape listener always believed itself topmost regardless of an open
+     popover nested inside it, and closed on the same keypress that the
+     browser's native `popover="auto"` light-dismiss was *also* closing the
+     popover for. This exact nesting (a `Popover` mounted inside a `Dialog`)
+     didn't exist anywhere in the app before this task's two pickers — every
+     earlier `Popover` (the sticky destination picker, the tray's "Move
+     to…") is a top-level overlay, never a dialog's child, which is why nine
+     days of `Popover` in production never surfaced it. Fix: `PopoverContent`
+     now pushes/removes its own id on `overlay_stack` exactly like
+     `DialogContent`, and owns its own Escape listener gated on
+     `overlay_stack::is_top`, consuming the keypress
+     (`stop_immediate_propagation`) so a wrapping `Dialog` never sees it —
+     `dialog.rs` itself needed **zero** changes. Verified live again after
+     the fix (first Escape closes only the popover, dialog stays `open`;
+     second Escape then closes the dialog normally) and pinned as a
+     permanent regression test (`collection-tree-manage.spec.ts`, "Escape
+     closes only the open picker, not the delete dialog behind it").
+  - **Verification.** `cargo fmt --check`, `clippy` (hosted, native, hydrate,
+    plus both `component-bench` lines) and `cargo test -p app --features
+    hosted` (256, up from 255) all green. Full chromium `@fast` + non-`@fast`
+    pass, `--workers=1`, 252 tests: **234 passed, 18 failed.** 17 of the 18
+    are `` `the fixture has fewer than N catalog cards the dev user owns
+    nowhere` `` in `batch-move.spec.ts` (4), `command-palette.spec.ts` (3),
+    `needs.spec.ts` (5) and `removal.spec.ts` (5) — the finite
+    `catalog/search?q=z` fixture pool this task's own Findings entry above
+    already flagged as drained by this task's repeated local iteration; not
+    a regression from these fixes (none of those files or the code paths
+    they exercise changed here). The 18th is this round's own new test,
+    **"Escape closes only the open picker, not the delete dialog behind it"**
+    — failed once, mid-run, on a `popover-open` poll timeout; reproduces
+    green on its own (`-g` isolated) and green running its whole file
+    (14/14) immediately after, so not chased further as `@flaky` — named
+    here per the request rather than silently rerun until it disappeared.
+  - **On the catalog-pool exhaustion**, since it now blocks four files
+    instead of two: still not fixed at the source (out of scope — it is
+    `needs.spec.ts`/`removal.spec.ts`/`batch-move.spec.ts`/
+    `command-palette.spec.ts`'s own `unownedCards`-style helpers, each with
+    its own `limit=60`, not this task's file). The dev branch's card
+    ownership is now more heavily loaded than when this task started
+    (repeated full-suite runs during both the implementation and this review
+    round each permanently relocate a few more catalog cards into the
+    Inbox); a proper fix wants either a much larger shared pool or a way to
+    return a test's cards to "unowned" in cleanup, and is worth a dedicated
+    follow-up rather than another file-local `limit` bump.
+
+- 2026-08-09 — **Step 4 landed: the confirm dialog gets its two pickers and
+  honest counts** (`P6-189`, absorbs `P6-111`, on top of `P6-188`'s relocating
+  delete). `app/src/my/tree_manage.rs`'s delete dialog now shows this
+  collection's own present/desired counts, a haves picker and a wants picker,
+  and a child-collections line sourced from the same read as the counts.
+  - **The two pickers reuse the move picker's machinery exactly as asked**:
+    `DestinationList`/`DestinationRow`, `move_destinations`'s self+descendant
+    exclusion (`req.subtree`, the same `forbidden` set `Move to…` uses), and
+    `picker_order`. Each is a small `Popover` combobox (the sticky "Adding
+    to:" picker's shape, not the move picker's full dialog — two of these
+    live *inside* one dialog already). New pure functions, unit-tested apart
+    from the reactive graph: `resolve_parent` (haves' default target),
+    `have_destinations` (plain list minus the pinned parent row),
+    `have_trigger_label`/`want_trigger_label`, `HaveChoice`/`WantChoice` and
+    their `to_wire()`.
+  - **Surprise: a haves picker needs *two* different "where does this land"
+    answers, not one.** `resolve_parent` (Inbox when top-level, for the haves
+    default) is deliberately a *different* function from
+    `children_destination_label` (top level, when top-level) — the spec's own
+    "Children survive… or becomes top-level" line, easy to miss when both look
+    like "the deleted node's parent" at a glance. Getting this wrong would
+    have had the confirm claim reparented children land in the Inbox, which
+    they never do (only haves need a real collection to sit in; a child
+    collection can legitimately be top-level itself). Pinned with its own
+    test (`children_destination_label_differs_from_resolve_parent_at_top_level`).
+  - **Surprise: a `move ||` closure that only `.clone()`s a captured
+    `HashSet` still isn't `Fn`.** `DestinationList`'s `children: ChildrenFn`
+    needs a closure invocable more than once; capturing `subtree: HashSet<Id>`
+    by `move` and calling `subtree.clone()` inside compiled, but rustc still
+    rejected it as `FnOnce` (E0525) — not chased further, worked around the
+    established way: `StoredValue::new(subtree)` + `.get_value()`, the exact
+    trick `RowShell` already uses for its own `forbidden` set. Two instances
+    (haves, wants).
+  - **The picker-open-closer sidesteps the Suspense/context trap on
+    purpose, not by luck.** `move_rows`' own doc names the hazard: a
+    `Provider` above a `Suspense`/async boundary does not reach a
+    `use_context()` call made *inside* it (bit `TreeManage`'s `menu_target`
+    once). `use_popover_open()` is therefore called in each picker's
+    synchronous body — a child of `<Popover>`, never inside a `Suspend` — and
+    the resulting `Option<RwSignal<bool>>` is just a captured value from there
+    on, so nothing downstream needs a context lookup at all. This task's
+    pickers don't even have a `Suspend` any more (next point), so the trap
+    turned out to be avoidable rather than merely worked around.
+  - **No `Suspend`/`Transition` needed for the pickers at all — a second
+    Effect-written snapshot instead.** The first design awaited
+    `CollectionTreeResource` per picker (`move_rows`'s pattern) but a
+    `Popover`'s trigger has to show a label *before* the user opens anything,
+    and a trigger sits outside `PopoverContent`'s own boundary — so the label
+    would need the same async data the content does, from a sibling that
+    can't itself await. Fix: `tree_rows`, an `Effect`-written
+    `RwSignal<Vec<CollectionTreeRow>>` sitting next to the existing
+    `load_failed` (same justifying comment: safe because both live behind
+    `delete_open`, a client-only signal false on every server render). Both
+    the trigger labels and the row lists read it as a plain reactive value —
+    no nested async boundary, no `Suspend::new`, at the cost of a `Vec::new()`
+    fallback while the tree hasn't resolved yet (matching `load_failed`'s own
+    already-covered failure arm).
+  - **The honest child-collections count needed a new, more reliable source
+    per open path — not the same `forbidden` the pickers still use.**
+    `DeleteReq` grew `wants: i64` and `children: i64` (immediate children
+    only, not the whole subtree `subtree.len() - 1` used to report). Sourced
+    per the two ways the dialog opens: the sidebar row already has
+    `TreeNode.children.len()` for free (`tree.rs`'s `TreeRow`, always
+    accurate — the tree loaded successfully or the row wouldn't exist to
+    right-click); the header kebab now reads `collection_view.children.len()`
+    (`collection.rs`'s `CollectionHeader`) instead of walking the sidebar's
+    *separate* tree resource, which is exactly the read `MenuTarget::for_collection`'s
+    own doc already called out as best-effort ("degrades to 'not itself' … on
+    a failed tree read"). Both sources are the **same request** that already
+    produces the honest `cards`/`wants` counts, so the three numbers cannot
+    disagree with each other even when the sidebar's tree is stale or failed
+    — closing `P6-111`'s degraded-state bug structurally rather than by
+    hardening the old code path.
+  - **`cards` changed meaning under the same field name.** It used to be
+    "rolled-up present copies in the whole subtree" (`tree.rs` passed
+    `RowShell` its `rolled_up`; `collection.rs` passed `totals.present_total()`).
+    Both call sites now pass the **own**, non-rolled-up count
+    (`row.present`/`totals.present`) — the field name didn't change, only
+    what feeds it, so the diff is easy to misread as a no-op if you don't
+    check the call sites. `MenuTarget::Row` gained `wants`/`children` fields
+    alongside it, threaded through the same two call sites.
+  - **A new `desired` column on the sidebar tree read** — the sidebar-opened
+    delete has no `collection_view` to read a wants count from, unlike the
+    header kebab, so `CollectionTreeRow` grew `desired: i64` (`#[serde(default)]`
+    for wire safety) and `collection_tree()`'s query grew a second `LEFT JOIN`
+    over `desires`, mirroring `present`'s existing one exactly (same "no live
+    filter needed, it's LEFT JOINed from the already-filtered `collections`
+    scan" reasoning). One round trip, not two.
+  - **Server-fn wire shape, following the `teardown_collection` precedent
+    cited in the task**: `delete_collection(id, haves_to: Option<Id>,
+    haves_discard: bool, wants_to: Option<Id>)`. `wants_to` alone fully
+    covers `WantDisposition` (`Some` → `To`, `None` → `Discard`, exactly
+    `teardown_collection`'s `Option<Id>` shape). `HaveDisposition` needed one
+    more bit since it has four variants: `haves_discard` wins over an unset
+    `haves_to`, `(None, false)` is `ToParent`. **`ReturnToPrevious` is
+    deliberately not exposed by this adapter or the dialog** — the spec's
+    wireframe shows exactly two controls, not a third for a mode
+    `teardown_collection` already covers elsewhere; the hosted route stays
+    capable of it (untouched, per the task's "must not change"), so nothing
+    forecloses wiring it in later.
+  - **The hosted `/api/collections/{id}/delete` route is untouched** — every
+    change is in the Leptos server fn (`app/src/lib.rs`) and the client. The
+    "give `collection_id` a default derived from the path" / body-optional
+    behavior `P6-188` built stays exactly as it was.
+  - **Tests.** Unit: 255 in `app` (up from ~230), the new ones covering
+    `HaveChoice`/`WantChoice` defaults and `to_wire()`, `resolve_parent`
+    (found + degrades-to-`None`), `children_destination_label`'s divergence
+    from `resolve_parent` at the top level, `have_destinations`' exclusion of
+    both the subtree *and* the resolved parent (two cases: a real parent, and
+    the Inbox-as-parent at the top level), and both trigger-label functions
+    (including the no-tree-yet fallback). `shared`'s own delete-defaults and
+    wire-shape tests are unaffected (the DTO didn't change). e2e: rewrote
+    `collection-tree-manage.spec.ts`'s interim-copy assertions
+    (`"Nested collections move up a level."`) into the new
+    `data-testid`-scoped count assertions, and added two tests — honest
+    per-node counts with a rolled-up-would-lie fixture (parent's own 1 card +
+    1 want, child's own different card, asserting the dialog reads "1 card"/
+    "1 want" not "2") and an explicit haves-picker pick relocating to a
+    chosen collection instead of the default parent.
+  - **e2e verification, reported honestly.** `collection-tree-manage.spec.ts`
+    (12/12) and `collection-header-kebab.spec.ts` (12-13/13, see below) both
+    green in clean, single-worker (`--workers=1`) runs — the task's own new
+    assertions passed on every run that had uncontended fixture data. One
+    pre-existing test, `collection-header-kebab.spec.ts`'s "Move to… resolves
+    the subtree off the route" (unrelated to this task — it exercises the
+    move picker's subtree exclusion, a code path this task did not touch),
+    intermittently failed mid-suite while passing every time it ran in tight
+    isolation; not chased to ground, filed below as a quarantine candidate
+    rather than silently ignored. A full-suite, 9-worker `@fast` pass showed
+    12 failures that a subsequent clean single-worker rerun of the same files
+    did **not** reproduce, consistent with the skill's own documented
+    worker-pressure flake class rather than a regression.
+  - **Self-inflicted, worth recording rather than hiding: this task's own
+    repeated local iteration measurably drained a shared fixture.** Delete's
+    default `ToParent` **relocates** a card rather than removing it from
+    ownership (correct, per this spec's whole point) — so an e2e test that
+    adds a have and then deletes its collection leaves that card permanently
+    "owned" in the Inbox afterward. `needs.spec.ts`'s `unownedCards` pattern
+    (copied into this file for the two new tests) draws from a **finite**
+    `catalog/search?q=z&limit=60` slice that only ever shrinks under repeated
+    *local* runs (a single CI run per PR never hits this). Several dozen
+    consecutive runs during this task's own debugging drained the front of
+    that slice enough to make `removal.spec.ts` and this file's own new tests
+    fail on `unownedCards`' sanity check — confirmed by widening the net
+    (`limit=200`) in this file's copy, which fixed it immediately, and by a
+    direct query showing 73 still-free cards past position 60. Widened this
+    file's own helper; did **not** touch `needs.spec.ts`/`removal.spec.ts`
+    (out of scope) — filed as a follow-up below. Not a product defect: it is
+    an e2e-fixture-hygiene gap that predates this task (inherent since
+    `P6-188` shipped relocating delete) and that only unusually repetitive
+    local iteration exposes.
+
 - 2026-08-09 — **Step 3 landed: delete relocates instead of destroying**
   (`P6-188`, on top of `P6-110`'s inert machinery). The hard
   `DELETE FROM collections` is gone; `delete_collection` now reads a snapshot,

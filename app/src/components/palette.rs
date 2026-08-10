@@ -1571,6 +1571,7 @@ mod tests {
                 format: None,
             },
             present: 0,
+            desired: 0,
         }
     }
 
