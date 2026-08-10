@@ -2845,6 +2845,22 @@ fn at_item(index: usize, e: ApiError) -> ApiError {
 /// previous" (the most recent place the copies could actually go back to), but
 /// it is not the same as "treat a hidden source as no history", so step 3 should
 /// plan against this behaviour rather than the simpler one.
+///
+/// **An undone move gets the same treatment, for the same reason.**
+/// `undone_at IS NULL` sits beside the live filter in that `WHERE`, so a move
+/// that was later reversed is *skipped over* exactly like a hidden source —
+/// the next-most-recent **live, un-undone** move wins, and the Inbox fallback
+/// only fires when none is left. This matters most after P6-190: a delete's
+/// relocations have `from_collection_id` set to the collection being deleted,
+/// so they are never candidates for *that same* collection's own previous
+/// location — the undone move that can pollute this lookup always belongs to
+/// **another** collection's delete landing copies into `collection_id`
+/// (a `to_collection_id = collection_id` row) that was later undone. Concretely:
+/// `X` already holds some copies of a card; a delete of `Y` relocates two more
+/// copies of the same card into `X`; undoing that delete pulls those two back
+/// out and stamps `undone_at` on the move. Without this filter, `X`'s own,
+/// unrelated copies would then "return" to `Y` — a collection that never
+/// really held them as live history.
 async fn previous_location(
     tx: &mut Transaction<'static, Postgres>,
     collection_id: Id,
@@ -2854,7 +2870,7 @@ async fn previous_location(
         "SELECT from_collection_id FROM moves \
          WHERE to_collection_id = $1 AND printing_id = $2 AND finish = $3::card_finish \
            AND condition = $4::card_condition AND language = $5 AND from_collection_id IS NOT NULL \
-           AND {live} \
+           AND undone_at IS NULL AND {live} \
          ORDER BY created_at DESC LIMIT 1",
         live = in_live_collection("moves.from_collection_id"),
     ))
@@ -4435,6 +4451,91 @@ mod delete_live {
         );
         sweep(&f.be).await;
 
+        assert_eq!(
+            counts(&be).await,
+            before,
+            "collections / holdings / desires / moves are exactly as found"
+        );
+    }
+
+    /// P6-113: `previous_location` must not let a delete's own, now-undone
+    /// relocation decide a future "return to previous" destination.
+    ///
+    /// Undo (`undo_one`) stamps `undone_at` on the delete's relocating move
+    /// but — unlike a fresh `move_cards` call — writes no new ledger row to
+    /// record the reversal, so the only trace of "this collection received A
+    /// once" is that one move, now marked undone. Without the
+    /// `undone_at IS NULL` predicate, `previous_location` would still hand it
+    /// back as if the relocation were live history; this pins that it does
+    /// not, by calling `previous_location` directly (the same helper
+    /// `delete_collection`'s planner and `teardown`'s `ReturnToPrevious` both
+    /// go through) rather than re-deriving the assertion through a second
+    /// full delete cycle.
+    #[tokio::test]
+    #[ignore = "writes to the live dev branch (DATABASE_URL + TR_DEV_USER_ID required)"]
+    async fn previous_location_ignores_an_undone_move() {
+        let user_id: Uuid = std::env::var("TR_DEV_USER_ID")
+            .expect("TR_DEV_USER_ID (the dev user to act as)")
+            .parse()
+            .expect("uuid");
+        let be = HostedBackend::for_user(user_id).await.expect("pool");
+
+        sweep(&be).await;
+        let before = counts(&be).await;
+
+        let f = setup(HostedBackend::for_user(user_id).await.unwrap(), user_id).await;
+
+        // Delete `subject` with ReturnToPrevious: A's only live history (the
+        // setup's `source -> subject` move) sends it back to `source` — the
+        // delete appends that as a real move, `subject -> source`.
+        let receipt =
+            f.be.delete_collection(DeleteCollectionReq {
+                collection_id: f.subject,
+                haves: HaveDisposition::ReturnToPrevious,
+                wants: WantDisposition::Discard,
+            })
+            .await
+            .expect("delete");
+        assert_eq!(
+            present(&f.be, f.source, f.printing_a).await,
+            2,
+            "A relocated to source"
+        );
+
+        // Undo the delete whole: `undo_one` stamps that `subject -> source`
+        // move's `undone_at` and writes the copies straight back into
+        // `subject` — no new ledger row records the reversal.
+        f.be.undo_delete(receipt).await.expect("undo");
+        assert_eq!(
+            present(&f.be, f.subject, f.printing_a).await,
+            2,
+            "A is back in subject"
+        );
+
+        // The predicate under test. `source` was never a *live* previous
+        // location for A on its own account — its only appearance as a move
+        // destination is the delete's own relocation, now undone. Before this
+        // fix, `previous_location(source, …)` would still resolve to
+        // `subject` (the reversed move's `from`); after it, that move is
+        // skipped exactly like a hidden source and there is no other
+        // history, so the answer must be `None`.
+        let grain = Grain {
+            printing_id: f.printing_a,
+            finish: Finish::Nonfoil.to_pg().to_string(),
+            condition: Condition::Nm.to_pg().to_string(),
+            language: shared::default_language(),
+        };
+        let mut t = tx(&f.be).await;
+        let prev = previous_location(&mut t, f.source, &grain)
+            .await
+            .expect("previous_location");
+        t.commit().await.expect("commit");
+        assert_eq!(
+            prev, None,
+            "an undone move must not decide a return-to-previous destination"
+        );
+
+        sweep(&f.be).await;
         assert_eq!(
             counts(&be).await,
             before,

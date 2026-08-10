@@ -385,3 +385,11 @@ resolves.
   reappears — no DB needed, so it runs in CI. The one surprise: the guard's own
   literal needle self-matched on first pass (`include_str!` includes the test
   itself), fixed by assembling the needle from two halves at runtime.
+
+- 2026-08-10 — **`previous_location` now excludes undone moves** (P6-113):
+  added `undone_at IS NULL` beside the existing live-collection filter, so a
+  relocation reversed by `undo_one` (notably a delete's own moves after
+  `undo_delete`, P6-190) can no longer decide a future `ReturnToPrevious`
+  destination; pinned with a live-DB test that calls `previous_location`
+  directly after a delete → undo cycle (`previous_location_ignores_an_undone_move`
+  in `hosted.rs`).

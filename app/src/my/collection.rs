@@ -1778,7 +1778,7 @@ fn TeardownDialog(
                             </select>
                         </label>
                         <p class="text-muted-foreground text-xs">
-                            "\"Their previous locations\" sends each card back to the collection it was last moved here from — Inbox where there is no history."
+                            "\"Their previous locations\" sends each card back to its most recent live, un-undone source — Inbox where none exists."
                         </p>
                         {move || {
                             error
