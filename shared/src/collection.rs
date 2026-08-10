@@ -551,6 +551,121 @@ pub struct TeardownReceipt {
     pub move_ids: Vec<Id>,
 }
 
+/// Where a deleted collection's **holdings** go
+/// (specs/collection-deletion.md → The two dispositions).
+///
+/// Anything the user chooses to move out moves through the real `moves` ledger;
+/// anything they do not simply goes hidden with the collection. `ToParent` is
+/// the default because a have is a physical object that has to be *somewhere*.
+///
+/// The user never sees the word `Discard`: both controls label it
+/// **"Remove from Collection"** (resolved 2026-08-05 in the spec). The variant
+/// keeps the shorter name because it is what the code and the ledger reasoning
+/// call it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum HaveDisposition {
+    /// The nearest surviving parent — always the deleted collection's own
+    /// `parent_id`, since children re-parent rather than cascade — or the Inbox
+    /// when it was top-level.
+    #[default]
+    ToParent,
+    /// A collection the user picked. Must be live and owned, like any other
+    /// move destination; the collection being deleted is refused.
+    To { collection_id: Id },
+    /// Each card back to the most recent **live** collection it was moved into
+    /// this one from, Inbox where the history has none — the existing
+    /// [`Teardown::ReturnToPrevious`] machinery, reused verbatim.
+    ReturnToPrevious,
+    /// Writes **nothing**: the holdings stay attached to the now-hidden
+    /// collection, vanish from every count and every view because the
+    /// collection is filtered out, and return intact on undo.
+    Discard,
+}
+
+/// Where a deleted collection's **desires** go (specs/collection-deletion.md).
+///
+/// Chosen separately from [`HaveDisposition`], and defaulting the other way: a
+/// want is an intention that was very likely scoped to the deck being deleted,
+/// so leaving it attached to the hidden collection is the sane default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum WantDisposition {
+    /// Writes nothing — the desires go hidden with the collection.
+    #[default]
+    Discard,
+    /// Move them to a live, owned collection (merging into its existing rows).
+    To { collection_id: Id },
+}
+
+/// Delete a collection — which, since specs/collection-deletion.md, **relocates
+/// rather than destroys**: the row is hidden (`deleted_at`), its live children
+/// re-point at its parent, and its holdings move out as real ledger moves.
+///
+/// **Every field is optional on the wire.** The dispositions default to the
+/// spec's `ToParent` / `Discard`, so a caller with no picker yet (the tree's
+/// confirm dialog until step 4) sends nothing at all. `collection_id` defaults
+/// to the nil uuid, which the hosted route reads as *unstated* and fills from
+/// the path — see [`resolve_path_id`](Self::resolve_path_id). That keeps the
+/// operation's long-standing "`POST …/{id}/delete` with no body" contract
+/// working while the DTO keeps the shape specs/collection-deletion.md gives it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeleteCollectionReq {
+    #[serde(default)]
+    pub collection_id: Id,
+    #[serde(default)]
+    pub haves: HaveDisposition,
+    #[serde(default)]
+    pub wants: WantDisposition,
+}
+
+impl DeleteCollectionReq {
+    /// The spec's defaults — holdings to the parent, wants left attached.
+    pub fn defaults(collection_id: Id) -> Self {
+        Self {
+            collection_id,
+            haves: HaveDisposition::default(),
+            wants: WantDisposition::default(),
+        }
+    }
+
+    /// Reconcile a request body with the collection named in the URL path.
+    ///
+    /// Unstated (the nil uuid, i.e. absent from the JSON) takes the path's id.
+    /// **Stated and different is refused**, rather than one side quietly
+    /// winning: a request that names two collections has no safe reading, and
+    /// silently deleting the *other* one is the worst answer available.
+    pub fn resolve_path_id(mut self, path_id: Id) -> crate::ApiResult<Self> {
+        if self.collection_id == Id::nil() {
+            self.collection_id = path_id;
+            Ok(self)
+        } else if self.collection_id != path_id {
+            Err(ApiError::Validation(
+                "collection_id does not match the path".into(),
+            ))
+        } else {
+            Ok(self)
+        }
+    }
+}
+
+/// What a delete wrote — **handles, not counts**, for the same reason
+/// [`TeardownReceipt`] carries ids: the undo behind the toast has to reverse
+/// exactly this operation (clear `deleted_at`, reverse every `move_id`,
+/// re-parent every id in `reparented` back), and a count cannot do that.
+///
+/// `Discard`ed rows produce no ids because they produce no writes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeleteCollectionReceipt {
+    /// The collection that was hidden.
+    pub collection_id: Id,
+    /// Holdings relocations, in write order (empty for `Discard`).
+    pub move_ids: Vec<Id>,
+    /// Children whose `parent_id` changed (they survive — delete removes
+    /// exactly one node).
+    pub reparented: Vec<Id>,
+}
+
 /// A row of the virtual "All cards" view (specs/collection-api.md → AllCardsView):
 /// per oracle card, the aggregate counts across *every* collection.
 ///
@@ -655,6 +770,98 @@ mod tests {
     fn a_batch_failure_carries_the_item_it_belongs_to() {
         let msg = batch_item_error(3, "no copies to move");
         assert_eq!(batch_item_index(&msg), Some((3, "no copies to move")));
+    }
+
+    /// The defaults are contractual, not stylistic: the confirm dialog opens on
+    /// them, and a caller that posts neither disposition (every caller until the
+    /// dialog's pickers land) must get "holdings to the parent, wants stay
+    /// attached" — specs/collection-deletion.md → The two dispositions.
+    #[test]
+    fn the_delete_defaults_are_to_parent_and_discard() {
+        let req = DeleteCollectionReq::defaults(Id::from_u128(1));
+        assert_eq!(req.haves, HaveDisposition::ToParent);
+        assert_eq!(req.wants, WantDisposition::Discard);
+
+        // …and a body carrying only the id deserializes to the same thing, so
+        // the wire default and the Rust default cannot drift apart.
+        let wire: DeleteCollectionReq =
+            serde_json::from_str(r#"{"collection_id":"00000000-0000-0000-0000-000000000001"}"#)
+                .expect("id-only body");
+        assert_eq!(wire, req);
+    }
+
+    /// The endpoint has always accepted `POST /api/collections/{id}/delete`
+    /// with **no body**, and callers rely on it (every e2e cleanup helper posts
+    /// either nothing or `{}`). Adding dispositions must not turn those into
+    /// 422s, so an empty body is a complete request whose id comes from the
+    /// path.
+    #[test]
+    fn an_empty_body_takes_its_collection_from_the_path() {
+        let path_id = Id::from_u128(1);
+        let empty: DeleteCollectionReq = serde_json::from_str("{}").expect("empty body");
+        assert_eq!(empty.collection_id, Id::nil(), "unstated");
+        assert_eq!(
+            empty.resolve_path_id(path_id),
+            Ok(DeleteCollectionReq::defaults(path_id))
+        );
+    }
+
+    /// Stated and matching is fine; stated and different is refused outright —
+    /// picking a winner would mean deleting a collection the caller did not
+    /// name in the URL.
+    #[test]
+    fn a_body_that_names_another_collection_is_refused() {
+        let path_id = Id::from_u128(1);
+        let same = DeleteCollectionReq::defaults(path_id);
+        assert_eq!(same.clone().resolve_path_id(path_id), Ok(same));
+
+        let other = DeleteCollectionReq::defaults(Id::from_u128(2));
+        assert!(matches!(
+            other.resolve_path_id(path_id),
+            Err(ApiError::Validation(_))
+        ));
+    }
+
+    /// Both dispositions are internally tagged on `mode`, like [`Teardown`] —
+    /// the native client and the hosted router share these strings.
+    #[test]
+    fn the_dispositions_round_trip_on_a_mode_tag() {
+        let dest = Id::from_u128(7);
+        for (value, json) in [
+            (HaveDisposition::ToParent, r#"{"mode":"to_parent"}"#),
+            (
+                HaveDisposition::ReturnToPrevious,
+                r#"{"mode":"return_to_previous"}"#,
+            ),
+            (HaveDisposition::Discard, r#"{"mode":"discard"}"#),
+            (
+                HaveDisposition::To {
+                    collection_id: dest,
+                },
+                r#"{"mode":"to","collection_id":"00000000-0000-0000-0000-000000000007"}"#,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&value).unwrap(), json);
+            assert_eq!(
+                serde_json::from_str::<HaveDisposition>(json).unwrap(),
+                value
+            );
+        }
+        for (value, json) in [
+            (WantDisposition::Discard, r#"{"mode":"discard"}"#),
+            (
+                WantDisposition::To {
+                    collection_id: dest,
+                },
+                r#"{"mode":"to","collection_id":"00000000-0000-0000-0000-000000000007"}"#,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&value).unwrap(), json);
+            assert_eq!(
+                serde_json::from_str::<WantDisposition>(json).unwrap(),
+                value
+            );
+        }
     }
 
     #[test]

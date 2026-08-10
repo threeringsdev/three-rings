@@ -14,10 +14,11 @@
 use shared::{
     AddHave, AddLine, AddWant, AllCardsView, ApiError, ApiResult, BatchMove, CardDetail,
     CardSummary, CatalogCount, CollectionSummary, CollectionTree, CollectionView, DeckCommanders,
-    DesireLine, ErrorEnvelope, HoldingLine, HoldingMove, Id, LineResult, MoveReceipt, MoveRequest,
-    NeedsView, NewCollection, NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery,
-    SearchResults, SetBoard, SetQuantity, SetQuery, SetSummary, ShoppingList, SuggestedDestination,
-    Tag, TagAssignment, TaggedCard, Teardown, TeardownReceipt,
+    DeleteCollectionReceipt, DeleteCollectionReq, DesireLine, ErrorEnvelope, HoldingLine,
+    HoldingMove, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection, NewTag, Page,
+    Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard, SetQuantity,
+    SetQuery, SetSummary, ShoppingList, SuggestedDestination, Tag, TagAssignment, TaggedCard,
+    Teardown, TeardownReceipt,
 };
 use tokio::sync::OnceCell;
 
@@ -291,11 +292,19 @@ impl CollectionStore for NativeBackend {
         .await
     }
 
-    async fn delete_collection(&self, id: Id) -> ApiResult<()> {
+    /// The dispositions ride in the body; the id stays in the path, where every
+    /// other per-collection op keeps it (specs/collection-api.md → the endpoint
+    /// surface). The body repeats it because that is the shape
+    /// specs/collection-deletion.md gives `DeleteCollectionReq`, and the hosted
+    /// route rejects a body that disagrees with the path rather than picking one.
+    async fn delete_collection(
+        &self,
+        req: DeleteCollectionReq,
+    ) -> ApiResult<DeleteCollectionReceipt> {
         self.require_session()?;
-        self.post_unit(
-            &super::paths::collection_op(id, super::paths::op::DELETE),
-            &(),
+        self.post(
+            &super::paths::collection_op(req.collection_id, super::paths::op::DELETE),
+            &req,
         )
         .await
     }

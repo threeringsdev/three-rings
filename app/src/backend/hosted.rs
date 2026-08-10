@@ -8,16 +8,18 @@ use shared::{
     union_color_identity, AddHave, AddLine, AddWant, AllCardsRow, AllCardsView, ApiError,
     ApiResult, BatchMove, Board, CardDetail, CardLocation, CardRow, CardSummary, CatalogCount,
     CollectionKind, CollectionSummary, CollectionTree, CollectionTreeRow, CollectionView,
-    Condition, DeckCommanders, DesireLine, Finish, HoldingLine, HoldingMove, Id, LineResult,
-    MoveReceipt, MoveRequest, NeedRow, NeedsView, NewCollection, NewTag, OwnershipEntry, Page,
-    PrintingSummary, Rename, RenameTag, Reorder, Reparent, Ruling, SearchQuery, SearchResults,
-    SetBoard, SetQuantity, SetQuery, SetSummary, ShoppingList, ShoppingRow, SuggestedDestination,
-    Tag, TagAssignment, TagScope, TaggedCard, Teardown, TeardownReceipt,
+    Condition, DeckCommanders, DeleteCollectionReceipt, DeleteCollectionReq, DesireLine, Finish,
+    HaveDisposition, HoldingLine, HoldingMove, Id, LineResult, MoveReceipt, MoveRequest, NeedRow,
+    NeedsView, NewCollection, NewTag, OwnershipEntry, Page, PrintingSummary, Rename, RenameTag,
+    Reorder, Reparent, Ruling, SearchQuery, SearchResults, SetBoard, SetQuantity, SetQuery,
+    SetSummary, ShoppingList, ShoppingRow, SuggestedDestination, Tag, TagAssignment, TagScope,
+    TaggedCard, Teardown, TeardownReceipt,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use super::delete_plan::{plan_delete, DeleteSnapshot};
 use super::{CatalogStore, CollectionStore};
 
 /// A per-request handle to the hosted database. Cheap to construct — it borrows
@@ -559,26 +561,195 @@ impl CollectionStore for HostedBackend {
         Ok(summary)
     }
 
-    async fn delete_collection(&self, id: Id) -> ApiResult<()> {
+    /// **Delete relocates; it does not destroy** (specs/collection-deletion.md,
+    /// step 3 — the task that closes the data-loss hole).
+    ///
+    /// What used to be `DELETE FROM collections` — one statement whose blast
+    /// radius was four `ON DELETE CASCADE`s and a ledger silently rewritten into
+    /// intakes and removals — is now: read a snapshot, plan against it
+    /// ([`plan_delete`]), then execute the plan in one transaction. The row is
+    /// hidden last, so every write before it still sees a live collection.
+    ///
+    /// Read → plan → write, rather than deciding as it goes, because *what goes
+    /// where* is all edge cases (top-level, no history, discard, a child as the
+    /// destination) and none of them need a database to be right — that is the
+    /// `plan_move`/`plan_drop` precedent, and the reason those rules are unit
+    /// tests rather than dev-branch transcripts.
+    async fn delete_collection(
+        &self,
+        req: DeleteCollectionReq,
+    ) -> ApiResult<DeleteCollectionReceipt> {
+        let user_id = self.session_id()?;
+        let id = req.collection_id;
         let mut tx = self.scoped_tx().await?;
-        // Still the hard delete this method has always been — soft deletion is
-        // the *next* step of specs/collection-deletion.md and nothing sets
-        // `deleted_at` yet. The filter is here so that once something does, a
-        // second delete of an already-hidden collection reads as absent rather
-        // than cascading its subtree away for real.
-        let affected = sqlx::query(
-            "DELETE FROM collections WHERE id = $1 AND NOT is_inbox AND deleted_at IS NULL",
+
+        // One read settles ownership (RLS), liveness (`deleted_at IS NULL`) and
+        // the two facts the plan needs about the node itself. `FOR UPDATE` holds
+        // it for the whole operation: everything below is keyed on this row
+        // still being live and still having this parent.
+        let row: Option<(Option<Uuid>, bool)> = sqlx::query_as(
+            "SELECT parent_id, is_inbox FROM collections \
+             WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        // Absent, not owned or already hidden — one answer, as everywhere else.
+        let Some((parent_id, is_inbox)) = row else {
+            return Err(ApiError::NotFound("collection".into()));
+        };
+
+        // Children survive, so only the **live** immediate children are read:
+        // a grandchild keeps its parent, which is itself about to be re-pointed.
+        let children: Vec<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM collections WHERE parent_id = $1 AND deleted_at IS NULL \
+             ORDER BY position, name",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+
+        // Per board, exactly as `teardown` snapshots: one ledger row per board
+        // is what makes the undo exact (a 2-main/1-side stack must not come back
+        // as 3 mainboard copies).
+        let holdings: Vec<MoveGrainRow> = sqlx::query_as(
+            "SELECT printing_id, finish::text AS finish, condition::text AS condition, \
+                    language, board::text AS board, sum(quantity)::int AS quantity \
+             FROM holdings WHERE collection_id = $1 \
+             GROUP BY printing_id, finish, condition, language, board",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+
+        let (has_desires,): (bool,) =
+            sqlx::query_as("SELECT EXISTS (SELECT 1 FROM desires WHERE collection_id = $1)")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(upstream)?;
+
+        // Resolved unconditionally (and provisioned if missing): it is the
+        // fallback for both `ToParent` at top level and `ReturnToPrevious`
+        // without history, and the planner is pure, so it cannot go looking.
+        let inbox = inbox_id(&mut tx, user_id).await?;
+
+        // `ReturnToPrevious` is the one disposition whose answer differs per
+        // stack, so it is the only one that pays for these lookups.
+        let mut previous = Vec::with_capacity(holdings.len());
+        for h in &holdings {
+            previous.push(match req.haves {
+                HaveDisposition::ReturnToPrevious => {
+                    previous_location(&mut tx, id, &grain_of(h)).await?
+                }
+                _ => None,
+            });
+        }
+
+        let snapshot = DeleteSnapshot {
+            collection_id: id,
+            parent_id,
+            is_inbox,
+            inbox_id: inbox,
+            children: children.into_iter().map(|(id,)| id).collect(),
+            holdings: previous,
+            has_desires,
+        };
+        let plan = plan_delete(&snapshot, req.haves, req.wants)?;
+
+        // Every destination the plan produced — the user's `To` pick, the
+        // parent, a previous location, the Inbox — re-validated as live and
+        // owned before anything moves. Checking the *plan* rather than the
+        // request is what makes "a hidden collection is never a write target"
+        // hold for all four dispositions at once.
+        for dest in plan.destinations() {
+            require_owned_collection(&mut tx, dest).await?;
+        }
+
+        // 1. Children survive. Delete removes exactly one node.
+        if !plan.reparent.is_empty() {
+            sqlx::query(
+                "UPDATE collections SET parent_id = $2 \
+                 WHERE id = ANY($1) AND deleted_at IS NULL",
+            )
+            .bind(plan.reparent.as_slice())
+            .bind(plan.reparent_to)
+            .execute(&mut *tx)
+            .await
+            .map_err(upstream)?;
+        }
+
+        // 2. Holdings leave as real ledger moves — the same take/add/append
+        //    triple `teardown` uses, so undo, history and every count treat a
+        //    delete's relocations exactly like any other move. A `None`
+        //    destination is `Discard`: the loop writes nothing at all.
+        let mut move_ids: Vec<Id> = Vec::with_capacity(plan.moves());
+        for (h, dest) in holdings.iter().zip(&plan.holding_dests) {
+            let Some(dest) = *dest else { continue };
+            let grain = grain_of(h);
+            let board = board_of(&h.board)?;
+            holding_take(&mut tx, id, &grain, board, h.quantity).await?;
+            holding_add(&mut tx, user_id, dest, &grain, Board::Main, h.quantity).await?;
+            move_ids.push(
+                append_move(
+                    &mut tx,
+                    user_id,
+                    Some(id),
+                    Some(dest),
+                    &grain,
+                    (board, Board::Main),
+                    h.quantity,
+                )
+                .await?,
+            );
+        }
+
+        // 3. Desires, if they were asked to move. No ledger exists for them
+        //    (desires have no move rows and no quantity operation), so this is a
+        //    merge-and-drop: the destination may already want the same card, and
+        //    `desires_uniq` is `NULLS NOT DISTINCT`, so an unpinned want merges
+        //    with an unpinned want. Two source rows can never collide on the
+        //    destination key, because they are distinct on it in the source too.
+        if let Some(dest) = plan.desire_dest {
+            sqlx::query(
+                "INSERT INTO desires (user_id, collection_id, oracle_id, printing_id, board, quantity) \
+                 SELECT user_id, $2, oracle_id, printing_id, board, quantity \
+                 FROM desires WHERE collection_id = $1 \
+                 ON CONFLICT ON CONSTRAINT desires_uniq \
+                   DO UPDATE SET quantity = desires.quantity + EXCLUDED.quantity",
+            )
+            .bind(id)
+            .bind(dest)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            sqlx::query("DELETE FROM desires WHERE collection_id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(upstream)?;
+        }
+
+        // 4. Hide the node — last, so every write above acted on a live
+        //    collection and `require_owned_collection` could not have refused
+        //    the operation's own subject.
+        sqlx::query(
+            "UPDATE collections SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
         )
         .bind(id)
         .execute(&mut *tx)
         .await
-        .map_err(upstream)?
-        .rows_affected();
-        if affected == 0 {
-            return Err(self.absent_or_inbox(&mut tx, id, "deleted").await);
-        }
+        .map_err(upstream)?;
+
         tx.commit().await.map_err(upstream)?;
-        Ok(())
+        Ok(DeleteCollectionReceipt {
+            collection_id: id,
+            move_ids,
+            reparented: plan.reparent,
+        })
     }
 
     async fn reparent_collection(&self, id: Id, req: Reparent) -> ApiResult<()> {
@@ -1324,12 +1495,7 @@ impl CollectionStore for HostedBackend {
 
         let mut move_ids: Vec<Id> = Vec::with_capacity(holdings.len());
         for h in &holdings {
-            let grain = Grain {
-                printing_id: h.printing_id,
-                finish: h.finish.clone(),
-                condition: h.condition.clone(),
-                language: h.language.clone(),
-            };
+            let grain = grain_of(h);
             let board = board_of(&h.board)?;
             let dest = match &mode {
                 Teardown::EmptyTo { to_collection_id } => *to_collection_id,
@@ -2128,7 +2294,22 @@ async fn undo_one(
     let from_board = board_of(&m.from_board)?;
     let to_board = board_of(&m.to_board)?;
     // Reverse: give the copies back to the source, take them from the dest.
+    //
+    // **The source may since have been soft-deleted**, and this is the one write
+    // path in the file that never goes through `require_owned_collection`,
+    // because its ids come from the ledger rather than from the caller. Undoing
+    // an old, unrelated move whose source is now hidden would otherwise put real
+    // copies somewhere the user cannot see.
+    //
+    // Maintainer ruling, 2026-08-09 (specs/collection-deletion.md → Open
+    // questions, now resolved): **redirect them to the Inbox.** Cards always
+    // come back, and they never silently land in a hidden collection. Refusing
+    // the undo and auto-restoring the collection were both considered and
+    // rejected. The delete's *own* undo is unaffected — it clears `deleted_at`
+    // before reversing its moves, so the source is live again by the time this
+    // runs.
     if let Some(from) = m.from_collection_id {
+        let from = live_or_inbox(tx, user_id, from).await?;
         holding_add(tx, user_id, from, &grain, from_board, m.quantity).await?;
     }
     if let Some(to) = m.to_collection_id {
@@ -2360,6 +2541,31 @@ async fn previous_location(
     Ok(row.map(|(id,)| id))
 }
 
+/// `collection_id` if it is still live and the caller's, otherwise the caller's
+/// Inbox — the redirect behind [`undo_one`]'s write-back
+/// (specs/collection-deletion.md, maintainer ruling 2026-08-09).
+///
+/// A row that is missing entirely takes the same branch as a hidden one, and
+/// deliberately: both mean "these copies have nowhere of their own to go back
+/// to", and the Inbox is the answer to that question everywhere else in this
+/// file too.
+async fn live_or_inbox(
+    tx: &mut Transaction<'static, Postgres>,
+    user_id: Uuid,
+    collection_id: Id,
+) -> ApiResult<Uuid> {
+    let live: Option<(i32,)> =
+        sqlx::query_as("SELECT 1 FROM collections WHERE id = $1 AND deleted_at IS NULL")
+            .bind(collection_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(upstream)?;
+    match live {
+        Some(_) => Ok(collection_id),
+        None => inbox_id(tx, user_id).await,
+    }
+}
+
 /// The caller's Inbox id, provisioning it if missing (idempotent).
 async fn inbox_id(tx: &mut Transaction<'static, Postgres>, user_id: Uuid) -> ApiResult<Uuid> {
     sqlx::query(
@@ -2406,6 +2612,18 @@ struct MoveGrainRow {
     language: String,
     board: String,
     quantity: i32,
+}
+
+/// The [`Grain`] of a snapshotted stack — the board rides beside it, never in
+/// it (see [`Grain`]). Shared by the two operations that empty a collection:
+/// `teardown` and `delete_collection`.
+fn grain_of(h: &MoveGrainRow) -> Grain {
+    Grain {
+        printing_id: h.printing_id,
+        finish: h.finish.clone(),
+        condition: h.condition.clone(),
+        language: h.language.clone(),
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -3138,6 +3356,533 @@ mod search_live {
             ApiError::Validation(msg) => assert!(msg.contains("pow>3"), "{msg}"),
             other => panic!("expected Validation, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod delete_live {
+    //! The dev-branch integration check specs/collection-deletion.md → Testing
+    //! asks for: delete → the collection is hidden, the cards are at the
+    //! destination, the children are re-parented, and the ledger rows are real
+    //! moves rather than intakes/removals — plus the regression that matters
+    //! most, a card held **only** in the deleted collection.
+    //!
+    //! Deliberately `#[ignore]`d, like [`super::search_live`]: it writes to a
+    //! real database. Needs the runtime credential and a user to act as —
+    //!
+    //! ```text
+    //! DATABASE_URL=… TR_DEV_USER_ID=… \
+    //!   cargo test -p app --features hosted -- --ignored delete_live --nocapture
+    //! ```
+    //!
+    //! (`scripts/seed-dev-data.sh` shows how to resolve the e2e user's uuid from
+    //! `neon_auth."user"` with the owner credential.)
+    //!
+    //! **Self-cleaning, and it proves it.** Every collection it makes is named
+    //! with [`SCRATCH`]; the two printings it uses are picked from cards the
+    //! user owns *none* of, so their holdings can be swept from anywhere —
+    //! including the Inbox copies a `ReturnToPrevious` or an undo-redirect
+    //! lands there. The test's last assertion is that the user's row counts are
+    //! exactly what they were before it ran.
+
+    use super::*;
+    use shared::{HaveDisposition, WantDisposition};
+
+    /// Name prefix for everything this test creates, so a crashed run is
+    /// cleanable (and is cleaned, on the next run's setup).
+    const SCRATCH: &str = "P6-188 scratch";
+
+    struct Fixture {
+        be: HostedBackend,
+        user_id: Uuid,
+        root: Id,
+        subject: Id,
+        child: Id,
+        grandchild: Id,
+        source: Id,
+        elsewhere: Id,
+        inbox: Id,
+        /// Held (after the setup move) **only** in `subject` — the regression's card.
+        printing_a: Id,
+        oracle_a: Id,
+        /// Held in `subject` *and* in `elsewhere`.
+        printing_b: Id,
+        oracle_b: Id,
+    }
+
+    async fn tx(be: &HostedBackend) -> Transaction<'static, Postgres> {
+        be.scoped_tx().await.expect("scoped tx")
+    }
+
+    /// `(collections, holdings, desires, moves)` for the caller — RLS scopes
+    /// each count, and hidden collections are counted too (this is the
+    /// "did you leave anything behind" measure, not a read model).
+    async fn counts(be: &HostedBackend) -> (i64, i64, i64, i64) {
+        let mut t = tx(be).await;
+        let row: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM collections), (SELECT count(*) FROM holdings), \
+                    (SELECT count(*) FROM desires), (SELECT count(*) FROM moves)",
+        )
+        .fetch_one(&mut *t)
+        .await
+        .expect("counts");
+        t.commit().await.expect("commit");
+        row
+    }
+
+    /// The `owned_by_card` view — the single definition of "owned per card", and
+    /// therefore the thing the acceptance rule is stated against. No row = 0.
+    async fn owned(be: &HostedBackend, oracle_id: Id) -> i32 {
+        let mut t = tx(be).await;
+        let row: Option<(i32,)> =
+            sqlx::query_as("SELECT owned FROM owned_by_card WHERE oracle_id = $1")
+                .bind(oracle_id)
+                .fetch_optional(&mut *t)
+                .await
+                .expect("owned_by_card");
+        t.commit().await.expect("commit");
+        row.map(|(n,)| n).unwrap_or(0)
+    }
+
+    /// Copies of a printing in a collection, hidden or not (raw `holdings`, not
+    /// a read model — "where did the rows actually go").
+    async fn present(be: &HostedBackend, collection_id: Id, printing_id: Id) -> i32 {
+        let mut t = tx(be).await;
+        let (n,): (i32,) = sqlx::query_as(
+            "SELECT COALESCE(sum(quantity), 0)::int FROM holdings \
+             WHERE collection_id = $1 AND printing_id = $2",
+        )
+        .bind(collection_id)
+        .bind(printing_id)
+        .fetch_one(&mut *t)
+        .await
+        .expect("present");
+        t.commit().await.expect("commit");
+        n
+    }
+
+    /// `(parent_id, hidden)` straight off the row.
+    async fn node(be: &HostedBackend, id: Id) -> (Option<Id>, bool) {
+        let mut t = tx(be).await;
+        let row: (Option<Uuid>, bool) = sqlx::query_as(
+            "SELECT parent_id, deleted_at IS NOT NULL FROM collections WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&mut *t)
+        .await
+        .expect("node");
+        t.commit().await.expect("commit");
+        row
+    }
+
+    /// A ledger row's two ends. `NULL` means intake / removal, which is exactly
+    /// what the old hard delete turned every historical move into.
+    async fn move_ends(be: &HostedBackend, move_id: Id) -> (Option<Id>, Option<Id>) {
+        let mut t = tx(be).await;
+        let row: (Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as("SELECT from_collection_id, to_collection_id FROM moves WHERE id = $1")
+                .bind(move_id)
+                .fetch_one(&mut *t)
+                .await
+                .expect("move");
+        t.commit().await.expect("commit");
+        row
+    }
+
+    /// Remove every trace of a run — and derive *what* to remove rather than
+    /// being told, so it also cleans up after a run that crashed half way
+    /// (which is the state the next run's pre-state count would otherwise be
+    /// measured against).
+    ///
+    /// The hard part is the copies that legitimately end up **outside** a
+    /// scratch collection: the Inbox, where `ReturnToPrevious`'s no-history
+    /// fallback and the undo redirect both put them. Every one of those got
+    /// there through a `moves` row with a scratch collection at one end —
+    /// delete writes real ledger moves, which is the property this whole task
+    /// is about — so the ledger names the printings, and the holdings go first
+    /// while it still does. Then the ledger, then the collections (their
+    /// cascade takes the desires).
+    ///
+    /// Everything is RLS-scoped to the caller, so the `printing_id` sweep cannot
+    /// reach another user's copies.
+    async fn sweep(be: &HostedBackend) {
+        let mut t = tx(be).await;
+        let scratch = format!("{SCRATCH}%");
+        sqlx::query(
+            "DELETE FROM holdings WHERE printing_id IN ( \
+               SELECT printing_id FROM moves \
+                WHERE from_collection_id IN (SELECT id FROM collections WHERE name LIKE $1) \
+                   OR to_collection_id IN (SELECT id FROM collections WHERE name LIKE $1) \
+               UNION \
+               SELECT printing_id FROM holdings \
+                WHERE collection_id IN (SELECT id FROM collections WHERE name LIKE $1))",
+        )
+        .bind(&scratch)
+        .execute(&mut *t)
+        .await
+        .expect("sweep holdings");
+        sqlx::query(
+            "DELETE FROM moves WHERE from_collection_id IN \
+               (SELECT id FROM collections WHERE name LIKE $1) \
+                OR to_collection_id IN (SELECT id FROM collections WHERE name LIKE $1)",
+        )
+        .bind(&scratch)
+        .execute(&mut *t)
+        .await
+        .expect("sweep moves");
+        sqlx::query("DELETE FROM collections WHERE name LIKE $1")
+            .bind(&scratch)
+            .execute(&mut *t)
+            .await
+            .expect("sweep collections");
+        t.commit().await.expect("commit");
+    }
+
+    async fn binder(be: &HostedBackend, parent: Option<Id>, name: &str) -> Id {
+        be.create_collection(NewCollection {
+            parent_id: parent,
+            kind: CollectionKind::Binder,
+            name: format!("{SCRATCH} {name}"),
+            format: None,
+        })
+        .await
+        .expect("create")
+        .id
+    }
+
+    fn have(printing_id: Id, quantity: i32) -> AddHave {
+        AddHave {
+            printing_id,
+            finish: Finish::Nonfoil,
+            condition: Condition::Nm,
+            language: shared::default_language(),
+            board: Board::Main,
+            quantity,
+        }
+    }
+
+    /// Build the subtree each phase deletes:
+    ///
+    /// ```text
+    /// root ── subject (deck) ── child ── grandchild
+    ///      ├─ source        (card A came from here)
+    ///      └─ elsewhere     (holds card B too)
+    /// ```
+    ///
+    /// Card **A** lands in `subject` by a real move *out of* `source`, which is
+    /// both how it ends up held nowhere else and how `ReturnToPrevious` has a
+    /// live previous location to find. Card **B** is added straight to
+    /// `subject` (an intake, `from = NULL`), so it has no previous location and
+    /// must fall back to the Inbox.
+    async fn setup(be: HostedBackend, user_id: Uuid) -> Fixture {
+        let inbox = be
+            .list_collections()
+            .await
+            .expect("collections")
+            .into_iter()
+            .find(|c| c.is_inbox)
+            .expect("inbox")
+            .id;
+
+        // Two printings of cards the user owns none of — that is what makes
+        // "held only in the deleted collection" true, and what makes the sweep
+        // safe to run against every collection including the Inbox.
+        let mut t = tx(&be).await;
+        let cards: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT DISTINCT ON (p.oracle_id) p.id, p.oracle_id FROM printings p \
+             WHERE NOT EXISTS (SELECT 1 FROM owned_by_card o WHERE o.oracle_id = p.oracle_id) \
+             ORDER BY p.oracle_id, p.id LIMIT 2",
+        )
+        .fetch_all(&mut *t)
+        .await
+        .expect("unowned printings");
+        t.commit().await.expect("commit");
+        assert_eq!(cards.len(), 2, "need two cards the user owns none of");
+
+        let root = binder(&be, None, "root").await;
+        let subject = be
+            .create_collection(NewCollection {
+                parent_id: Some(root),
+                kind: CollectionKind::Deck,
+                name: format!("{SCRATCH} subject"),
+                format: None,
+            })
+            .await
+            .expect("create deck")
+            .id;
+        let child = binder(&be, Some(subject), "child").await;
+        let grandchild = binder(&be, Some(child), "grandchild").await;
+        let source = binder(&be, Some(root), "source").await;
+        let elsewhere = binder(&be, Some(root), "elsewhere").await;
+
+        let (printing_a, oracle_a) = cards[0];
+        let (printing_b, oracle_b) = cards[1];
+
+        be.add_holding(source, have(printing_a, 2))
+            .await
+            .expect("A");
+        be.move_cards(MoveRequest {
+            from_collection_id: Some(source),
+            to_collection_id: Some(subject),
+            printing_id: printing_a,
+            finish: Finish::Nonfoil,
+            condition: Condition::Nm,
+            language: shared::default_language(),
+            from_board: Board::Main,
+            to_board: Board::Main,
+            quantity: 2,
+        })
+        .await
+        .expect("A into the subject");
+        be.add_holding(subject, have(printing_b, 1))
+            .await
+            .expect("B here");
+        be.add_holding(elsewhere, have(printing_b, 4))
+            .await
+            .expect("B elsewhere");
+        be.add_desire(
+            subject,
+            AddWant {
+                oracle_id: oracle_a,
+                printing_id: None,
+                board: Board::Main,
+                quantity: 3,
+            },
+        )
+        .await
+        .expect("want");
+
+        assert_eq!(owned(&be, oracle_a).await, 2, "A is held, only here");
+        assert_eq!(
+            owned(&be, oracle_b).await,
+            5,
+            "B is held here and elsewhere"
+        );
+
+        Fixture {
+            be,
+            user_id,
+            root,
+            subject,
+            child,
+            grandchild,
+            source,
+            elsewhere,
+            inbox,
+            printing_a,
+            oracle_a,
+            printing_b,
+            oracle_b,
+        }
+    }
+
+    /// The assertions every disposition shares: exactly one node hidden, the
+    /// children survive re-parented, and every ledger row the receipt names is a
+    /// **real** move (two live ends), not an intake or a removal.
+    async fn assert_shape(f: &Fixture, receipt: &shared::DeleteCollectionReceipt, dests: &[Id]) {
+        assert_eq!(receipt.collection_id, f.subject);
+        assert_eq!(receipt.reparented, vec![f.child], "one child, re-parented");
+
+        assert!(node(&f.be, f.subject).await.1, "subject is hidden");
+        for other in [f.root, f.child, f.grandchild, f.source, f.elsewhere] {
+            assert!(!node(&f.be, other).await.1, "only one node is hidden");
+        }
+        assert_eq!(
+            node(&f.be, f.child).await.0,
+            Some(f.root),
+            "the child re-points at the deleted node's parent"
+        );
+        assert_eq!(
+            node(&f.be, f.grandchild).await.0,
+            Some(f.child),
+            "a grandchild keeps its own parent — delete removes exactly one node"
+        );
+
+        assert_eq!(receipt.move_ids.len(), dests.len());
+        for (move_id, dest) in receipt.move_ids.iter().zip(dests) {
+            assert_eq!(
+                move_ends(&f.be, *move_id).await,
+                (Some(f.subject), Some(*dest)),
+                "a real move out of the deleted collection, not an intake/removal"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "writes to the live dev branch (DATABASE_URL + TR_DEV_USER_ID required)"]
+    async fn delete_relocates_instead_of_destroying() {
+        let user_id: Uuid = std::env::var("TR_DEV_USER_ID")
+            .expect("TR_DEV_USER_ID (the dev user to act as)")
+            .parse()
+            .expect("uuid");
+        let be = HostedBackend::for_user(user_id).await.expect("pool");
+
+        // A previous crashed run would otherwise poison the counts.
+        sweep(&be).await;
+        let before = counts(&be).await;
+
+        // --- ToParent (the default) ---------------------------------------
+        let f = setup(HostedBackend::for_user(user_id).await.unwrap(), user_id).await;
+        let receipt =
+            f.be.delete_collection(DeleteCollectionReq::defaults(f.subject))
+                .await
+                .expect("delete");
+        assert_shape(&f, &receipt, &[f.root, f.root]).await;
+        assert_eq!(present(&f.be, f.root, f.printing_a).await, 2);
+        assert_eq!(present(&f.be, f.subject, f.printing_a).await, 0);
+        assert_eq!(
+            owned(&f.be, f.oracle_a).await,
+            2,
+            "THE regression: a card held only in the deleted collection is \
+             still owned, at the destination"
+        );
+        assert_eq!(owned(&f.be, f.oracle_b).await, 5);
+        sweep(&f.be).await;
+
+        // --- ReturnToPrevious ---------------------------------------------
+        let f = setup(HostedBackend::for_user(user_id).await.unwrap(), user_id).await;
+        let receipt =
+            f.be.delete_collection(DeleteCollectionReq {
+                collection_id: f.subject,
+                haves: HaveDisposition::ReturnToPrevious,
+                wants: WantDisposition::Discard,
+            })
+            .await
+            .expect("delete");
+        // A came from `source`; B was an intake, so it has no previous location
+        // and falls back to the Inbox. Receipt order follows the snapshot's, so
+        // match on the ends rather than on a guessed order.
+        let ends: Vec<_> = {
+            let mut v = Vec::new();
+            for id in &receipt.move_ids {
+                v.push(move_ends(&f.be, *id).await.1.unwrap());
+            }
+            v.sort();
+            v
+        };
+        let mut want = vec![f.source, f.inbox];
+        want.sort();
+        assert_eq!(ends, want, "A back to its source, B to the Inbox");
+        assert_eq!(present(&f.be, f.source, f.printing_a).await, 2);
+        assert_eq!(present(&f.be, f.inbox, f.printing_b).await, 1);
+        assert_eq!(owned(&f.be, f.oracle_a).await, 2, "still owned");
+        sweep(&f.be).await;
+
+        // --- To { elsewhere } ---------------------------------------------
+        let f = setup(HostedBackend::for_user(user_id).await.unwrap(), user_id).await;
+        let receipt =
+            f.be.delete_collection(DeleteCollectionReq {
+                collection_id: f.subject,
+                haves: HaveDisposition::To {
+                    collection_id: f.elsewhere,
+                },
+                wants: WantDisposition::To {
+                    collection_id: f.elsewhere,
+                },
+            })
+            .await
+            .expect("delete");
+        assert_shape(&f, &receipt, &[f.elsewhere, f.elsewhere]).await;
+        assert_eq!(present(&f.be, f.elsewhere, f.printing_a).await, 2);
+        assert_eq!(present(&f.be, f.elsewhere, f.printing_b).await, 5);
+        assert_eq!(owned(&f.be, f.oracle_a).await, 2, "still owned");
+        let (desires_here,): (i64,) = {
+            let mut t = tx(&f.be).await;
+            let row = sqlx::query_as("SELECT count(*) FROM desires WHERE collection_id = $1")
+                .bind(f.elsewhere)
+                .fetch_one(&mut *t)
+                .await
+                .expect("desires");
+            t.commit().await.expect("commit");
+            row
+        };
+        assert_eq!(desires_here, 1, "the wants moved with the cards");
+        sweep(&f.be).await;
+
+        // --- Discard: writes nothing --------------------------------------
+        let f = setup(HostedBackend::for_user(user_id).await.unwrap(), user_id).await;
+        let receipt =
+            f.be.delete_collection(DeleteCollectionReq {
+                collection_id: f.subject,
+                haves: HaveDisposition::Discard,
+                wants: WantDisposition::Discard,
+            })
+            .await
+            .expect("delete");
+        assert_shape(&f, &receipt, &[]).await;
+        assert_eq!(
+            present(&f.be, f.subject, f.printing_a).await,
+            2,
+            "the copies are still there — attached to the hidden collection, \
+             which is what makes them come back on undo"
+        );
+        assert_eq!(
+            owned(&f.be, f.oracle_a).await,
+            0,
+            "…and not owned: hidden means it stops counting everywhere at once"
+        );
+        assert_eq!(
+            owned(&f.be, f.oracle_b).await,
+            4,
+            "the copies elsewhere stay"
+        );
+        sweep(&f.be).await;
+
+        // --- the undo redirect (maintainer ruling, 2026-08-09) -------------
+        let f = setup(HostedBackend::for_user(user_id).await.unwrap(), user_id).await;
+        // An *unrelated, older* move: copies out of `source` into `elsewhere`.
+        // Then `source` is hidden by hand, standing in for "someone deleted it
+        // in between". Undoing that move must not put the copies back into a
+        // collection the user can no longer see.
+        f.be.add_holding(f.source, have(f.printing_b, 3))
+            .await
+            .expect("stock the source");
+        let m =
+            f.be.move_cards(MoveRequest {
+                from_collection_id: Some(f.source),
+                to_collection_id: Some(f.elsewhere),
+                printing_id: f.printing_b,
+                finish: Finish::Nonfoil,
+                condition: Condition::Nm,
+                language: shared::default_language(),
+                from_board: Board::Main,
+                to_board: Board::Main,
+                quantity: 3,
+            })
+            .await
+            .expect("move")
+            .move_id;
+        {
+            let mut t = tx(&f.be).await;
+            sqlx::query("UPDATE collections SET deleted_at = now() WHERE id = $1")
+                .bind(f.source)
+                .execute(&mut *t)
+                .await
+                .expect("hand-hide");
+            t.commit().await.expect("commit");
+        }
+        let inbox_before = present(&f.be, f.inbox, f.printing_b).await;
+        f.be.undo_move(m).await.expect("undo");
+        assert_eq!(
+            present(&f.be, f.source, f.printing_b).await,
+            0,
+            "nothing written back into the hidden collection"
+        );
+        assert_eq!(
+            present(&f.be, f.inbox, f.printing_b).await,
+            inbox_before + 3,
+            "the copies came back — redirected to the Inbox"
+        );
+
+        sweep(&f.be).await;
+        let _ = f.user_id;
+
+        // --- and nothing was left behind ----------------------------------
+        assert_eq!(
+            counts(&be).await,
+            before,
+            "collections / holdings / desires / moves are exactly as found"
+        );
     }
 }
 

@@ -14,9 +14,9 @@ use axum::routing::{get, post};
 use axum::Json;
 use http::StatusCode;
 use shared::{
-    AddHave, AddLine, AddWant, ApiResult, BatchMove, HoldingMove, Id, MoveRequest, NewCollection,
-    NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery, SetBoard, SetQuantity,
-    SetQuery, TagAssignment, Teardown,
+    AddHave, AddLine, AddWant, ApiResult, BatchMove, DeleteCollectionReq, HoldingMove, Id,
+    MoveRequest, NewCollection, NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery,
+    SetBoard, SetQuantity, SetQuery, TagAssignment, Teardown,
 };
 
 use super::paths;
@@ -217,13 +217,34 @@ async fn rename_collection(
     )
 }
 
-/// `POST /api/collections/{id}/delete`.
-async fn delete_collection(user: AuthUser, Path(id): Path<Id>) -> Response {
+/// `POST /api/collections/{id}/delete` — the soft delete that relocates
+/// (specs/collection-deletion.md).
+///
+/// **The body is entirely optional**, and it has to be: this operation took no
+/// body at all before the dispositions existed, and callers still post nothing
+/// or `{}` (every e2e cleanup helper does). `Option<Json<…>>` covers the
+/// no-body case, `#[serde(default)]` on each field covers `{}`, and the result
+/// either way is the spec's defaults — holdings to the parent, wants left
+/// attached.
+///
+/// [`DeleteCollectionReq`] names the collection too, because that is the shape
+/// the spec gives it, so the id can arrive twice: `resolve_path_id` fills an
+/// unstated one from the path and **refuses** a stated one that disagrees,
+/// rather than picking a winner. Silently deleting the *other* collection is the
+/// worst available answer.
+async fn delete_collection(
+    user: AuthUser,
+    Path(id): Path<Id>,
+    req: Option<Json<DeleteCollectionReq>>,
+) -> Response {
+    let req = req
+        .map(|Json(r)| r)
+        .unwrap_or_else(|| DeleteCollectionReq::defaults(id));
     json_result(
         async {
             HostedBackend::for_user(user.user_id)
                 .await?
-                .delete_collection(id)
+                .delete_collection(req.resolve_path_id(id)?)
                 .await
         }
         .await,

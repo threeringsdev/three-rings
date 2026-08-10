@@ -23,13 +23,16 @@
 
 use shared::{
     AddHave, AddLine, AddWant, AllCardsView, ApiResult, BatchMove, CardDetail, CardSummary,
-    CatalogCount, CollectionSummary, CollectionTree, CollectionView, DeckCommanders, DesireLine,
-    HoldingLine, HoldingMove, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection,
-    NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard,
-    SetQuantity, SetQuery, SetSummary, ShoppingList, SuggestedDestination, Tag, TagAssignment,
-    TaggedCard, Teardown, TeardownReceipt,
+    CatalogCount, CollectionSummary, CollectionTree, CollectionView, DeckCommanders,
+    DeleteCollectionReceipt, DeleteCollectionReq, DesireLine, HoldingLine, HoldingMove, Id,
+    LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection, NewTag, Page, Rename,
+    RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard, SetQuantity, SetQuery,
+    SetSummary, ShoppingList, SuggestedDestination, Tag, TagAssignment, TaggedCard, Teardown,
+    TeardownReceipt,
 };
 
+#[cfg(feature = "hosted")]
+pub mod delete_plan;
 #[cfg(feature = "hosted")]
 pub mod hosted;
 #[cfg(feature = "native")]
@@ -255,9 +258,22 @@ pub trait CollectionStore {
     /// (`Conflict`).
     async fn rename_collection(&self, id: Id, req: Rename) -> ApiResult<CollectionSummary>;
 
-    /// Delete a collection (cascades to descendants + holdings/desires). The
-    /// Inbox is undeletable (`Conflict`).
-    async fn delete_collection(&self, id: Id) -> ApiResult<()>;
+    /// Delete a collection — which **relocates rather than destroys**
+    /// (specs/collection-deletion.md). In one transaction: the live children
+    /// re-point at the deleted node's parent (delete removes exactly one node),
+    /// the holdings move out as real ledger moves per
+    /// [`HaveDisposition`](shared::HaveDisposition), the desires follow
+    /// [`WantDisposition`](shared::WantDisposition), and only then is
+    /// `deleted_at` stamped. `Discard` on either side writes **nothing**: those
+    /// rows stay attached to the hidden collection and return intact on undo.
+    ///
+    /// The Inbox is undeletable (`Conflict`); a soft-deleted collection is as
+    /// absent as a non-existent one (`NotFound`). Returns the handles the undo
+    /// toast needs — never a count.
+    async fn delete_collection(
+        &self,
+        req: DeleteCollectionReq,
+    ) -> ApiResult<DeleteCollectionReceipt>;
 
     /// Move a collection under a new parent (or to top level). Rejects a cycle —
     /// the target being the node itself or one of its descendants (`Conflict`).

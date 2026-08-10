@@ -8,16 +8,15 @@ import { AUTH_STATE, hydrated } from "./helpers";
 //   right-click a row opens the shared context menu · the Inbox row offers
 //   create only (no rename/delete — it is protected) · "New binder/deck
 //   inside…" and the background "New … " open a create dialog that adds a
-//   child/root · Rename edits a name in place · Delete confirms with the
-//   cascade's counts, then removes the subtree · drag drops reparent (into a
-//   row) and reorder (onto a row's edge band) · a drop onto the node's own
-//   descendant is refused (the client cycle pre-check), and the server is the
-//   backstop (409).
+//   child/root · Rename edits a name in place · Delete hides one node and moves
+//   its children up a level · drag drops reparent (into a row) and reorder (onto
+//   a row's edge band) · a drop onto the node's own descendant is refused (the
+//   client cycle pre-check), and the server is the backstop (409).
 //
 // These tests MUTATE the Neon dev branch, so every one creates its own
 // uniquely-named scratch collections via the API and deletes them in a
-// `finally`. Deleting a parent cascades its subtree (FK ON DELETE CASCADE),
-// so cleanup is one delete per root created.
+// `finally`. Delete no longer cascades (specs/collection-deletion.md — children
+// survive), so `deleteCollection` walks the subtree deepest-first.
 
 test.use({ storageState: AUTH_STATE });
 
@@ -50,8 +49,28 @@ async function createCollection(
   return (await resp.json()) as Summary;
 }
 
+/// Cleanup helper: remove a collection **and everything under it**.
+///
+/// Delete no longer cascades — it hides one node and moves its children up a
+/// level (specs/collection-deletion.md) — so a cleanup that deleted only the
+/// root would strand every descendant on the dev branch as a new top-level
+/// collection. Deepest-first, reading the tree once before anything is hidden.
 async function deleteCollection(page: Page, id: string): Promise<void> {
-  await page.request.post(`/api/collections/${id}/delete`);
+  const rows = await fetchTree(page);
+  const children = new Map<string, string[]>();
+  for (const r of rows) {
+    const parent = r.summary.parent_id;
+    if (parent) children.set(parent, [...(children.get(parent) ?? []), r.summary.id]);
+  }
+  const order: string[] = [];
+  const walk = (node: string) => {
+    for (const kid of children.get(node) ?? []) walk(kid);
+    order.push(node);
+  };
+  walk(id);
+  for (const node of order) {
+    await page.request.post(`/api/collections/${node}/delete`, { data: {} });
+  }
 }
 
 async function fetchTree(page: Page): Promise<TreeRow[]> {
@@ -183,7 +202,7 @@ test.describe("create", () => {
       await expect(page.locator("nav[aria-label='Collections']", { hasText: childName }))
         .toBeVisible();
     } finally {
-      await deleteCollection(page, parent.id); // cascades the child
+      await deleteCollection(page, parent.id); // subtree-aware helper
     }
   });
 
@@ -252,12 +271,19 @@ test("Rename edits the name in place @fast", async ({ page }) => {
   }
 });
 
-test("Delete confirms with the cascade counts, then removes the subtree @fast", async ({
+// Delete relocates rather than destroys (specs/collection-deletion.md): the
+// node is hidden, and its child survives by moving up a level. This test used
+// to assert the opposite — "1 nested collection" and "cannot be undone" in the
+// copy, and the whole subtree gone from the server — which was the accurate
+// description of a real data-loss bug.
+test("Delete hides the collection and moves its child up a level @fast", async ({
   page,
 }) => {
   const parent = await createCollection(page, { name: scratchName("del-par") });
-  await createCollection(page, { parent_id: parent.id, name: scratchName("del-kid") });
-  let deleted = false;
+  const child = await createCollection(page, {
+    parent_id: parent.id,
+    name: scratchName("del-kid"),
+  });
   try {
     await page.goto("/my");
     await hydrated(page);
@@ -265,21 +291,28 @@ test("Delete confirms with the cascade counts, then removes the subtree @fast", 
     await menu.locator('[role="menuitem"]', { hasText: "Delete…" }).click();
 
     const dialog = page.locator('[role="dialog"]', { hasText: "Delete" });
-    // The confirm names the cascade: the one nested collection.
-    await expect(dialog).toContainText("1 nested collection");
-    await expect(dialog).toContainText("cannot be undone");
+    // The copy says where things go, and no longer promises destruction.
+    await expect(dialog).toContainText("Nested collections move up a level.");
+    await expect(dialog).not.toContainText("cannot be undone");
     await dialog.locator("#tree-delete-confirm").click();
 
-    // The row is gone from the tree and the server.
+    // The row is gone from the tree and the server…
     await expect(page.locator(`li[data-tree-row="${parent.id}"]`)).toHaveCount(0);
     await expect
       .poll(async () =>
         (await fetchTree(page)).some((r) => r.summary.id === parent.id),
       )
       .toBe(false);
-    deleted = true;
+    // …while the child is still there, now at the top level.
+    await expect
+      .poll(async () =>
+        (await fetchTree(page)).find((r) => r.summary.id === child.id)?.summary
+          .parent_id,
+      )
+      .toBeNull();
   } finally {
-    if (!deleted) await deleteCollection(page, parent.id);
+    await deleteCollection(page, child.id);
+    await deleteCollection(page, parent.id);
   }
 });
 
@@ -423,7 +456,7 @@ test.describe("drag", () => {
       });
       expect(resp.status()).toBe(409);
     } finally {
-      await deleteCollection(page, parent.id); // cascades child
+      await deleteCollection(page, parent.id); // subtree-aware helper
     }
   });
 });
