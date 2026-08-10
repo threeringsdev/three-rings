@@ -291,6 +291,11 @@ fn TreeBody(t: AssembledTree, pathname: Memo<String>) -> impl IntoView {
                 count=t.shopping_short
                 pathname
             />
+            // No badge count — deliberately, and for the same reason the list
+            // itself carries none (specs/collection-deletion.md → step 5): this
+            // row exists so a soft delete stays reachable, not to describe how
+            // many are waiting.
+            <PinnedLinkRow href="/my/recently-deleted" icon="🗑" label="Recently deleted" pathname />
         </div>
     }
 }
@@ -326,6 +331,31 @@ fn PinnedRow(
             <Badge variant=BadgeVariant::Muted size=BadgeSize::Sm class="shrink-0">
                 {count}
             </Badge>
+        </Item>
+    }
+}
+
+/// A pinned system row with no count badge — [`PinnedRow`] minus the number,
+/// for a destination that names *whether* it's reachable rather than *how
+/// much* is there (Recently deleted: specs/collection-deletion.md → step 5,
+/// "NO counts").
+#[component]
+fn PinnedLinkRow(
+    href: &'static str,
+    icon: &'static str,
+    label: &'static str,
+    pathname: Memo<String>,
+) -> impl IntoView {
+    view! {
+        <Item
+            href=href
+            size=ItemSize::Xs
+            class="aria-[current=page]:bg-accent aria-[current=page]:text-accent-foreground w-full"
+            {..}
+            aria-current=move || (pathname.get() == href).then_some("page")
+        >
+            <span aria-hidden="true">{icon}</span>
+            <span class="min-w-0 flex-1 truncate font-medium">{label}</span>
         </Item>
     }
 }

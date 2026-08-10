@@ -8,18 +8,21 @@ use shared::{
     union_color_identity, AddHave, AddLine, AddWant, AllCardsRow, AllCardsView, ApiError,
     ApiResult, BatchMove, Board, CardDetail, CardLocation, CardRow, CardSummary, CatalogCount,
     CollectionKind, CollectionSummary, CollectionTree, CollectionTreeRow, CollectionView,
-    Condition, DeckCommanders, DeleteCollectionReceipt, DeleteCollectionReq, DesireLine, Finish,
-    HaveDisposition, HoldingLine, HoldingMove, Id, LineResult, MoveReceipt, MoveRequest, NeedRow,
-    NeedsView, NewCollection, NewTag, OwnershipEntry, Page, PrintingSummary, Rename, RenameTag,
-    Reorder, Reparent, Ruling, SearchQuery, SearchResults, SetBoard, SetQuantity, SetQuery,
-    SetSummary, ShoppingList, ShoppingRow, SuggestedDestination, Tag, TagAssignment, TagScope,
-    TaggedCard, Teardown, TeardownReceipt,
+    Condition, DeckCommanders, DeleteCollectionReceipt, DeleteCollectionReq, DeletedCollectionRow,
+    DesireLine, Finish, HaveDisposition, HoldingLine, HoldingMove, Id, LineResult, MoveReceipt,
+    MoveRequest, NeedRow, NeedsView, NewCollection, NewTag, OwnershipEntry, Page, PrintingSummary,
+    RelocatedDesire, Rename, RenameTag, Reorder, Reparent, Ruling, SearchQuery, SearchResults,
+    SetBoard, SetQuantity, SetQuery, SetSummary, ShoppingList, ShoppingRow, SuggestedDestination,
+    Tag, TagAssignment, TagScope, TaggedCard, Teardown, TeardownReceipt,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use super::delete_plan::{plan_delete, DeleteSnapshot};
+use super::delete_plan::{
+    plan_delete, plan_undo, reparent_is_safe, restore_parent, validate_receipt, DeleteSnapshot,
+    UndoStep,
+};
 use super::{CatalogStore, CollectionStore};
 
 /// A per-request handle to the hosted database. Cheap to construct — it borrows
@@ -723,7 +726,32 @@ impl CollectionStore for HostedBackend {
         //    `desires_uniq` is `NULLS NOT DISTINCT`, so an unpinned want merges
         //    with an unpinned want. Two source rows can never collide on the
         //    destination key, because they are distinct on it in the source too.
+        //
+        //    The source rows are read **before** the merge — the receipt's
+        //    `desires` handles (maintainer ruling 2026-08-10: undo must fully
+        //    reverse `WantDisposition::To`) are exactly this snapshot, since
+        //    the merge-and-drop below is what makes them otherwise
+        //    unrecoverable (no ledger, and the source rows are gone after the
+        //    `DELETE`).
+        let mut relocated_desires: Vec<RelocatedDesire> = Vec::new();
         if let Some(dest) = plan.desire_dest {
+            let source: Vec<DesireGrainRow> = sqlx::query_as(
+                "SELECT oracle_id, printing_id, board::text AS board, quantity \
+                 FROM desires WHERE collection_id = $1",
+            )
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(upstream)?;
+            for row in &source {
+                relocated_desires.push(RelocatedDesire {
+                    to_collection_id: dest,
+                    oracle_id: row.oracle_id,
+                    printing_id: row.printing_id,
+                    board: board_of(&row.board)?,
+                    quantity: row.quantity,
+                });
+            }
             sqlx::query(
                 "INSERT INTO desires (user_id, collection_id, oracle_id, printing_id, board, quantity) \
                  SELECT user_id, $2, oracle_id, printing_id, board, quantity \
@@ -759,7 +787,251 @@ impl CollectionStore for HostedBackend {
             collection_id: id,
             move_ids,
             reparented: plan.reparent,
+            desires: relocated_desires,
         })
+    }
+
+    /// **Undo** — the misclick path, off the delete toast: reverse a delete
+    /// *whole*, from its own receipt (specs/collection-deletion.md → step 5).
+    /// Deliberately the stricter of the two recovery paths (see
+    /// [`Self::restore_collection`] for the weaker one): a stale receipt is
+    /// refused with an honest error rather than guessed at.
+    ///
+    /// **The receipt is client-held**, not server-derived or stashed — it is
+    /// already handed to the caller by [`Self::delete_collection`]'s return
+    /// value, so the toast just posts it back whole. Every id it names is
+    /// re-validated here: RLS scopes every read/write in `tx` to the caller
+    /// regardless, but a foreign or already-reused id still has to fail with a
+    /// real error instead of a silent partial no-op — and a *crafted* receipt
+    /// (adversarial review, `P6-190`) must not be able to write anything
+    /// dangerous either; see the `Reparent` arm and [`validate_receipt`]
+    /// below.
+    ///
+    /// Executes [`plan_undo`]'s steps **in order** — the plan *is* the
+    /// execution, so "un-hide first" cannot drift out of sync between a pure
+    /// description and what actually runs. `Unhide` additionally refuses a
+    /// **stale receipt**: the collection must still be the caller's and still
+    /// hidden (`require_deleted_collection`, `FOR UPDATE` — see its own doc
+    /// for why), and if it had a parent, that parent must still be live —
+    /// undo puts the collection back *exactly* where it was, and a parent
+    /// soft-deleted in the interim is not a case undo can paper over the way
+    /// [`Self::restore_collection`]'s top-level fallback does; it is the
+    /// toast trying to reverse a world that no longer exists, so it refuses
+    /// loudly instead.
+    async fn undo_delete(&self, receipt: DeleteCollectionReceipt) -> ApiResult<()> {
+        let user_id = self.session_id()?;
+        // Pure, no I/O, checked before the transaction even opens: a receipt
+        // with an invalid desire quantity must not write anything at all,
+        // not fail partway through (adversarial review — see the function's
+        // own doc for the sign-inversion this closes).
+        validate_receipt(&receipt)?;
+        let mut tx = self.scoped_tx().await?;
+        // `reparent_to` — the restored collection's own current parent,
+        // read once by `Unhide` (the first step `plan_undo` ever emits) and
+        // reused by every `Reparent` step's cycle guard below. `None` until
+        // `Unhide` runs, which it always does first.
+        let mut reparent_to: Option<Uuid> = None;
+
+        for step in plan_undo(&receipt) {
+            match step {
+                UndoStep::Unhide => {
+                    require_deleted_collection(&mut tx, receipt.collection_id).await?;
+                    let (parent_id,): (Option<Uuid>,) =
+                        sqlx::query_as("SELECT parent_id FROM collections WHERE id = $1")
+                            .bind(receipt.collection_id)
+                            .fetch_one(&mut *tx)
+                            .await
+                            .map_err(upstream)?;
+                    reparent_to = parent_id;
+                    if let Some(pid) = parent_id {
+                        // Only a genuinely-gone parent becomes the honest
+                        // "try Restore instead" Conflict — a real Upstream/DB
+                        // failure must propagate as itself, not be relabeled
+                        // into a false "it was deleted" claim (adversarial
+                        // review).
+                        match require_owned_collection(&mut tx, pid).await {
+                            Ok(()) => {}
+                            Err(ApiError::NotFound(_)) => {
+                                return Err(ApiError::Conflict(
+                                    "its parent collection was deleted in the meantime; \
+                                     undo can't put it back where it was — try Restore \
+                                     instead"
+                                        .into(),
+                                ));
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    sqlx::query("UPDATE collections SET deleted_at = NULL WHERE id = $1")
+                        .bind(receipt.collection_id)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(upstream)?;
+                }
+                UndoStep::UndoMove(move_id) => undo_one(&mut tx, user_id, move_id).await?,
+                UndoStep::Reparent(child_id) => {
+                    // **The cycle guard** (adversarial review, `P6-190`,
+                    // rounds 1 and 2): a crafted receipt could name
+                    // `receipt.collection_id`'s own current parent here, or
+                    // — the case round 1's guard missed — name
+                    // `receipt.collection_id` itself, either of which would
+                    // commit a cycle if applied blindly. `reparent_is_safe`
+                    // takes both `child_id` and `receipt.collection_id`
+                    // explicitly so it can refuse the self-parent shape by id
+                    // equality before it ever asks whether the parents match
+                    // — see its own doc for the full rule and why each half
+                    // is sufficient. A guard failure refuses the **whole**
+                    // undo rather than silently dropping this one step: the
+                    // receipt no longer describes reality, and undo's
+                    // contract is "put it back exactly, or say why not," the
+                    // same rule the stale-parent check above follows.
+                    let row: Option<(Option<Uuid>, bool)> =
+                        sqlx::query_as("SELECT parent_id, is_inbox FROM collections WHERE id = $1")
+                            .bind(child_id)
+                            .fetch_optional(&mut *tx)
+                            .await
+                            .map_err(upstream)?;
+                    let safe = match row {
+                        Some((cur_parent, is_inbox)) => reparent_is_safe(
+                            child_id,
+                            cur_parent,
+                            is_inbox,
+                            receipt.collection_id,
+                            reparent_to,
+                        ),
+                        None => false,
+                    };
+                    if !safe {
+                        return Err(ApiError::Conflict(
+                            "this receipt's re-parented collections no longer match what \
+                             the delete actually moved; undo refuses rather than risking \
+                             a cycle"
+                                .into(),
+                        ));
+                    }
+                    sqlx::query("UPDATE collections SET parent_id = $2 WHERE id = $1")
+                        .bind(child_id)
+                        .bind(receipt.collection_id)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(upstream)?;
+                }
+                UndoStep::RestoreDesire(d) => {
+                    // Decrement the merge destination first (clamped — it may
+                    // have changed since), then re-insert at the source. Mirrors
+                    // `delete_collection`'s own merge-and-drop in reverse.
+                    desire_take_clamp(
+                        &mut tx,
+                        d.to_collection_id,
+                        d.oracle_id,
+                        d.printing_id,
+                        d.board,
+                        d.quantity,
+                    )
+                    .await?;
+                    sqlx::query(
+                        "INSERT INTO desires \
+                           (user_id, collection_id, oracle_id, printing_id, board, quantity) \
+                         VALUES ($1, $2, $3, $4, $5::card_board, $6) \
+                         ON CONFLICT ON CONSTRAINT desires_uniq \
+                           DO UPDATE SET quantity = desires.quantity + EXCLUDED.quantity",
+                    )
+                    .bind(user_id)
+                    .bind(receipt.collection_id)
+                    .bind(d.oracle_id)
+                    .bind(d.printing_id)
+                    .bind(d.board.to_pg())
+                    .bind(d.quantity)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
+                }
+            }
+        }
+
+        tx.commit().await.map_err(upstream)?;
+        Ok(())
+    }
+
+    /// **Restore** — from the "Recently deleted" list, potentially days later:
+    /// the weaker path, deliberately (specs/collection-deletion.md → step 5).
+    /// Clears `deleted_at`, re-attaches to the original parent **if it is
+    /// still live**, otherwise top-level — and leaves cards and children
+    /// exactly where they now are. No move to reverse, no receipt to consume:
+    /// restore does not know or care what the delete did to its contents,
+    /// which is the whole point (a restore days later is not a time machine).
+    async fn restore_collection(&self, id: Id) -> ApiResult<()> {
+        let mut tx = self.scoped_tx().await?;
+        require_deleted_collection(&mut tx, id).await?;
+
+        // The parent it had when it was hidden — soft delete never touches a
+        // collection's own `parent_id`, only its children's, so this is still
+        // exactly where it was.
+        let (parent_id,): (Option<Uuid>,) =
+            sqlx::query_as("SELECT parent_id FROM collections WHERE id = $1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(upstream)?;
+
+        // Unlike undo, a dead parent here is the *expected* shape of a restore
+        // used days later, not a surprise to refuse — `restore_parent` falls
+        // back to the top level rather than erroring.
+        let parent_is_live = match parent_id {
+            Some(pid) => require_owned_collection(&mut tx, pid).await.is_ok(),
+            None => false,
+        };
+        let new_parent = restore_parent(parent_id, parent_is_live);
+
+        sqlx::query("UPDATE collections SET deleted_at = NULL, parent_id = $2 WHERE id = $1")
+            .bind(id)
+            .bind(new_parent)
+            .execute(&mut *tx)
+            .await
+            .map_err(upstream)?;
+
+        tx.commit().await.map_err(upstream)?;
+        Ok(())
+    }
+
+    /// The "Recently deleted" list (specs/collection-deletion.md → step 5): the
+    /// caller's own soft-deleted collections, newest first. Deliberately thin —
+    /// no counts, no rows for what's inside them; it exists so a soft delete is
+    /// reachable after its toast is gone.
+    ///
+    /// **The one documented, deliberate read of hidden collections in this
+    /// file** (`soft_delete_guard`'s exemption below): every other read filters
+    /// `deleted_at IS NULL`, but finding what's hidden is this list's entire
+    /// job. RLS still scopes it to the caller — nothing here bypasses
+    /// ownership, only liveness.
+    async fn recently_deleted(&self) -> ApiResult<Vec<DeletedCollectionRow>> {
+        let mut tx = self.scoped_tx().await?;
+        // Bounded: the spec calls this "a small list", not a full trash
+        // archive (no purge exists to keep it small on its own over months
+        // of use) — 50 is generous for "reachable after the toast is gone"
+        // and cheap insurance against an unbounded scan/payload either way.
+        let rows: Vec<DeletedCollectionSql> = sqlx::query_as(
+            "SELECT id, name, kind::text AS kind, \
+                    to_char(deleted_at AT TIME ZONE 'UTC', \
+                            'Mon DD, YYYY \"at\" HH12:MI AM \"UTC\"') AS deleted_at \
+             FROM collections WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC LIMIT 50",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(DeletedCollectionRow {
+                    id: r.id,
+                    name: r.name,
+                    kind: CollectionKind::from_pg(&r.kind).ok_or_else(|| {
+                        ApiError::Upstream(format!("unknown collection kind: {}", r.kind))
+                    })?,
+                    deleted_at: r.deleted_at,
+                })
+            })
+            .collect()
     }
 
     async fn reparent_collection(&self, id: Id, req: Reparent) -> ApiResult<()> {
@@ -2450,6 +2722,52 @@ async fn holding_take_clamp(
     Ok(())
 }
 
+/// Best-effort desire decrement for undo: take up to `want` off a collection's
+/// desire row — identified the way `desires_uniq` identifies it
+/// (`collection_id`, `oracle_id`, `printing_id`, `board`) — clamping to what's
+/// there. Mirrors [`holding_take_clamp`]'s reasoning exactly, on the desires
+/// side: the merge destination's want may have changed since the delete that
+/// merged into it, so undo takes back at most what remains rather than
+/// erroring or going negative.
+async fn desire_take_clamp(
+    tx: &mut Transaction<'static, Postgres>,
+    collection_id: Id,
+    oracle_id: Id,
+    printing_id: Option<Id>,
+    board: Board,
+    want: i32,
+) -> ApiResult<()> {
+    let cur: Option<(Uuid, i32)> = sqlx::query_as(
+        "SELECT id, quantity FROM desires \
+         WHERE collection_id = $1 AND oracle_id = $2 AND printing_id IS NOT DISTINCT FROM $3 \
+           AND board = $4::card_board \
+         FOR UPDATE",
+    )
+    .bind(collection_id)
+    .bind(oracle_id)
+    .bind(printing_id)
+    .bind(board.to_pg())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(upstream)?;
+    let Some((id, qty)) = cur else { return Ok(()) };
+    if qty <= want {
+        sqlx::query("DELETE FROM desires WHERE id = $1")
+            .bind(id)
+            .execute(&mut **tx)
+            .await
+            .map_err(upstream)?;
+    } else {
+        sqlx::query("UPDATE desires SET quantity = quantity - $2 WHERE id = $1")
+            .bind(id)
+            .bind(want)
+            .execute(&mut **tx)
+            .await
+            .map_err(upstream)?;
+    }
+    Ok(())
+}
+
 /// Append a `moves` ledger row and return its id. `boards` is
 /// `(from_board, to_board)` — the two ends, recorded separately so undo can put
 /// the copies back on the board they left.
@@ -2624,6 +2942,18 @@ struct MoveGrainRow {
     quantity: i32,
 }
 
+/// A snapshotted `desires` row — `delete_collection`'s pre-merge read, the
+/// source of the receipt's [`RelocatedDesire`] handles. Desires have no ledger,
+/// so this snapshot (not a `move_id`) is what undo has to reverse the
+/// merge-and-drop from.
+#[derive(sqlx::FromRow)]
+struct DesireGrainRow {
+    oracle_id: Uuid,
+    printing_id: Option<Uuid>,
+    board: String,
+    quantity: i32,
+}
+
 /// The [`Grain`] of a snapshotted stack — the board rides beside it, never in
 /// it (see [`Grain`]). Shared by the two operations that empty a collection:
 /// `teardown` and `delete_collection`.
@@ -2691,6 +3021,17 @@ struct ShoppingSql {
 struct WantedBySql {
     oracle_id: Uuid,
     collection_name: String,
+}
+
+/// A row of `recently_deleted` — `kind`/`deleted_at` read back as text (the
+/// enum cast and the formatted timestamp respectively), turned into
+/// [`DeletedCollectionRow`] by the caller.
+#[derive(sqlx::FromRow)]
+struct DeletedCollectionSql {
+    id: Uuid,
+    name: String,
+    kind: String,
+    deleted_at: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -3236,6 +3577,44 @@ async fn require_owned_collection(
     Ok(())
 }
 
+/// Reject an undo/restore targeting a collection that is not the caller's, or
+/// that is not currently soft-deleted — the mirror image of
+/// [`require_owned_collection`], and used by both [`HostedBackend::undo_delete`]
+/// and [`HostedBackend::restore_collection`].
+///
+/// **The one documented exemption from `soft_delete_guard`'s "every ownership
+/// lookup filters `deleted_at IS NULL`" rule** (specs/collection-deletion.md →
+/// step 5): undo and restore both exist to find a **hidden** row, so this is
+/// the one place in the file that legitimately looks for the opposite. The
+/// guard test below allowlists this exact query rather than loosening its
+/// needle, so a *new*, undocumented unfiltered lookup still fails it.
+///
+/// **`FOR UPDATE`** (adversarial review, `P6-190`): `undo_one` is idempotent,
+/// but `RestoreDesire` is not — two overlapping `undo_delete` calls carrying
+/// the same receipt would otherwise both pass this check before either
+/// commits, and both would re-insert the relocated desires, doubling them.
+/// Locking the row here makes the second caller block on the first, then
+/// re-evaluate the same `WHERE` against the *committed* row: once the first
+/// call's `Unhide` clears `deleted_at`, the second sees a live row, fails
+/// `deleted_at IS NOT NULL` honestly, and its whole transaction refuses
+/// rather than double-applying anything.
+async fn require_deleted_collection(
+    tx: &mut Transaction<'static, Postgres>,
+    collection_id: Id,
+) -> ApiResult<()> {
+    let found: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM collections WHERE id = $1 AND deleted_at IS NOT NULL FOR UPDATE",
+    )
+    .bind(collection_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(upstream)?;
+    if found.is_none() {
+        return Err(ApiError::NotFound("deleted collection".into()));
+    }
+    Ok(())
+}
+
 /// The process-wide Neon pool (as `app_runtime`). Connects on first use; needs
 /// `DATABASE_URL`. Maps a connection failure onto `Upstream`.
 async fn pool() -> ApiResult<&'static PgPool> {
@@ -3471,6 +3850,37 @@ mod delete_live {
         .expect("present");
         t.commit().await.expect("commit");
         n
+    }
+
+    /// Desired quantity of `oracle_id` in a collection, hidden or not (raw
+    /// `desires`, mirroring [`present`]'s reasoning for holdings — "where did
+    /// the rows actually go", not a read model). 0 if none.
+    async fn desired(be: &HostedBackend, collection_id: Id, oracle_id: Id) -> i32 {
+        let mut t = tx(be).await;
+        let (n,): (i32,) = sqlx::query_as(
+            "SELECT COALESCE(sum(quantity), 0)::int FROM desires \
+             WHERE collection_id = $1 AND oracle_id = $2",
+        )
+        .bind(collection_id)
+        .bind(oracle_id)
+        .fetch_one(&mut *t)
+        .await
+        .expect("desired");
+        t.commit().await.expect("commit");
+        n
+    }
+
+    /// Whether a ledger row has been reversed.
+    async fn move_undone(be: &HostedBackend, move_id: Id) -> bool {
+        let mut t = tx(be).await;
+        let (undone,): (bool,) =
+            sqlx::query_as("SELECT undone_at IS NOT NULL FROM moves WHERE id = $1")
+                .bind(move_id)
+                .fetch_one(&mut *t)
+                .await
+                .expect("move undone_at");
+        t.commit().await.expect("commit");
+        undone
     }
 
     /// `(parent_id, hidden)` straight off the row.
@@ -3809,6 +4219,13 @@ mod delete_live {
             row
         };
         assert_eq!(desires_here, 1, "the wants moved with the cards");
+        // The receipt grew a handle for this (maintainer ruling 2026-08-10):
+        // `WantDisposition::To` has no ledger, so this is undo's *only* way
+        // to find its way back.
+        assert_eq!(receipt.desires.len(), 1, "one relocated desire row");
+        assert_eq!(receipt.desires[0].to_collection_id, f.elsewhere);
+        assert_eq!(receipt.desires[0].oracle_id, f.oracle_a);
+        assert_eq!(receipt.desires[0].quantity, 3);
         sweep(&f.be).await;
 
         // --- Discard: writes nothing --------------------------------------
@@ -3896,6 +4313,134 @@ mod delete_live {
             "collections / holdings / desires / moves are exactly as found"
         );
     }
+
+    /// Step 5's own dev-branch evidence: undo reverses a delete **whole**
+    /// (`ToParent` cards + an explicitly relocated want, so the receipt's new
+    /// `desires` handle is actually exercised), byte-identical; then a
+    /// second delete → restore cycle shows the *weaker* semantics — the
+    /// collection comes back re-attached, but its cards and children stay
+    /// exactly where the delete left them.
+    #[tokio::test]
+    #[ignore = "writes to the live dev branch (DATABASE_URL + TR_DEV_USER_ID required)"]
+    async fn undo_and_restore_live() {
+        let user_id: Uuid = std::env::var("TR_DEV_USER_ID")
+            .expect("TR_DEV_USER_ID (the dev user to act as)")
+            .parse()
+            .expect("uuid");
+        let be = HostedBackend::for_user(user_id).await.expect("pool");
+
+        sweep(&be).await;
+        let before = counts(&be).await;
+
+        // --- Undo: ToParent + an explicit want relocation, reversed whole ---
+        let f = setup(HostedBackend::for_user(user_id).await.unwrap(), user_id).await;
+        let receipt =
+            f.be.delete_collection(DeleteCollectionReq {
+                collection_id: f.subject,
+                haves: HaveDisposition::ToParent,
+                wants: WantDisposition::To {
+                    collection_id: f.elsewhere,
+                },
+            })
+            .await
+            .expect("delete");
+        assert_shape(&f, &receipt, &[f.root, f.root]).await;
+        assert_eq!(receipt.desires.len(), 1, "the want moved — one handle");
+        assert_eq!(
+            present(&f.be, f.root, f.printing_a).await,
+            2,
+            "card at the parent"
+        );
+        assert_eq!(
+            desired(&f.be, f.elsewhere, f.oracle_a).await,
+            3,
+            "want at elsewhere"
+        );
+        assert_eq!(desired(&f.be, f.subject, f.oracle_a).await, 0);
+
+        f.be.undo_delete(receipt.clone()).await.expect("undo");
+
+        // Byte-identical restoration: live again, same parent, the child back
+        // under it, the card and the want both back at their original
+        // quantities and gone from wherever the delete had put them, and
+        // every move the receipt named shows `undone_at`.
+        assert!(!node(&f.be, f.subject).await.1, "subject is live again");
+        assert_eq!(node(&f.be, f.subject).await.0, Some(f.root));
+        assert_eq!(
+            node(&f.be, f.child).await.0,
+            Some(f.subject),
+            "the child is back under subject, not still up at root"
+        );
+        assert_eq!(
+            present(&f.be, f.subject, f.printing_a).await,
+            2,
+            "card A is back"
+        );
+        assert_eq!(
+            present(&f.be, f.root, f.printing_a).await,
+            0,
+            "…and gone from root"
+        );
+        assert_eq!(
+            desired(&f.be, f.subject, f.oracle_a).await,
+            3,
+            "want is back"
+        );
+        assert_eq!(
+            desired(&f.be, f.elsewhere, f.oracle_a).await,
+            0,
+            "…and gone from elsewhere"
+        );
+        for move_id in &receipt.move_ids {
+            assert!(move_undone(&f.be, *move_id).await, "{move_id} reversed");
+        }
+        assert_eq!(
+            owned(&f.be, f.oracle_a).await,
+            2,
+            "still owned, same as before the delete"
+        );
+        sweep(&f.be).await;
+
+        // --- Restore: the weaker path — cards/children stay put -----------
+        let f = setup(HostedBackend::for_user(user_id).await.unwrap(), user_id).await;
+        let receipt =
+            f.be.delete_collection(DeleteCollectionReq::defaults(f.subject))
+                .await
+                .expect("delete");
+        assert_shape(&f, &receipt, &[f.root, f.root]).await;
+
+        f.be.restore_collection(f.subject).await.expect("restore");
+
+        assert!(!node(&f.be, f.subject).await.1, "restored");
+        assert_eq!(
+            node(&f.be, f.subject).await.0,
+            Some(f.root),
+            "reattached to its still-live original parent"
+        );
+        assert_eq!(
+            node(&f.be, f.child).await.0,
+            Some(f.root),
+            "the child stays exactly where the delete left it — restore does \
+             not reverse the re-parent, only undo does"
+        );
+        assert_eq!(
+            present(&f.be, f.subject, f.printing_a).await,
+            0,
+            "no card came back with it"
+        );
+        assert_eq!(
+            present(&f.be, f.root, f.printing_a).await,
+            2,
+            "…it stays at the destination the delete sent it to"
+        );
+        sweep(&f.be).await;
+
+        assert_eq!(
+            counts(&be).await,
+            before,
+            "collections / holdings / desires / moves are exactly as found"
+        );
+    }
 }
 
 /// Regression guard for the "owned per card" collapse onto the `owned_by_card`
@@ -3963,7 +4508,15 @@ mod soft_delete_guard {
     /// parent checks, which share the idiom) *exactly* as a non-existent one
     /// does, or it stays reachable as a move destination and a write target.
     ///
-    /// The needle is assembled at runtime, not written as one literal:
+    /// **One documented exemption** (specs/collection-deletion.md → step 5):
+    /// `require_deleted_collection` — undo and restore's own existence check —
+    /// deliberately inverts the filter, because finding a **hidden** row is
+    /// those two operations' entire job. Counted separately by its own exact
+    /// literal, not folded into a looser needle that would also pass a *new*,
+    /// undocumented unfiltered lookup elsewhere in the file — that is the
+    /// difference between an allowlist and a weakened check.
+    ///
+    /// The needles are assembled at runtime, not written as one literal each:
     /// `include_str!` pulls in this test's own source, and a contiguous literal
     /// would match itself.
     #[test]
@@ -3977,22 +4530,33 @@ mod soft_delete_guard {
 
         let lookup = format!("{} {}", "SELECT 1 FROM collections", "WHERE id = $1");
         let filtered = format!("{lookup} AND deleted_at IS NULL");
+        // The one allowlisted inversion: `require_deleted_collection`'s own
+        // idiom, assembled the same self-match-proof way.
+        let exempt = format!("{lookup} AND deleted_at IS {} NULL", "NOT");
         let total = normalized.matches(&lookup).count();
         let guarded = normalized.matches(&filtered).count();
+        let exempted = normalized.matches(&exempt).count();
 
         assert!(
             total > 0,
             "sanity: `{lookup}` is the ownership-check idiom and should still exist in hosted.rs"
         );
         assert_eq!(
+            exempted, 1,
+            "expected exactly one `require_deleted_collection`-shaped lookup \
+             (`{exempt}`) — undo/restore's one documented exemption. Zero means the \
+             helper was rewritten out from under this guard; more than one means a new \
+             unfiltered-by-liveness lookup was added without being named here."
+        );
+        assert_eq!(
             total,
-            guarded,
+            guarded + exempted,
             "{} of {total} collection ownership lookups in hosted.rs are missing \
-             `AND deleted_at IS NULL`. A soft-deleted collection must be as invisible \
-             to an ownership check as a non-existent one (specs/collection-deletion.md \
-             → \"The read path\"), otherwise it stays usable as a move destination or \
-             a write target.",
-            total - guarded,
+             `AND deleted_at IS NULL` and are not the one documented exemption above. \
+             A soft-deleted collection must be as invisible to an ownership check as a \
+             non-existent one (specs/collection-deletion.md → \"The read path\"), \
+             otherwise it stays usable as a move destination or a write target.",
+            total - guarded - exempted,
         );
     }
 

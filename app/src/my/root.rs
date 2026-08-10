@@ -51,6 +51,9 @@ const ICON_ALL_CARDS: &str = "🗂";
 const ICON_INBOX: &str = "📥";
 const ICON_COLLECTION: &str = "📁";
 const ICON_SHOPPING: &str = "🛒";
+/// The sidebar's `PinnedLinkRow` uses the same glyph (`tree.rs`) — one rule
+/// for what "recently deleted" reads as everywhere.
+const ICON_RECENTLY_DELETED: &str = "🗑";
 
 /// One chevroned row of the root list.
 #[derive(Debug, Clone, PartialEq)]
@@ -76,7 +79,7 @@ pub struct RootRow {
 
 /// The list, projected off the assembled tree: `All cards` · divider ·
 /// the top-level collections (Inbox pinned first, by [`assemble`]) · divider ·
-/// `Shopping list`.
+/// `Shopping list` · `Recently deleted`.
 ///
 /// `all_cards_href` is a parameter rather than a constant so `/my?q=…` survives
 /// the trip: the table lives one route down on a phone, and a search deep link
@@ -105,6 +108,7 @@ pub fn root_rows(t: &AssembledTree, all_cards_href: &str) -> Vec<RootRow> {
         });
     }
     rows.push(shopping_row(Some(t.shopping_short)));
+    rows.push(recently_deleted_row());
     rows
 }
 
@@ -123,7 +127,11 @@ pub fn root_rows(t: &AssembledTree, all_cards_href: &str) -> Vec<RootRow> {
 /// Counts are omitted rather than zeroed: both totals come out of the read that
 /// just failed, and `0` would be a number the app cannot vouch for.
 pub fn fallback_rows(all_cards_href: &str) -> Vec<RootRow> {
-    vec![all_cards_row(all_cards_href, None), shopping_row(None)]
+    vec![
+        all_cards_row(all_cards_href, None),
+        shopping_row(None),
+        recently_deleted_row(),
+    ]
 }
 
 fn all_cards_row(href: &str, count: Option<i64>) -> RootRow {
@@ -147,6 +155,26 @@ fn shopping_row(count: Option<i64>) -> RootRow {
         strong: false,
         // Always: there is always at least the aggregate row above it.
         divider_before: true,
+        collection: None,
+    }
+}
+
+/// The "Recently deleted" row (specs/collection-deletion.md → step 5) —
+/// this list's mobile counterpart to the sidebar's `PinnedLinkRow`
+/// (`tree.rs`), so the page is reachable on a phone without the rail
+/// drawer. `count: None` always, not "unknown": the spec is explicit that
+/// this list carries **no counts**, which is a different claim from the
+/// tree-read-failure meaning `None` carries elsewhere in this file. Joins
+/// the `Shopping list` row's own divider group rather than drawing a second
+/// rule — the same "pinned system rows" cluster the sidebar keeps them in.
+fn recently_deleted_row() -> RootRow {
+    RootRow {
+        href: "/my/recently-deleted".into(),
+        icon: ICON_RECENTLY_DELETED,
+        label: "Recently deleted".into(),
+        count: None,
+        strong: false,
+        divider_before: false,
         collection: None,
     }
 }
@@ -406,8 +434,17 @@ mod tests {
                 ("Inbox", ICON_INBOX, Some(7), false, true),
                 ("Binders", ICON_COLLECTION, Some(645), false, false),
                 ("Decks", ICON_COLLECTION, Some(172), false, false),
-                // A second rule, then the pinned system row.
+                // A second rule, then the two pinned system rows — Recently
+                // deleted joins Shopping list's group rather than drawing a
+                // third rule (specs/collection-deletion.md → step 5).
                 ("Shopping list", ICON_SHOPPING, Some(2), false, true),
+                (
+                    "Recently deleted",
+                    ICON_RECENTLY_DELETED,
+                    None,
+                    false,
+                    false
+                ),
             ]
         );
     }
@@ -415,19 +452,22 @@ mod tests {
     #[test]
     fn a_failed_tree_read_still_offers_a_way_out() {
         // The escape hatch: below `md` this list is the only navigation `/my`
-        // has, so a failed tree read must not take the two tree-independent
+        // has, so a failed tree read must not take the three tree-independent
         // destinations with it.
         let rows = fallback_rows(ALL_CARDS_PATH);
         assert_eq!(
             rows.iter().map(|r| r.href.as_str()).collect::<Vec<_>>(),
-            ["/my/all", "/my/shopping"]
+            ["/my/all", "/my/shopping", "/my/recently-deleted"]
         );
         // No counts: both totals come from the read that failed, and a `0`
-        // would be a number the app cannot vouch for.
+        // would be a number the app cannot vouch for (Recently deleted never
+        // has a count regardless — see `recently_deleted_row`).
         assert!(rows.iter().all(|r| r.count.is_none()));
-        // One rule between them, none above the first — the empty-tree shape.
+        // One rule, before Shopping list; none above the first, none before
+        // Recently deleted (it joins Shopping list's own group).
         assert!(!rows[0].divider_before);
         assert!(rows[1].divider_before);
+        assert!(!rows[2].divider_before);
         // A search that landed on the list still rides down to the table.
         assert_eq!(fallback_rows("/my/all?q=bolt")[0].href, "/my/all?q=bolt");
     }
@@ -462,12 +502,15 @@ mod tests {
     }
 
     #[test]
-    fn system_rows_target_the_two_system_routes() {
+    fn system_rows_target_the_three_system_routes() {
         let rows = root_rows(&ia_tree(), ALL_CARDS_PATH);
         assert_eq!(rows[0].href, "/my/all");
         assert_eq!(rows[0].collection, None);
-        assert_eq!(rows.last().unwrap().href, "/my/shopping");
+        assert_eq!(rows.last().unwrap().href, "/my/recently-deleted");
         assert_eq!(rows.last().unwrap().collection, None);
+        let shopping = rows.iter().find(|r| r.label == "Shopping list").unwrap();
+        assert_eq!(shopping.href, "/my/shopping");
+        assert_eq!(shopping.collection, None);
     }
 
     #[test]
@@ -496,7 +539,14 @@ mod tests {
         // Server order preserved (no re-sort), Inbox lifted to the front.
         assert_eq!(
             labels,
-            ["All cards", "Inbox", "Zephyr", "Alpha", "Shopping list"]
+            [
+                "All cards",
+                "Inbox",
+                "Zephyr",
+                "Alpha",
+                "Shopping list",
+                "Recently deleted",
+            ]
         );
     }
 
@@ -507,10 +557,12 @@ mod tests {
             shopping_short: 0,
         });
         let rows = root_rows(&t, ALL_CARDS_PATH);
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert!(!rows[0].divider_before);
-        // The one remaining rule separates the aggregate from the system row;
-        // the tree's own divider has nothing to introduce.
+        // The one remaining rule separates the aggregate from the pinned
+        // system rows; the tree's own divider has nothing to introduce.
         assert!(rows[1].divider_before);
+        // Recently deleted joins that same group, no rule of its own.
+        assert!(!rows[2].divider_before);
     }
 }

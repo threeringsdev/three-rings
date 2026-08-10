@@ -153,6 +153,11 @@ pub fn App() -> impl IntoView {
                     view=my::shopping::ShoppingPage
                     ssr=SsrMode::Async
                 />
+                <Route
+                    path=StaticSegment("recently-deleted")
+                    view=my::recently_deleted::RecentlyDeletedPage
+                    ssr=SsrMode::Async
+                />
             </ParentRoute>
         </ParentRoute>
         <Route path=StaticSegment("login") view=auth_pages::LoginPage />
@@ -812,6 +817,88 @@ pub async fn delete_collection(
     #[cfg(not(feature = "ssr"))]
     {
         let _ = (id, haves_to, haves_discard, wants_to);
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// Undo a delete whole — the misclick path, fired from the delete toast's
+/// Undo button (specs/collection-deletion.md → step 5).
+///
+/// **The whole receipt, not scalars.** Every other write adapter here takes
+/// scalars because the server-fn POST codec mangles nested/tagged DTOs — but
+/// `DeleteCollectionReceipt` carries no tagged enum, only ids and a list of
+/// plain structs (`RelocatedDesire`), so `input = Json` (the same fix
+/// `undo_selection_move`/`pull_needs` use for their own `Vec<…>` arguments)
+/// handles it directly. **Client-held**: the receipt is already the return
+/// value of [`delete_collection`] above, so the toast's own closure holds it
+/// and posts it back whole rather than the server re-deriving or stashing it.
+#[server(
+    prefix = "/api",
+    endpoint = "undo_delete_collection",
+    input = leptos::server_fn::codec::Json
+)]
+pub async fn undo_delete_collection(
+    receipt: shared::DeleteCollectionReceipt,
+) -> Result<(), ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .undo_delete(receipt)
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = receipt;
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// Restore a soft-deleted collection from the "Recently deleted" list — the
+/// weaker, later recovery path (specs/collection-deletion.md → step 5).
+/// Scalar id in, matching the rest of this adapter's convention; unlike
+/// [`undo_delete_collection`] there is no receipt to carry.
+#[server(prefix = "/api", endpoint = "restore_collection")]
+pub async fn restore_collection(id: shared::Id) -> Result<(), ServerFnError<String>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .restore_collection(id)
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = id;
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// The "Recently deleted" list (specs/collection-deletion.md → step 5): the
+/// caller's own soft-deleted collections, newest first. GET, per the
+/// read-adapter exemplar — a plain list on a shareable URL.
+#[server(
+    prefix = "/api",
+    endpoint = "recently_deleted",
+    input = leptos::server_fn::codec::GetUrl
+)]
+pub async fn recently_deleted() -> Result<Vec<shared::DeletedCollectionRow>, ServerFnError<String>>
+{
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .recently_deleted()
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
         Err(ServerFnError::ServerError("server-only".into()))
     }
 }

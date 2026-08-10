@@ -694,13 +694,10 @@ pub fn TreeDialogs() -> impl IntoView {
         // in `lib.rs` for why scalars rather than the tagged enums.
         let (haves_to, haves_discard) = manage.delete_haves.get_untracked().to_wire();
         let wants_to = manage.delete_wants.get_untracked().to_wire();
+        let name = req.name.clone();
         spawn_local(async move {
-            // The receipt (`move_ids` + `reparented`) is what a future undo
-            // toast reverses — step 5 of specs/collection-deletion.md. Nothing
-            // holds it yet, so it is dropped here rather than stashed in a
-            // signal no one reads.
             match crate::delete_collection(req.id, haves_to, haves_discard, wants_to).await {
-                Ok(_receipt) => {
+                Ok(receipt) => {
                     manage.busy.set(false);
                     manage.delete_open.set(false);
                     tree.refetch();
@@ -720,6 +717,24 @@ pub fn TreeDialogs() -> impl IntoView {
                         // database no longer had.
                         None => manage.revision.update(|r| *r = r.wrapping_add(1)),
                     }
+                    // The undo toast — the misclick path, step 5 of
+                    // specs/collection-deletion.md. The receipt is held by the
+                    // toast's own action closure (client-held, never a
+                    // server-side stash) and posted back whole on Undo.
+                    // `Callback` is `Fn`, not `FnOnce` — it can outlive one
+                    // click in principle — so the closure clones its own copy
+                    // on every call rather than moving the captured original.
+                    let for_undo = receipt.clone();
+                    toast.show(
+                        ToastOptions::message(format!("Deleted {name}"))
+                            .kind(ToastKind::Success)
+                            .action(
+                                "Undo",
+                                Callback::new(move |()| {
+                                    commit_undo_delete(tree_res, toast, manage, for_undo.clone());
+                                }),
+                            ),
+                    );
                 }
                 Err(e) => {
                     manage.busy.set(false);
@@ -981,6 +996,38 @@ pub fn TreeDialogs() -> impl IntoView {
             </DialogContent>
         </Dialog>
     }
+}
+
+/// Commit the delete toast's Undo action (specs/collection-deletion.md → step
+/// 5). Posts the receipt back whole; on success both the tree and this page's
+/// own read (folder rows, rollups — the same reasoning `revision` exists for
+/// throughout this file) need to catch up, since the collection just
+/// reappeared with everything it took with it.
+fn commit_undo_delete(
+    tree: CollectionTreeResource,
+    toast: ToastHandle,
+    manage: TreeManage,
+    receipt: shared::DeleteCollectionReceipt,
+) {
+    spawn_local(async move {
+        match crate::undo_delete_collection(receipt).await {
+            Ok(()) => {
+                tree.0.refetch();
+                manage.revision.update(|r| *r = r.wrapping_add(1));
+            }
+            Err(e) => {
+                // The delete already happened and closed its own dialog; a
+                // failed undo is reported the same way `commit_move`'s
+                // partial-failure and `undo_removal`'s own error report
+                // theirs — a fresh toast, not the (long gone) confirm dialog's
+                // error line.
+                toast.show(
+                    ToastOptions::message(format!("Couldn't undo: {}", user_msg(&e)))
+                        .kind(ToastKind::Error),
+                );
+            }
+        }
+    });
 }
 
 /// `"1 card"` / `"3 cards"` — the plain-English plural the two counts rows

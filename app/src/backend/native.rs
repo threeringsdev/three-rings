@@ -14,11 +14,11 @@
 use shared::{
     AddHave, AddLine, AddWant, AllCardsView, ApiError, ApiResult, BatchMove, CardDetail,
     CardSummary, CatalogCount, CollectionSummary, CollectionTree, CollectionView, DeckCommanders,
-    DeleteCollectionReceipt, DeleteCollectionReq, DesireLine, ErrorEnvelope, HoldingLine,
-    HoldingMove, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection, NewTag, Page,
-    Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard, SetQuantity,
-    SetQuery, SetSummary, ShoppingList, SuggestedDestination, Tag, TagAssignment, TaggedCard,
-    Teardown, TeardownReceipt,
+    DeleteCollectionReceipt, DeleteCollectionReq, DeletedCollectionRow, DesireLine, ErrorEnvelope,
+    HoldingLine, HoldingMove, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection,
+    NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard,
+    SetQuantity, SetQuery, SetSummary, ShoppingList, SuggestedDestination, Tag, TagAssignment,
+    TaggedCard, Teardown, TeardownReceipt,
 };
 use tokio::sync::OnceCell;
 
@@ -307,6 +307,33 @@ impl CollectionStore for NativeBackend {
             &req,
         )
         .await
+    }
+
+    /// The receipt rides whole in the body (`input = Json`'s server-fn
+    /// counterpart in `lib.rs`); the id stays in the path like every other
+    /// per-collection op, and the hosted route refuses a body whose
+    /// `collection_id` disagrees with it.
+    async fn undo_delete(&self, receipt: DeleteCollectionReceipt) -> ApiResult<()> {
+        self.require_session()?;
+        self.post_unit(
+            &super::paths::collection_op(receipt.collection_id, super::paths::op::UNDO_DELETE),
+            &receipt,
+        )
+        .await
+    }
+
+    async fn restore_collection(&self, id: Id) -> ApiResult<()> {
+        self.require_session()?;
+        self.post_unit(
+            &super::paths::collection_op(id, super::paths::op::RESTORE),
+            &(),
+        )
+        .await
+    }
+
+    async fn recently_deleted(&self) -> ApiResult<Vec<DeletedCollectionRow>> {
+        self.require_session()?;
+        self.get(super::paths::RECENTLY_DELETED).await
     }
 
     async fn reparent_collection(&self, id: Id, req: Reparent) -> ApiResult<()> {
