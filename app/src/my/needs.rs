@@ -121,6 +121,47 @@ impl PullOutcome {
     }
 }
 
+/// What a pull line should do with itself, given how many copies it asked for
+/// and how many the server actually reports moving for its own token.
+///
+/// `Pulled::copies` already tells the truth about what moved (its own doc
+/// comment: "reported rather than inferred") — the P6-119 defect was never a
+/// missing wire fact, it was the caller treating *any* nonzero as the whole
+/// ask. `Full`/`Partial`/`Zero` make that comparison a closed set instead of
+/// the boolean `!outcome.pulled.is_empty()` that could not distinguish "moved
+/// all of it" from "moved some of it".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullLineOutcome {
+    /// Moved at least as much as was asked — today's strike-through case.
+    Full,
+    /// Moved something, but less than was asked. The line stays live, owing
+    /// exactly `residual`.
+    Partial { residual: i32 },
+    /// Moved nothing for this token — already excluded from `pulled` entirely
+    /// (a zero-copy line is reported as a [`Skipped`] instead, never as a
+    /// `Pulled` with `copies: 0`), kept here so the caller's match is
+    /// exhaustive rather than leaning on an inferred `else`.
+    Zero,
+}
+
+/// Classify one line's tick against what it asked for.
+///
+/// `asked` is the caller's own displayed count — the pick list is a snapshot
+/// (module doc), so this is deliberately *not* re-derived from a fresh server
+/// read; it is simply "what the label already said" before this tick. `moved`
+/// is [`Pulled::copies`], the one number the server actually reports moving.
+pub fn pull_line_outcome(asked: i32, moved: i32) -> PullLineOutcome {
+    if moved <= 0 {
+        PullLineOutcome::Zero
+    } else if moved >= asked {
+        PullLineOutcome::Full
+    } else {
+        PullLineOutcome::Partial {
+            residual: asked - moved,
+        }
+    }
+}
+
 // -------------------------------------------------------- the arithmetic ---
 
 /// Copies to take from each location to fill one row's gap, in the needs read's
@@ -607,10 +648,17 @@ fn ElsewhereRow(row: NeedRow, collection_id: Id, pending: RwSignal<bool>) -> imp
                     &outcome,
                     &label.get_value(),
                     toast,
-                    tree,
-                    revision,
-                    last_move,
+                    ReportContext {
+                        tree,
+                        revision,
+                        last_move,
+                    },
                     None,
+                    // `fillable` is this row's own asked total across every
+                    // source its allocation named — the honest baseline the
+                    // toast checks a shortfall against, same as the pick
+                    // list's per-line ask (see `PickRowView`).
+                    Some(fillable),
                 ),
                 Err(e) => {
                     toast.show(
@@ -775,6 +823,13 @@ fn PickRowView(
     let token = StoredValue::new(row.item.token());
     let label = StoredValue::new(row.name.clone());
     let item = row.item;
+    // The line's own honest count. Starts at the snapshot's ask; a partial
+    // pull rewrites it to the residual rather than lying that the whole ask
+    // moved (P6-119). The `pick-label` span below is its one and only
+    // reader — the checkbox's `aria_label` deliberately carries no count at
+    // all, since it is a plain (non-reactive) prop set once at mount and
+    // could not follow this signal.
+    let remaining = RwSignal::new(row.copies);
     let checked = Signal::derive(move || done.read().contains(&token.get_value()));
 
     let toggle = Callback::new(move |want: bool| {
@@ -790,26 +845,55 @@ fn PickRowView(
             busy.set(false);
             match result {
                 Ok(outcome) => {
-                    let moved = !outcome.pulled.is_empty();
-                    if moved {
-                        done.update(|d| {
-                            d.insert(token.get_value());
-                        });
+                    // What this line asked for, and what the server reports it
+                    // actually moved *for this token* — not just "did anything
+                    // move" (the P6-119 bug: any nonzero `pulled` struck the
+                    // line through, even a source that only had 2 of the 4
+                    // asked, and the residual 2 vanished from the walk).
+                    let asked = remaining.get_untracked();
+                    let moved = outcome
+                        .pulled
+                        .iter()
+                        .find(|p| p.token == token.get_value())
+                        .map(|p| p.copies)
+                        .unwrap_or(0);
+                    match pull_line_outcome(asked, moved) {
+                        PullLineOutcome::Full => {
+                            done.update(|d| {
+                                d.insert(token.get_value());
+                            });
+                        }
+                        // Stay unstruck, carrying the honest residual — the line
+                        // is not done, it is owed fewer copies than before.
+                        PullLineOutcome::Partial { residual } => remaining.set(residual),
+                        // Unreachable via `outcome.pulled` today (a zero-copy
+                        // line is a `Skipped`, never a `Pulled{copies: 0}`) —
+                        // handled anyway so this match stays exhaustive rather
+                        // than assuming that invariant here too.
+                        PullLineOutcome::Zero => {}
                     }
                     let undo_token = token.get_value();
                     report(
                         &outcome,
                         &label.get_value(),
                         toast,
-                        tree,
-                        revision,
-                        last_move,
+                        ReportContext {
+                            tree,
+                            revision,
+                            last_move,
+                        },
                         Some(Callback::new(move |()| {
                             let undo_token = undo_token.clone();
                             done.update(|d| {
                                 d.remove(&undo_token);
                             });
+                            // The reversed copies go back where they came
+                            // from, so the line's own ask reverts too — a
+                            // partial-then-undo must not leave the line
+                            // quietly asking for less than it originally did.
+                            remaining.set(asked);
                         })),
+                        Some(asked),
                     );
                 }
                 Err(e) => {
@@ -833,7 +917,13 @@ fn PickRowView(
                 checked
                 disabled=Signal::derive(move || busy.get())
                 on_checked_change=toggle
-                aria_label=format!("Pull {} {}", row.copies, row.name)
+                // No count here: `aria_label` is a plain `String` frozen at
+                // mount, not reactive, so it could not follow a partial
+                // pull's residual (P6-119 review) — leaving the count in
+                // would tell a screen-reader user the original ask forever.
+                // The visible `pick-label` span is reactive and is now the
+                // one and only reader of the count.
+                aria_label=format!("Pull {}", row.name)
             />
             <span
                 class=move || {
@@ -841,26 +931,48 @@ fn PickRowView(
                 }
                 data-testid="pick-label"
             >
-                {format!("{} × {}", row.copies, row.name)}
+                {move || format!("{} × {}", remaining.get(), label.get_value())}
             </span>
         </li>
     }
+}
+
+/// The page plumbing a pull's report has to follow through: the sidebar tree
+/// (badge counts), the holdings revision (this page's own resource trigger)
+/// and ⌘K's last-move memory. Bundled into one `Copy` struct because the three
+/// always travel together at both `report` call sites, and doing so keeps
+/// `report` under clippy's argument ceiling now that `asked` (P6-119) would
+/// otherwise have tipped it over.
+#[derive(Clone, Copy)]
+struct ReportContext {
+    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
+    revision: Option<super::move_selection::HoldingsRevision>,
+    last_move: Option<crate::components::palette::LastMoveState>,
 }
 
 /// The toast every pull raises, and the Undo behind it.
 ///
 /// One place, because a pull has three outcomes worth stating — copies moved,
 /// lines refused, and both at once — and two call sites (the row button and the
-/// checklist tick) that must not word them differently.
+/// checklist tick) that must not word them differently. `asked`, when the
+/// caller knows one, is a fourth outcome worth a different sentence: **a
+/// shortfall**. Both callers pass their own honest total (the pick list's
+/// per-line snapshot count, the row button's `owned_elsewhere`) so a source
+/// that had less than it looked like — the residual, not just "it moved
+/// something" — gets said out loud instead of read as an unqualified success.
 fn report(
     outcome: &PullOutcome,
     label: &str,
     toast: ToastHandle,
-    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
-    revision: Option<super::move_selection::HoldingsRevision>,
-    last_move: Option<crate::components::palette::LastMoveState>,
+    ctx: ReportContext,
     on_undo: Option<Callback<()>>,
+    asked: Option<i32>,
 ) {
+    let ReportContext {
+        tree,
+        revision,
+        last_move,
+    } = ctx;
     if !outcome.move_ids.is_empty() {
         tree.refetch();
         if let Some(r) = revision {
@@ -870,13 +982,29 @@ fn report(
         let move_ids = outcome.move_ids.clone();
         // A pull is a batch of moves — one Undo for the toast, one for ⌘K.
         crate::components::palette::note_last_move(last_move, move_ids.clone());
-        let copies_label = if copies == 1 {
-            "1 copy".to_string()
-        } else {
-            format!("{copies} copies")
+        let message = match asked.map(|asked| pull_line_outcome(asked, copies)) {
+            Some(PullLineOutcome::Partial { residual }) => {
+                let asked = asked.expect("asked is Some when this arm matched");
+                // Cause-neutral and number-only, deliberately: "not found at
+                // the source" would assert a cause the client cannot know —
+                // a `NoLongerNeeded` skip beside this one means the *gap*
+                // closed, not the source, and that skip already states its
+                // own reason. "the source" would also be wrong on
+                // `ElsewhereRow`'s path, whose `asked` spans every source its
+                // allocation named, not one.
+                format!("Pulled {copies} of {asked} {label} — {residual} still owed")
+            }
+            _ => {
+                let copies_label = if copies == 1 {
+                    "1 copy".to_string()
+                } else {
+                    format!("{copies} copies")
+                };
+                format!("Pulled {copies_label} of {label}")
+            }
         };
         toast.show(
-            ToastOptions::message(format!("Pulled {copies_label} of {label}"))
+            ToastOptions::message(message)
                 .kind(ToastKind::Success)
                 .action(
                     "Undo",
@@ -1202,5 +1330,61 @@ mod tests {
         assert!(plan_pull(&[], src, 4).is_empty());
         // A zeroed stack is not a stack.
         assert!(plan_pull(&[holding(src, 0, Finish::Nonfoil, Board::Main)], src, 4).is_empty());
+    }
+
+    // ------------------------------------------------- P6-119: partial pulls ---
+
+    #[test]
+    fn moving_everything_asked_is_a_full_pull() {
+        // The ordinary case, pinned so the boundary condition below (`moved ==
+        // asked`) is provably `Full`, not a one-off `Partial { residual: 0 }`
+        // that happened to render the same.
+        assert_eq!(pull_line_outcome(4, 4), PullLineOutcome::Full);
+        assert_eq!(pull_line_outcome(1, 1), PullLineOutcome::Full);
+        // Moving *more* than the stale snapshot asked (the source restocked
+        // between generating the pick list and ticking the line) is still a
+        // full pull, never a negative residual. This pins today's decision
+        // function against that input, not an endorsement that the server
+        // *should* be free to move more than a line ever displayed — whether
+        // it can genuinely over-pull relative to what the user saw is a
+        // separate time-of-check-to-time-of-use question about `pull_needs`
+        // itself (P6-120's territory), out of this task's scope.
+        assert_eq!(pull_line_outcome(2, 5), PullLineOutcome::Full);
+    }
+
+    #[test]
+    fn moving_less_than_asked_is_a_partial_pull_carrying_the_honest_residual() {
+        // The defect this task fixes: a line asking 4 whose source only had 2
+        // left must not read as fully pulled, and what remains owed is 2, not
+        // the original 4 restated.
+        assert_eq!(
+            pull_line_outcome(4, 2),
+            PullLineOutcome::Partial { residual: 2 }
+        );
+        assert_eq!(
+            pull_line_outcome(3, 1),
+            PullLineOutcome::Partial { residual: 2 }
+        );
+        // One short of the ask is still a partial, not a full pull with an
+        // off-by-one forgiven.
+        assert_eq!(
+            pull_line_outcome(5, 4),
+            PullLineOutcome::Partial { residual: 1 }
+        );
+    }
+
+    #[test]
+    fn moving_nothing_for_this_token_is_zero_and_leaves_no_residual_claim() {
+        // Today's already-correct behavior for a token absent from
+        // `outcome.pulled` entirely (it is reported as a `Skipped` instead) —
+        // pinned here so it cannot regress silently while the `Partial` arm
+        // is added beside it.
+        assert_eq!(pull_line_outcome(4, 0), PullLineOutcome::Zero);
+        assert_eq!(pull_line_outcome(0, 0), PullLineOutcome::Zero);
+        // Defensive: a negative report (should not happen — `Pulled::copies`
+        // is a sum of non-negative `plan_pull` quantities) still resolves to
+        // "nothing to strike through or shrink" rather than a bogus larger
+        // residual than was ever asked.
+        assert_eq!(pull_line_outcome(4, -1), PullLineOutcome::Zero);
     }
 }
