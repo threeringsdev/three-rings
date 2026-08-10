@@ -801,8 +801,14 @@ fn PaletteBody() -> impl IntoView {
                 state.0.set(None);
                 let restore = move_ids.clone();
                 spawn_local(async move {
+                    // `undo_move` carries a restored-holding id: the
+                    // collection-view stepper calls this same server fn and
+                    // rewires its row's captured id from it. ⌘K has no
+                    // row-scoped signal to rewire, so it discards the receipt
+                    // here — purely so both arms unify with
+                    // `undo_selection_move`'s plain `()`.
                     let result = if move_ids.len() == 1 {
-                        crate::undo_move(move_ids[0]).await
+                        crate::undo_move(move_ids[0]).await.map(|_| ())
                     } else {
                         crate::undo_selection_move(move_ids).await
                     };

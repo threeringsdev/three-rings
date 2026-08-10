@@ -228,6 +228,113 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Same-device undo-flow defects: a stale stepper id and a stale toast (2026-08-10)
+
+P6-117. Two defects in `app/src/my/collection.rs`'s `HereCount` (the count
+stepper's collection-view host — "Custom gap components" above), both reachable
+on one device inside the removal toast's own 5s auto-dismiss window.
+
+**Defect 1 — the stepper's captured `holding_id` went dead across an undo.**
+`undo_removal` optimistically restored the row (`removed.set(false)`,
+`value.set(copies)`) then bumped a revision that refetches `collection_view` —
+but that refetch was also the *only* mechanism that ever gave the row a fresh
+`holding_id`, because undoing a removal re-inserts the holding under a **new**
+id (`hosted::undo_one` → `holding_add`'s upsert). Between the optimistic
+restore and the refetch landing, a +/- addressed the dead pre-removal id and
+failed `"not found: holding"`.
+
+**Fix chosen: the server tells the client the new id.** `undo_one` now returns
+the id `holding_add` wrote to (`RETURNING id`), threaded up through a new
+`shared::UndoReceipt { restored_holding_id: Option<Id> }` — the trait's
+`undo_move: ApiResult<UndoReceipt>` (was `ApiResult<()>`), both backends
+(`hosted`'s direct write, `native`'s HTTP client), the `undo_move` server fn,
+and `HereCount`'s own `holding_id`, now an `RwSignal<Id>` instead of a plain
+value so `undo_removal`'s success arm can `holding_id.set(new_id)`
+immediately — closing the window synchronously rather than waiting on the
+refetch. The revision bump stays (WANTED/OWNED and the header's totals still
+come from `collection_view`), it just no longer carries the id.
+
+**Rejected: gating the stepper until the refetch lands.** Considered and set
+aside — the receipt was cheap to thread (one `RETURNING id`, one wrapper
+struct matching the existing `MoveReceipt`/`TeardownReceipt`/`QuickAddReceipt`
+convention) and closes the window *exactly*, where a pending/disabled stepper
+would still have a visible dead window, just a non-interactive one, and adds a
+second signal (busy) to reason about for no real gain.
+
+Two other callers of the trait method needed touching, both mechanically:
+`undo_quick_add` (server fn) discards the receipt (`.map(|_| ())`) since a
+quick-add's move has no origin to restore; ⌘K's `Undo last move`
+(`palette.rs`) does the same to keep its
+`if move_ids.len()==1 {...} else {...}` branches unifying with
+`undo_selection_move`'s `Result<(), _>`. Neither changes behavior.
+
+**Defect 2 — a stale count-change toast's own Undo outlived the row's
+removal.** `CountStepper`'s built-in commit-toast guards its Undo only on
+`value.try_get_untracked()` succeeding (the row not disposed) and
+`cur != from` — but removal deliberately does **not** dispose the row (that is
+what keeps the *removal's own* Undo toast reachable). So a "3 → 1 · Undo"
+toast raised before a removal stayed live after it, and firing it re-committed
+into the holding `remove_holding` had just deleted, surfacing "Couldn't save:
+not found: holding" — the write always failed, but the attempt and the bogus
+error were the bug.
+
+**Fix chosen: guard the caller's `on_commit`, not the generic stepper.**
+`HereCount::on_commit` — the boundary the component's own doc already calls
+out as "the caller owns persistence" — now opens with
+`if stale_commit_should_be_dropped(removed.get_untracked()) { return; }`, a
+new pure predicate (unit-tested) reusing the `removed` signal the row already
+owns. **Rejected:** extending `CountStepper` itself with a
+`retired`/generation-counter prop, the shape considered first — the guard is
+specific to *this* caller's "removed" semantics, and the component's contract
+(`caller_reports`, the doc comments throughout) already puts write-eligibility
+decisions on the caller's `on_commit`, not the shared primitive; adding
+removal vocabulary to a reusable stepper felt like the wrong layer for a
+one-consumer concern.
+
+**A genuine, pre-existing, unrelated wasm panic was found (not fixed) while
+trying to make defect 1's race deterministic in e2e.** `page.route`-holding
+`collection_view` open across an Undo click reproduced "you tried to access a
+reactive value... it has already been disposed" at `count_stepper.rs:416`
+(`holds_focus`'s `container_ref.get_untracked()`, reached from the deferred
+`set_timeout(0)` a stray `focusout` schedules) — and it reproduces
+**identically against unmodified `main`** (confirmed by `git stash`-ing this
+task's diff and re-running the exact same probe), so it predates this task and
+is `commitZero`'s own Enter-key-commit path racing a fresh remount, not
+anything this task touches. Filed as follow-up, not fixed — out of this task's
+surgical scope. Because of it, the deterministic e2e for defect 1 was dropped;
+defect 1 is covered instead by the existing "the page followed the database...
+the row is back with a live holding id" e2e assertions (eventual consistency)
+plus the type-level id threading through `shared::UndoReceipt` /
+`hosted::undo_one`. The attempt and the reasoning are recorded in
+`end2end/tests/removal.spec.ts`, above the teardown section.
+
+**Fixture debris, again.** `removal.spec.ts`'s own `unownedCards` was still at
+`q=z&limit=60`; the shared dev branch's pool is now exhausted at that limit
+(measured live: 0 free at 60, 51 free at 200) — the same problem
+`collection-undo-restore.spec.ts` and `collection-tree-manage.spec.ts` already
+worked around. Bumped to `limit=200` here too. **Not fixed, same reason, in
+`batch-move.spec.ts`, `command-palette.spec.ts`, `needs.spec.ts`** — out of
+this task's scope; `command-palette.spec.ts`'s three "Undo last move" tests
+were spot-checked and fail at the identical setup assertion, unrelated to the
+`palette.rs` touch here (a type-erasing `.map(|_| ())`, exercised indirectly
+through the same `undo_move` wire path the passing `removal.spec.ts` tests
+cover).
+
+Verified: `cargo fmt --all -- --check`; `cargo clippy` clean (`-D warnings`)
+across `-p app --features hosted --all-targets`,
+`--features hydrate --target wasm32-unknown-unknown`,
+`--features native --all-targets`,
+`--features hosted,component-bench --all-targets`, and
+`--features hydrate,component-bench --target wasm32-unknown-unknown`.
+`cargo test -p app --features hosted`: 270 passed, 4 ignored (DB-gated,
+untouched by this diff, not run — no DB work this task). e2e:
+`removal.spec.ts` full file (7/7) + `collection-undo-restore.spec.ts`'s `Undo`
+describe block (1/1), chromium `--workers=1`.
+`collection-undo-restore.spec.ts`'s `Restore` describe block has 2
+pre-existing failures (a "Recently deleted" row not found) — a file this diff
+does not touch at all; not investigated further, flagged here for the
+maintainer rather than silently absorbed.
+
 ### Responsive audit + stage close (2026-07-27) — **the Stage 3 boundary**
 
 All nine wireframe frames reconciled against the running app at their own widths (3 desktop

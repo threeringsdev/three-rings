@@ -28,7 +28,7 @@ use shared::{
     HoldingMove, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection, NewTag, Page,
     Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard, SetQuantity,
     SetQuery, SetSummary, ShoppingList, SuggestedDestination, Tag, TagAssignment, TaggedCard,
-    Teardown, TeardownReceipt,
+    Teardown, TeardownReceipt, UndoReceipt,
 };
 
 #[cfg(feature = "hosted")]
@@ -399,8 +399,20 @@ pub trait CollectionStore {
     async fn move_batch(&self, req: BatchMove) -> ApiResult<Vec<MoveReceipt>>;
 
     /// Undo a move: reverse its holdings effect and stamp `undone_at`. Idempotent
-    /// (undoing an already-undone move is a no-op).
-    async fn undo_move(&self, move_id: Id) -> ApiResult<()>;
+    /// (undoing an already-undone move is a no-op — the receipt's
+    /// `restored_holding_id` is `None` on the second call, since nothing writes
+    /// the second time).
+    ///
+    /// Returns [`UndoReceipt`], not `()`: a caller addressing a *specific*
+    /// holding by id (the collection-view stepper) needs to know the id the
+    /// reversal actually wrote to, since undoing a removal re-inserts under a
+    /// **new** id rather than reviving the old one. `restored_holding_id` is
+    /// `None` whenever there is no holding at the move's own origin to name —
+    /// which also covers a soft-deleted origin: a hosted backend redirects
+    /// those copies to the Inbox rather than losing them, and a caller still
+    /// addressing the original collection must not be handed that unrelated
+    /// holding (see [`UndoReceipt`]'s own doc).
+    async fn undo_move(&self, move_id: Id) -> ApiResult<UndoReceipt>;
 
     /// Undo several moves **in one transaction** — the batch counterpart of
     /// [`Self::undo_move`], and the symmetric partner of [`Self::move_batch`].

@@ -18,7 +18,7 @@ use shared::{
     HoldingLine, HoldingMove, Id, LineResult, MoveReceipt, MoveRequest, NeedsView, NewCollection,
     NewTag, Page, Rename, RenameTag, Reorder, Reparent, SearchQuery, SearchResults, SetBoard,
     SetQuantity, SetQuery, SetSummary, ShoppingList, SuggestedDestination, Tag, TagAssignment,
-    TaggedCard, Teardown, TeardownReceipt,
+    TaggedCard, Teardown, TeardownReceipt, UndoReceipt,
 };
 use tokio::sync::OnceCell;
 
@@ -438,9 +438,9 @@ impl CollectionStore for NativeBackend {
             .await
     }
 
-    async fn undo_move(&self, move_id: Id) -> ApiResult<()> {
+    async fn undo_move(&self, move_id: Id) -> ApiResult<UndoReceipt> {
         self.require_session()?;
-        self.post_unit(&super::paths::move_undo(move_id), &()).await
+        self.post(&super::paths::move_undo(move_id), &()).await
     }
 
     async fn undo_moves(&self, move_ids: Vec<Id>) -> ApiResult<()> {

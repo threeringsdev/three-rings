@@ -23,9 +23,12 @@
 // have passed all of these at the wrong grain.)
 //
 // Isolation: scratch `zz-e2e-…` collections created via the API and deleted in a
-// `finally` (delete cascades holdings, desires and nothing else's). Printings
-// come from catalog cards the fixture owns nowhere, so a count read back is this
-// test's writes and nothing else.
+// `finally`. Delete no longer cascades (specs/collection-deletion.md, stale
+// since P6-188): it soft-deletes the collection and relocates its holdings to
+// the Inbox (the default `ToParent` disposition — these scratch collections
+// are top-level) rather than destroying them. Printings come from catalog
+// cards the fixture owns nowhere, so a count read back is this test's writes
+// and nothing else.
 
 import {
   expect,
@@ -147,7 +150,12 @@ async function unownedCards(
     cards: { card: Card }[];
   };
   const taken = new Set(owned.map((r) => r.card.oracle_id));
-  const res = await request.get("/api/catalog/search?q=z&limit=60");
+  // `limit=200`, not 60: the shared `q=z` unowned-card pool this suite reuses
+  // across files has been drained far enough by repeated runs that 60 no
+  // longer clears the front (measured 0 free at 60, 51 free at 200 — the same
+  // reason `collection-undo-restore.spec.ts` and
+  // `collection-tree-manage.spec.ts` already made this switch).
+  const res = await request.get("/api/catalog/search?q=z&limit=200");
   expect(res.status(), "catalog search").toBe(200);
   const { cards } = (await res.json()) as { cards: Card[] };
   const free = cards
@@ -326,6 +334,127 @@ test("@fast removing a sideboard stack leaves the mainboard alone and undoes to 
     await deleteCollection(request, deck.id);
   }
 });
+
+// -------------------------------------------- same-device undo-flow defects ---
+//
+// P6-117: removal deliberately does *not* dispose the row after it commits
+// (that is what keeps the *removal's own* Undo toast reachable — see the
+// module comment above `commitZero`'s callers). Two defects fall out of that
+// choice, both reachable on one device with no timing trick beyond "act
+// before a 5s toast auto-dismisses":
+//
+//   1. A count-change toast raised *before* the removal keeps its own Undo
+//      button live after the row is gone, and firing it used to write the
+//      reversed count straight to the holding `remove_holding` had just
+//      deleted — a bogus "Couldn't save: not found: holding" toast.
+//   2. Undo-of-removal optimistically restores the row before the server's
+//      response lands, but the stepper it re-shows kept the *dead*
+//      pre-removal holding id until an unrelated view refetch remounted the
+//      row — a real window where a +/- failed the same way.
+
+test("@fast a stale count-change toast's Undo does nothing once the row has been removed", async ({
+  page,
+  request,
+}) => {
+  // Two commit-and-toast cycles plus three DB read-backs (batch-move.spec.ts's
+  // longest test carries the same note): fits the default 30s alone, tight
+  // under a loaded shared dev branch — slow, not flaky.
+  test.slow();
+  const [card] = await unownedCards(request, 1, 10);
+  const binder = await createCollection(request, "binder", "stale-toast");
+  try {
+    await addHave(request, binder.id, card.printing_id as string, 3);
+    const where = { [binder.id]: "binder" };
+
+    await page.goto(`/my/collections/${binder.id}`);
+    await hydrated(page);
+    const row = rowFor(page, card.printing_id as string);
+    await expect(row.locator(STEPPER_VALUE)).toHaveText("3");
+
+    // Change the count first. Its own commit toast carries an Undo that would
+    // normally re-commit `3 → 1`'s reversal — and it is still on screen (its
+    // 5s auto-dismiss has not fired) when the row is removed a moment later.
+    await row.locator(STEPPER_VALUE).click();
+    await row.locator(STEPPER_INPUT).fill("1");
+    await row.locator(STEPPER_INPUT).press("Enter");
+    const staleToast = page.locator(TOAST, { hasText: `${card.name}: 3 → 1` });
+    await expect(staleToast).toBeVisible();
+
+    // Remove the row outright. This raises a *second*, later toast — the
+    // stale one from the count change is still sitting underneath it, because
+    // removal deliberately does not dispose the row (that would take the
+    // removal's own Undo down with it).
+    await commitZero(row);
+    const removalToast = page.locator(TOAST, { hasText: "Removed" });
+    await expect(removalToast).toContainText(`Removed ${card.name} (1 copy)`);
+
+    // Fire the *stale* toast's Undo promptly — no DB round-trip in between.
+    // Its 5s auto-dismiss started when it first appeared (well before this
+    // point), not when the row was removed, so stacking a `toPass` poll here
+    // risks it dismissing before this click lands on a loaded shared dev
+    // branch. The read-backs move after the click instead.
+    //
+    // Watched from here, not from the top of the test: the *legitimate*
+    // `3 → 1` edit above also calls `set_holding_quantity`, and the point is
+    // to catch only a write this click itself provokes.
+    const badWrites: string[] = [];
+    page.on("request", (r) => {
+      if (r.url().includes("/api/set_holding_quantity")) badWrites.push(r.url());
+    });
+    await staleToast.getByRole("button", { name: "Undo" }).click();
+
+    // Bounded wait, not an instant check: the fix returns before firing
+    // anything, so there is no request to await — a wrongly-issued write
+    // needs real time to round-trip and render its error toast, and a single
+    // check right after the click would pass vacuously whether or not the
+    // guard actually ran.
+    await page.waitForTimeout(1000);
+    expect(
+      badWrites,
+      "the stale toast's Undo must not write to the dead holding",
+    ).toEqual([]);
+    await expect(
+      page.locator(TOAST, { hasText: "Couldn't save" }),
+    ).toHaveCount(0);
+    // The DB read-back that used to sit before the click: it still proves
+    // both that the removal actually landed *and* that the stale Undo put
+    // nothing back, in one read, now that the click is no longer waiting on
+    // it.
+    expect(await grainsIn(request, card.oracle_id, where)).toEqual([]);
+
+    // The regression this fix must not cause: the *removal's* own Undo is
+    // still fully live and still works.
+    await removalToast.getByRole("button", { name: "Undo" }).click();
+    await expect(async () => {
+      expect(await grainsIn(request, card.oracle_id, where)).toEqual([
+        "binder: nonfoil/nm/en/main x1",
+      ]);
+    }).toPass({ timeout: 5000 });
+  } finally {
+    await deleteCollection(request, binder.id);
+  }
+});
+
+// Defect 1 (the stale-id race) is deliberately **not** given an e2e test.
+// `undo_removal` rewires the row's captured `holding_id` straight from the
+// server's `UndoReceipt` (collection.rs), so a real race would need a +/-
+// landing in the gap between that rewire (synchronous, in the same success
+// branch) and nothing — the window it used to depend on (an unrelated
+// `collection_view` refetch) is no longer load-bearing for correctness at
+// all. The one way to *construct* the old window deterministically —
+// `page.route` holding `collection_view` open across the Undo click — was
+// tried and dropped: it reproduces a genuine but **pre-existing and
+// unrelated** wasm panic in `count_stepper.rs`'s blur-commit machinery
+// (`container_ref`, defined at count_stepper.rs:99, accessed after disposal
+// at count_stepper.rs:416, inside the deferred `set_timeout` a stray
+// `focusout` schedules), confirmed to reproduce identically against
+// unmodified `main` — i.e. it is `commitZero`'s own Enter-key commit path
+// racing a fresh remount, not anything this task touches. Filed as a
+// follow-up rather than fixed here (see this file's — and app-ui.md's —
+// Findings). Defect 1's fix is covered by the existing "the page followed
+// the database rather than waiting for a reload" assertions above (the
+// *eventual* consistency of the rewired id) and by the unit-level type
+// threading in `shared::UndoReceipt` / `hosted::undo_one`.
 
 // --------------------------------------------------------------- teardown ---
 

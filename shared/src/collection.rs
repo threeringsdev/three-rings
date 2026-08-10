@@ -449,6 +449,34 @@ pub struct MoveReceipt {
     pub move_id: Id,
 }
 
+/// What undoing a move restores — the id of the holding row the reversed
+/// move's copies landed back on, when they landed at the move's own
+/// `from_collection_id`.
+///
+/// `None` in three cases, all meaning "there is no such holding to name":
+/// the move being undone had no origin collection (a quick-add's intake has
+/// nothing to point a caller back at — its undo only removes copies from the
+/// destination); the move was already undone (idempotent — a second call
+/// writes nothing, so there is nothing new to restore); and the origin
+/// collection has since been soft-deleted, so `hosted::undo_one` redirects
+/// the copies to the Inbox instead of `from_collection_id` (maintainer
+/// ruling, specs/collection-deletion.md → Open questions). That redirect
+/// lands the copies somewhere real, but naming that holding here would let a
+/// caller still rendering the *original* collection's row — the
+/// collection-view stepper — rewire itself onto an unrelated Inbox holding
+/// through a row that no longer describes it. A plain removal's undo is
+/// `Some` only when its origin collection is still live; the redirect case
+/// is not rare enough to hand-wave away.
+///
+/// This exists so a caller holding a *dead* id — the collection-view stepper,
+/// after removing the row it edits — can rewire itself to the *live* one the
+/// undo just created, rather than waiting on an unrelated refetch to remount
+/// it with fresh data (app-ui.md → Findings, the stale-stepper-id defect).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UndoReceipt {
+    pub restored_holding_id: Option<Id>,
+}
+
 /// Which catalog quick action fired. The two differ in grain — a Have is
 /// per-printing, a Want is per-oracle — and in whether the result is undoable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
