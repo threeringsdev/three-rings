@@ -39,6 +39,7 @@ fn row(
             format: None,
         },
         present,
+        desired: 0,
     }
 }
 
@@ -46,10 +47,19 @@ pub fn demo() -> AnyView {
     // The IA sketch's cast (information-architecture.md lines 21–34), with
     // `Inbox` returned last so the pin is visible on the page and not just in
     // the unit test.
+    // `Trade` carries a nonzero `desired` — every other fixture row is
+    // `desired: 0` (Adversarial review, this task), which is realistic for
+    // none of them: a demo tree where nothing is ever wanted is a fixture
+    // gap for any future bench section that reads it (the delete confirm's
+    // wants count among them).
+    let trade = CollectionTreeRow {
+        desired: 6,
+        ..row(2, Some(1), "Trade", false, 120)
+    };
     let tree = assemble(CollectionTree {
         collections: vec![
             row(1, None, "Binders", false, 5),
-            row(2, Some(1), "Trade", false, 120),
+            trade,
             row(3, Some(1), "Bulk", false, 520),
             row(4, None, "Decks", false, 72),
             row(5, Some(4), "Grixis", false, 100),

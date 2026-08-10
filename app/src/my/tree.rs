@@ -341,6 +341,17 @@ fn TreeRow(node: TreeNode, depth: usize, pathname: Memo<String>) -> AnyView {
     let mut forbidden = HashSet::new();
     subtree_ids(&node, &mut forbidden);
 
+    // Own counts, captured before `row`/`children` are consumed below — the
+    // delete confirm's honest counts (specs/collection-deletion.md → step 4):
+    // present and desired *of this node alone*, never rolled up (a want is
+    // scoped to the deck that states it, and a delete relocates only this
+    // node's own copies), plus the number of **immediate** children — the
+    // ones that actually re-parent when this node is deleted, not the whole
+    // subtree `forbidden` walks.
+    let own_cards = node.row.present;
+    let own_wants = node.row.desired;
+    let own_children = node.children.len() as i64;
+
     let TreeNode {
         row,
         rolled_up,
@@ -362,7 +373,17 @@ fn TreeRow(node: TreeNode, depth: usize, pathname: Memo<String>) -> AnyView {
     if children.is_empty() {
         view! {
             <li data-tree-row=id.to_string()>
-                <RowShell id name is_inbox parent_id forbidden cards=rolled_up indent>
+                <RowShell
+                    id
+                    name
+                    is_inbox
+                    parent_id
+                    forbidden
+                    cards=own_cards
+                    wants=own_wants
+                    children_count=own_children
+                    indent
+                >
                     <span
                         aria-hidden="true"
                         class="text-muted-foreground w-5 shrink-0 text-center text-[10px]"
@@ -379,7 +400,17 @@ fn TreeRow(node: TreeNode, depth: usize, pathname: Memo<String>) -> AnyView {
         view! {
             <li data-tree-row=id.to_string()>
                 <Collapsible default_open=true content_id=format!("tree-children-{id}")>
-                    <RowShell id name is_inbox parent_id forbidden cards=rolled_up indent>
+                    <RowShell
+                        id
+                        name
+                        is_inbox
+                        parent_id
+                        forbidden
+                        cards=own_cards
+                        wants=own_wants
+                        children_count=own_children
+                        indent
+                    >
                         <CollapsibleTrigger
                             class="text-muted-foreground hover:text-foreground w-5 shrink-0 rounded-sm text-center"
                             attr:aria-label=toggle_label
@@ -435,7 +466,16 @@ fn RowShell(
     is_inbox: bool,
     parent_id: Option<Id>,
     forbidden: HashSet<Id>,
+    /// This node's own present count — the delete confirm's card count
+    /// (specs/collection-deletion.md → step 4: never rolled up, since a
+    /// delete relocates only this node's own copies).
     cards: i64,
+    /// This node's own desired count — the delete confirm's wants count.
+    wants: i64,
+    /// This node's immediate children — the delete confirm's
+    /// child-collections count (not the whole `forbidden` subtree: only
+    /// direct children re-parent when this node is deleted).
+    children_count: i64,
     indent: String,
     children: Children,
 ) -> impl IntoView {
@@ -455,6 +495,8 @@ fn RowShell(
             parent_id,
             forbidden: row_forbidden.get_value(),
             cards,
+            wants,
+            children: children_count,
         }));
     };
 
@@ -756,6 +798,7 @@ mod tests {
                 format: None,
             },
             present,
+            desired: 0,
         }
     }
 

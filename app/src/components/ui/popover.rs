@@ -12,6 +12,18 @@
 //! - CSS anchor positioning verified on the Android webview (Chrome 145);
 //!   webkit rides the boundary tier — fallback decision recorded in
 //!   app-ui Findings
+//! - **registers with [`super::overlay_stack`]** (Adversarial review,
+//!   `P6-189`): without this, a popover opened *inside* a `Dialog` (the
+//!   delete confirm's two disposition pickers) was invisible to the app's own
+//!   overlay bookkeeping, so `Dialog`'s window-level Escape listener still
+//!   believed itself topmost and closed the whole dialog underneath the
+//!   popover on the same keypress. `PopoverContent` now pushes/removes its
+//!   own id the same way `DialogContent` does, and owns its own Escape
+//!   listener gated on `overlay_stack::is_top` — consuming the keypress
+//!   (`stop_immediate_propagation`) so a `Dialog` further down the stack
+//!   never sees it, exactly `DialogContent`'s own multi-overlay reasoning.
+//!   A **second** Escape press then closes the dialog, since the popover has
+//!   dropped off the stack by then.
 
 use leptos::prelude::*;
 use tw_merge::tw_merge;
@@ -227,6 +239,45 @@ pub fn PopoverContent(children: Children, #[prop(optional, into)] class: String)
             }
             #[cfg(not(feature = "hydrate"))]
             let _ = &target_id;
+        }
+    });
+
+    // Overlay-stack bookkeeping (see the module doc): push while open, so a
+    // `Dialog` further down the visual stack can tell it is no longer
+    // topmost. `target_id` is already the deterministic per-instance id
+    // (`popover-{id}`), so it doubles as the stack key.
+    let stack_id = ctx.target_id.clone();
+    Effect::new(move |prev: Option<bool>| {
+        let now = open.get();
+        if now {
+            super::overlay_stack::push(&stack_id);
+        } else if prev == Some(true) {
+            super::overlay_stack::remove(&stack_id);
+        }
+        now
+    });
+
+    // Own Escape listener, gated the same way `DialogContent`'s is: only the
+    // topmost overlay reacts, and it consumes the keypress so nothing further
+    // down the stack (a `Dialog` wrapping this popover, most notably) also
+    // sees it. Native `popover="auto"` closes on Escape by default too, but
+    // relying on that alone raced this listener's stack bookkeeping and a
+    // `Dialog`'s separate window listener with no defined order between them
+    // — `prevent_default` here suppresses the native default action, making
+    // this the sole authority, exactly `DialogContent`'s own model.
+    let esc_id = ctx.target_id.clone();
+    let esc = window_event_listener(leptos::ev::keydown, move |ev| {
+        if ev.key() == "Escape" && open.get_untracked() && super::overlay_stack::is_top(&esc_id) {
+            ev.prevent_default();
+            ev.stop_immediate_propagation();
+            open.set(false);
+        }
+    });
+    let unmount_id = ctx.target_id.clone();
+    on_cleanup(move || {
+        esc.remove();
+        if open.get_untracked() {
+            super::overlay_stack::remove(&unmount_id);
         }
     });
 
