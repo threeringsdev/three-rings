@@ -31,9 +31,14 @@
 //! `locations` the needs read already carries, in that read's own order
 //! (quantity desc, then name), and the sum of an allocation is the row's
 //! `owned_elsewhere` by construction. The server runs the *same* function over
-//! its *own* fresh `needs()` read, so the number on the checklist and the number
-//! that moves are the same function of the same shape — a client asking for 99
-//! copies gets the allocation, not the 99.
+//! its *own* fresh `needs()`-shaped read, so the number on the checklist and
+//! the number that moves are the same function of the same shape — a client
+//! asking for 99 copies gets the allocation, not the 99. `allocate`,
+//! [`gap_of`], [`dedupe`] and [`plan_pull`] are reused as-is by
+//! `crate::backend::pull_plan` (P6-120): the read, the plan and the write used
+//! to be three separately-committed calls composed in the `pull_needs` server
+//! fn; they now run inside one transaction in the hosted backend, calling
+//! straight back into these same functions rather than re-deriving them.
 //!
 //! **A pull is grain-agnostic where the tray's move is not, on purpose.** The
 //! selection tray refuses a stack holding several grains and no default one
@@ -1345,10 +1350,14 @@ mod tests {
         // between generating the pick list and ticking the line) is still a
         // full pull, never a negative residual. This pins today's decision
         // function against that input, not an endorsement that the server
-        // *should* be free to move more than a line ever displayed — whether
-        // it can genuinely over-pull relative to what the user saw is a
-        // separate time-of-check-to-time-of-use question about `pull_needs`
-        // itself (P6-120's territory), out of this task's scope.
+        // *should* be free to move more than a line ever displayed.
+        // P6-120 closed the read/plan/write race (the three-transaction
+        // window that could move *different* copies than the plan saw) but
+        // deliberately left this one alone: a fresh `needs()` read legitimately
+        // widening the destination's gap since the snapshot was taken is not a
+        // bug to fix, it is the same "quantity is never the caller's" rule this
+        // module leads with — still recorded here as a real, un-narrowed input
+        // to this function rather than a hypothetical one.
         assert_eq!(pull_line_outcome(2, 5), PullLineOutcome::Full);
     }
 

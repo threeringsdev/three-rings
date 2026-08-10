@@ -31,12 +31,29 @@ use shared::{
     Teardown, TeardownReceipt, UndoReceipt,
 };
 
+/// The pull request/response DTOs live beside the UI that renders them
+/// ([`crate::my::needs`], unconditionally compiled — see that module's own
+/// doc), not in `shared`, because they already crossed the wire as a Leptos
+/// server-fn's argument/return types before this trait method existed —
+/// [`crate::my::move_selection::Skipped`] is placed the same way, for the
+/// same reason, for the batch-move adapter. That precedent is for the
+/// **Leptos server-fn wire** only, though: every DTO the *native* `/api`
+/// routes carried before this task lived in `shared`, so `PullItem`/
+/// `PullOutcome` are the first `app::my` types to also cross that second,
+/// native-client wire (`native.rs`/`routes.rs`, added by this task) — a new
+/// precedent, not an extension of an existing one for that surface. The
+/// hosted route and native client import them from here rather than
+/// duplicating or relocating them.
+use crate::my::needs::{PullItem, PullOutcome};
+
 #[cfg(feature = "hosted")]
 pub mod delete_plan;
 #[cfg(feature = "hosted")]
 pub mod hosted;
 #[cfg(feature = "native")]
 pub mod native;
+#[cfg(feature = "hosted")]
+pub mod pull_plan;
 #[cfg(feature = "hosted")]
 pub mod routes;
 
@@ -106,6 +123,10 @@ pub mod paths {
         pub const VIEW: &str = "view";
         pub const TEARDOWN: &str = "teardown";
         pub const NEEDS: &str = "needs";
+        /// Pull this collection's needs from the caller's other collections —
+        /// one transaction, plan and write together (specs/collection-api.md
+        /// → "Pull / Pull-all"; P6-120).
+        pub const PULL: &str = "pull";
         /// GET the tags in scope for a collection (system + account + this deck's).
         pub const TAGS: &str = "tags";
         /// GET a deck's commanders + derived color identity.
@@ -469,6 +490,33 @@ pub trait CollectionStore {
     /// A collection's needs: cards it desires beyond what it holds, each split
     /// into owned-elsewhere (with locations) and short-to-buy.
     async fn needs(&self, collection_id: Id) -> ApiResult<NeedsView>;
+
+    /// **Pull** — fill `to_collection_id`'s needs from the caller's other
+    /// collections (specs/app-ui.md → `/my/collections/:id/needs`; P6-120).
+    ///
+    /// One transaction: re-derives the destination's gap from a fresh
+    /// `needs`-shaped read, locks every source stack the plan might draw
+    /// from (`FOR UPDATE`, in a canonical order this method controls rather
+    /// than the caller's — see [`crate::backend::pull_plan::oracle_ids_of`]),
+    /// plans against exactly what is locked, then writes. Before this method
+    /// existed, the same composition ran as three independently-committed
+    /// calls (`needs` → `holdings_of_oracle` → `move_batch`) from the
+    /// `pull_needs` server fn, leaving a window where the write could act on
+    /// a plan the database had already moved past — the same check-then-act
+    /// shape [`Self::move_holding`] closed for the single-row path, now
+    /// closed here for the batch one.
+    ///
+    /// `items` carries **no quantity** — same rule as
+    /// [`crate::my::needs`]'s own doc: a pull's count is the gap, a fact
+    /// about the database at write time, never the caller's. Each item that
+    /// cannot be honored comes back in [`crate::my::needs::PullOutcome::skipped`]
+    /// with why, never silently dropped; a partial pull reports the copies it
+    /// actually moved rather than the copies it was asked for.
+    async fn pull_needs(
+        &self,
+        to_collection_id: Id,
+        items: Vec<PullItem>,
+    ) -> ApiResult<PullOutcome>;
 
     /// The global shopping list: cards short across the whole collection
     /// (total desired − owned > 0), with which collections want them.

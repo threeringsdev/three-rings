@@ -1436,24 +1436,19 @@ pub async fn shopping_list_view() -> Result<shared::ShoppingList, ServerFnError<
 /// (specs/app-ui.md → `/my/collections/:id/needs`: "a one-tap Pull (pre-filled
 /// move)"; "Pull all generates a pick list… checking records the move").
 ///
-/// **No new backend read was invented for this.** The pick list is composed
-/// here, out of two reads that already exist: `needs` supplies each row's gap
-/// and the `locations` holding fillable copies, and `holdings_of_oracle`
-/// supplies the ungrouped stacks a write is addressed at. The write is
-/// `move_batch` — one transaction, one ledger row per stack drawn from, so the
-/// caller's single Undo (`undo_selection_move`) covers the whole pull.
-///
-/// (The spec line names `move_cards` + `suggested_destinations` as the
-/// composition. `suggested_destinations` ranks *destinations* for a card, and on
-/// this page the destination is the page itself — so the read that was actually
-/// needed is the source-side one, `holdings_of_oracle`. Recorded rather than
-/// bent to fit.)
+/// **Thin wrapper (P6-120).** The read (fresh gap), the plan (which stacks to
+/// draw from) and the write (the ledger moves) used to be three independently
+/// committed calls composed here — `needs`, then `holdings_of_oracle`, then
+/// `move_batch` — which left a window where the write could act on a plan the
+/// database had already moved past (specs/collection-api.md Findings). That
+/// composition now lives in [`crate::backend::CollectionStore::pull_needs`],
+/// one transaction end to end; this function only forwards to it.
 ///
 /// **Quantity is not the caller's**, the same rule [`move_selection`] follows
 /// and for a sharper reason: a pull's count is the *gap*, which is a fact about
 /// the database at write time, not a number a page rendered some minutes ago.
-/// So the server re-reads `needs`, re-runs the very allocation function the
-/// checklist was rendered from (`my::needs::allocate`), and takes from the
+/// The trait method re-reads `needs` and re-runs the very allocation function
+/// the checklist was rendered from (`my::needs::allocate`), taking from the
 /// client only *which* (card, source) lines to apply. A line whose need has
 /// since closed is refused by name rather than moved.
 ///
@@ -1471,126 +1466,17 @@ pub async fn pull_needs(
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
-        use crate::my::move_selection::{SkipReason, Skipped};
-        use crate::my::needs::{allocate, dedupe, gap_of, plan_pull, PullOutcome, Pulled};
-        use std::collections::hash_map::Entry;
-        use std::collections::HashMap;
 
         if items.len() > SELECTION_MOVE_MAX {
             return Err(ServerFnError::ServerError(format!(
                 "a pull can carry at most {SELECTION_MOVE_MAX} lines"
             )));
         }
-        let backend = collection_backend().await?;
-
-        // The plan, re-derived: the same allocation the checklist rendered, but
-        // over *this* transaction's reading of the gap.
-        let needs = backend.needs(to_collection_id).await.map_err(api_err)?;
-        let mut planned: HashMap<(shared::Id, shared::Id), i32> = HashMap::new();
-        for row in &needs.rows {
-            for (from, copies) in allocate(gap_of(row), &row.locations) {
-                planned.insert((row.oracle_id, from), copies);
-            }
-        }
-
-        let mut pulled: Vec<Pulled> = Vec::new();
-        let mut skipped: Vec<Skipped> = Vec::new();
-        let mut lines: Vec<shared::MoveItem> = Vec::new();
-        // One holdings read per distinct card: a pull of the same card from two
-        // collections is two lines off one read.
-        let mut owned: HashMap<shared::Id, Vec<shared::HoldingLine>> = HashMap::new();
-        // One line per (card, source). `planned` is a fixed per-pair number and
-        // `owned` is not consumed between lines, so a repeated item would plan
-        // the whole gap twice and move it twice — a quantity supplied by
-        // repetition through an API that takes none. The cap above is checked
-        // against what the caller *sent*, so duplicates cannot buy headroom.
-        for item in dedupe(items) {
-            let token = item.token();
-            if item.from_collection_id == to_collection_id {
-                skipped.push(Skipped {
-                    token,
-                    reason: SkipReason::AlreadyThere,
-                });
-                continue;
-            }
-            let Some(&want) = planned.get(&(item.oracle_id, item.from_collection_id)) else {
-                skipped.push(Skipped {
-                    token,
-                    reason: SkipReason::NoLongerNeeded,
-                });
-                continue;
-            };
-            let holdings = match owned.entry(item.oracle_id) {
-                Entry::Occupied(seen) => seen.into_mut(),
-                Entry::Vacant(slot) => {
-                    // Session-scoped and RLS-filtered — `holdings_of_oracle`
-                    // can only return the caller's own rows, which is what
-                    // makes trusting the client's oracle id safe here (a wrong
-                    // one plans nothing and is refused).
-                    let rows = backend
-                        .holdings_of_oracle(item.oracle_id)
-                        .await
-                        .map_err(api_err)?;
-                    slot.insert(rows)
-                }
-            };
-            let plan = plan_pull(holdings, item.from_collection_id, want);
-            if plan.is_empty() {
-                skipped.push(Skipped {
-                    token,
-                    reason: SkipReason::NoCopies,
-                });
-                continue;
-            }
-            let copies = plan.iter().map(|l| l.quantity).sum();
-            for line in plan {
-                lines.push(shared::MoveItem {
-                    from_collection_id: Some(line.source.from),
-                    printing_id: line.source.printing_id,
-                    // The grain and board of the stack actually found, never
-                    // restated defaults: a `MoveItem` at the default grain
-                    // beside a foil-only stack aims at copies that do not exist
-                    // and rolls the whole batch back.
-                    finish: line.source.finish,
-                    condition: line.source.condition,
-                    language: line.source.language,
-                    from_board: line.source.board,
-                    // Copies pulled *into* a collection are ordinary copies
-                    // there; landing them on a board is card-tagging's relabel,
-                    // not this move (specs/collection-api.md → moves).
-                    to_board: shared::Board::Main,
-                    quantity: line.quantity,
-                });
-            }
-            pulled.push(Pulled { token, copies });
-        }
-
-        // Nothing to write is not a "successful" move of nothing.
-        let move_ids = if lines.is_empty() {
-            Vec::new()
-        } else {
-            match backend
-                .move_batch(shared::BatchMove {
-                    to_collection_id: Some(to_collection_id),
-                    items: lines,
-                })
-                .await
-            {
-                Ok(receipts) => receipts.into_iter().map(|r| r.move_id).collect(),
-                // One transaction, so this moved nothing at all. The batch
-                // failure is tagged with an item index, but a pull's items are
-                // stacks rather than cards — the index names a `holdings` row
-                // the user never saw, so it is dropped rather than mis-attached
-                // to a card name.
-                Err(e) => return Err(api_err(e)),
-            }
-        };
-
-        Ok(PullOutcome {
-            move_ids,
-            pulled,
-            skipped,
-        })
+        collection_backend()
+            .await?
+            .pull_needs(to_collection_id, items)
+            .await
+            .map_err(api_err)
     }
     #[cfg(not(feature = "ssr"))]
     {

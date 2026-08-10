@@ -23,7 +23,10 @@ use super::delete_plan::{
     plan_delete, plan_undo, reparent_is_safe, restore_parent, validate_receipt, DeleteSnapshot,
     UndoStep,
 };
+use super::pull_plan;
 use super::{CatalogStore, CollectionStore};
+use crate::my::move_selection::MoveSource;
+use crate::my::needs::{PullItem, PullOutcome};
 
 /// A per-request handle to the hosted database. Cheap to construct — it borrows
 /// the process-wide pool. `session` is the authenticated user id for
@@ -1934,89 +1937,152 @@ impl CollectionStore for HostedBackend {
     async fn needs(&self, collection_id: Id) -> ApiResult<NeedsView> {
         let mut tx = self.scoped_tx().await?;
         require_owned_collection(&mut tx, collection_id).await?;
-        // `present_here` / `elsewhere` are collection-scoped aggregations in
-        // their own right, not re-derivations of `owned_by_card`, so the soft
-        // delete filter has to land here too (specs/collection-deletion.md is
-        // explicit about this pair). `d`/`ph` are scoped to `$1`, which
-        // `require_owned_collection` just proved live; `pe` spans every *other*
-        // collection and so carries the filter.
-        let rows: Vec<NeedSql> = sqlx::query_as(&format!(
-            "WITH d AS ( \
-               SELECT oracle_id, sum(quantity)::int AS desired \
-               FROM desires WHERE collection_id = $1 GROUP BY oracle_id \
-             ), \
-             ph AS ( \
-               SELECT p.oracle_id, sum(h.quantity)::int AS present_here \
-               FROM holdings h JOIN printings p ON p.id = h.printing_id \
-               WHERE h.collection_id = $1 GROUP BY p.oracle_id \
-             ), \
-             pe AS ( \
-               SELECT p.oracle_id, sum(h.quantity)::int AS elsewhere \
-               FROM holdings h JOIN printings p ON p.id = h.printing_id \
-               WHERE h.collection_id <> $1 AND {live} GROUP BY p.oracle_id \
-             ) \
-             SELECT d.oracle_id, c.name, d.desired, COALESCE(ph.present_here, 0) AS present_here, \
-                    COALESCE(pe.elsewhere, 0) AS elsewhere \
-             FROM d JOIN cards c ON c.oracle_id = d.oracle_id \
-             LEFT JOIN ph ON ph.oracle_id = d.oracle_id \
-             LEFT JOIN pe ON pe.oracle_id = d.oracle_id \
-             WHERE d.desired > COALESCE(ph.present_here, 0) \
-             ORDER BY c.name",
-            live = in_live_collection("h.collection_id"),
-        ))
-        .bind(collection_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(upstream)?;
-
-        // Per-location listing for the needed cards, in the user's OTHER
-        // **live** collections — one query, grouped in Rust. The rows here are
-        // "pull it from here" offers, so a hidden collection must not appear.
-        let oracles: Vec<Uuid> = rows.iter().map(|r| r.oracle_id).collect();
-        let locs: Vec<LocationSql> = sqlx::query_as(
-            "SELECT p.oracle_id, h.collection_id, c.name AS collection_name, \
-                    sum(h.quantity)::int AS quantity \
-             FROM holdings h JOIN printings p ON p.id = h.printing_id \
-             JOIN collections c ON c.id = h.collection_id \
-             WHERE h.collection_id <> $1 AND p.oracle_id = ANY($2) \
-               AND c.deleted_at IS NULL \
-             GROUP BY p.oracle_id, h.collection_id, c.name \
-             ORDER BY quantity DESC, c.name",
-        )
-        .bind(collection_id)
-        .bind(&oracles)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(upstream)?;
+        let rows = read_needs_rows(&mut tx, collection_id).await?;
         tx.commit().await.map_err(upstream)?;
-
-        let need_rows = rows
-            .into_iter()
-            .map(|r| {
-                let gap = r.desired - r.present_here;
-                let owned_elsewhere = r.elsewhere.min(gap);
-                NeedRow {
-                    locations: locs
-                        .iter()
-                        .filter(|l| l.oracle_id == r.oracle_id)
-                        .map(|l| CardLocation {
-                            collection_id: l.collection_id,
-                            collection_name: l.collection_name.clone(),
-                            quantity: l.quantity,
-                        })
-                        .collect(),
-                    oracle_id: r.oracle_id,
-                    name: r.name,
-                    desired: r.desired,
-                    present_here: r.present_here,
-                    owned_elsewhere,
-                    short: gap - owned_elsewhere,
-                }
-            })
-            .collect();
         Ok(NeedsView {
             collection_id,
-            rows: need_rows,
+            rows,
+        })
+    }
+
+    /// **Pull** — see the trait doc for what closed. Read → plan → write in
+    /// one transaction, following [`Self::delete_collection`]'s own precedent:
+    /// [`pull_plan::plan_pull_needs`] is pure and does all the deciding, this
+    /// method only gathers the snapshot it needs (locked) and executes what
+    /// comes back.
+    async fn pull_needs(
+        &self,
+        to_collection_id: Id,
+        items: Vec<PullItem>,
+    ) -> ApiResult<PullOutcome> {
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        require_owned_collection(&mut tx, to_collection_id).await?;
+
+        // 1. Lock every source stack the plan might draw from **first**, one
+        //    oracle at a time in **canonical (sorted) order** — never the
+        //    caller's item order. Caller-order locking is exactly the bug
+        //    P6-114 found (and deliberately left unfixed) in `move_batch`:
+        //    two concurrent calls whose item lists overlap but arrive in
+        //    opposite order can each hold one row the other wants. Sorting
+        //    costs nothing extra here — this transaction enumerates the ids
+        //    anyway — so it is worth doing for this one operation without
+        //    building the general cross-operation ordering P6-114 itself
+        //    declined to build.
+        let mut holdings: HashMap<Uuid, Vec<HoldingLine>> = HashMap::new();
+        for oracle_id in pull_plan::oracle_ids_of(&items) {
+            // Mirrors `holdings_of_oracle`'s own query (full breadth across
+            // every live collection — `plan_pull` filters to the named
+            // source), with `FOR UPDATE OF h` added so only the `holdings`
+            // row itself is locked, never the joined `printings` catalog row.
+            // Columns are qualified (`h.…`) rather than reusing `HOLDING_COLS`
+            // — that constant's bare `id` is ambiguous once `printings` (which
+            // also has an `id`) is joined in.
+            //
+            // **This bulk-locks every live holdings row of the oracle**, not
+            // just the specific `from_collection_id` an item names — wider
+            // than the row this transaction will actually decrement (see the
+            // Findings entry this task added to specs/collection-api.md for
+            // the tradeoff: it is what makes two overlapping pulls sharing an
+            // oracle id serialize against each other below, at the cost of a
+            // wider blocking surface against unrelated `move_batch` calls
+            // touching the same card).
+            let rows: Vec<HoldingRow> = sqlx::query_as(&format!(
+                "SELECT h.id, h.collection_id, h.printing_id, h.finish::text AS finish, \
+                        h.condition::text AS condition, h.language, h.board::text AS board, \
+                        h.quantity \
+                 FROM holdings h JOIN printings p ON p.id = h.printing_id \
+                 WHERE p.oracle_id = $1 AND {live} \
+                 ORDER BY h.collection_id, h.printing_id, h.board, h.finish, h.condition, h.language \
+                 FOR UPDATE OF h",
+                live = in_live_collection("h.collection_id"),
+            ))
+            .bind(oracle_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(upstream)?;
+            let lines: ApiResult<Vec<HoldingLine>> =
+                rows.into_iter().map(HoldingRow::into_line).collect();
+            holdings.insert(oracle_id, lines?);
+        }
+
+        // 2. **Only now** read the destination's fresh needs — the exact
+        //    read `needs()` makes, in this same transaction instead of a
+        //    separate one, and deliberately run *after* every lock above
+        //    rather than before it. Two overlapping pulls that share an
+        //    oracle id contend for the same rows locked in step 1 (that
+        //    query is bulk over the whole oracle, not filtered to one
+        //    source — see the comment above), so whichever pull is second
+        //    blocks there until the first commits; only then does *this*
+        //    read run, and it sees the first pull's already-updated
+        //    `present_here`/gap. Reading needs before the lock loop (the
+        //    first draft of this method) let two overlapping pulls each plan
+        //    off the *same* stale gap and overshoot `desired` once both had
+        //    committed — this ordering is what actually closes that, not
+        //    merely "one transaction."
+        let needs = read_needs_rows(&mut tx, to_collection_id).await?;
+
+        // 3. Plan — pure, over the needs read above and exactly what step 1
+        //    locked.
+        let snapshot = pull_plan::PullSnapshot { needs, holdings };
+        let plan = pull_plan::plan_pull_needs(to_collection_id, &snapshot, items);
+
+        // 4. Write every planned line — the same take/add/append triple
+        //    `delete_collection`/`teardown` use, so a pull's moves are
+        //    ordinary ledger rows. Each source row is already locked by step
+        //    1, so `holding_take`'s own `FOR UPDATE` re-acquires instantly.
+        //    **Not routed through `apply_move`**, unlike every other move
+        //    site in this file — so it does not inherit that function's
+        //    `quantity > 0`, `from != to` and ownership guards. All three are
+        //    provably unreachable via this path today (`plan_pull` never
+        //    emits a non-positive quantity; the `AlreadyThere` skip in
+        //    `plan_pull_needs` already refuses `from == to_collection_id`
+        //    before a write is ever planned; `from` and `to_collection_id`
+        //    are both RLS-scoped/`require_owned_collection`-checked reads),
+        //    but a guard added to `apply_move` in the future will not
+        //    automatically cover this loop too.
+        let mut move_ids: Vec<Id> = Vec::with_capacity(plan.writes.len());
+        for (i, write) in plan.writes.iter().enumerate() {
+            let grain = Grain::from(&write.source);
+            holding_take(
+                &mut tx,
+                write.source.from,
+                &grain,
+                write.source.board,
+                write.quantity,
+            )
+            .await
+            .map_err(|e| at_item(i, e))?;
+            holding_add(
+                &mut tx,
+                user_id,
+                to_collection_id,
+                &grain,
+                Board::Main,
+                write.quantity,
+            )
+            .await
+            .map_err(|e| at_item(i, e))?;
+            move_ids.push(
+                append_move(
+                    &mut tx,
+                    user_id,
+                    Some(write.source.from),
+                    Some(to_collection_id),
+                    &grain,
+                    (write.source.board, Board::Main),
+                    write.quantity,
+                )
+                .await
+                .map_err(|e| at_item(i, e))?,
+            );
+        }
+
+        tx.commit().await.map_err(upstream)?;
+        Ok(PullOutcome {
+            move_ids,
+            pulled: plan.pulled,
+            skipped: plan.skipped,
         })
     }
 
@@ -2506,6 +2572,19 @@ impl From<&MoveRequest> for Grain {
     }
 }
 
+/// The grain a [`pull_plan::PullWrite`]'s source stack was found at — the
+/// exact stack [`pull_plan::plan_pull_needs`] chose, never a restated default.
+impl From<&MoveSource> for Grain {
+    fn from(s: &MoveSource) -> Self {
+        Grain {
+            printing_id: s.printing_id,
+            finish: s.finish.to_pg().to_string(),
+            condition: s.condition.to_pg().to_string(),
+            language: s.language.clone(),
+        }
+    }
+}
+
 /// Perform one move within an open transaction: validate, decrement the source
 /// holding on `from_board`, upsert the destination on `to_board`, append the
 /// ledger row. Returns the new move id.
@@ -2836,6 +2915,10 @@ fn board_of(label: &str) -> ApiResult<Board> {
 /// Attribute a batch-move failure to the item at `index`, preserving the
 /// variant so the status code is still the right one — only the message grows
 /// the position the caller needs to name a card (`shared::batch_item_error`).
+/// Used by [`HostedBackend::move_batch`] and, since P6-120,
+/// [`HostedBackend::pull_needs`]'s write loop (`index` there is the position
+/// in [`pull_plan::PullPlan::writes`], the same numbering the pre-P6-120
+/// composition's `move_batch` call already tagged errors by).
 fn at_item(index: usize, e: ApiError) -> ApiError {
     use ApiError::*;
     let tag = |m: String| shared::batch_item_error(index, &m);
@@ -3586,6 +3669,98 @@ async fn ensure_inbox(tx: &mut Transaction<'static, Postgres>, user_id: Uuid) ->
     .await
     .map_err(upstream)?;
     Ok(())
+}
+
+/// A collection's needs (specs/collection-api.md → `NeedsView`): cards it
+/// desires beyond what it holds, split into owned-elsewhere (with per-location
+/// listings) and short-to-buy. Factored out of [`HostedBackend::needs`] so
+/// [`HostedBackend::pull_needs`] can re-derive the identical read inside its
+/// own write transaction (P6-120) instead of a separate one — the caller owns
+/// `require_owned_collection` and the commit, this only reads.
+///
+/// `present_here` / `elsewhere` are collection-scoped aggregations in their
+/// own right, not re-derivations of `owned_by_card`, so the soft delete filter
+/// has to land here too (specs/collection-deletion.md is explicit about this
+/// pair). `d`/`ph` are scoped to `$1`, which the caller's own
+/// `require_owned_collection` has already proved live; `pe` spans every
+/// *other* collection and so carries the filter.
+async fn read_needs_rows(
+    tx: &mut Transaction<'static, Postgres>,
+    collection_id: Id,
+) -> ApiResult<Vec<NeedRow>> {
+    let rows: Vec<NeedSql> = sqlx::query_as(&format!(
+        "WITH d AS ( \
+           SELECT oracle_id, sum(quantity)::int AS desired \
+           FROM desires WHERE collection_id = $1 GROUP BY oracle_id \
+         ), \
+         ph AS ( \
+           SELECT p.oracle_id, sum(h.quantity)::int AS present_here \
+           FROM holdings h JOIN printings p ON p.id = h.printing_id \
+           WHERE h.collection_id = $1 GROUP BY p.oracle_id \
+         ), \
+         pe AS ( \
+           SELECT p.oracle_id, sum(h.quantity)::int AS elsewhere \
+           FROM holdings h JOIN printings p ON p.id = h.printing_id \
+           WHERE h.collection_id <> $1 AND {live} GROUP BY p.oracle_id \
+         ) \
+         SELECT d.oracle_id, c.name, d.desired, COALESCE(ph.present_here, 0) AS present_here, \
+                COALESCE(pe.elsewhere, 0) AS elsewhere \
+         FROM d JOIN cards c ON c.oracle_id = d.oracle_id \
+         LEFT JOIN ph ON ph.oracle_id = d.oracle_id \
+         LEFT JOIN pe ON pe.oracle_id = d.oracle_id \
+         WHERE d.desired > COALESCE(ph.present_here, 0) \
+         ORDER BY c.name",
+        live = in_live_collection("h.collection_id"),
+    ))
+    .bind(collection_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(upstream)?;
+
+    // Per-location listing for the needed cards, in the user's OTHER **live**
+    // collections — one query, grouped in Rust. The rows here are "pull it
+    // from here" offers, so a hidden collection must not appear.
+    let oracles: Vec<Uuid> = rows.iter().map(|r| r.oracle_id).collect();
+    let locs: Vec<LocationSql> = sqlx::query_as(
+        "SELECT p.oracle_id, h.collection_id, c.name AS collection_name, \
+                sum(h.quantity)::int AS quantity \
+         FROM holdings h JOIN printings p ON p.id = h.printing_id \
+         JOIN collections c ON c.id = h.collection_id \
+         WHERE h.collection_id <> $1 AND p.oracle_id = ANY($2) \
+           AND c.deleted_at IS NULL \
+         GROUP BY p.oracle_id, h.collection_id, c.name \
+         ORDER BY quantity DESC, c.name",
+    )
+    .bind(collection_id)
+    .bind(&oracles)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(upstream)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let gap = r.desired - r.present_here;
+            let owned_elsewhere = r.elsewhere.min(gap);
+            NeedRow {
+                locations: locs
+                    .iter()
+                    .filter(|l| l.oracle_id == r.oracle_id)
+                    .map(|l| CardLocation {
+                        collection_id: l.collection_id,
+                        collection_name: l.collection_name.clone(),
+                        quantity: l.quantity,
+                    })
+                    .collect(),
+                oracle_id: r.oracle_id,
+                name: r.name,
+                desired: r.desired,
+                present_here: r.present_here,
+                owned_elsewhere,
+                short: gap - owned_elsewhere,
+            }
+        })
+        .collect())
 }
 
 /// Reject an operation targeting a collection the caller doesn't own **or that
