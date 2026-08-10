@@ -47,7 +47,15 @@ pub struct DeleteSnapshot {
     /// applies: a hidden previous source is skipped over in favour of the
     /// next-most-recent live one (that is `previous_location`'s `WHERE`, ahead
     /// of its `ORDER BY`), so `None` here means "no live source anywhere in this
-    /// stack's history" — the only case that falls back to the Inbox.
+    /// stack's history" — the only case that falls back to the Inbox. P6-113
+    /// extended that same skip to an **undone** move: a move into this
+    /// collection can itself later be reversed — not this collection's own
+    /// delete (its relocations move copies *out*, so they are never a
+    /// candidate here), but **another** collection's delete having landed
+    /// copies here and since been undone (P6-190). That reversed move is
+    /// skipped exactly like a hidden source rather than treated as history.
+    /// So `None` here really means "no live, un-undone source anywhere" —
+    /// already-live-and-not-undone-filtered by the time it reaches the planner.
     pub holdings: Vec<Option<Id>>,
     /// Whether any desire rows are attached (they move or stay as one group —
     /// desires have no ledger and no per-row operation).
