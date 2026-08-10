@@ -17,6 +17,11 @@
 //   (see below and the `my::needs` module doc). The test pins today's decision
 //   *on purpose*: if someone makes needs board-aware, this test must fail and
 //   the decision must be re-taken, rather than the page quietly changing shape.
+// - **a partial pull stays honest (P6-119).** A pick-list line that finds
+//   fewer copies at its source than it asked for — the pick list is a
+//   snapshot, so the source can drain between generating it and ticking the
+//   line — is not struck through as fully pulled. It stays in the walk
+//   carrying the residual, and the toast names the shortfall.
 //
 // **On the board case.** A deck holding a card on `main` and wanting it on
 // `side` renders two rows on the collection page — a mainboard row with copies
@@ -52,6 +57,7 @@ const PICK_ROW = '[data-testid="pick-row"]';
 type Summary = { id: string; name: string };
 type Card = { oracle_id: string; printing_id: string | null; name: string };
 type Holding = {
+  id: string;
   collection_id: string;
   finish: string;
   board: string;
@@ -116,6 +122,23 @@ async function addWant(
   expect(res.status(), "add want").toBe(200);
 }
 
+/// Set one holding's absolute quantity — the raw REST route the count stepper
+/// uses (`app/src/backend/routes.rs`), reached directly here to drain a source
+/// *out of band* of the page under test: the pick list is a snapshot (module
+/// doc in `app/src/my/needs.rs`), so a write through this route, not through
+/// `page`, is what models "another tab" or "the stepper" changing the source
+/// between generating the list and ticking one of its lines.
+async function setHoldingQuantity(
+  request: APIRequestContext,
+  holdingId: string,
+  quantity: number,
+) {
+  const res = await request.post(`/api/holdings/${holdingId}/quantity`, {
+    data: { quantity },
+  });
+  expect(res.status(), "set holding quantity").toBe(200);
+}
+
 /// Every copy of a card the signed-in user holds, ungrouped.
 async function holdingsOf(
   request: APIRequestContext,
@@ -157,9 +180,22 @@ async function needsOf(
 }
 
 /// Catalog cards the signed-in user owns nowhere, with a real printing.
-/// `q=z` rather than a vowel: the seed picked its own cards from name-ordered
-/// searches, so the alphabetically-first slice of the catalog is exactly the
-/// slice the dev user already owns.
+///
+/// **Was `q=z&limit=60`, switched to `q=n&limit=200` (P6-119), file-scoped —
+/// the same remedy P6-118 applied to `removal.spec.ts`.** (The old "`q=z`
+/// rather than a vowel, since the seed's own name-ordered picks own the
+/// alphabetically-first slice" rationale was specific to `z` and does not
+/// carry over to explain `n` — dropped rather than left stale.) Measured
+/// live: `q=z&limit=60` is now fully exhausted (0 free — a limit bump alone
+/// cannot grow a query's own universe, which P6-118 already found tops out
+/// at 132 total for `q=z`), while `q=n&limit=200` measured 112 free. This
+/// file's own new partial-pull test (below) is what finally tripped it. This
+/// now draws from the **same** `q=n&limit=200` pool `removal.spec.ts` already
+/// uses (P6-118), so the two files are no longer isolated from each other's
+/// draw-down either — the systemic fix (one query with real headroom shared
+/// by every file, instead of each file drifting to its own patched term,
+/// still including `batch-move.spec.ts` and `command-palette.spec.ts`, both
+/// still on the exhausted `q=z`) is filed as follow-up, not done here.
 async function unownedCards(
   request: APIRequestContext,
   n: number,
@@ -169,7 +205,7 @@ async function unownedCards(
   expect(mine.status(), "all cards").toBe(200);
   const { cards: owned } = (await mine.json()) as { cards: { card: Card }[] };
   const taken = new Set(owned.map((r) => r.card.oracle_id));
-  const res = await request.get("/api/catalog/search?q=z&limit=60");
+  const res = await request.get("/api/catalog/search?q=n&limit=200");
   expect(res.status(), "catalog search").toBe(200);
   const { cards } = (await res.json()) as { cards: Card[] };
   const free = cards
@@ -366,6 +402,98 @@ test("@fast Pull all groups the walk by source, and each tick records its move",
   } finally {
     await deleteCollection(request, big.id);
     await deleteCollection(request, small.id);
+    await deleteCollection(request, deck.id);
+  }
+});
+
+// ------------------------------------------------- P6-119: partial pulls ---
+
+test("@fast a line that finds less than it asked for stays in the walk with its residual", async ({
+  page,
+  request,
+}) => {
+  // The pick list is generated once and walked over several separate
+  // requests (one `pull_needs` per tick), so a line's *displayed* ask can go
+  // stale between generating it and ticking it — reachable in one session,
+  // no second browser needed, because anything that touches the source in
+  // between does it (another tab, the collection view's own count stepper).
+  // Modeled here with a raw write through the holdings-quantity route rather
+  // than a second page, for determinism: the point under test is what the
+  // pick-list line does with the mismatch, not how the source came to drain.
+  const [card] = await unownedCards(request, 1);
+  const source = await createCollection(request, "binder", "partial-src");
+  const deck = await createCollection(request, "deck", "partial-dst");
+  try {
+    await addHave(request, source.id, card.printing_id as string, 4);
+    await addWant(request, deck.id, card.oracle_id, 4);
+
+    await page.goto(`/my/collections/${deck.id}/needs`);
+    await hydrated(page);
+    await page.locator('[data-testid="pull-all"]').click();
+
+    const group = page.locator(PICK_LIST).locator(PICK_GROUP, {
+      hasText: source.name,
+    });
+    const row = group.locator(PICK_ROW);
+    // The snapshot: the whole gap is fillable from this one source, so the
+    // line asks for all 4.
+    await expect(group.locator('[data-testid="pick-label"]')).toHaveText(
+      `4 × ${card.name}`,
+    );
+
+    // Drain the source to 2, out of band — the mounted pick list does not
+    // see this; it is a snapshot (module doc), not a re-derivation.
+    const before = await holdingsOf(request, card.oracle_id);
+    const sourceHolding = before.find((h) => h.collection_id === source.id);
+    expect(sourceHolding, "the source must hold the card to drain it").toBeTruthy();
+    await setHoldingQuantity(
+      request,
+      (sourceHolding as Holding).id,
+      2,
+    );
+
+    await row.locator('[data-name="Checkbox"]').click();
+
+    // The honest outcome, read off the toast: 2 of the 4 asked moved, not 4.
+    // Cause-neutral wording ("still owed", not "not found at the source") —
+    // this client cannot know *why* the residual remains, only how much.
+    await expect(page.locator(TOAST)).toContainText(
+      `Pulled 2 of 4 ${card.name} — 2 still owed`,
+    );
+    // Not struck through — this line is not done, it is owed 2 more.
+    await expect(row).toHaveAttribute("data-state", "todo");
+    await expect(row.locator('[data-testid="pick-label"]')).toHaveText(
+      `2 × ${card.name}`,
+    );
+    // The checkbox itself must not read as checked either — a struck-through
+    // label beside an unchecked box, or vice versa, would be its own lie.
+    await expect(row.locator('[data-name="Checkbox"]')).toHaveAttribute(
+      "data-state",
+      "unchecked",
+    );
+
+    // Read back through the API: exactly 2 moved, none left behind unmoved
+    // and unaccounted for at the drained source.
+    await expect(async () => {
+      expect(await copiesIn(request, card.oracle_id, source.id)).toBe(0);
+      expect(await copiesIn(request, card.oracle_id, deck.id)).toBe(2);
+    }).toPass({ timeout: 5000 });
+
+    // The line is still live: ticking it again asks the server fresh, and
+    // the now-empty source has nothing left to give — refused by name, not
+    // silently re-struck. Scoped to the refusal's own wording, not just
+    // `card.name`: the *first* toast's "... still owed" message is still
+    // visible for its own 5s window and also contains the card's name, so an
+    // unscoped match could pass off a stale read of tick one rather than
+    // proving tick two.
+    await row.locator('[data-name="Checkbox"]').click();
+    await expect(
+      page.locator(TOAST, { hasText: "no longer missing here" }),
+    ).toBeVisible();
+    await expect(row).toHaveAttribute("data-state", "todo");
+    expect(await copiesIn(request, card.oracle_id, deck.id)).toBe(2);
+  } finally {
+    await deleteCollection(request, source.id);
     await deleteCollection(request, deck.id);
   }
 });

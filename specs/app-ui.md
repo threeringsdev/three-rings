@@ -228,6 +228,188 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Partial pulls stay in the walk with their residual (P6-119, 2026-08-10)
+
+`app/src/my/needs.rs:~793` — `PickRowView::toggle`'s decision on a tick was
+`let moved = !outcome.pulled.is_empty();`, a boolean that could not
+distinguish "moved everything this line asked for" from "moved something".
+Since [`Pulled`]'s doc already promises the honest count ("reported rather
+than inferred"), any nonzero `pulled` entry struck the line through and
+folded its token into `done` — a line asking 4 whose source had only 2 left
+was marked fully pulled, and the residual 2 vanished from the walk with no
+record it was ever owed.
+
+**Root cause, traced rather than assumed.** The pick list is a snapshot
+(module doc): each line's displayed count is `allocate(gap, locations)` at
+the moment "Pull all…" was clicked. Between then and a given line's own tick,
+the server re-derives `want` fresh from a live `needs()` read (`pull_needs`'s
+own doc: quantity is never the caller's) — but that fresh `want` can itself
+be *less* than the client's stale snapshot if the source's real stock
+dropped in between (another tab, the collection view's own count stepper, or
+simply an earlier line in the same walk touching the same card by a
+different path). The server then moves exactly what it can, honestly, and
+reports it — the defect was never a missing wire fact, it was the client
+inferring "the whole ask" from "not empty".
+
+**Determined `outcome.pulled` already carries what it needed to: no DTO
+change.** `Pulled { token, copies }`'s `copies` is the real moved count,
+server-verified end to end by the existing `POST /api/pull_needs`
+duplicate-line check (Findings, "Needs view + pick list…"). What was missing
+was not on the wire, it was a decision function on the client — extracted as
+[`pull_line_outcome(asked, moved) -> PullLineOutcome`] (`Full` /
+`Partial { residual }` / `Zero`), a pure, unit-tested classification so the
+three cases are a closed match rather than an inferred boolean and an
+implicit else. `asked` is deliberately the caller's own already-known
+snapshot count, not a second server round trip — re-deriving it live is
+exactly the "re-derive the source" step the floor below declines for size S.
+
+**Presentation shipped: the stated floor, not the ideal.** On `Partial`, the
+line stays unstruck, its own `RwSignal<i32>` count (`remaining`, new —
+previously `row.copies` was rendered as a bare, non-reactive value) updates
+to the residual, and the shared `report()` toast states the shortfall by
+name: `"Pulled {moved} of {asked} {label} — {residual} still owed"`. Reworded
+from an earlier `"… not found at the source"` (review): that phrasing
+asserted a *cause* the client cannot know — a `NoLongerNeeded` skip beside
+this same toast means the *gap* closed, not the source, and that skip
+already states its own reason — and named a *single* source, which is wrong
+on `ElsewhereRow`'s path, whose `asked` spans every source its allocation
+named. The shipped wording is cause-neutral and number-only. What was **not**
+attempted: re-deriving *where else* the residual
+might now be fillable from (a different, non-dry source in the same
+collection tree) — that needs a fresh `needs()` read and a new pick-list
+line, which is a materially bigger change than a size-S fix carries. The
+line simply keeps naming its own (now-partially-dry) source rather than
+pointing at one with copies left, which is the explicitly-sanctioned floor:
+"line stays unstruck, count updates to the residual, toast names the
+shortfall." Re-ticking the same line after a partial pull is still live
+(the checkbox is not marked `done`) and asks the server fresh each time — on
+a fully-dried source that resolves to `SkipReason::NoLongerNeeded` (the
+existing "gap closed" reason, imprecise here since it is the *source*, not
+the gap, that closed — a pre-existing wording nuance, not introduced by this
+task and not fixed here).
+
+**Undo reverts the residual too.** A partial pull is still one real
+`move_batch` entry, so Undo is unaffected — its callback additionally resets
+`remaining` back to the original `asked`, so a partial-then-undo does not
+quietly leave the line asking for less than it originally did.
+
+**`report()` grew a fourth outcome (`asked: Option<i32>`) worth a different
+sentence, not a second toast.** Considered and rejected: firing the existing
+"Pulled N copies of X" toast unchanged *and* a second "shortfall" toast for
+the same tick — two toasts stacking for one action reads as noise the
+existing single-toast-per-outcome design (the function's own doc: "must not
+word them differently") argues against. `report()` now computes the same
+`pull_line_outcome` over the outcome's own total when the caller supplies
+`asked`, and only *changes wording* on a genuine shortfall; a full match
+(the overwhelmingly common case, and every existing passing e2e assertion)
+falls through to the original "Pulled N copies of X" text unchanged. Wired
+into **both** call sites — `PickRowView` (the snapshot count) and
+`ElsewhereRow`'s one-tap Pull button (`fillable = row.owned_elsewhere`, its
+own already-computed total ask across every source the row's allocation
+named) — a free, low-risk consistency extension once `report()` already knew
+how, since the row button can partially fill exactly the same way and
+previously said nothing about it either.
+
+**`report()` crossed clippy's argument ceiling (7) at 8 with `asked`
+added; fixed by bundling, not by `#[allow]`.** `tree` / `revision` /
+`last_move` always travel together at both call sites (same three local
+variable names at each), so they moved into a new `Copy` struct
+(`ReportContext`) rather than suppressing the lint — the repo has no
+precedent for `#[allow(clippy::too_many_arguments)]` and one more
+already-grouped concept was the cheaper fix.
+
+**Test coverage: unit for the decision, e2e for the whole walk.** Three unit
+tests pin `pull_line_outcome`'s three arms plus their boundaries (`moved ==
+asked` is `Full`, not `Partial { residual: 0 }`; `moved > asked` — the source
+restocked between snapshot and tick — is still `Full`, never a negative
+residual; a defensive negative `moved` still resolves to `Zero`). The e2e
+addition (`end2end/tests/needs.spec.ts`, "a line that finds less than it
+asked for stays in the walk with its residual") sets up a real shortage
+**server-side**, deterministically: generate the pick list at 4-from-one-
+source, then drain that source to 2 via the raw `POST
+/api/holdings/{id}/quantity` route (the same one the count stepper uses)
+*out of band* of the page under test — modeling "another tab" without a
+second browser context — before ticking the line. Asserts the toast's exact
+shortfall wording, the label's residual count, the checkbox's own
+`data-state="unchecked"` (a struck label beside a checked box, or the
+reverse, would be its own lie the two assertions catch independently), the
+real holdings read back (0 at the source, 2 at the destination — not just
+the toast's claim), and that a second tick on the now-dry line is still live
+and refused by name rather than silently re-doing nothing.
+
+**Fixture debris, again — `q=z&limit=60` in this file was already fully
+exhausted, not just tight.** This task's own new test was what tripped it:
+measured live, `q=z&limit=60` now returns **0** free (down from P6-117/
+P6-118's own draws against the same shared pool). Applied the identical
+file-scoped remedy P6-118 used in `removal.spec.ts` — switched
+`unownedCards` to `q=n&limit=200` (measured 112 free before this task's runs,
+99 free after, still ample headroom) — local to `needs.spec.ts`. This puts
+`needs.spec.ts` on the **same** `q=n&limit=200` pool `removal.spec.ts`
+already uses (P6-118), so the two are no longer isolated from each other's
+draw-down either. Still on the exhausted `q=z`, untouched by this task:
+`batch-move.spec.ts`, `command-palette.spec.ts`, `collection-tree-manage.spec.ts`
+and `collection-undo-restore.spec.ts` (the latter two at `q=z&limit=200` —
+P6-118's own comment in `removal.spec.ts` names them as having already made
+the `limit=60→200` bump, but not the `q=z→q=n` letter switch). The systemic
+fix (one query with real headroom shared by every file, instead of each file
+drifting to its own patched term) is not done here — filed as follow-up,
+same as P6-118 left it.
+
+**Zero-pull already worked, verified rather than assumed.** A token that
+appears in `outcome.skipped` instead of `outcome.pulled` (`AlreadyThere`,
+`NoCopies`, `NoLongerNeeded`) was never inserted into `done` even before this
+task — `moved` defaults to `0` when the token is absent from `pulled`
+entirely (a zero-copy line is reported as a skip, never as a `Pulled{copies:
+0}`, per that struct's own doc), and `pull_line_outcome(_, 0) == Zero`
+changes nothing. Pinned by a unit test rather than left as an unstated
+assumption.
+
+**Two accepted edges, recorded rather than fixed (review).**
+
+- **Two live partial-pull Undo toasts on one line can restore a stale ask.**
+  Each tick's Undo closure captures its own `asked` at click time and, on
+  success, `remaining.set(asked)`. If the same line is ticked twice inside
+  one 5s auto-dismiss window (two partial pulls in quick succession — the
+  checkbox stays live and clickable between them, since a partial pull is
+  never marked `done`), two Undo actions are live at once; clicking the
+  **older** one after the newer tick has already moved `remaining` on
+  overwrites it with the older, now-stale `asked` rather than a value
+  consistent with the newer tick's own effect. Same class as P6-118's
+  superseded-`section_delta` note: the write is harmless (no data
+  corruption — only the *displayed* residual on an already-partial line is
+  briefly wrong) and the window is bounded by the same auto-dismiss timing;
+  it self-corrects the next time the pick list is regenerated (the list has
+  no independent refetch path of its own — module doc). Not worth a guard
+  for the same reason P6-118 gave.
+- **⌘K's "Undo last move" bypasses `PickRowView`'s own `on_undo`, and now
+  also leaves `remaining` stale, not just `done`.** `palette.rs`'s
+  `UndoLastMove` handler calls `undo_move`/`undo_selection_move` directly
+  against the ids `note_last_move` recorded — it has no reference to the
+  ticked row's local signals, which are component state, not reachable from
+  a global command. This was already true of `done` before this task (a
+  fully-pulled, struck-through line reversed via ⌘K stayed struck until the
+  pick list was regenerated) and the same gap now covers `remaining`: a
+  partially-pulled line reversed via ⌘K keeps showing its post-pull residual
+  rather than reverting to the original ask. Same bounded, self-correcting
+  window as the edge above — pre-existing scope, not fixed here.
+
+Verified: `cargo fmt --all -- --check` clean; `cargo clippy -p app --features
+hosted --all-targets -- -D warnings` and `--features hydrate --target
+wasm32-unknown-unknown -- -D warnings` both clean; `cargo test -p app
+--features hosted`: 277 passed (274 baseline +
+`moving_everything_asked_is_a_full_pull` +
+`moving_less_than_asked_is_a_partial_pull_carrying_the_honest_residual` +
+`moving_nothing_for_this_token_is_zero_and_leaves_no_residual_claim`), 4
+ignored (DB-gated, untouched); `cargo test -p shared`: 34 passed (no wire
+types changed, run anyway). e2e: `needs.spec.ts` full file, chromium
+`--workers=1`, 7/7, run twice for stability (a default-parallelism run first
+surfaced a **pre-existing** cross-test race in this file's own
+`unownedCards(request, n)` helper — concurrent workers computing the same
+"first free card" before any of them had added holdings for it, corrupting
+each other's fixtures — not a regression from this task; the skill's
+`--workers=1` requirement for a task's e2e run exists for exactly this
+reason and the file has never been safe to run at default parallelism).
+
 ### Removed rows leave section counts and selection immediately (2026-08-10)
 
 P6-117 fixed the removed row's own stepper and id; P6-118 fixed the two
