@@ -651,8 +651,13 @@ pub async fn remove_holding(holding_id: shared::Id) -> Result<shared::Id, Server
 /// the same trait call [`undo_quick_add`] makes; the two are separate adapters
 /// because each surface's endpoint names what it undoes, and collapsing them
 /// into one generic endpoint is filed as follow-up rather than done here.
+///
+/// Returns [`shared::UndoReceipt`], not `()`: the collection-view stepper
+/// addresses its holding by id, and undoing a removal re-inserts under a
+/// **new** id rather than reviving the dead one — the caller rewires itself
+/// from `restored_holding_id` rather than waiting on an unrelated refetch.
 #[server(prefix = "/api", endpoint = "undo_move")]
-pub async fn undo_move(move_id: shared::Id) -> Result<(), ServerFnError<String>> {
+pub async fn undo_move(move_id: shared::Id) -> Result<shared::UndoReceipt, ServerFnError<String>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -1106,6 +1111,10 @@ pub fn clamp_quick_add_quantity(quantity: u32) -> u32 {
 
 /// Undo one quick-add, from its toast's action. Idempotent at the trait level,
 /// so a double-click or a re-fired toast action is harmless.
+///
+/// A quick-add's move has no origin collection, so its `UndoReceipt` never
+/// carries a restored holding to rewire anything to — discarded rather than
+/// widening this adapter's own return type for a value no caller here needs.
 #[server(prefix = "/api", endpoint = "undo_quick_add")]
 pub async fn undo_quick_add(move_id: shared::Id) -> Result<(), ServerFnError<String>> {
     #[cfg(feature = "ssr")]
@@ -1115,6 +1124,7 @@ pub async fn undo_quick_add(move_id: shared::Id) -> Result<(), ServerFnError<Str
             .await?
             .undo_move(move_id)
             .await
+            .map(|_| ())
             .map_err(api_err)
     }
     #[cfg(not(feature = "ssr"))]

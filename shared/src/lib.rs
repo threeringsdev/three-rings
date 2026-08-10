@@ -38,7 +38,7 @@ pub use collection::{
     HaveDisposition, HoldingLine, HoldingMove, LineResult, MoveItem, MoveReceipt, MoveRequest,
     NeedRow, NeedsView, NewCollection, Page, QuickAddKind, QuickAddReceipt, RelocatedDesire,
     Rename, Reorder, Reparent, SetQuantity, ShoppingList, ShoppingRow, SuggestedDestination,
-    Teardown, TeardownReceipt, WantDisposition,
+    Teardown, TeardownReceipt, UndoReceipt, WantDisposition,
 };
 pub use tags::{
     union_color_identity, DeckCommanders, NewTag, RenameTag, SetBoard, Tag, TagAssignment,

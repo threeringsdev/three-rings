@@ -13,7 +13,7 @@ use shared::{
     MoveRequest, NeedRow, NeedsView, NewCollection, NewTag, OwnershipEntry, Page, PrintingSummary,
     RelocatedDesire, Rename, RenameTag, Reorder, Reparent, Ruling, SearchQuery, SearchResults,
     SetBoard, SetQuantity, SetQuery, SetSummary, ShoppingList, ShoppingRow, SuggestedDestination,
-    Tag, TagAssignment, TagScope, TaggedCard, Teardown, TeardownReceipt,
+    Tag, TagAssignment, TagScope, TaggedCard, Teardown, TeardownReceipt, UndoReceipt,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::HashMap;
@@ -868,7 +868,9 @@ impl CollectionStore for HostedBackend {
                         .await
                         .map_err(upstream)?;
                 }
-                UndoStep::UndoMove(move_id) => undo_one(&mut tx, user_id, move_id).await?,
+                UndoStep::UndoMove(move_id) => {
+                    undo_one(&mut tx, user_id, move_id).await?;
+                }
                 UndoStep::Reparent(child_id) => {
                     // **The cycle guard** (adversarial review, `P6-190`,
                     // rounds 1 and 2): a crafted receipt could name
@@ -1639,12 +1641,14 @@ impl CollectionStore for HostedBackend {
         Ok(MoveReceipt { move_id })
     }
 
-    async fn undo_move(&self, move_id: Id) -> ApiResult<()> {
+    async fn undo_move(&self, move_id: Id) -> ApiResult<UndoReceipt> {
         let user_id = self.session_id()?;
         let mut tx = self.scoped_tx().await?;
-        undo_one(&mut tx, user_id, move_id).await?;
+        let restored_holding_id = undo_one(&mut tx, user_id, move_id).await?;
         tx.commit().await.map_err(upstream)?;
-        Ok(())
+        Ok(UndoReceipt {
+            restored_holding_id,
+        })
     }
 
     async fn undo_moves(&self, move_ids: Vec<Id>) -> ApiResult<()> {
@@ -2543,13 +2547,17 @@ async fn apply_move(
     append_move(tx, user_id, from, to, grain, boards, quantity).await
 }
 
-/// Reverse a move and stamp `undone_at`. Idempotent: an already-undone or
-/// missing-but-owned move is handled without double-reversing.
+/// Reverse one move and stamp `undone_at`, returning the id of the holding
+/// row its copies landed back on — `None` when there is no such holding to
+/// name: the move had no origin collection, the move was already undone (the
+/// idempotent no-op case — nothing is written, so nothing restored), or the
+/// origin has since been soft-deleted and the copies redirected to the Inbox
+/// instead (see `shared::UndoReceipt`).
 async fn undo_one(
     tx: &mut Transaction<'static, Postgres>,
     user_id: Uuid,
     move_id: Id,
-) -> ApiResult<()> {
+) -> ApiResult<Option<Id>> {
     let m: Option<MoveRow> = sqlx::query_as(
         "SELECT printing_id, finish::text AS finish, condition::text AS condition, language, \
                 from_board::text AS from_board, to_board::text AS to_board, \
@@ -2562,7 +2570,7 @@ async fn undo_one(
     .map_err(upstream)?;
     let m = m.ok_or_else(|| ApiError::NotFound("move".into()))?;
     if m.undone {
-        return Ok(()); // idempotent
+        return Ok(None); // idempotent — nothing written, so nothing restored
     }
     let grain = Grain {
         printing_id: m.printing_id,
@@ -2590,9 +2598,19 @@ async fn undo_one(
     // rejected. The delete's *own* undo is unaffected — it clears `deleted_at`
     // before reversing its moves, so the source is live again by the time this
     // runs.
+    // Named only when the copies actually landed back at `from` — a redirect
+    // (below) puts them somewhere real but not where the caller's own
+    // `from_collection_id` says, and naming that holding would let a caller
+    // still rendering the *original* collection's row (the collection-view
+    // stepper) rewire itself onto an Inbox holding through a row that no
+    // longer describes it.
+    let mut restored_holding_id = None;
     if let Some(from) = m.from_collection_id {
-        let from = live_or_inbox(tx, user_id, from).await?;
-        holding_add(tx, user_id, from, &grain, from_board, m.quantity).await?;
+        let resolved = live_or_inbox(tx, user_id, from).await?;
+        let holding_id = holding_add(tx, user_id, resolved, &grain, from_board, m.quantity).await?;
+        if resolved == from {
+            restored_holding_id = Some(holding_id);
+        }
     }
     if let Some(to) = m.to_collection_id {
         holding_take_clamp(tx, to, &grain, to_board, m.quantity).await?;
@@ -2602,10 +2620,14 @@ async fn undo_one(
         .execute(&mut **tx)
         .await
         .map_err(upstream)?;
-    Ok(())
+    Ok(restored_holding_id)
 }
 
-/// Upsert `+delta` into a collection's holding for the grain **on `board`**.
+/// Upsert `+delta` into a collection's holding for the grain **on `board`**,
+/// returning the row's id — the row that already existed, or the one this
+/// insert just created. `undo_one` is the caller that needs it: a removal's
+/// undo re-inserts a fresh holding, and the caller addressing it by id (the
+/// collection-view stepper) has to be told which id that is.
 async fn holding_add(
     tx: &mut Transaction<'static, Postgres>,
     user_id: Uuid,
@@ -2613,13 +2635,14 @@ async fn holding_add(
     grain: &Grain,
     board: Board,
     delta: i32,
-) -> ApiResult<()> {
-    sqlx::query(
+) -> ApiResult<Id> {
+    let (id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO holdings \
            (user_id, collection_id, printing_id, finish, condition, language, board, quantity) \
          VALUES ($1, $2, $3, $4::card_finish, $5::card_condition, $6, $7::card_board, $8) \
          ON CONFLICT ON CONSTRAINT holdings_uniq \
-           DO UPDATE SET quantity = holdings.quantity + EXCLUDED.quantity",
+           DO UPDATE SET quantity = holdings.quantity + EXCLUDED.quantity \
+         RETURNING id",
     )
     .bind(user_id)
     .bind(collection_id)
@@ -2629,10 +2652,10 @@ async fn holding_add(
     .bind(&grain.language)
     .bind(board.to_pg())
     .bind(delta)
-    .execute(&mut **tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(db_err)?;
-    Ok(())
+    Ok(id)
 }
 
 /// Remove exactly `need` copies from a collection's holding on `board`; errors
