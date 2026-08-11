@@ -535,3 +535,27 @@ on all 116,695 printings, 77,998 rulings swapped in, `matched == scanned ==
 - Wall-clock context: the download (≈80MB gz) plus pass 1 dominated the first
   attempt's early phase; the write phase at full speed is ~2 minutes. A prod
   run reusing a warm download should complete in single-digit minutes.
+
+## Findings (stage 2 — full load, PROD, 2026-08-11)
+
+**Prod is loaded and every acceptance criterion passed.** Final prod state
+mirrors dev exactly: **116,695 printings / 38,623 cards / 1,047 sets**, prices
+on all printings, 77,998 rulings, 25 distinct layouts, five-set spot-checks
+exact, 0 FK orphans, 0 non-array faces, and user rows byte-identical to the
+pre-load baseline (2 holdings / 0 desires / 2 moves / 2 collections). The
+deployed site serves the full catalog: `/api/catalog/count` → 38,623 (was
+2,637). Gated re-run: **1 second, all-zero stats**.
+
+- **Two attempts, honestly recorded.** Attempt 1 (run 2) died at 28,344
+  printings after ~7 minutes: Postgres `idle-in-transaction timeout` (5min
+  default) — prod's cold Neon compute wrote at a fraction of dev's pace,
+  stretching a client gap past the limit. Remediation: `ALTER ROLE
+  catalog_ingest SET idle_in_transaction_session_timeout = '30min'` on prod
+  (kept — it serves the standing true-up cadence), then resume. Attempt 2
+  (run 3) completed the remaining **90,695 printings in 1m43s** on the warmed
+  compute — the second live proof this week that the hash-gated ratchet
+  recovers an interrupted load losslessly.
+- Operational notes for the standing true-up: warm the compute (any query)
+  before a big run; the raised idle timeout is role-scoped to
+  `catalog_ingest`; the download cache in the host tmp dir is keyed by
+  snapshot and safely reusable across branches.
