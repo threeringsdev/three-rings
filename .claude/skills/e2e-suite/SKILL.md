@@ -118,12 +118,16 @@ single biggest cost sink in the loop.
   printings vs the 2,976 the suite grew up on) parallel full runs fail ~29
   tests from shared-dev-server contention — a different subset each run, every
   sampled failure green solo. The filed contention task (WB-01KZRZ0TT7) owns changing this
-  policy; until it lands, parallel full passes prove nothing. **Known-red
-  interim (2026-08-11):** even serial is 239/259 right now — ~13 deterministic
-  expectation-drift failures from the bulk load (tests written against the
-  2,976-card POC catalog) plus the filed fixture-pool class; the
-  post-bulk-load reconciliation task (WB-01KZS0WR3N) owns restoring green. Until it lands,
-  judge a task's e2e run against that known-red baseline, not against 100%.
+  policy; until it lands, parallel full passes prove nothing. **Serial full
+  pass is the verification mode (~13 min). Post-reconciliation baseline
+  (2026-08-11): 247/259. The 12 residual failures, enumerated — fixture-pool
+  class (WB-01KZMVA2Y1): batch-move :242/:315/:366/:435, command-palette
+  :442/:484/:524, all-cards :270 (location summary), tree-manage :419
+  (pool-growth count). Order-sensitive, proven green solo, owned by the
+  flake task (WB-01KZNPJC9S): undo-restore :208, removal :369, tree-manage
+  :538 (Escape/picker). Judge a task's run against that enumeration: a NEW
+  failure outside it is the task's problem; these twelve are not. Delete
+  this note when both owning tasks land.**
 
   **The hydration-click flake is handled now, test-side — `retryUntil` /
   `clickUntil` in `end2end/tests/helpers.ts`.** `hydrated(page)` waits on the

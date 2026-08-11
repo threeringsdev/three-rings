@@ -152,6 +152,7 @@ test("a repeated facet key keeps the term the rail did not show @fast", async ({
 
 test("a multi-select serializes to one comma-OR term @fast", async ({
   page,
+  request,
 }) => {
   // Comma-OR is the whole reason the rail's facets can be multi-select: flat
   // syntax has no other way to say "instant OR sorcery".
@@ -169,17 +170,38 @@ test("a multi-select serializes to one comma-OR term @fast", async ({
 
   // And it is a real OR against the catalog, not just a string the UI echoes.
   // Name-narrowed so the numbers stay well under the 50-row first page (paging
-  // is a later task) and the union is exactly decidable: an AND of the two
-  // substrings would return 0, one value alone returns 1, the OR returns both.
+  // is a later task). Counts are read from the API rather than pinned: the
+  // full-catalog bulk load put many more "bolt"-named instants/sorceries in
+  // play (19 instants, 15 sorceries as of writing, not the POC catalog's
+  // single "Lightning Bolt") — the durable invariant isn't a literal count,
+  // it's that instant/sorcery are mutually exclusive types, so a comma-OR's
+  // union must equal the sum of the two singles at any catalog size.
   const countFor = async (query: string) => {
     await page.goto(`/catalog?q=${encodeURIComponent(query)}`);
     await hydrated(page);
     await expect(page.getByTestId("results-grid")).toBeVisible();
     return await page.locator("[data-testid=results-grid] li").count();
   };
-  expect(await countFor("bolt t:instant")).toBe(1);
-  expect(await countFor("bolt t:sorcery")).toBe(1);
-  expect(await countFor("bolt t:instant,sorcery")).toBe(2);
+  const apiCountFor = async (query: string) => {
+    const res = await request.get(
+      `/api/catalog/search?q=${encodeURIComponent(query)}&limit=200`,
+    );
+    expect(res.status(), `GET ${query}`).toBe(200);
+    const body = (await res.json()) as { cards: unknown[]; next_cursor: string | null };
+    expect(body.next_cursor, `"${query}" should fit on one page`).toBeNull();
+    return body.cards.length;
+  };
+
+  const instantCount = await apiCountFor("bolt t:instant");
+  const sorceryCount = await apiCountFor("bolt t:sorcery");
+  expect(instantCount).toBeGreaterThan(0);
+  expect(sorceryCount).toBeGreaterThan(0);
+
+  expect(await countFor("bolt t:instant")).toBe(instantCount);
+  expect(await countFor("bolt t:sorcery")).toBe(sorceryCount);
+  expect(await countFor("bolt t:instant,sorcery")).toBe(
+    instantCount + sorceryCount,
+  );
 });
 
 test("typing in the query bar reflects back into the widgets @fast", async ({

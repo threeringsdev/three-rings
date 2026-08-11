@@ -124,10 +124,17 @@ test.describe("mobile", () => {
       await page.goto("/my");
       await hydrated(page);
 
+      // "Recently deleted" (specs/collection-deletion.md → step 5,
+      // app/src/my/root.rs `root_rows`) is an always-present system row, like
+      // "Shopping list" — not conditional on the tree read, not something
+      // `/api/collection_tree` reports, and not related to catalog size. The
+      // test predates the row landing; it belongs in the expected list every
+      // time, not behind any drift check.
       expect(await labels(page)).toEqual([
         "All cards",
         ...roots.map((s) => s.name),
         "Shopping list",
+        "Recently deleted",
       ]);
 
       // Counts agree with the tree read, per row and for the aggregate.

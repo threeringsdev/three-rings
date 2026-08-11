@@ -318,16 +318,43 @@ async function search(
 const tileFor = (page: import("@playwright/test").Page, oracleId: string) =>
   page.locator(`[data-testid=results-grid] a[href="/cards/${oracleId}"]`);
 
-/// A syntactically valid cursor positioned past the end of the catalog
-/// (`{name, oracle_id}`, base64url, no padding — `hosted::encode_cursor`). Built
-/// rather than fetched because there is no cursor *for* the last page: the
-/// endpoint stops emitting one there, which is precisely the case under test.
-const PAST_THE_END = Buffer.from(
-  JSON.stringify({
-    name: "zzzzzzzz",
-    oracle_id: "ffffffff-ffff-ffff-ffff-ffffffffffff",
-  }),
-).toString("base64url");
+/// A syntactically valid cursor positioned past the real end of the catalog
+/// (`{name, oracle_id}`, base64url, no padding — `hosted::encode_cursor`).
+/// Keyset paging orders `ORDER BY c.name, c.oracle_id` under this DB's default
+/// (byte-order) collation, so a cursor built from the *actual last card's own*
+/// identity always yields zero rows next — nothing sorts strictly after it.
+///
+/// A hardcoded `"zzzzzzzz"` sentinel drifted the moment the full-catalog bulk
+/// load landed: Scryfall names carrying accented Latin letters (e.g. "Éomer
+/// of the Riddermark", "Óin the Brave") encode to UTF-8 bytes ≥ 0xC3, which
+/// sort *after* ASCII `z` (0x7A) — so `zzzzzzzz` stopped being past the end
+/// and the "page past the end" case silently became a real, non-empty page.
+/// `"zzzzzzzz"` is kept only as a cheap jump-off point (skip the large
+/// all-ASCII bulk of the catalog in one query) — the loop below then walks
+/// whatever non-ASCII tail exists today to the API's own real last row,
+/// so this stays correct at any catalog size or alphabet mix.
+async function pastTheEndCursor(request: APIRequestContext): Promise<string> {
+  let cursor = Buffer.from(
+    JSON.stringify({
+      name: "zzzzzzzz",
+      oracle_id: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+    }),
+  ).toString("base64url");
+  let last: { name: string; oracle_id: string } | null = null;
+  for (;;) {
+    const page = await search(request, { cursor, limit: 200 });
+    if (page.cards.length === 0) break;
+    const lastCard = page.cards[page.cards.length - 1];
+    last = { name: lastCard.name, oracle_id: lastCard.oracle_id };
+    if (!page.next_cursor) break;
+    cursor = page.next_cursor;
+  }
+  expect(
+    last,
+    "expected at least one card past the zzzzzzzz jump-off point",
+  ).toBeTruthy();
+  return Buffer.from(JSON.stringify(last)).toString("base64url");
+}
 
 test("the pager walks to a second page of different cards @fast", async ({
   page,
@@ -470,10 +497,12 @@ test("the view switch keeps your place in the results @fast", async ({
 
 test("a page past the end says so and offers a way home @fast", async ({
   page,
+  request,
 }) => {
   // An empty *cursored* page is not "no cards match": the search is fine, the
   // reader has walked off the end.
-  await page.goto(`/catalog?cursor=${PAST_THE_END}`);
+  const pastTheEnd = await pastTheEndCursor(request);
+  await page.goto(`/catalog?cursor=${pastTheEnd}`);
   await hydrated(page);
   const empty = page.getByTestId("no-results");
   await expect(empty).toContainText("Nothing on this page");

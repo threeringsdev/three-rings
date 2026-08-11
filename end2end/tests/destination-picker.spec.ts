@@ -139,19 +139,37 @@ test.describe("signed in", () => {
     )?.id;
     expect(inboxId, "the authed user must have a collection to add to").toBeTruthy();
     const boltPresent = async () => {
+      // `q=`, not a bare `?limit=200` page one: this dev user's Inbox has
+      // accumulated far more than 200 distinct card rows across the
+      // project's e2e history (fixture-pool growth, WB-01KZMVA2Y1's class —
+      // a `limit=200` first page no longer reliably reaches "Lightning
+      // Bolt" alphabetically). `collection_view`'s own `q` is the in-
+      // collection search (routes.rs `collection_view`, same substring
+      // search `/my` uses) — read through it instead of paging blind.
       const res = await page.request.get(
-        `/api/collections/${inboxId}/view?limit=200`,
+        `/api/collections/${inboxId}/view?q=${encodeURIComponent("Lightning Bolt")}&limit=10`,
       );
       expect(res.status()).toBe(200);
       const view = await res.json();
-      const row = view.cards.find((c: { name: string }) =>
-        c.name.startsWith("Lightning Bolt"),
+      // Exact, not `startsWith`: the full-catalog bulk load also seeded
+      // "Lightning Bolt // Lightning Bolt", which `startsWith` would match
+      // too.
+      const row = view.cards.find(
+        (c: { name: string }) => c.name === "Lightning Bolt",
       );
       return row?.present ?? 0;
     };
     const before = await boltPresent();
 
-    const have = page.getByTestId("quick-add-have").first();
+    // A "bolt" browse now returns many cards ("Beacon Bolt", "Blastfire
+    // Bolt", … — the full-catalog bulk load, not the POC's single
+    // "Lightning Bolt"), so `.first()` no longer reliably lands on the
+    // probe card. Scope by the button's own aria-label (`QuickAddButton`,
+    // app/src/catalog.rs: `"Add {name} to {noun}"`), exact, instead.
+    const have = page.getByRole("button", {
+      name: "Add Lightning Bolt to Have",
+      exact: true,
+    });
     // Disabled until the destination resolves — an add with no destination
     // would have to guess where it goes.
     await expect(have).toBeEnabled({ timeout: 10000 });
@@ -190,7 +208,13 @@ test.describe("signed in", () => {
     const label = page.getByTestId("destination-label");
     await expect(label).toHaveText(/Inbox/, { timeout: 10000 });
 
-    const want = page.getByTestId("quick-add-want").first();
+    // Scoped by aria-label, exact — see the `+ Have` test above: `.first()`
+    // on a "bolt" browse no longer reliably lands on "Lightning Bolt" now
+    // that the full catalog returns many "*Bolt*" cards.
+    const want = page.getByRole("button", {
+      name: "Add Lightning Bolt to Want",
+      exact: true,
+    });
     await expect(want).toBeEnabled({ timeout: 10000 });
 
     const add = page.waitForResponse(
