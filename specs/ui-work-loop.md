@@ -37,8 +37,10 @@ promoting Playwright into CI was decided **against** 2026-07-23, see Findings).
 
 ### Mechanism: a repo skill, not a Workflow script
 
-`.claude/skills/ui-task-loop/SKILL.md` (mirrored in `.agents/skills/`),
-orchestrating in the **main session**. Revised 2026-07-25 (maintainer): the
+`.claude/skills/ui-task-loop/SKILL.md` — `.agents/skills/` is a symlink to
+`.claude/skills/` (see Findings, "Skills-tree parity: the symlink saga"), so
+this is one file on disk, not a pair to keep in sync — orchestrating in the
+**main session**. Revised 2026-07-25 (maintainer): the
 main session is now a pure **orchestrator** — implementation and adversarial
 review each run in their own subagent with a clean context, and Codex is out
 of the loop entirely (see Findings, "Loop goes fully Claude-driven"). What
@@ -659,3 +661,113 @@ in `CardFaceSummary::build`'s fail-closed guard). Both respected review-only:
 every mutation reverted byte-identical, neither touched the orchestrator's
 server. The six distinct findings across the two runs are queued as a Phase 5
 follow-up task.
+
+### Skills-tree parity: the symlink saga (2026-08-11)
+
+**The problem.** The manual-mirror discipline never held: the trees drifted
+three times (2026-07-26, resynced same day; 2026-07-30, resynced same day,
+see `specs/TODO-Phase-6.md` `P6-032`; and a third time discovered while
+picking up `P6-032` — `.claude/skills/workbook`, added while setting up this
+project's Workbook tracking, had no `.agents` counterpart). Each drift was
+invisible because both trees read as plausible in isolation — nothing fails,
+an agent just silently gets a stale or missing skill. `P6-032` originally
+specced a merge-gate `diff -rq` step but named the structural alternative —
+one tree as a symlink of the other — "if the agent harnesses tolerate it."
+
+**The symlink choice and its harness-tolerance table.** `.agents/skills` was
+deleted and replaced with the relative symlink `.agents/skills ->
+../.claude/skills` (`diff -rq .claude/skills .agents/skills` was clean
+byte-for-byte before the switch, so no merge was needed first). Evidence
+gathered before shipping it:
+
+- **Codex CLI (the real `.agents/skills` consumer) — tolerates it.** `codex
+  debug prompt-input` renders the exact skill list a live session would see,
+  without spending a model turn. Before the change, the tool's own
+  skill-root table showed `r15 = <repo>/.agents/skills`, with all seven repo
+  skills discovered under it. After the switch: `r15` resolved to
+  `<repo>/.claude/skills` (Codex canonicalizes the path), the same seven
+  skills were listed with identical descriptions, no duplicate root or
+  missing entry — the symlink is transparent to Codex's skill discovery.
+- **git checkout in a fresh clone — tolerates it.** A synthetic repo (`git
+  init`, add a real symlink, commit, fresh `git clone`) checked out the
+  symlink correctly in the local sandboxed dev environment — real
+  `lrwxr-xr-x` entry, resolves, reads through. Fresh clones auto-detect
+  symlink support and leave `core.symlinks` unset (defaults to on) when it
+  works.
+- **Caveat found in the maintainer's local clone, not disqualifying on its
+  own:** `~/source/three-rings` (and every worktree off it — worktrees share
+  the parent's `.git/config`) has `core.symlinks=false` baked in from however
+  that clone was originally created. Confirmed live: restoring
+  `.agents/skills` from the index there (simulating a checkout) materialized
+  it as a **plain text file** containing `../.claude/skills`, not a working
+  symlink. A stale per-clone cache, not a property of macOS or the sandbox
+  (the synthetic test above ran in the identical environment and worked),
+  fixable with a one-time `git config core.symlinks true` in that clone.
+- **No workflow or script reads `.agents/skills` directly** — grepped
+  `.github/workflows/` and `scripts/`; the only references anywhere in the
+  repo were prose in specs describing the mirror, none of it machine-read.
+- **Windows** — out of scope per this repo's dev-environment contract (macOS
+  host + Linux container/CI only); not probed, not solved.
+
+**The false-negative: a phantom "GitHub Actions rejects the symlink."** The
+first PR carrying the symlink (`p6-032-skills-symlink`, #96) was opened from
+a worktree that had been cut from `origin/main` at the *start* of this task
+and never re-synced. In the interim, an unrelated PR (#95, "build `three_rings`
+so native codegen regressions cannot ship green") merged to `main` — and, as
+it happened, touched the exact same two spots this task also edits (the
+CLAUDE.md/AGENTS.md verify block, and the step list in `validate.yml`). #96
+opened against that now-stale base, GitHub computed it as `CONFLICTING`, and
+**no Validate check run appeared on the PR at all — not a failure, not a
+startup error, nothing.** A second PR built the `diff -rq`-gate fallback
+(`p6-032-skills-parity-gate`, #98) — also cut from the same stale base, also
+`CONFLICTING`, also zero Validate runs. Two data points with the symlink
+absent (#98 has no symlink, only the gate step) and the same silent-zero-runs
+symptom looked, at the time, like confirming evidence that GitHub Actions was
+refusing to trigger on a tree containing the symlink. It wasn't a fair test:
+**both PRs shared the confound of a stale, conflicting base**, and the control
+comparison (a symlink-free branch triggering normally) was against branches
+that were *not* stale — the one variable that actually differed between
+"broken" and "working" was mergeability, not the symlink's presence.
+Confirmed after the fact via `gh pr view` against the real GitHub API: #96 and
+#98 both show `"mergeable": "CONFLICTING"` with a `statusCheckRollup`
+containing no Validate entry at all (only an unrelated bot check); every PR in
+this repo's history with a clean, mergeable base shows a real Validate run.
+The most defensible reading, given what's directly observable and not
+GitHub's undocumented internals: a `pull_request` build that cannot compute a
+clean merge with its base does not get a Validate run queued, and GitHub
+surfaces this as silence rather than an error — which is indistinguishable
+from "the harness rejected the symlink" unless you think to check
+mergeability first.
+
+**The fair re-test.** A clean branch was cut from current `main` (i.e.,
+*after* #95), carrying only the symlink and the `test -L .agents/skills` gate
+step — `p6-032-symlink-retest`, PR #99. Verified directly via the GitHub API:
+`"mergeable": "MERGEABLE"`, and a real completed check run — `Format, Clippy,
+Test & Build` (the Validate workflow), `conclusion: "SUCCESS"` — started about
+15 seconds after the PR opened and finished in **6m31s**
+(13:37:35Z–13:44:06Z), through the symlinked tree, with the `test -L` step
+included. The full merge gate is green on a properly based PR carrying the
+symlink.
+
+**Verdict: the symlink ships.** `.agents/skills` is the relative symlink
+`.agents/skills -> ../.claude/skills`; there is exactly one tree of skill
+content on disk. `validate.yml` runs `test -L .agents/skills` next to the fmt
+check as the structural guard — a re-materialized real directory would
+silently resurrect drift, so the gate now fails loudly instead. The
+manual-resync discipline this spec described for two years is retired: there
+is nothing left to keep in sync.
+
+**Two operational morals, for whoever hits this next:**
+
+1. **A PR with zero check runs and no errors is not evidence the harness
+   rejected your change — check mergeability first.** GitHub is silent about
+   conflict-suppressed runs; it looks exactly like a harness refusing to
+   trigger, and chasing the wrong hypothesis here cost a full extra
+   implementation-and-revert cycle before the stale base was noticed.
+2. **A worktree cut from `origin/main` goes stale the moment any sibling PR
+   merges — rebase before diagnosing CI ghosts, not after.** This task's
+   worktree was created once at the start and reused across the whole saga;
+   it was never re-fetched against `main` even as #95 landed mid-task. Fetch
+   and rebase (or diff `HEAD` against current `origin/main`) is the first
+   move when a CI result looks inexplicable, before trusting any theory about
+   what the CI provider does or doesn't tolerate.
