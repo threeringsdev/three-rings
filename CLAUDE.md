@@ -129,6 +129,7 @@ cargo clippy -p frontend --target wasm32-unknown-unknown -- -D warnings     # wa
 cargo clippy -p app --features native --all-targets -- -D warnings          # native backend (masked by hosted in the workspace line)
 cargo clippy -p app --features hosted,component-bench --all-targets -- -D warnings          # bench code, hosted server half
 cargo clippy -p app --features hydrate,component-bench --target wasm32-unknown-unknown -- -D warnings  # bench code, wasm half
+cargo build -p three_rings                                              # native codegen coverage: recursion_limit is codegen-time, clippy can't catch it (2026-07-26)
 cargo test --workspace --exclude frontend
 CARGO_TARGET_DIR=target/gate cargo leptos build --release               # full Tailwind + wasm pipeline; own target dir (below)
 ```
@@ -155,7 +156,11 @@ gate lines exist because of it: the **native backend** line lints the
 clippy and test commands — the container omits Tauri's Linux libs, so the Tauri
 shell is lint-checked in CI, not locally. The `-p app --features native` line
 *does* run in-container (it's the `app` crate, no Tauri libs) and is how you lint
-the native backend locally. Everything else runs in-container as written.
+the native backend locally. The `cargo build -p three_rings` line is not an
+exclusion case — it doesn't run in-container at all, on hosts/CI only, same as
+`cargo tauri build` (see "The environment" above: the container omits Tauri's
+Linux libs entirely, so the crate does not build there). Everything else runs
+in-container as written.
 
 ## What runs where
 
