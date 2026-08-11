@@ -109,6 +109,20 @@ jobs:
           cargo clippy -p app --features hosted,component-bench --all-targets -- -D warnings
           cargo clippy -p app --features hydrate,component-bench --target wasm32-unknown-unknown -- -D warnings
 
+      # Codegen-only coverage: an `#![recursion_limit]` overflow is resolved
+      # while computing the layout of a monomorphized async block, a
+      # codegen-time rustc query that `cargo check`/clippy never runs — so the
+      # clippy lines above cannot catch a regression here, and the release
+      # build below only codegens the wasm instantiation. `three_rings` is the
+      # one crate whose view tree is reachable solely under `--features
+      # native` (src-tauri), so build it for real; debug profile is enough
+      # since it's codegen, not optimization, being exercised. Diagnosed
+      # 2026-07-26: rustc names `app` as the crate to fix regardless of which
+      # of app/frontend/three_rings triggers the overflow, since the offending
+      # generic originates there.
+      - name: Build three_rings (native codegen coverage)
+        run: cargo build -p three_rings
+
       - name: Test (native workspace, excl. frontend)
         run: cargo test --workspace --exclude frontend
 
