@@ -659,3 +659,4 @@ in `CardFaceSummary::build`'s fail-closed guard). Both respected review-only:
 every mutation reverted byte-identical, neither touched the orchestrator's
 server. The six distinct findings across the two runs are queued as a Phase 5
 follow-up task.
+
