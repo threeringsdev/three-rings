@@ -25,13 +25,20 @@ const USER_AGENT: &str = concat!(
     " (+https://github.com/threeringsdev/three-rings)"
 );
 
-/// One `/bulk-data` entry (the fields we use).
+/// One `/bulk-data` entry (the fields we use). Scryfall renamed this file's
+/// download-URL key from `download_uri` to `jsonl_download_uri` sometime
+/// between 2026-07-16 (this pipeline's shape review) and 2026-08-11 (the
+/// stage-2 full load) — observed live: the field is gone from the response
+/// entirely, not added alongside the old name, so a straight field rename
+/// (not an alias) is correct. The Rust field name stays `download_uri`
+/// (every caller reads `bulk.download_uri`); only the wire name changes.
 #[derive(Debug, Deserialize)]
 pub struct BulkFile {
     #[serde(rename = "type")]
     pub kind: String,
     /// RFC 3339; recorded on the run row and used for the bulk-mode gate.
     pub updated_at: String,
+    #[serde(rename = "jsonl_download_uri")]
     pub download_uri: String,
 }
 
