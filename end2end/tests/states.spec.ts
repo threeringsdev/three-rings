@@ -264,6 +264,7 @@ test("@fast the destination picker blames the read, not the user's collections",
 
 test("@fast the move dialog says the tree is missing instead of offering only root", async ({
   page,
+  request,
 }) => {
   // The third `DestinationList` consumer, and the one where the collapse wrote.
   // `move_rows` renders `⬆ Top level` unconditionally, so a failed tree read left
@@ -294,11 +295,58 @@ test("@fast the move dialog says the tree is missing instead of offering only ro
   // reason the scenario is reachable at all. Specifically the **single-location**
   // shape, which renders a bare `<a>`; the multi-location shape hides its links
   // inside a closed `Collapsible` whose trigger swallows the click.
-  const link = page.locator('a[data-testid="location-summary"]').first();
-  await expect(
-    link,
-    "fixture has no single-location card on /my/all — no SPA route into a collection survives the failed tree",
-  ).toBeVisible();
+  //
+  // Not the Inbox, though: its own kebab withholds Move to…/Rename…/Delete…
+  // (the API's `AND NOT is_inbox` guard, app/src/my/collection.rs), so a link
+  // that lands there could never open the dialog under test. Other e2e
+  // suites' quick-adds default to the Inbox, and it has accumulated so much
+  // fixture history that it now dominates every *page one* of `/my/all`'s
+  // single-location rows — so this resolves the target card from the API
+  // (walking `all_cards` pages if needed, cheap next to rendering) and then
+  // searches for it by name, rather than trusting whatever DOM order happens
+  // to land on page one.
+  const collectionsRes = await request.get("/api/collections");
+  expect(collectionsRes.status()).toBe(200);
+  const inboxId = (
+    (await collectionsRes.json()) as { id: string; is_inbox: boolean }[]
+  ).find((c) => c.is_inbox)?.id;
+  expect(inboxId, "the authed user must have an Inbox").toBeTruthy();
+
+  type AllCardsRow = {
+    card: { name: string; oracle_id: string };
+    locations: { collection_id: string }[];
+  };
+  let cursor: string | undefined;
+  let target: AllCardsRow | undefined;
+  for (let i = 0; i < 20 && !target; i++) {
+    const url =
+      "/api/all_cards?q=" + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
+    const res = await request.get(url);
+    expect(res.status()).toBe(200);
+    const view = await res.json();
+    target = (view.cards as AllCardsRow[]).find(
+      (r) => r.locations.length === 1 && r.locations[0].collection_id !== inboxId,
+    );
+    if (!view.next_cursor) break;
+    cursor = view.next_cursor;
+  }
+  expect(
+    target,
+    "fixture has no non-Inbox single-location card — no SPA route into a collection survives the failed tree",
+  ).toBeTruthy();
+
+  // Narrow the table to that one card so its row renders regardless of where
+  // it falls in the full (debris-heavy) list — and then scope the link to the
+  // row that card's own oracle id names, not `.first()`: the search text can
+  // still substring-match other cards' names (e.g. a plain "Bolt" needle also
+  // matches "Blastfire Bolt"), so `.first()` post-search is exactly the same
+  // trap the catalog-size bulk load exposed elsewhere in this suite.
+  await page.locator("#my-query").fill(target!.card.name);
+  await page.waitForURL((u) => u.searchParams.get("q") === target!.card.name);
+  const link = page
+    .locator(`[data-testid="all-cards-row"][data-oracle="${target!.card.oracle_id}"]`)
+    .locator('a[data-testid="location-summary"]');
+  await expect(link).toBeVisible();
   await link.click();
   await page.waitForURL(/\/my\/collections\//);
   // The page itself is fine (it reads `collection_view`), which is exactly why

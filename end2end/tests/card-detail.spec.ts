@@ -67,6 +67,33 @@ async function firstCard(
   return cards[0];
 }
 
+/// Resolve a card by its **exact** name rather than "first substring hit".
+/// The full-catalog bulk load put several distinct cards' full names on a
+/// shared substring — `SINGLE_FACE_QUERY` ("Lightning Bolt") also matches
+/// "Emeritus of Conflict // Lightning Bolt" and "Lightning Bolt // Lightning
+/// Bolt", which `firstCard` would silently hand back instead (alphabetically
+/// first) — every "Lightning Bolt"-named tile on /catalog mounts its own
+/// sheet, so a query, trigger or sheet locator scoped only by that substring
+/// now resolves to more than one element. Callers that need the specific
+/// single-face card use this instead.
+async function exactCard(
+  request: APIRequestContext,
+  name: string,
+): Promise<Summary> {
+  const cards = await search(request, name);
+  const card = cards.find((c) => c.name === name);
+  expect(card, `no exact catalog hit for "${name}"`).toBeTruthy();
+  return card!;
+}
+
+/// A tile's own preview trigger, scoped by the oracle id its tile links to —
+/// the same disambiguation `tileFor` uses in catalog.spec.ts, needed here
+/// because a substring query can mount several same-substring tiles at once.
+const triggerFor = (page: import("@playwright/test").Page, oracleId: string) =>
+  page.locator('[data-testid="card-preview-trigger"]').filter({
+    has: page.locator(`a[href="/cards/${oracleId}"]`),
+  });
+
 test("card detail SSRs the card, its printings and its rulings @fast", async ({
   request,
 }) => {
@@ -295,23 +322,33 @@ test.describe("DFC flip", () => {
 
 test("hovering a list row opens a preview without changing the URL @fast", async ({
   page,
+  request,
 }) => {
+  // Exact card, not `.first()`: the substring "Lightning Bolt" now also
+  // matches "Emeritus of Conflict // Lightning Bolt" (alphabetically first),
+  // whose hover body would still satisfy a `toContainText` check on the
+  // substring and mask that the wrong row was ever hovered.
+  const card = await exactCard(request, SINGLE_FACE_QUERY);
   await page.goto(`/catalog?q=${encodeURIComponent(SINGLE_FACE_QUERY)}&view=list`);
   await hydrated(page);
 
-  const hoverBody = page
-    .locator("[data-testid=card-preview-hover]")
-    .first();
+  // Scoped by the HoverCard's own id (`hc-content-card-preview-{oracle_id}`,
+  // components/ui/hover_card.rs) — `.first()` would resolve to whichever of
+  // the three "Lightning Bolt"-substring tiles sorts first, not necessarily
+  // the one this test just hovered.
+  const hoverBody = page.locator(
+    `[data-testid=card-preview-hover]#hc-content-card-preview-${card.oracle_id}`,
+  );
   await expect(hoverBody).toBeHidden();
   // Lazily mounted — and this is the assertion that actually says so: the
   // popover element itself is always in the DOM, so only the absence of a
   // *second* copy of the card name proves the body hasn't rendered. Eager
   // bodies made getByText(name).first() resolve to a hidden node.
-  await expect(page.getByText(SINGLE_FACE_QUERY, { exact: true })).toHaveCount(1);
+  await expect(page.getByText(card.name, { exact: true })).toHaveCount(1);
 
-  await page.getByTestId("card-preview-trigger").first().hover();
+  await triggerFor(page, card.oracle_id).hover();
   await expect(hoverBody).toBeVisible(); // 150 ms hover intent
-  await expect(hoverBody).toContainText(SINGLE_FACE_QUERY);
+  await expect(hoverBody).toContainText(card.name);
   // A preview is not navigation.
   expect(new URL(page.url()).pathname).toBe("/catalog");
 });
@@ -319,6 +356,9 @@ test("hovering a list row opens a preview without changing the URL @fast", async
 test("a grid tile offers no hover preview — it is already the art @fast", async ({
   page,
 }) => {
+  // Any tile does: this assertion has no card-identity dependency (grid
+  // tiles never get a hover card, `hover=false` at the call site), so
+  // `.first()` over the substring match is fine as-is.
   await page.goto(`/catalog?q=${encodeURIComponent(SINGLE_FACE_QUERY)}`);
   await hydrated(page);
   await page.getByTestId("card-preview-trigger").first().hover();
@@ -366,27 +406,35 @@ test.describe("touch", () => {
 
   test("tapping a tile opens the sheet instead of navigating @fast", async ({
     page,
+    request,
   }) => {
+    // Exact card + oracle-id-scoped locators: the substring query now also
+    // matches "Emeritus of Conflict // Lightning Bolt" and "Lightning Bolt //
+    // Lightning Bolt" (the full-catalog bulk load), each mounting its own
+    // sheet — an unscoped `[data-testid=card-preview-sheet][role=dialog]`
+    // locator resolves to all three (Playwright strict-mode violation).
+    const card = await exactCard(request, SINGLE_FACE_QUERY);
     await page.goto(`/catalog?q=${encodeURIComponent(SINGLE_FACE_QUERY)}`);
     await hydrated(page);
 
-    await page.getByTestId("card-preview-trigger").first().click();
+    await triggerFor(page, card.oracle_id).click();
 
     // The spread puts the testid on the backdrop as well as the panel; the
-    // dialog is the one with the content in it.
-    const sheet = page.locator("[data-testid=card-preview-sheet][role=dialog]");
+    // sheet's own id (`card-sheet-{oracle_id}`, app/src/cards.rs) is what
+    // picks the one dialog out of however many the substring mounted.
+    const sheet = page.locator(`#card-sheet-${card.oracle_id}[role=dialog]`);
     // `data-state`, not toBeVisible: the sheet slides in via a transform and
     // stays in the layout when closed, so a closed sheet is "visible" to
     // Playwright too (found by mutation — app-ui Findings).
     await expect(sheet).toHaveAttribute("data-state", "open");
-    await expect(sheet).toContainText(SINGLE_FACE_QUERY);
+    await expect(sheet).toContainText(card.name);
     // The tap was intercepted: still on the catalog, not the detail page.
     expect(new URL(page.url()).pathname).toBe("/catalog");
 
     // ...and the sheet is how you get to the page from here.
     await sheet.getByTestId("card-preview-full-details").click();
     await page.waitForURL((url) => url.pathname.startsWith("/cards/"));
-    await expect(page.getByTestId("card-name")).toContainText(SINGLE_FACE_QUERY);
+    await expect(page.getByTestId("card-name")).toContainText(card.name);
   });
 
   test("the sheet flips a DFC without closing or navigating @fast", async ({
@@ -437,9 +485,14 @@ test.describe("touch", () => {
     await expect(
       page.locator("[data-testid=card-preview-hover]").first(),
     ).toBeHidden();
-    // ...and the sheet did not open either — a hover is not a tap.
+    // ...and no sheet opened either — a hover is not a tap. Asserted as "zero
+    // open sheets" rather than one specific locator's `data-state`: the
+    // substring query mounts one sheet per matching tile (the full-catalog
+    // bulk load put three "Lightning Bolt"-named cards on this query), so
+    // "none opened" has to hold across all of them, not just whichever one
+    // an unscoped locator happens to resolve to.
     await expect(
-      page.locator("[data-testid=card-preview-sheet][role=dialog]"),
-    ).toHaveAttribute("data-state", "closed");
+      page.locator('[data-testid=card-preview-sheet][data-state="open"]'),
+    ).toHaveCount(0);
   });
 });

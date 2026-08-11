@@ -355,8 +355,16 @@ test("quick search filters by name and rides the URL @fast", async ({
     await hydrated(page);
     await page.locator("#my-query").fill(needle);
 
-    // The URL is the query: the debounce moves it, and the rows follow the URL.
-    await quick(page).toHaveURL(`/my?q=${encodeURIComponent(needle)}`);
+    // The URL is the query: the debounce moves it, and the rows follow the
+    // URL. Assert on the decoded param rather than a literal string: the app's
+    // own `encode_query_value` (app/src/catalog.rs) deliberately percent-encodes
+    // more characters than JS's `encodeURIComponent` (e.g. `!`), a documented
+    // choice, not a bug — a punctuation-heavy needle (the full catalog can
+    // make card 0 be `"Ach! Hans, Run!"`) must not fail on encoder choice.
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("q"), { timeout: 2000 })
+      .toBe(needle);
+    expect(new URL(page.url()).pathname).toBe("/my");
     await quick(page.locator('[data-testid="all-cards-row"]')).toHaveCount(
       expected.cards.length,
     );

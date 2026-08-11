@@ -799,3 +799,145 @@ across 9 files (search results, counts and layouts assumed the POC catalog)
 plus the filed fixture-pool class — the post-bulk-load reconciliation task
 (WB-01KZS0WR3N) owns restoring green in any mode. The helper ships as the standing
 convention — the mechanism it retires is real, just no longer the bottleneck.
+
+### Post-bulk-load e2e reconciliation (WB-01KZS0WR3N, 2026-08-11)
+
+Reran each of the recorded ~13 deterministic serial failures solo
+(`--workers=1`) and diagnosed each fresh — line numbers had drifted, and one
+file's named failure had already healed. Per file:
+
+- **all-cards.spec.ts** ("quick search filters by name"): expectation drift.
+  The needle (`view.cards[0].card.name.slice(0,6)`) is now often punctuation
+  (the full catalog's alphabetically-first card is `"Ach! Hans, Run!"`), and
+  the app's own `encode_query_value` (app/src/catalog.rs) deliberately
+  percent-encodes more characters than JS `encodeURIComponent` (documented,
+  not a bug) — the test compared literal encoded strings. Fixed: assert on
+  the decoded `q` param (`new URL(page.url()).searchParams.get("q")`) instead
+  of a hand-built string. Green solo 14/14.
+- **catalog.spec.ts** ("a page past the end"): expectation drift. The
+  hardcoded `"zzzzzzzz"` past-the-end sentinel assumed an all-ASCII catalog;
+  the bulk load added accented-name cards (`"Éomer of the Riddermark"`, …)
+  that sort after ASCII `z` under this DB's byte-order collation, so the old
+  sentinel now lands mid-catalog instead of past the end. Fixed: derive the
+  true last card from the API (jump past `z` cheaply, then walk the real,
+  small non-ASCII tail to its end) and build the cursor from that card's own
+  identity — correct at any catalog size or alphabet mix. Green solo 26/26.
+- **filter-rail.spec.ts** ("a multi-select serializes to one comma-OR
+  term"): expectation drift. Hardcoded counts (`bolt t:instant` = 1, `bolt
+  t:sorcery` = 1) assumed the POC catalog's single "Lightning Bolt"; the full
+  catalog now returns 19 and 15 respectively. Fixed: read both counts from
+  the API and assert the sum-of-singles invariant. CAVEAT (review): the
+  "instant/sorcery are mutually exclusive" premise is approximate — split
+  cards (Instant // Sorcery) carry both types, so a future bolt-named split
+  makes this a false RED (never a false green). Durable fix if it fires:
+  assert union == |instantIds ∪ sorceryIds| from the API's oracle ids.
+  Green solo 26/26.
+- **card-detail.spec.ts** (touch sheet tests): expectation drift. The
+  substring `SINGLE_FACE_QUERY = "Lightning Bolt"` now also matches two other
+  cards ("Emeritus of Conflict // Lightning Bolt", "Lightning Bolt //
+  Lightning Bolt"), each mounting its own preview sheet, so an unscoped
+  `[data-testid=card-preview-sheet][role=dialog]` locator hit Playwright's
+  strict-mode multi-element error. Fixed: resolve the exact card by name via
+  the API and scope every trigger/sheet/hover-body locator to its oracle id
+  (the sheet's own DOM id is `card-sheet-{oracle_id}`). Same pass also fixed
+  a *passing-but-silently-wrong* sibling test (the hover-preview test was
+  hovering the wrong card and only passing because its name is a substring of
+  the right one) — found while building the fix, corrected for consistency.
+  Green solo 17/17.
+- **my-root.spec.ts** ("the list is the sidebar's top level"): not
+  catalog-size drift — an unrelated, already-shipped feature the test
+  predates. "Recently deleted" (specs/collection-deletion.md step 5) is an
+  always-present system row in `root_rows()`, not conditional on the tree
+  read; the test's expected label list never included it. Fixed: added it to
+  the expected list. The other assigned line (mobile scroll, :292) had
+  already healed — passed unmodified. Green solo 13/13.
+- **destination-picker.spec.ts** (`+ Have` / `+ Want`): expectation drift,
+  two layers. (1) `.first()` on a `q=bolt` browse assumed "Lightning Bolt"
+  was the only hit; the full catalog returns 48 "*Bolt*" cards, so `.first()`
+  now lands on an unrelated one. Fixed: scope the quick-add buttons by their
+  own aria-label (`"Add Lightning Bolt to Have/Want"`, exact). (2) Once the
+  right card was being clicked, `boltPresent()`'s `?limit=200` first-page
+  read of the Inbox no longer reached "Lightning Bolt" alphabetically — the
+  Inbox has accumulated 200+ distinct rows from other suites' quick-adds over
+  the project's history (fixture-pool growth, see below). Fixed: read
+  through `collection_view`'s own `q=` in-collection search instead of
+  paging blind. Green solo 8/8.
+- **collection-undo-restore.spec.ts** ("Restore" tests, both): initially
+  misdiagnosed as an app bug — see the corrected diagnosis below. Left
+  unmodified, correctly: after purging the soft-deleted `zz-e2e%` debris
+  (936 rows + 1,160 scratch moves) both pass green solo on the real dev
+  branch. No app change was ever needed.
+- **states.spec.ts** ("the move dialog says the tree is missing"):
+  expectation drift, two layers, both from Inbox fixture-pool skew. (1)
+  `.first()` on `/my/all`'s `location-summary` links now lands on the Inbox
+  (its accumulated holdings make it dominate page one), and the Inbox's
+  kebab withholds `Move to…`/`Rename…`/`Delete…` (`AND NOT is_inbox`, by
+  design) — the menu opened but never had the item, so the click timed out.
+  (2) Once resolved via the API (walk `all_cards` for a non-Inbox
+  single-location card) and searched into view, `.first()` on the
+  post-search `location-summary` links could still hit a different card
+  whose name merely contains the search substring. Fixed: resolve the target
+  card from the API and scope the final link to its own row via
+  `[data-oracle="{id}"]`. Green solo 12/12.
+- **collection-tree-manage.spec.ts** ("Delete targets the row it was opened
+  for"): **healed** — passed unmodified on every solo run (3/3). Not
+  touched.
+
+**Corrected diagnosis (orchestrator, same day): there is no app bug.** The
+"Recently deleted list never surfaces fresh deletions" conclusion did not
+survive a controlled experiment: after purging the accumulated soft-deleted
+`zz-e2e%` debris from the real dev branch (936 rows + 1,160 scratch ledger
+rows), both "Restore" tests pass green solo through the real app —
+`recently_deleted()`'s query (`ORDER BY deleted_at DESC LIMIT 50`) is
+correct and fresh deletions rank first, verified by direct psql against the
+same DATABASE_URL the app serves from. Two lessons the original
+investigation recorded for the permanent record: (1) **debris is the
+default suspect** — with 900+ same-named `zz-e2e` soft-deleted rows, a
+name-locating test can act on an older namesake and every downstream
+assertion goes wrong in ways that mimic deep app breakage
+(`scratchName`'s no-wall-clock collision flaw, filed on WB-01KZMVA2Y1, is
+the enabler); (2) **the Neon MCP is a cross-project hazard** — the
+investigation's "ground truth" SQL ran against MCP-listed identifiers
+(`steep-scene-29832344`/`br-empty-butterfly-atqr162u`) that were never
+verified to be the branch the app actually serves from; conclusions built
+on that comparison were contaminated from the start. Ground truth for this
+repo is psql against the `.devcontainer/.env` URLs, nothing else. Parts of
+the original session's observations (a stale list surviving a server
+restart) remain unexplained but are unreproducible on clean state; if the
+symptom ever recurs post-purge, reopen from scratch with .env-psql evidence
+only.
+
+**Fixture-pool observations for WB-01KZMVA2Y1.** Beyond that ticket's
+already-filed batch-move/command-palette symptom, this task found the same
+underlying cause reaching further: the shared e2e user's **Inbox** alone now
+holds 200+ distinct card rows (`collection_view` returns a full page with
+`next_cursor` still set), skewing `.first()`-style locators across multiple
+files toward it and toward whichever *other* single card a broad substring
+query happens to put first. `all-cards.spec.ts`'s "the location summary
+expands to the collections it names" test (not part of this task's list) is
+failing for the same family of reasons — the seed no longer has *any*
+card in two collections (0 of 50 rows are multi-location) — left unfixed
+here as it is squarely fixture-pool territory. Also observed:
+`collection-tree-manage.spec.ts`'s "Delete's card count is this
+collection's own" test reliably fails (present count 1 → 4 → 5) when the
+file is run **repeatedly back-to-back** without recovery — the shared
+`catalog/search?q=z` unowned-card pool selection does not appear to advance
+or isolate across runs, so repeated local runs compound. Not a deterministic
+failure on a single clean run (absent from every first-run pass this task
+took), but worth WB-01KZMVA2Y1's attention alongside the batch-move symptom.
+
+**Left flaky, not quarantined.** `collection-tree-manage.spec.ts`'s "Escape
+closes only the open picker, not the delete dialog behind it" failed in 2 of
+4 solo runs of the full file (always passed when run alone, or as the third
+full-file run) — a genuine non-deterministic order-sensitivity, not a
+catalog-size drift and not part of this task's list. Per the quarantine
+policy (flake → one retry; still flaky → `@flaky` + Findings) it does not
+meet the bar for a tag here since it passed clean solo and on a subsequent
+full run without any code change; flagged for whoever next touches that
+file to watch for a recurrence.
+
+**Doc updates in this task:** the e2e-suite skill's known-red-baseline
+paragraph is deleted, replaced with the residual-baseline note: serial is
+the verification mode (~13 min), post-reconciliation baseline 247/259, and
+every residual failure is enumerated there with its owning task. This
+Findings entry is the per-file drift record the skill note defers to.
