@@ -771,3 +771,31 @@ is nothing left to keep in sync.
    and rebase (or diff `HEAD` against current `origin/main`) is the first
    move when a CI result looks inexplicable, before trusting any theory about
    what the CI provider does or doesn't tolerate.
+
+## Findings — hydration-aware island clicks (P6-060, 2026-08-11)
+
+**Shipped:** `retryUntil`/`clickUntil` in `end2end/tests/helpers.ts` — the
+convention for interacting with streamed islands and globally-wired listeners
+(retry the interaction against its own declared effect instead of clicking
+once and waiting passively), applied at the four historically-flaky sites and
+their obviously-identical neighbors. Also: the suite's auth origin repointed
+`127.0.0.1:3000` → `localhost:3000` (Neon Better Auth's "Allow Localhost"
+matches the literal hostname; ON for dev, OFF for prod — recorded so nobody
+"fixes" it backward).
+
+**The honest measurement story.** The task's premise (four tests flake at
+default workers, all else green) predated the full-catalog bulk load. Measured
+after it: baseline 229/259 at 9 workers; post-helper parallel runs 230/259 and
+231/259 — a *different* overlapping ~29-failure subset each run, the four
+named sites failing in **none** of them, and every sampled failure green solo
+(`catalog.spec` 27/27 at `--workers=1`). The dominant parallel-failure class
+is now shared-dev-server contention on 40× heavier data (116,695 printings vs
+the 2,976 the suite grew up on), which no click helper can reach. Parallel
+full passes therefore prove nothing today; `--workers=1` remains the
+documented full-pass mode until the filed contention task lands (worker
+count / data isolation / server capacity are its levers). And serial itself
+is currently 239/259 (12.4m): ~13 deterministic expectation-drift failures
+across 9 files (search results, counts and layouts assumed the POC catalog)
+plus the filed fixture-pool class — the post-bulk-load reconciliation task
+(WB-01KZS0WR3N) owns restoring green in any mode. The helper ships as the standing
+convention — the mechanism it retires is real, just no longer the bottleneck.

@@ -21,7 +21,7 @@ page.on("response", (r) => {
   if (r.url().includes("/api/")) console.log("[res]", r.status(), r.url());
 });
 
-await page.goto("http://127.0.0.1:3000/catalog?q=bolt");
+await page.goto("http://localhost:3000/catalog?q=bolt");
 await page.locator("html[data-hydrated=true]").waitFor({ state: "attached" });
 await page.locator('[data-testid=destination-label]').waitFor();
 console.log("label:", await page.locator("[data-testid=destination-label]").textContent());

@@ -49,10 +49,29 @@ probe, add its script line here — an unregistered probe is one nobody runs.
 
 ## Server lifecycle
 
-Tests hit `http://127.0.0.1:3000` — the `cargo leptos watch --features
-component-bench` server (repo root; reads `.env` → Neon **dev** branch).
+Tests hit `http://localhost:3000` — the `cargo leptos watch --features
+component-bench` server (repo root; reads `.env` → Neon **dev** branch)
+still *binds* `127.0.0.1:3000` (`Cargo.toml` `site-addr`; do not touch that —
+it's server config, not a test-suite concern) and `localhost` resolves to it,
+so this is a client-side-only distinction.
 Check `lsof -i :3000` before starting another; the bind happens *after* the
 first build, so a fresh start takes minutes. Never point tests at prod.
+
+**Must be `localhost`, not `127.0.0.1` (maintainer ruling, 2026-08-11).**
+Neon Better Auth's "Allow Localhost" setting is ON for the Neon **dev**
+environment and matches the literal `localhost` hostname — a request whose
+`Origin` is `http://127.0.0.1:3000` now gets `403 INVALID_ORIGIN` on sign-in.
+Every `end2end/` origin hardcode (`playwright.config.ts`'s `baseURL`, every
+`.mjs` probe, `seed-e2e-user.sh`) was repointed to `http://localhost:3000`
+accordingly (P6-060) — a probe or test still hitting `127.0.0.1:3000` will
+either 403 on its own sign-in or, if it reuses the login fixture's
+`storageState`, silently send no cookie at all (cookies are host-scoped, and
+the fixture's cookies are now scoped to `localhost`, not `127.0.0.1`). New
+probes must use `localhost:3000`, never `127.0.0.1:3000`.
+**Caveat, so nobody "fixes" this backward:** prod (Render, Neon's main
+branch) keeps Allow Localhost **OFF**. This is irrelevant to e2e, which never
+targets prod (never point tests at prod, above) — recorded only so the
+distinction doesn't get "corrected" into matching prod's setting.
 
 **Release-build clobber trap (isolated for the gate):** a `cargo leptos build
 --release` that writes to the default `target/site` overwrites `target/site/pkg`
@@ -93,21 +112,53 @@ single biggest cost sink in the loop.
   while building: `npx playwright test --project=chromium --grep @fast`.
   Implementers and reviewers use **only** this.
 - The task's e2e run = **once per task, after the adversarial-review fixes are
-  in** (ui-task-loop step 4):
-  `npx playwright test --project=chromium --workers=1`. One pass, not one per
-  round. A task is not `[x]` until it is green.
+  in** (ui-task-loop step 4): `npx playwright test --project=chromium
+  --workers=1` — **serial remains the full-pass mode** (12.4m measured 2026-08-11). P6-060's
+  helper retires the hydration-click mechanism, but post-bulk-load (116,695
+  printings vs the 2,976 the suite grew up on) parallel full runs fail ~29
+  tests from shared-dev-server contention — a different subset each run, every
+  sampled failure green solo. The filed contention task (WB-01KZRZ0TT7) owns changing this
+  policy; until it lands, parallel full passes prove nothing. **Known-red
+  interim (2026-08-11):** even serial is 239/259 right now — ~13 deterministic
+  expectation-drift failures from the bulk load (tests written against the
+  2,976-card POC catalog) plus the filed fixture-pool class; the
+  post-bulk-load reconciliation task (WB-01KZS0WR3N) owns restoring green. Until it lands,
+  judge a task's e2e run against that known-red baseline, not against 100%.
 
-  **`--workers=1` is deliberate, not caution.** `hydrated(page)` waits on the
+  **The hydration-click flake is handled now, test-side — `retryUntil` /
+  `clickUntil` in `end2end/tests/helpers.ts`.** `hydrated(page)` waits on the
   global `<html data-hydrated>` stamp, which does not imply a *streamed*
-  Suspense island is interactive; under worker pressure a click lands before
-  the island is wired and is silently swallowed. Four tests flake on this —
-  `smoke.spec.ts:92` and `:114`, `collection-tree.spec.ts:65`,
-  `selection-tray.spec.ts:239` — a different subset each run, all passing in
-  isolation. Measured 2026-07-25: default workers 2 failed / 141 passed in
-  1.4 min, then 143/143 in 3.8 min single-worker. Since the parallel run needs
-  a retry to be believed, it is not actually faster, and it costs a real
-  signal. Revert this when the hydration-aware click helper lands (filed under
-  Phase 5 discoveries).
+  `<Suspense>`/`<Transition>` island, or a global listener (⌘K's document
+  keydown, the router's click-delegate), is wired yet; under worker pressure
+  an interaction can land before its handler is attached and is silently
+  swallowed — Playwright reports a normal, successful action (element
+  visible/enabled/stable) while the app never reacts. `clickUntil(locator,
+  check)` retries the interaction itself against its own declared effect
+  instead of clicking once and waiting passively on an effect that may never
+  arrive; `retryUntil` is the general form for non-click actions. Deliberately
+  test-side, not an app-side readiness marker — see the helper's own doc
+  comment for why (the swallowed sites span mechanisms too different for one
+  app stamp to cover honestly). Applied to the four originally-flaky sites
+  (`smoke.spec.ts`'s Mode-switch/bottom-tabs tests, `collection-tree.spec.ts`'s
+  tree-badge/chevron/row-click tests, `selection-tray.spec.ts`'s row-select
+  tests) plus obviously-identical neighbors in those same three files — the
+  convention + those sites, not a suite-wide sweep. Honest scope note: in the
+  2026-08-11 measurement runs the four named sites failed in NO parallel run —
+  the dominant parallel-failure class had already shifted to post-bulk-load
+  server contention (see the policy bullet above) — so the helper is shipped
+  as the standing convention for island interactions, not as the fix for
+  today's parallel failures. Evidence in specs/ui-work-loop.md Findings,
+  "Hydration-aware island clicks" (P6-060).
+
+  **Why parallel still fails (both filed):** (a) the **contention** class —
+  post-bulk-load pages query 40× more data, so 9 workers push the shared dev
+  server into timeouts suite-wide (~29 failures/run, disjoint subsets, all
+  green solo); and (b) the **fixture-pool** class: many spec files write
+  through the *same single* seeded e2e user against the *same* shared Neon
+  dev branch (holdings, collections, `LastMoveState`), so concurrent workers
+  race each other's writes to the same rows — data problems
+  `retryUntil`/`clickUntil` cannot fix, since retrying a click faster does
+  not make two workers agree on one row's count.
   A **major** failure goes back to the implementer; a minor failure or flake is
   quarantined `@flaky` and filed under Phase 5 discoveries. (Stage boundaries
   add the Android **release** smoke, not a different browser tier.)

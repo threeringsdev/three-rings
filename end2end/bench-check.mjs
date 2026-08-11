@@ -6,7 +6,10 @@
 //   node bench-check.mjs http://127.0.0.1:3100/dev/components
 import { chromium } from 'playwright';
 
-const url = process.argv[2] ?? 'http://127.0.0.1:3000/dev/components';
+// localhost, not 127.0.0.1 — Better Auth's origin check (e2e-suite skill);
+// /dev/components itself is anonymous but the default should still match
+// the origin every other probe now uses.
+const url = process.argv[2] ?? 'http://localhost:3000/dev/components';
 const failures = [];
 const consoleIssues = [];
 

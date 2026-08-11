@@ -23,7 +23,8 @@ const ctx = await browser.newContext({
     fs.readFileSync("playwright/.auth/user.json", "utf8"),
   ),
   viewport: { width: 1440, height: 900 },
-  baseURL: "http://127.0.0.1:3000",
+  // localhost, not 127.0.0.1 — Better Auth's origin check (e2e-suite skill).
+  baseURL: "http://localhost:3000",
 });
 const page = await ctx.newPage();
 

@@ -29,7 +29,7 @@ import {
   type APIRequestContext,
   type Page,
 } from "@playwright/test";
-import { AUTH_STATE, hydrated } from "./helpers";
+import { AUTH_STATE, clickUntil, hydrated, textEquals } from "./helpers";
 
 const TRAY = '[data-testid="selection-tray"]';
 const COUNT = '[data-testid="tray-count"]';
@@ -175,9 +175,15 @@ test.describe("cross-view", () => {
     // Zero selection on a real page renders no tray either.
     await expect(page.locator(TRAY)).toHaveCount(0);
 
-    await page.locator(MY_ROW_SELECT).nth(0).click();
-    await page.locator(MY_ROW_SELECT).nth(1).click();
-    await expect(page.locator(COUNT)).toHaveText("2 cards");
+    // clickUntil: the all-cards row checkbox lives inside the `<Transition>`
+    // `AllCardsBody` resolves into (app/src/my/all_cards.rs) — same confirmed
+    // flake class as the mode-switch clicks below (e2e-suite skill "Tiers").
+    await clickUntil(page.locator(MY_ROW_SELECT).nth(0), () =>
+      textEquals(page.locator(COUNT), "1 card"),
+    );
+    await clickUntil(page.locator(MY_ROW_SELECT).nth(1), () =>
+      textEquals(page.locator(COUNT), "2 cards"),
+    );
     const key = await page
       .locator(MY_ROW_SELECT)
       .first()
@@ -185,16 +191,21 @@ test.describe("cross-view", () => {
     expect(key).toMatch(/^card:[0-9a-f-]+$/);
 
     // The desktop mode switch — real SPA navigation (the router intercepts the
-    // anchor), which is what "survives a mode switch" means.
+    // anchor), which is what "survives a mode switch" means. clickUntil: the
+    // same Mode nav confirmed flaky in smoke.spec.ts.
     const modes = page.locator('nav[aria-label="Mode"]');
-    await modes.getByRole("link", { name: "Catalog" }).click();
-    await expect(page).toHaveURL(/\/catalog$/);
+    await clickUntil(
+      modes.getByRole("link", { name: "Catalog" }),
+      async () => new URL(page.url()).pathname === "/catalog",
+    );
     // Still up, still counting the same picks, on a page with no rows of its
     // own to select.
     await expect(page.locator(COUNT)).toHaveText("2 cards");
 
-    await modes.getByRole("link", { name: "My cards" }).click();
-    await expect(page).toHaveURL(/\/my$/);
+    await clickUntil(
+      modes.getByRole("link", { name: "My cards" }),
+      async () => new URL(page.url()).pathname === "/my",
+    );
     await expect(page.locator(COUNT)).toHaveText("2 cards");
     // …and the rows it came from come back checked, which is the half a
     // count-only assertion would miss.
@@ -209,26 +220,29 @@ test.describe("cross-view", () => {
   }) => {
     const collection = await collectionWithCards(request);
     await openMy(page);
-    await page.locator(MY_ROW_SELECT).first().click();
-    await expect(page.locator(COUNT)).toHaveText("1 card");
+    // clickUntil: same all-cards `<Transition>` flake as the mode-switch
+    // test above.
+    await clickUntil(page.locator(MY_ROW_SELECT).first(), () =>
+      textEquals(page.locator(COUNT), "1 card"),
+    );
 
-    // Sidebar link → SPA navigation into the collection view.
-    await page
-      .locator(
+    // Sidebar link → SPA navigation into the collection view. Same
+    // `CollectionTreeNav` `<Suspense>` as collection-tree.spec.ts.
+    await clickUntil(
+      page.locator(
         `aside[aria-label="Sidebar"] li[data-tree-row="${collection.summary.id}"] a[href="/my/collections/${collection.summary.id}"]`,
-      )
-      .click();
-    await expect(page).toHaveURL(
-      new RegExp(`/my/collections/${collection.summary.id}$`),
+      ),
+      async () =>
+        new URL(page.url()).pathname === `/my/collections/${collection.summary.id}`,
     );
     await page.locator(COL_ROW_SELECT).first().waitFor();
     await expect(page.locator(COUNT)).toHaveText("1 card");
 
     // A collection row is the grain-complete shape: its key names the
-    // collection, the printing and the board.
+    // collection, the printing and the board. Same flake class — the
+    // collection view's own rows resolve inside their own async boundary.
     const here = page.locator(COL_ROW_SELECT).first();
-    await here.click();
-    await expect(page.locator(COUNT)).toHaveText("2 cards");
+    await clickUntil(here, () => textEquals(page.locator(COUNT), "2 cards"));
     expect(await here.getAttribute("data-selection-key")).toMatch(
       new RegExp(`^held:${collection.summary.id}:[0-9a-f-]+:(main|side|maybe)$`),
     );
@@ -249,8 +263,12 @@ test.describe("cross-view", () => {
 
     test("@fast the tray docks above the bottom tab bar", async ({ page }) => {
       await openMy(page, "/my/all");
-      await page.locator(MY_ROW_SELECT).first().click();
-      await expect(page.locator(COUNT)).toHaveText("1 card");
+      // clickUntil: the confirmed flaky site (e2e-suite skill "Tiers") — the
+      // all-cards row checkbox lives inside the `<Transition>` `AllCardsBody`
+      // resolves into.
+      await clickUntil(page.locator(MY_ROW_SELECT).first(), () =>
+        textEquals(page.locator(COUNT), "1 card"),
+      );
 
       const tray = await page.locator(TRAY).boundingBox();
       const tabs = await page.locator('nav[aria-label="Primary"]').boundingBox();
