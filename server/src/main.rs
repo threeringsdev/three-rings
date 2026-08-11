@@ -1,6 +1,16 @@
 use leptos::logging::log;
 use leptos::prelude::*;
 
+/// Render migration versions zero-padded to 4 digits (`10` -> `0010`), matching
+/// the `NNNN_description.sql` filename convention, comma-separated.
+fn fmt_versions(versions: &[i64]) -> String {
+    versions
+        .iter()
+        .map(|v| format!("{v:04}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[tokio::main]
 async fn main() {
     // Load a workspace-root .env when present (host-side dev: DATABASE_URL,
@@ -20,12 +30,104 @@ async fn main() {
     // pre-deploy command is the future paid path.
     if std::env::args().any(|arg| arg == "--migrate") {
         match app::db::migrate().await {
-            Ok(()) => {
-                log!("migrations: up to date");
+            Ok(report) => {
+                // MIGRATOR::run succeeded (the migration, if any, is
+                // committed) but the independent read-back that verifies it
+                // failed — not this run's failure. Exit 0: turning a
+                // successful migration into a reported FAILED would abort a
+                // future Render pre-deploy on a transient read blip.
+                if let Some(read_err) = &report.verify_read_failed {
+                    // `embedded` is a static, in-memory fact of this binary
+                    // (MIGRATOR::iter(), no DB access) — known regardless of
+                    // whether the post-run DB read above failed, so the
+                    // embedded=N token below is still valid for
+                    // scripts/migrate.sh's stale-embed guard even on this path.
+                    log!(
+                        "migrations: applied OK but the verification read failed: {read_err} — verify manually — embedded={n} host={host}",
+                        n = report.embedded.len(),
+                        host = report.host
+                    );
+                    return;
+                }
+                // Drift in either direction means Ok(()) from MIGRATOR::run
+                // does not mean what it looks like it means — fail loudly
+                // rather than print a success line (specs/phase-6-probes/
+                // P6-059.md: this is the case that used to print "up to
+                // date" unconditionally). Defense-in-depth in practice:
+                // sqlx's own VersionMissing/VersionMismatch checks inside
+                // MIGRATOR::run already refuse to run at all on most of this
+                // drift, surfacing instead as the Err(failure) arm below —
+                // this arm is what's left if that guard is ever bypassed.
+                if !report.missing.is_empty() || !report.unknown.is_empty() {
+                    if !report.applied.is_empty() {
+                        log!(
+                            "migrations: applied {} before the drift below was detected (versions {})",
+                            report.applied.len(),
+                            fmt_versions(&report.applied)
+                        );
+                    }
+                    if !report.missing.is_empty() {
+                        log!(
+                            "migrations FAILED: embedded but not applied: {} (host {})",
+                            fmt_versions(&report.missing),
+                            report.host
+                        );
+                    }
+                    if !report.unknown.is_empty() {
+                        log!(
+                            "migrations FAILED: applied in the database but not embedded in this binary: {} (host {})",
+                            fmt_versions(&report.unknown),
+                            report.host
+                        );
+                    }
+                    std::process::exit(1);
+                }
+                // `embedded=N` is a stable, machine-parseable token (in
+                // addition to being readable): scripts/migrate.sh greps it
+                // out and compares it against migrations/*.sql on disk to
+                // catch the one failure mode this DB-side check is
+                // structurally blind to — a build that itself is stale (never
+                // re-embedded a newly added .sql file at all), where every
+                // field above is internally consistent because the DB and
+                // this binary agree with each other while disagreeing with
+                // what's actually on disk.
+                if report.applied.is_empty() {
+                    log!(
+                        "migrations: all {n} embedded migrations already present (latest {latest}) — embedded={n} host={host}",
+                        n = report.embedded.len(),
+                        latest = report
+                            .embedded
+                            .last()
+                            .map(|v| format!("{v:04}"))
+                            .unwrap_or_else(|| "none".to_string()),
+                        host = report.host
+                    );
+                } else {
+                    log!(
+                        "migrations: applied {k} (versions {versions}) — embedded={n} host={host}",
+                        k = report.applied.len(),
+                        versions = fmt_versions(&report.applied),
+                        n = report.embedded.len(),
+                        host = report.host
+                    );
+                }
                 return;
             }
-            Err(e) => {
-                log!("migrations FAILED: {e}");
+            Err(failure) => {
+                if failure.applied_before_failure.is_empty() {
+                    log!(
+                        "migrations FAILED: {} (host {})",
+                        failure.error,
+                        failure.host
+                    );
+                } else {
+                    log!(
+                        "migrations FAILED: {} (host {}; applied before failure: {})",
+                        failure.error,
+                        failure.host,
+                        fmt_versions(&failure.applied_before_failure)
+                    );
+                }
                 std::process::exit(1);
             }
         }

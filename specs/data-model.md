@@ -566,11 +566,117 @@ Convention going forward: **every user-table migration explicitly `GRANT`s CRUD 
 `app_runtime`'s RLS context (the `app.user_id` GUC), not the RLS-forced owner's —
 keeping the per-user scoping unambiguous.
 
-**`scripts/migrate.sh` hardened.** The `sqlx::migrate!` macro embeds the migrations
-dir at compile time, and cargo did not reliably rebuild `app` when a *new* `.sql`
-file was added — so `--migrate` silently reported "up to date" without applying
-`0004` until `app` was force-recompiled. `migrate.sh` now `touch`es
-`app/src/db.rs` before building to guarantee a re-embed.
+**`scripts/migrate.sh` hardened (2026-07-15, revised 2026-08 — P6-059), three
+independent layers, because no single one covers every way this can go wrong.**
+The `sqlx::migrate!` macro embeds the migrations dir at compile time, and cargo
+did not reliably rebuild `app` when a *new* `.sql` file was added — so
+`--migrate` silently reported "up to date" without applying `0004` until `app`
+was force-recompiled. The original fix had `migrate.sh` `touch` `app/src/db.rs`
+before building; that was **not actually a guarantee** — it relied on mtime
+comparison, and a `touch` landing inside the same coarse- or cached-mtime
+window as the previous build's output artifact is not reliably seen as newer
+(confirmed by `specs/phase-6-probes/P6-059.md`).
+
+1. **`app/build.rs`** emits `cargo:rerun-if-changed=../migrations`, giving
+   cargo an actual dependency edge on the migrations directory — previously
+   there was **none at all** (`app` had no build script, so cargo had no
+   reason to even consider that directory when deciding whether to rebuild).
+   Cargo's own check behind that edge is *still* an mtime comparison — this
+   doesn't make the embed mtime-*immune*; the difference from the old `touch`
+   is that the edge now exists and cargo evaluates it on every build, rather
+   than depending on an external script guessing the right moment to perturb
+   an unrelated file's timestamp. This is what makes a normal build reliable.
+2. **`--migrate` verifies DB-vs-binary agreement.** It no longer trusts
+   `MIGRATOR.run`'s bare `Ok(())` — it reads the applied-migrations table back
+   (`Migrate::list_applied_migrations`) before and after and reports concrete
+   versions applied this run vs. already present. It also carries `missing`/
+   `unknown` fields for drift between what this binary embeds and what the DB
+   has applied — but that check is **defense-in-depth, not the primary guard**:
+   sqlx's own `validate_applied_migrations` inside `MIGRATOR.run` already
+   refuses to run at all when the DB has a version the binary doesn't embed
+   (`MigrateError::VersionMissing`), so that drift surfaces as a run failure
+   before this layer's comparison code is even reached in practice.
+3. **`scripts/migrate.sh` verifies the binary-vs-disk agreement layer (1) and
+   (2) cannot see.** Layers (1)–(2) both reason from *inside the running
+   binary's own idea* of what it embeds — if the binary itself is stale (built
+   without re-embedding a newly added `.sql` file, for any reason), the DB and
+   the binary can agree perfectly with each other while both disagree with
+   what's actually in `migrations/` on disk, and `--migrate` will honestly —
+   and wrongly — report success. `--migrate`'s report line now always carries
+   a machine-parseable `embedded=N` token (the distinct version count this
+   binary compiled in); `migrate.sh` independently counts `migrations/*.sql`
+   on disk (by distinct version prefix, so a future reversible `.up`/`.down`
+   pair still counts once) and compares the two after every successful run,
+   printing `STALE EMBED: …` and exiting nonzero on a mismatch. This is the
+   layer that actually makes "prove what it applied" hold even when (1) fails
+   to fire for some unanticipated reason.
+
+`cargo run --quiet` at `migrate.sh`'s call site is **kept** — `--quiet` only
+silences cargo's own compile/status lines, not the `server` binary's own
+`log!` output, so the version-bearing report line (and its `embedded=N` token)
+always prints regardless; the probe's complaint about `--quiet` was that it
+hid the *only* signal (recompilation happening) on top of an untrustworthy
+success message, and the message is trustworthy now — and independently
+checked by layer (3) above.
+
+**P6-059 empirical finding — edits to *existing* migration files also
+invalidate the embed.** The probe (`specs/phase-6-probes/P6-059.md` → "Open —
+needs a runtime check") left open whether cargo's directory-level
+`rerun-if-changed` also catches an in-place edit to an already-embedded `.sql`
+file, not just a newly added one. Verified directly: with `app` freshly built,
+appending a comment line to the existing `0010_collection_soft_delete.sql` and
+rebuilding produced `Dirty app … the file app/../migrations has changed`, and
+`app` recompiled. Cargo's directory-mtime watch is coarser than a per-file
+diff — it fires on any change under the watched path, additions and edits
+alike — so this closes the question in the safer direction: both failure
+modes the original entry worried about (a new file silently missing the
+embed, and a since-modified file's SQL going stale in a cached binary) are
+covered by the same mechanism.
+
+**P6-059 review finding — the DB-side check alone is structurally blind to a
+stale binary.** A first pass at this task added only layers (1) and (2) above
+and claimed that combination "caught" any no-op run. That claim was **false**
+and was caught in review: `MigrationReport.embedded` comes from
+`MIGRATOR.iter()` — the *running binary's own* compiled-in set. If the binary
+itself never re-embedded a newly added `.sql` file (for any reason layer (1)
+didn't cover), the DB and that binary agree with each other perfectly — the
+DB has exactly what the binary embeds — while both disagree with what's
+actually in `migrations/` on disk. `--migrate` would print "all N embedded
+migrations already present" truthfully *from the binary's point of view*
+while the new file sits on disk, never applied — reproducing the original bug
+inside more precise-sounding language. Layer (3) (the disk-vs-embedded count
+comparison in `scripts/migrate.sh`) exists specifically because no check that
+runs *inside* the binary being asked "are you stale?" can answer that
+question; only something outside it — the shell script, counting the
+filesystem independently — can.
+
+**Live verification (dev branch, 2026-08).** All three original report shapes
+plus the new guard, in sequence, ending with dev's `_sqlx_migrations` restored
+byte-for-byte:
+- Already present: `migrations: all 10 embedded migrations already present
+  (latest 0010) — embedded=10 host=ep-dry-cell-atj9rpc2.c-9.us-east-1.aws.neon.tech`,
+  exit 0, guard silent (10 disk == 10 embedded).
+- Applied (throwaway `0011_p6059_probe.sql`, `COMMENT ON TABLE cards IS NULL;`
+  — inert, verified no prior comment existed): `migrations: applied 1
+  (versions 0011) — embedded=11 host=…`, exit 0, guard silent (11 == 11).
+- Drift (file deleted, DB row still present): `migrations FAILED: migration
+  11 was previously applied but is missing in the resolved migrations (host
+  …)`, exit 1 — sqlx's own `VersionMissing` guard (layer (2)'s primary path),
+  confirmed still reachable through the restructured `Result<MigrationReport,
+  MigrateFailure>` API.
+- Stale-embed guard: reproducing an actual stale binary through a normal
+  `cargo run` is not possible now (layer (1) fixes exactly that), so the guard
+  branch itself — the same comparison and message lines as
+  `scripts/migrate.sh` — was exercised directly against the real on-disk
+  count (10) with a deliberately forced wrong `embedded_count` (9), producing
+  `STALE EMBED: disk has 10 migrations, binary embedded 9 — rebuild happened
+  without the new file(s); do not trust this run` and a nonzero exit.
+
+Not live-tested: `MigrationReport.verify_read_failed` (a transient failure on
+the post-run read-back specifically, with `MIGRATOR.run` itself having
+already succeeded) — reproducing it needs a network failure injected between
+two specific connection attempts, which wasn't attempted; covered by
+compilation and code inspection only.
 
 **Prod migrated 2026-07-16** with the data-access-backends landing —
 `scripts/migrate.sh prod` applied `0002`–`0006` to the Neon production branch
