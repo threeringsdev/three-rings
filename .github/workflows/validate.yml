@@ -78,6 +78,13 @@ jobs:
       - name: Create resource dirs for Tauri build script
         run: mkdir -p target/site/pkg
 
+      # .agents/skills is a symlink of .claude/skills (specs/ui-work-loop.md),
+      # making skills-tree drift structurally impossible after three manual
+      # resyncs failed. This guards the structural fix staying structural: a
+      # re-materialized real directory would silently resurrect drift.
+      - name: Check .agents/skills stays a symlink
+        run: test -L .agents/skills
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
