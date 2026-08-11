@@ -217,6 +217,48 @@ if ((await dialogContent.getAttribute('data-state')) !== 'open') {
 await page.keyboard.press('Escape');
 await page.waitForTimeout(250);
 
+// dialog Tab focus trap (P6-125): opening via a click leaves focus on the
+// trigger — OUTSIDE DialogContent's own subtree — so the very first Tab
+// must not walk to whatever is next in the page (the symptom the palette's
+// field-focus-on-open cited). It must instead enter the dialog, then Tab
+// through its three stops in order, wrap forward off the last one, and wrap
+// backward off the first with Shift+Tab.
+await page.locator('#trigger_bench-dialog').click();
+await page.waitForTimeout(250);
+// Structural selectors, not `getByRole(name:)` — `DialogClose` (the
+// "Cancel" button) sets `aria-label="Close dialog"` too, which overrides its
+// accessible name to match the real close button's, so a role/name query
+// can't tell them apart. The real close button is a direct child of
+// `#bench-dialog`; Cancel/Move are the footer's two buttons, in DOM order.
+const trapCloseBtn = page.locator('#bench-dialog > button[aria-label="Close dialog"]');
+const trapFooterButtons = page.locator('#bench-dialog footer button');
+const trapCancelBtn = trapFooterButtons.nth(0);
+const trapMoveBtn = trapFooterButtons.nth(1);
+const isActive = (locator) => locator.evaluate((el) => el === document.activeElement);
+
+await page.keyboard.press('Tab');
+if (!(await isActive(trapCloseBtn))) {
+  failures.push('dialog Tab trap: first Tab from the (still-focused) trigger did not enter at the close button');
+}
+await page.keyboard.press('Tab');
+if (!(await isActive(trapCancelBtn))) {
+  failures.push('dialog Tab trap: Tab from the close button did not reach Cancel');
+}
+await page.keyboard.press('Tab');
+if (!(await isActive(trapMoveBtn))) {
+  failures.push('dialog Tab trap: Tab from Cancel did not reach Move');
+}
+await page.keyboard.press('Tab'); // last tabbable -> wraps forward
+if (!(await isActive(trapCloseBtn))) {
+  failures.push('dialog Tab trap: Tab from the last tabbable (Move) did not wrap to the first (close button)');
+}
+await page.keyboard.press('Shift+Tab'); // first tabbable -> wraps backward
+if (!(await isActive(trapMoveBtn))) {
+  failures.push('dialog Tab trap: Shift+Tab from the first tabbable (close button) did not wrap to the last (Move)');
+}
+await page.keyboard.press('Escape');
+await page.waitForTimeout(250);
+
 // popover: native Popover API opens on trigger; anchor positioning puts the
 // panel adjacent to (not detached from) its trigger.
 const popTrigger = page.locator('[popovertarget="popover-bench-popover"]');

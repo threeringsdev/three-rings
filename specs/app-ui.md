@@ -228,6 +228,181 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### The vendored Dialog traps Tab focus (P6-125, 2026-08-11)
+
+`DialogContent` (`app/src/components/ui/dialog.rs`) gained a second `window`
+keydown listener alongside Escape's, gated identically
+(`overlay_stack::is_top`): while the dialog is open and topmost, Tab from the
+last tabbable descendant wraps to the first, Shift+Tab from the first wraps
+to the last, and — the cited symptom, `palette.rs`'s field-focus-on-open with
+nothing installed to hold it — a Tab pressed while focus is still *outside*
+the container (the trigger, focused by the click that opened it) is
+redirected in rather than left to walk the page behind the scrim. Zero
+tabbable descendants keeps focus on the container itself (now
+`tabindex="-1"`, so `.focus()` has somewhere to land). One fix at the
+`DialogContent` level covers all six current dialog instances across three
+files with no per-consumer wiring: `app/src/my/tree_manage.rs`'s
+create/rename/delete/move dialogs (four), `app/src/my/collection.rs`'s
+`TeardownDialog` (one), and the command palette via `CommandDialog` (one).
+
+**Mechanics.** The tabbable set is enumerated fresh on every keypress — never
+cached, since dialogs re-render — via a standard selector
+(`a[href]`/`button`/`textarea`/`input`/`select`/`[tabindex]`, each
+`:not([disabled])`, tabindex explicitly excluding `-1`) filtered to elements
+with real layout (`offsetWidth`/`offsetHeight` > 0). That filter turned out to
+be load-bearing, not defensive: `CommandDialog` opens with
+`show_close_button=false`, which only sets Tailwind's `hidden` class
+(`display:none`) on the close button — the button is still in the DOM,
+untabindexed, and would otherwise count as a real stop, breaking the
+palette's "one tabbable" case below. The same filter also excludes a closed
+sibling `Popover`'s native-hidden content (the delete dialog's two
+disposition pickers), which matches the selector but carries no
+`disabled`/tabindex marker of its own.
+
+**Composition, the three points named in the task.**
+- **`overlay_stack`/Escape**: the Tab listener shares Escape's exact gate, so
+  a `Popover` opened on top of a `Dialog` (the delete confirm's pickers, per
+  `P6-189`) keeps its own Tab order — the `Dialog` below is not topmost and
+  does not intercept. The popover itself gets no trap of its own here (out of
+  scope, "their own stories" per the task) — filed as a follow-up below.
+- **The palette's autofocus** (`palette.rs`'s open `Effect`, focusing
+  `#command-palette-input`): unchanged. The trap does not set initial focus;
+  it only constrains Tab from wherever focus already is. `CommandDialog`'s
+  palette has exactly one tabbable descendant (the search field —
+  `CommandItem` rows carry `tabindex="-1"`, roving ↑↓ is their own navigation
+  model, and the close button is filtered out per above), so this is also the
+  trap's "one tabbable" edge case: Tab/Shift+Tab both keep focus on the field.
+  Verified in `command-palette.spec.ts`.
+- **`tree_manage.rs`'s four dialogs**: none fight the trap. Create/rename have
+  no autofocus effect of their own at all (the trap's outside-container
+  redirect is what puts focus inside on the first Tab); the move dialog's
+  existing `focus_move_field` effect composes the same way the palette's
+  does. Nothing in any of the four uses a custom `tabindex` that would
+  conflict with the selector.
+
+**Review round 1 caught a real hole: "focus inside the container but on
+nothing tabbable" fell through to native Tab, uncaught — and it was routine,
+not rare.** The first cut's boundary check only distinguished "focus outside
+the container" (redirect in) from "focus inside, on a tracked tabbable, at a
+boundary" (wrap) — it never asked what happens when focus is *inside* the
+container but on something that isn't itself tabbable at all. That state
+turned out to be reachable on every dialog by the most ordinary interaction
+there is: clicking non-interactive chrome — a title, a description, plain
+padding — has no focusable target of its own, so the browser's own focus
+algorithm walks up the tree to the nearest focusable ancestor and lands there
+instead, which is exactly `DialogContent`'s own `tabindex="-1"` (added by
+this same task, for the zero-tabbables fallback). Repro: open "New binder
+inside…", click the description line, Shift+Tab — focus walked backward onto
+a tree link behind the backdrop. Fixed by recognizing that `idx: Option<usize>`
+already carries everything needed to decide this, once containment is dropped
+as a separate check: every element `tabbable_within` finds is, by
+construction, a descendant of the container it was queried from, so
+`idx.is_some()` already implies "within" — `None` correctly, and identically,
+covers both "outside the container entirely" and "inside it, but not on a
+tabbable." The `container.contains(...)` check is gone; `trap_tab` now
+branches on `idx` alone.
+
+**Surprise, found while writing the e2e test, not a regression.**
+`DialogClose` sets `attr:aria-label="Close dialog"` unconditionally,
+regardless of its children — so a dialog's "Cancel" button and its real close
+(X) button share one accessible name. `getByRole('button', { name: 'Cancel'
+})` and `getByRole('button', { name: 'Close dialog' })` both fail to
+disambiguate them; the e2e tests below locate structurally instead (the close
+button is `DialogContent`'s own direct child, `footer button` for the
+footer's two). Pre-existing (this task did not add the `aria-label`), and out
+of surgical scope — worth its own small a11y fix, filed below.
+
+**Accepted papercut.** Clicking non-interactive chrome now blurs a
+previously-focused field (the click lands on the container's own
+`tabindex="-1"`, added by this task), so Enter-to-submit needs a re-click
+into the field first if a stray click landed on the dialog's padding in
+between — recorded on the `DialogClose` a11y follow-up task
+(`WB-01KZSBB0GM`) rather than chased here.
+
+**Bench.** `app/src/bench/dialog.rs`'s existing "Confirm move…" demo already
+has three tabbable stops (close button, Cancel, Move) — enough to exercise a
+forward wrap, a backward wrap, and an ordinary in-between Tab with no new
+markup; extended with a one-line caption naming the sequence.
+`end2end/bench-check.mjs`'s dialog section gained the trap assertions: open
+via the trigger (leaving focus on it, *outside* `DialogContent` — the exact
+"focus behind the scrim" scenario), Tab through all three stops in order,
+Tab again to prove the forward wrap, Shift+Tab to prove the backward wrap.
+`npm run probe:bench`: **CLEAN**.
+
+**e2e.** Three new deterministic tests in `collection-tree-manage.spec.ts`
+(`describe("Tab focus trap (P6-125)")`), against the create dialog — a Tab
+cycle from an explicitly-focused Name field through Cancel → Create → wraps
+to the close button; a Shift+Tab from the close button wrapping to Create;
+and (added in review, pinning the round-1 fix above) "clicking non-interactive
+dialog chrome does not leak focus past the scrim" — click the description
+line, assert the container itself is focused, Shift+Tab, assert focus lands
+on Create (not a control behind the backdrop), then the forward-Tab sibling
+assertion (click the description again, Tab, assert focus lands on the close
+button) — plus one composition test in `command-palette.spec.ts` confirming
+the search field keeps the palette's own autofocus and neither Tab nor
+Shift+Tab can move off it (the "one tabbable" case, for real, not just in the
+bench). All four solo: **4/4 passed**.
+
+**Regression runs, both consumer files, full file, `--workers=1`** (real dev
+server, `http://127.0.0.1:3000`), re-run after the review-round fix added a
+third test to `collection-tree-manage.spec.ts`:
+- `collection-tree-manage.spec.ts`: 16/17 passed. The one failure ("Delete's
+  card count is this collection's own, not the rolled-up subtree", `copiesIn`
+  expected 1, got 2 the first run and 3 the re-run — consistent with a
+  shared-pool count still drifting between runs, not a fixed value) is the
+  skill's own enumerated residual — "tree-manage :419 (pool-growth count)" —
+  at its original line 419 on `main`; this task's own new describe block
+  shifts it to line 499 (two tests) then 542 (three tests, this diff's final
+  state), same test, same fixture-pool cause, not a regression.
+- `command-palette.spec.ts`: 16/19 passed (unaffected by the review-round
+  fix — no lines added to this file since). The three failures ("Undo last
+  move reverses the move another surface just made", "a move already undone
+  from its toast is no longer `the last move`", "`Undo last move` after Empty
+  deck reverses the teardown, not an older move") are the enumerated
+  "command-palette :442/:484/:524" residuals — this task's own new test above
+  them shifts each by the same +29 lines (442→471, 484→513, 524→553); all
+  three fail identically, `unownedCards` reporting 0 free against the shared
+  dev-branch pool, the documented fixture-pool class, not the trap.
+
+Every observed failure across both full-file runs matches the skill's
+baseline enumeration exactly (line-shifted by this diff's own insertions);
+zero failures outside it.
+
+**Real-app check.** Exercised against the real running dev server
+(`cargo leptos watch --features component-bench` on `127.0.0.1:3000`), not
+just unit-level: the bench probe (`npm run probe:bench`, driving a real
+Chromium page over CDP) and the e2e runs above (same server, real login
+session, real Neon dev-branch collections) both count — no separate manual
+probe was needed beyond these.
+
+**Verification.** `cargo fmt --all -- --check` clean; the gate's own clippy
+lines all clean — `cargo clippy --workspace --exclude frontend --all-targets
+-- -D warnings` (native workspace incl. `src-tauri`/`three_rings`, run for
+real on this macOS host, not skipped the way the web-dev container would
+skip it), `cargo clippy -p frontend --target wasm32-unknown-unknown -- -D
+warnings` (wasm hydrate crate), `cargo clippy -p app --features native
+--all-targets -- -D warnings` (native backend, masked by `hosted` in the
+workspace line), `cargo clippy -p app --features hosted,component-bench
+--all-targets -- -D warnings`, and `cargo clippy -p app --features
+hydrate,component-bench --target wasm32-unknown-unknown -- -D warnings`
+(bench code, both halves); `cargo test -p app --features hosted`: 285
+passed, 0 failed, 4 ignored (DB-gated, untouched — no new Rust unit tests,
+the trap is DOM-driven `hydrate`-only logic with no pure-function core to
+extract, same reasoning `context_menu.rs`'s own keyboard roving-focus code
+was never unit tested either).
+
+**Follow-ups filed, not absorbed.** (1) `Popover` gets no Tab trap of its
+own — a `Dialog`'s nested disposition pickers (the delete confirm) are
+untrapped while open on top of an already-trapped dialog; explicitly out of
+this task's scope ("their own stories"), but worth its own task once
+`popover`'s other open items are picked up. (2) `DialogClose`'s
+`aria-label="Close dialog"` collides with the real close button's — same
+accessible name for two different controls on every dialog that uses
+`DialogClose` with custom text ("Cancel", "Done", …). Pre-existing, found
+incidentally while writing this task's e2e tests, not fixed here (out of
+surgical scope) — worth a small follow-up giving `DialogClose` its own
+default `aria-label` (or none, letting its children supply the name).
+
 ### Teardown toast gains Undo — the phone's only reversal path (P6-031, 2026-08-10)
 
 The standing gap: "Empty deck…" wrote its receipt's `move_ids` straight to
