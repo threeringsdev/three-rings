@@ -27,7 +27,9 @@ import { chromium } from "playwright";
 import fs from "node:fs";
 import path from "node:path";
 
-const BASE = process.env.BASE_URL ?? "http://127.0.0.1:3000";
+// localhost, not 127.0.0.1 — Better Auth's origin check (e2e-suite skill);
+// the stored storageState cookie is now scoped to the localhost host.
+const BASE = process.env.BASE_URL ?? "http://localhost:3000";
 const LIMIT = Number(process.argv[2] ?? 3);
 
 const stateFile = path.join(import.meta.dirname, "playwright/.auth/user.json");

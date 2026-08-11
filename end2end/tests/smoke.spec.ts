@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { AUTH_STATE, hydrated } from "./helpers";
+import { AUTH_STATE, clickUntil, hydrated } from "./helpers";
 
 // Shell smoke (specs/app-ui.md "App shell"): the route map SSRs, `/`
 // dispatches by auth state, the /my/* guard bounces anonymous visitors to
@@ -45,6 +45,11 @@ test("anonymous SPA nav to My cards bounces once to login @fast", async ({
   // route unmounted (next=/login%3Fnext%3D…).
   await page.goto("/catalog");
   await hydrated(page);
+  // Deliberately a plain click, not clickUntil: this test's own job is to
+  // police the redirect firing exactly once, so a retry-capable click would
+  // fight the property under test (a second click while the first navigation
+  // is still settling could produce the exact compounding this guards
+  // against, as an artifact of the helper rather than a real regression).
   await page
     .getByRole("navigation", { name: "Mode" })
     .getByText("My cards")
@@ -110,16 +115,23 @@ test.describe("authed", () => {
       "aria-current",
       "page",
     );
-    await modeSwitch.getByText("Catalog").click();
-    await page.waitForURL("/catalog");
+    // clickUntil, not click + waitForURL: confirmed flaky under default
+    // workers (smoke.spec.ts, e2e-suite skill "Tiers") — the Mode nav's
+    // router click-delegate can still be wiring up just after `hydrated()`.
+    // A same-destination re-click is harmless here (a static href, not an
+    // accumulating query param), unlike the anonymous guard test above.
+    await clickUntil(modeSwitch.getByText("Catalog"), async () =>
+      new URL(page.url()).pathname === "/catalog",
+    );
     await expect(page.locator("h1:visible")).toHaveText("Catalog");
     await expect(page.locator("h1:visible")).toHaveCount(1);
     await expect(modeSwitch.getByText("Catalog")).toHaveAttribute(
       "aria-current",
       "page",
     );
-    await modeSwitch.getByText("My cards").click();
-    await page.waitForURL("/my");
+    await clickUntil(modeSwitch.getByText("My cards"), async () =>
+      new URL(page.url()).pathname === "/my",
+    );
     await expect(page.locator("h1:visible")).toHaveText("All cards");
     await expect(page.locator("h1:visible")).toHaveCount(1);
   });
@@ -133,14 +145,18 @@ test.describe("authed", () => {
     const tabs = page.getByRole("navigation", { name: "Primary" });
     await expect(tabs).toBeVisible();
     await expect(page.getByRole("navigation", { name: "Mode" })).toBeHidden();
-    await tabs.getByText("My cards").click();
-    await page.waitForURL("/my");
+    // clickUntil: same confirmed flake as the desktop mode switch above,
+    // on the bottom tab bar's own copy of the nav.
+    await clickUntil(tabs.getByText("My cards"), async () =>
+      new URL(page.url()).pathname === "/my",
+    );
     // At phone width the My-cards landing is the drill-down root list
     // (wireframes → "Mobile — My cards root"), not the All-cards table.
     await expect(page.locator("h1:visible")).toHaveText("My cards");
     await expect(page.locator("h1:visible")).toHaveCount(1);
-    await tabs.getByText("Catalog").click();
-    await page.waitForURL("/catalog");
+    await clickUntil(tabs.getByText("Catalog"), async () =>
+      new URL(page.url()).pathname === "/catalog",
+    );
   });
 
   test("user menu shows the signed-in account @fast", async ({ page }) => {

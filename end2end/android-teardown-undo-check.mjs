@@ -11,13 +11,19 @@
 // This probe uses a different origin none of them tried: `cargo tauri
 // android dev` already runs `adb reverse tcp:3000 tcp:3000`, so the device's
 // own loopback can reach the host server directly. A `page.goto` straight to
-// `http://127.0.0.1:3000/...` never enters Tauri's `tauri://` scheme handler
+// `http://localhost:3000/...` never enters Tauri's `tauri://` scheme handler
 // at all — it is a normal top-level navigation to a normal origin, so the
 // WebView's own cookie jar behaves like a real browser's. Verified live: sign-in
 // over this origin lands on `/my` with real session cookies, where the same
 // sign-in over `http://tauri.localhost/...` cannot even submit the form (POST
 // bodies are stripped there). This is what makes a REAL authed teardown
 // reachable on-device at all.
+//
+// `localhost`, not `127.0.0.1`: on-device `localhost` resolves to the
+// device's own loopback, which `adb reverse` forwards to the host exactly
+// like `127.0.0.1` did — and it is required now, not just consistent, since
+// Better Auth's "Allow Localhost" origin check matches the literal
+// `localhost` hostname (e2e-suite skill, "Server lifecycle").
 //
 // Usage: node android-teardown-undo-check.mjs
 import { chromium } from "playwright";
@@ -65,7 +71,7 @@ const hydrated = () =>
 // `page.request` has no `baseURL` here (that's a test-runner fixture
 // feature, not something `connectOverCDP` sets up) — every call needs the
 // absolute origin.
-const ORIGIN = "http://127.0.0.1:3000";
+const ORIGIN = "http://localhost:3000";
 
 const scratchName = (what) => `zz-android-p6031-${what}-${Date.now()}`;
 
@@ -87,7 +93,7 @@ async function viewRows(id) {
 }
 
 // --- sign in over the plain adb-reverse origin (see header) ---
-await page.goto("http://127.0.0.1:3000/login");
+await page.goto("http://localhost:3000/login");
 await hydrated();
 await page.fill("input[name=email]", process.env.E2E_EMAIL);
 await page.fill("input[name=password]", process.env.E2E_PASSWORD);
@@ -119,7 +125,7 @@ try {
   ok(`added 2x ${card.name} to the scratch deck`);
 
   // --- the real flow, on the real device ---
-  await page.goto(`http://127.0.0.1:3000/my/collections/${deck.id}`);
+  await page.goto(`http://localhost:3000/my/collections/${deck.id}`);
   await hydrated();
   const teardownOpen = page.locator('[data-testid="teardown-open"]');
   if ((await teardownOpen.count()) === 0) {

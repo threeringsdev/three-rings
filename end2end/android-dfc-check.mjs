@@ -27,7 +27,7 @@ function check(name, ok, detail = "") {
 // rot this probe.
 async function firstCard(q) {
   const res = await fetch(
-    `http://127.0.0.1:3000/api/search_catalog?q=${encodeURIComponent(q)}`,
+    `http://localhost:3000/api/search_catalog?q=${encodeURIComponent(q)}`,
   );
   const { cards } = await res.json();
   if (!cards?.length) {

@@ -23,7 +23,13 @@ export default defineConfig({
   reporter: process.env.CI ? "line" : [["html", { open: "never" }], ["line"]],
   use: {
     // The cargo-leptos watch/serve server (reads .env → Neon dev branch).
-    baseURL: "http://127.0.0.1:3000",
+    // Must be "localhost", not "127.0.0.1": Neon Better Auth's "Allow
+    // Localhost" setting (dev environment) matches the literal `localhost`
+    // hostname, so a 127.0.0.1 origin gets 403 INVALID_ORIGIN on sign-in
+    // (maintainer ruling, 2026-08-11). The server still binds 127.0.0.1:3000
+    // (Cargo.toml site-addr) — localhost resolves to it, so this is a client-
+    // side-only change. See the e2e-suite skill's "Server lifecycle" section.
+    baseURL: "http://localhost:3000",
     trace: "on-first-retry",
   },
 

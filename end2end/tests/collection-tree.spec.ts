@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { AUTH_STATE, hydrated } from "./helpers";
+import { AUTH_STATE, clickUntil, hydrated } from "./helpers";
 
 // Read-only collection tree (specs/app-ui.md "Collection tree", read-only
 // half; design/information-architecture.md → My cards mode).
@@ -68,41 +68,52 @@ test.describe("signed in", () => {
     await hydrated(page);
     const nav = page.locator('nav[aria-label="Collections"]');
 
-    // All cards: pinned link to /my carrying the everything-total.
-    const total = dto.collections.reduce((s, r) => s + r.present, 0);
-    const allCards = nav.locator("a", { hasText: "All cards" });
-    await expect(allCards).toHaveAttribute("href", "/my");
-    await expect(allCards.locator('[data-name="Badge"]')).toHaveText(
-      String(total),
-    );
-
-    // Inbox: a real collection, pinned first among the tree rows.
-    const inbox = dto.collections.find((r) => r.summary.is_inbox);
-    expect(inbox).toBeTruthy();
-    await expect(nav.locator("li[data-tree-row]").first()).toHaveAttribute(
-      "data-tree-row",
-      inbox!.summary.id,
-    );
-
-    // Every row's badge is its rollup — the parent rows are the ones that
-    // can get this wrong, so assert all of them. Skip the `zz-e2e-` scratch
-    // collections the management spec creates/deletes in parallel against the
-    // same dev user: `fetchTree` (a live DB read) picks them up, but they may
-    // vanish mid-assertion. They carry zero cards, so they never alter a seed
-    // row's rollup — ignoring them keeps this test isolated from that churn.
-    for (const row of dto.collections) {
-      if (row.summary.name.startsWith("zz-e2e-")) continue;
-      await expect(rowBadge(page, row.summary.id)).toHaveText(
-        String(rollup(dto, row.summary.id)),
+    // One confirmed flaky site under default workers (e2e-suite skill,
+    // "Tiers"): `CollectionTreeNav` renders inside its own `<Suspense>`
+    // (app/src/my/tree.rs), which resolves on its own client-side schedule —
+    // `hydrated()` above only proves the *document* took over, not that this
+    // island's badges have replaced the skeleton yet. `.toPass()` retries the
+    // whole read against the live DOM instead of asserting once against
+    // whatever painted first — the same idiom `all-cards.spec.ts` already
+    // uses for this exact class of race (retryUntil's read-side counterpart;
+    // helpers.ts).
+    await expect(async () => {
+      // All cards: pinned link to /my carrying the everything-total.
+      const total = dto.collections.reduce((s, r) => s + r.present, 0);
+      const allCards = nav.locator("a", { hasText: "All cards" });
+      await expect(allCards).toHaveAttribute("href", "/my");
+      await expect(allCards.locator('[data-name="Badge"]')).toHaveText(
+        String(total),
       );
-    }
 
-    // Shopping list: pinned link to /my/shopping with the short-card badge.
-    const shopping = nav.locator("a", { hasText: "Shopping list" });
-    await expect(shopping).toHaveAttribute("href", "/my/shopping");
-    await expect(shopping.locator('[data-name="Badge"]')).toHaveText(
-      String(dto.shopping_short),
-    );
+      // Inbox: a real collection, pinned first among the tree rows.
+      const inbox = dto.collections.find((r) => r.summary.is_inbox);
+      expect(inbox).toBeTruthy();
+      await expect(nav.locator("li[data-tree-row]").first()).toHaveAttribute(
+        "data-tree-row",
+        inbox!.summary.id,
+      );
+
+      // Every row's badge is its rollup — the parent rows are the ones that
+      // can get this wrong, so assert all of them. Skip the `zz-e2e-` scratch
+      // collections the management spec creates/deletes in parallel against the
+      // same dev user: `fetchTree` (a live DB read) picks them up, but they may
+      // vanish mid-assertion. They carry zero cards, so they never alter a seed
+      // row's rollup — ignoring them keeps this test isolated from that churn.
+      for (const row of dto.collections) {
+        if (row.summary.name.startsWith("zz-e2e-")) continue;
+        await expect(rowBadge(page, row.summary.id)).toHaveText(
+          String(rollup(dto, row.summary.id)),
+        );
+      }
+
+      // Shopping list: pinned link to /my/shopping with the short-card badge.
+      const shopping = nav.locator("a", { hasText: "Shopping list" });
+      await expect(shopping).toHaveAttribute("href", "/my/shopping");
+      await expect(shopping.locator('[data-name="Badge"]')).toHaveText(
+        String(dto.shopping_short),
+      );
+    }).toPass({ timeout: 10_000, intervals: [250, 500, 1_000] });
   });
 
   test("chevron collapses the subtree @fast", async ({ page }) => {
@@ -146,14 +157,20 @@ test.describe("signed in", () => {
     // Collapse: state flips and the subtree's links become unreachable.
     // (A closed panel keeps its DOM — assert data-state + inert, not
     // visibility; see the e2e-suite skill's "assertions that lie".)
-    await trigger.click();
-    await expect(content).toHaveAttribute("data-state", "closed");
+    // clickUntil: same tree Suspense (app/src/my/tree.rs), same confirmed
+    // flake class as "pinned rows and rolled-up badges" above.
+    await clickUntil(
+      trigger,
+      async () => (await content.getAttribute("data-state")) === "closed",
+    );
     await expect(trigger).toHaveAttribute("aria-expanded", "false");
     expect(await content.evaluate((el) => el.inert)).toBe(true);
 
     // Re-open: the child is clickable again.
-    await trigger.click();
-    await expect(content).toHaveAttribute("data-state", "open");
+    await clickUntil(
+      trigger,
+      async () => (await content.getAttribute("data-state")) === "open",
+    );
     expect(await content.evaluate((el) => el.inert)).toBe(false);
     await expect(childLink).toHaveAttribute(
       "href",
@@ -201,11 +218,12 @@ test.describe("signed in", () => {
     const inbox = dto.collections.find((r) => r.summary.is_inbox)!;
     await page.goto("/my");
     await hydrated(page);
-    await page
-      .locator(`li[data-tree-row="${inbox.summary.id}"] a`)
-      .first()
-      .click();
-    await page.waitForURL(`/my/collections/${inbox.summary.id}`);
+    // clickUntil: same tree Suspense, same confirmed flake class as above.
+    await clickUntil(
+      page.locator(`li[data-tree-row="${inbox.summary.id}"] a`).first(),
+      async () =>
+        new URL(page.url()).pathname === `/my/collections/${inbox.summary.id}`,
+    );
   });
 
   test.describe("mobile", () => {

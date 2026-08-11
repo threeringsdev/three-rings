@@ -17,7 +17,9 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
-base="${E2E_BASE:-http://127.0.0.1:3000}"
+# localhost, not 127.0.0.1 — Better Auth's "Allow Localhost" origin check
+# matches the literal `localhost` hostname (e2e-suite skill).
+base="${E2E_BASE:-http://localhost:3000}"
 
 # -- owner credential → PG* env scoped to each psql call only, so the secret
 #    never appears in argv (process tables are world-readable) and is never

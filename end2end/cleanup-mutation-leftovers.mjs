@@ -13,7 +13,9 @@ import fs from "node:fs";
 import path from "node:path";
 
 const apply = process.argv.includes("--apply");
-const base = "http://127.0.0.1:3000";
+// localhost, not 127.0.0.1 — Better Auth's origin check (e2e-suite skill);
+// the stored storageState cookie is now scoped to the localhost host.
+const base = "http://localhost:3000";
 const stateFile = path.join(import.meta.dirname, "playwright/.auth/user.json");
 if (!fs.existsSync(stateFile)) {
   console.error("no storageState — run `npx playwright test --project=setup` first");
