@@ -189,7 +189,7 @@ impl CatalogStore for HostedBackend {
             "SELECT p.id, s.code AS set_code, s.name AS set_name, p.collector_number, p.rarity, \
                     COALESCE(p.image_uris->>'normal', p.faces->0->'image_uris'->>'normal') \
                         AS image_uri, p.finishes::text[] AS finishes, \
-                    CASE WHEN p.faces IS NOT NULL THEN \
+                    CASE WHEN jsonb_typeof(p.faces) = 'array' THEN \
                         (SELECT array_agg(f->'image_uris'->>'normal' ORDER BY ord) \
                          FROM jsonb_array_elements(p.faces) WITH ORDINALITY AS t(f, ord)) \
                     END AS face_image_uris \
@@ -1398,7 +1398,7 @@ impl CollectionStore for HostedBackend {
             "CASE WHEN ca.layout IN ({layouts}) THEN ca.card_faces END AS card_faces, "
         ));
         qb.push(
-            "CASE WHEN p.faces IS NOT NULL THEN \
+            "CASE WHEN jsonb_typeof(p.faces) = 'array' THEN \
                  (SELECT array_agg(f->'image_uris'->>'normal' ORDER BY ord) \
                   FROM jsonb_array_elements(p.faces) WITH ORDINALITY AS t(f, ord)) \
              END AS face_image_uris \
@@ -3325,7 +3325,7 @@ fn back_face_layout_list() -> String {
 const REPRESENTATIVE_PRINTING_JOIN: &str = " LEFT JOIN LATERAL ( \
      SELECT p.id, \
             COALESCE(p.image_uris->>'normal', p.faces->0->'image_uris'->>'normal') AS image_uri, \
-            CASE WHEN p.faces IS NOT NULL THEN \
+            CASE WHEN jsonb_typeof(p.faces) = 'array' THEN \
                 (SELECT array_agg(f->'image_uris'->>'normal' ORDER BY ord) \
                  FROM jsonb_array_elements(p.faces) WITH ORDINALITY AS t(f, ord)) \
             END AS face_image_uris \
@@ -4884,5 +4884,85 @@ mod soft_delete_guard {
                  story rests on (specs/collection-deletion.md → Data model)."
             );
         }
+    }
+}
+
+/// Guard for `printings.faces` shape (specs/collection-api.md, P6-124 —
+/// defense-in-depth against an out-of-band write; the ingester can't
+/// produce this shape, see the spec's Findings). Unnesting a jsonb value
+/// into rows requires it to actually *be* an array: a scalar, an object, or
+/// the JSON literal `null` all make that extraction throw ("cannot extract
+/// elements from a scalar"/"…object"), which errors the *entire* query —
+/// every OTHER row on that catalog page too — not just the malformed one. A
+/// bare SQL-NULL check does not rule any of those shapes out, so every site
+/// that unnests a printing's faces must instead gate on the column's actual
+/// jsonb type. Structural, not live-DB — it greps this file's own source, so
+/// it runs under plain `cargo test` with no `DATABASE_URL`, the same trick
+/// `owned_definition_guard` above uses. **Narrow by construction:** the
+/// needle matches only `jsonb_array_elements` applied to `p.faces`, spelled
+/// exactly that way, in *this* file — a differently-aliased printings
+/// reference, a call wrapped or spaced differently, or the same hazard
+/// introduced in another file would all dodge it silently.
+#[cfg(test)]
+mod faces_shape_guard {
+    #[test]
+    fn every_jsonb_array_elements_call_is_typeof_guarded() {
+        let src = include_str!("hosted.rs");
+
+        // Collapse all whitespace — including the `\` line-continuations the
+        // SQL string literals use to stay readable — to single spaces, so
+        // reformatting (line wraps, indentation) can't dodge the check.
+        let normalized = src
+            .replace('\\', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // Assembled from parts at runtime, not one literal each — *anywhere*
+        // in this test's own source, including comments and assertion
+        // messages: `include_str!` pulls in this very file, and a contiguous
+        // literal here would match itself the moment it's compiled in.
+        let extraction = format!("{}{}", "jsonb_array_elements", "(p.faces)");
+        let guard = format!("{} {}", "jsonb_typeof(p.faces)", "= 'array'");
+        let guarded_case = format!(
+            "CASE WHEN {guard} THEN (SELECT array_agg(f->'image_uris'->>'normal' \
+             ORDER BY ord) FROM {extraction}"
+        );
+        // The old, insufficient gate this guard replaces — must be gone, not
+        // just outnumbered, or a copy-pasted new site could reintroduce it.
+        // Narrow risk accepted here too: this needle would false-positive on
+        // a future, legitimate `CASE WHEN` bare-not-null check on this same
+        // column that does something other than unnest it — none exists
+        // today (verified: this needle only matches the three sites fixed
+        // above, now gone).
+        let stale_guard = format!("{} {}", "p.faces IS NOT", "NULL THEN");
+
+        let total = normalized.matches(&extraction).count();
+        let guarded = normalized.matches(&guarded_case).count();
+        let stale = normalized.matches(&stale_guard).count();
+
+        assert!(
+            total > 0,
+            "sanity: the face-unnesting call (`{extraction}`) should still exist in \
+             hosted.rs — if it's gone, this guard has nothing left to check and should be \
+             removed with it."
+        );
+        assert_eq!(
+            stale, 0,
+            "found the old bare not-null gate (`{stale_guard}`) guarding a face-extraction \
+             CASE. That only excludes SQL NULL — a scalar, object, or JSON null all pass it \
+             and still make the extraction below it error the whole query. Gate on \
+             `{guard}` instead (specs/collection-api.md, P6-124)."
+        );
+        assert_eq!(
+            total,
+            guarded,
+            "{} of {total} face-unnesting call(s) (`{extraction}`) in hosted.rs are not \
+             wrapped in a `{guard}` CASE guard — an unguarded call errors the entire query \
+             (every catalog page) the moment one row's faces value is a non-array jsonb \
+             shape, instead of degrading just that one row to \"no faces\" \
+             (specs/collection-api.md, P6-124).",
+            total - guarded,
+        );
     }
 }
