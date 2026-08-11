@@ -123,6 +123,7 @@ themselves — not as a ritual before every push. Reproduce it exactly:
 
 ```bash
 mkdir -p target/site/pkg                                                # Tauri build script needs this dir
+diff -rq .claude/skills .agents/skills                                  # skill-tree mirrors stay in sync
 cargo fmt --all -- --check
 cargo clippy --workspace --exclude frontend --all-targets -- -D warnings   # native workspace incl. src-tauri
 cargo clippy -p frontend --target wasm32-unknown-unknown -- -D warnings     # wasm hydrate crate

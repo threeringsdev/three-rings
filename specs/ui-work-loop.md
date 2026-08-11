@@ -37,7 +37,10 @@ promoting Playwright into CI was decided **against** 2026-07-23, see Findings).
 
 ### Mechanism: a repo skill, not a Workflow script
 
-`.claude/skills/ui-task-loop/SKILL.md` (mirrored in `.agents/skills/`),
+`.claude/skills/ui-task-loop/SKILL.md`, mirrored byte-identical into
+`.agents/skills/` for Codex (a symlink was tried and is impossible on GitHub
+Actions — see Findings, "Skills-tree parity: symlink tried, gate shipped" —
+so `validate.yml` asserts `diff -rq .claude/skills .agents/skills` instead),
 orchestrating in the **main session**. Revised 2026-07-25 (maintainer): the
 main session is now a pure **orchestrator** — implementation and adversarial
 review each run in their own subagent with a clean context, and Codex is out
@@ -659,3 +662,93 @@ in `CardFaceSummary::build`'s fail-closed guard). Both respected review-only:
 every mutation reverted byte-identical, neither touched the orchestrator's
 server. The six distinct findings across the two runs are queued as a Phase 5
 follow-up task.
+
+### Skills-tree parity: symlink tried, gate shipped (2026-08-11)
+
+**Read this before touching `.agents/skills` again.** The symlink approach
+below was implemented, verified against every harness we could check
+locally, and then found to be silently fatal on the one harness we couldn't
+check without pushing: GitHub Actions itself. Do not re-attempt it without
+new evidence that GitHub has changed this behavior.
+
+**The problem.** The manual-mirror discipline never held: the trees drifted
+three times (2026-07-26, resynced same day; 2026-07-30, resynced same day,
+see `specs/TODO-Phase-6.md` `P6-032`; and a third time discovered while
+picking up `P6-032` — `.claude/skills/workbook`, added while setting up this
+project's Workbook tracking, had no `.agents` counterpart). Each drift was
+invisible because both trees read as plausible in isolation — nothing fails,
+an agent just silently gets a stale or missing skill. `P6-032` originally
+specced a merge-gate `diff -rq` step but named the structural alternative —
+one tree as a symlink of the other — "if the agent harnesses tolerate it."
+
+**The symlink attempt.** `.agents/skills` was deleted and replaced with the
+relative symlink `.agents/skills -> ../.claude/skills` (`diff -rq
+.claude/skills .agents/skills` was clean byte-for-byte before the switch, so
+no merge was needed first). Harness-tolerance evidence gathered before
+shipping it:
+
+- **Codex CLI (the real `.agents/skills` consumer) — tolerates it.** `codex
+  debug prompt-input` renders the exact skill list a live session would see,
+  without spending a model turn. Run from this repo before the change, the
+  tool's own skill-root table showed `r15 = <repo>/.agents/skills`, with all
+  seven repo skills discovered under it correctly. Same command run again
+  after `.agents/skills` became a symlink: `r15` now resolved to
+  `<repo>/.claude/skills` (Codex canonicalizes the path), the same seven
+  skills were listed with identical descriptions, and no duplicate root or
+  missing entry appeared — the symlink was transparent to Codex's skill
+  discovery. (The `.agents/plugins/marketplace.json` convention visible in
+  the `codex` binary's strings is a related but separate mechanism — plugin
+  marketplaces, not the bare `skills/` directory this repo uses — and didn't
+  bear on this check.)
+- **git checkout in a fresh clone — tolerates it.** A synthetic repo (`git
+  init`, add a real symlink, commit, fresh `git clone`) checked out the
+  symlink correctly in the local sandboxed dev environment — real
+  `lrwxr-xr-x` entry, resolves, reads through. Fresh clones auto-detect
+  symlink support and leave `core.symlinks` unset (defaults to on) when it
+  works, which is what a fresh clone of this repo did too.
+- **Caveat found in the maintainer's local clone, not disqualifying on its
+  own:** `~/source/three-rings` (and every worktree off it — worktrees share
+  the parent's `.git/config`) has `core.symlinks=false` baked in from however
+  that clone was originally created. Confirmed live: on that clone, restoring
+  `.agents/skills` from the index (simulating a checkout) materialized it as
+  a **plain text file** containing `../.claude/skills`, not a working
+  symlink — silently inert, not an error. This is a stale per-clone cache,
+  not a property of macOS or the sandbox (the synthetic test above ran in the
+  identical environment and worked), fixable with a one-time `git config
+  core.symlinks true` in that clone.
+- **No workflow or script reads `.agents/skills` directly** — grepped
+  `.github/workflows/` and `scripts/`; the only references anywhere in the
+  repo were prose in specs describing the mirror, none of it machine-read.
+- **Windows** — out of scope per this repo's dev-environment contract (macOS
+  host + Linux container/CI only); not probed, not solved.
+
+**The harness that actually broke it: GitHub Actions.** None of the above
+caught it because none of it can be checked without pushing a real PR.
+Control experiment, 2026-08-11: a branch whose tree contains the
+`.agents/skills` symlink produces **no check suite at all** on a
+`pull_request` event — no run, no startup failure, nothing — deterministic
+across close/reopen and across fresh commits (new SHAs). An otherwise
+identical control branch with no symlink triggered Validate normally. Branch
+protection requires the Validate check, so a PR carrying the symlink can
+**never merge** — it sits forever with no status to even react to. The
+mechanism wasn't diagnosed further (GitHub's own runner-provisioning or
+checkout step evidently chokes on a top-level symlink into a dotdir in a way
+that suppresses workflow evaluation entirely, rather than failing loudly),
+but the empirical result was clean and reproducible enough to act on without
+needing the root cause. This is a harness none of the local checks above
+could have caught — Codex CLI, a local git clone, and a local YAML parse all
+say the symlink is fine; only an actual GitHub PR event reveals it isn't.
+
+**The fallback, shipped instead.** `.agents/skills` is restored as a real
+directory, byte-identical to `.claude/skills` (`cp -R`, `diff -rq` clean).
+`validate.yml` runs `diff -rq .claude/skills .agents/skills` next to the fmt
+check — the original `P6-032` design — so a future drift fails the gate loudly
+instead of recurring invisibly a fourth time. The manual-resync discipline
+is *not* retired: whoever edits a skill still has to update both trees by
+hand, same as before this task, and the gate is what catches it when they
+forget. If GitHub Actions' behavior here is ever revisited (a platform fix,
+or a differently-shaped symlink that doesn't trip whatever this is), the
+harness-tolerance evidence above is the starting point — but re-verify the
+GitHub Actions check with a fresh control PR before trusting it again; this
+is exactly the kind of undocumented platform behavior that changes without
+notice.

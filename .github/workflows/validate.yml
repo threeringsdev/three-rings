@@ -78,6 +78,18 @@ jobs:
       - name: Create resource dirs for Tauri build script
         run: mkdir -p target/site/pkg
 
+      # .claude/skills and .agents/skills must stay byte-identical mirrors
+      # (specs/ui-work-loop.md): manual resync failed three times (2026-07-26,
+      # 2026-07-30, and a third drift found 2026-08-11). A symlink was tried
+      # instead but is IMPOSSIBLE on GitHub Actions — a tree containing the
+      # symlink deterministically suppressed every pull_request check suite
+      # (verified 2026-08-11 with a control PR: close/reopen and fresh SHAs
+      # all produced zero runs, while an identical symlink-free branch
+      # triggered Validate normally) — so detection, not prevention, is the
+      # durable fix here.
+      - name: Check .claude/skills and .agents/skills stay in sync
+        run: diff -rq .claude/skills .agents/skills
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
