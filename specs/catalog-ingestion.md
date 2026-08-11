@@ -496,3 +496,42 @@ Worth noting for the eventual full ingest: production had **zero** user rows
 (0 collections, 0 holdings) at the time, so this was additive against an empty
 database. That will not be true next time — the full-load task should assume
 live user data and re-read the hash-gated upsert guarantees before running.
+
+## Findings (stage 2 — full load, dev branch, 2026-08-11)
+
+**The dev load succeeded and every stage-2 acceptance criterion passed.** Final
+dev state: **116,695 printings / 38,623 cards / 1,047 sets**, prices refreshed
+on all 116,695 printings, 77,998 rulings swapped in, `matched == scanned ==
+116,695`, run row `succeeded` with full stats.
+
+- **Scryfall API drift found and fixed first** (`app/src/ingest/scryfall.rs`):
+  the `/bulk-data` download-URL key was renamed upstream from `download_uri` to
+  `jsonl_download_uri` between the 2026-07-16 shape review and this run — the
+  old field is gone entirely, so the gate-tested loader failed its first real
+  outing on deserialization. One serde rename; verified by this load.
+- **Two-attempt history, honestly recorded.** The first attempt (run 6, started
+  2026-08-10 23:05 ET) wrote 55,601 printings and died overnight: it was left
+  owned by a returned agent with nothing preventing host sleep. Marked `failed`
+  by hand. The relaunch (run 7) under `caffeinate`, reusing the completed
+  download, wrote the remaining **62,695 printings + 12,631 card upserts in
+  1m59s** — the hash-gated upserts made the interrupted first attempt entirely
+  recoverable, which is itself a live verification of the rebuild/true-up
+  design. Operational rule recorded: bulk runs get `caffeinate` + a live owner.
+- **Acceptance numbers:** count 116,695 (target ~116K ✓); `sets.card_count`
+  spot-checks exact on all five sampled sets (`lea` 295, `mh3` 528, `neo` 531,
+  `khm` 425, `war` 312 — printing counts match `card_count` per set ✓); 20+
+  distinct layouts present incl. `art_series`, `emblem`, `token`, `meld`,
+  `vanguard`, `scheme` (the "does default_cards carry them" question: yes ✓);
+  trgm search sane (`lightning bolt` → Lightning Bolt + fuzzy neighbors ✓);
+  non-POC sets fully present (`neo` 531 ✓).
+- **User data intact:** 0 FK orphans across holdings→printings; holdings /
+  desires / moves / collections at 342 / 66 / 3,304 / 298 after the load —
+  the load touched no user rows (catalog tables only, as designed).
+- **Faces guard sweep:** 0 non-array `faces` in 116,695 rows — the P6-124
+  premise correction holds at full scale.
+- **Immediate re-run: 0 seconds, exit 0** — the snapshot gate short-circuits
+  ("bulk snapshot already ingested — nothing to do", all-zero stats). The
+  strongest form of the near-no-op criterion.
+- Wall-clock context: the download (≈80MB gz) plus pass 1 dominated the first
+  attempt's early phase; the write phase at full speed is ~2 minutes. A prod
+  run reusing a warm download should complete in single-digit minutes.
