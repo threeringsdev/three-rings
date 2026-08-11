@@ -167,9 +167,17 @@ impl LastMoveState {
     /// what it does is make ⌘K raise "Undid the last move" over a no-op, which
     /// is a lie. The two ways to be wrong here are not symmetric: naming a move
     /// that is already reversed makes a labelled command report success falsely,
-    /// while naming nothing makes it say there is nothing to undo — and if that
-    /// dispatch fails, the toast that started it is still on screen with its own
-    /// button. Silence in the safe direction beats a false success.
+    /// while naming nothing makes it say there is nothing to undo. Silence in the
+    /// safe direction beats a false success — but silence cannot be the failure
+    /// mode either: this toaster (`ui::sonner::Toaster`) dismisses a toast the
+    /// instant its action button is clicked, *before* the request it triggers
+    /// even resolves, so "the toast that started it is still on screen to retry
+    /// from" is never true. A caller that forgets here on dispatch **must**
+    /// restore the record if that dispatch fails — guarded on nothing newer
+    /// having arrived meanwhile, so ⌘K stays reachable as the fallback rather
+    /// than the reversal becoming unreachable from any UI. See `UndoLastMove`'s
+    /// own handler below and `TeardownDialog::undo_teardown`
+    /// (`my/collection.rs`) for the pattern.
     pub fn forget(&self, move_ids: &[Id]) {
         if forgets(self.0.get_untracked().as_ref(), move_ids) {
             self.0.set(None);

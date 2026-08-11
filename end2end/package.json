@@ -21,7 +21,8 @@
     "probe:android-header-kebab": "node android-header-kebab-check.mjs",
     "probe:android-states": "node android-states-check.mjs",
     "diag:resource-ids": "node measure-resource-ids.mjs",
-    "probe:android-tap-targets": "node android-tap-targets-check.mjs"
+    "probe:android-tap-targets": "node android-tap-targets-check.mjs",
+    "probe:android-teardown-undo": "node android-teardown-undo-check.mjs"
   },
   "keywords": [],
   "author": "",

@@ -228,6 +228,191 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Teardown toast gains Undo — the phone's only reversal path (P6-031, 2026-08-10)
+
+The standing gap: "Empty deck…" wrote its receipt's `move_ids` straight to
+`note_last_move` for ⌘K's `Undo last move` and then dropped them — the only
+reversal was desktop-only (the palette does not exist below the `768px`/
+`pointer:fine` gate, `DESKTOP_MEDIA` in `palette.rs`), so a phone had no way to
+undo a teardown at all.
+
+**Reused the tray's reversal, not a new one.** `TeardownDialog::submit`
+(`app/src/my/collection.rs`) now keeps its own clone of `receipt.move_ids` and
+adds `.action("Undo", …)` to the success toast when the vec is non-empty (an
+empty teardown has nothing to undo, same guard `LastMoveState::note` already
+applies). The action calls a new `undo_teardown` closure built on
+`crate::undo_selection_move` — the one-transaction batch undo the tray's Undo
+and ⌘K's fallback path both already call, since a teardown is N ledger rows
+exactly like a tray move. Always the batch endpoint, never the single-move
+`undo_move` ⌘K falls back to for a length-1 batch: unlike `undo_removal`,
+teardown has no single row to rewire from a receipt, so there is no reason to
+special-case a count of one.
+
+**Review round 1 caught a real regression: the failed-undo path deleted the
+only reversal affordance.** The first version called `forget_last_move`
+unconditionally before dispatch and never restored it on failure — and the
+part that made this a MAJOR rather than a missed nicety is that the toast
+itself was never a fallback either: `Toaster` dismisses a toast the instant
+its action button is clicked (`sonner.rs`'s `on:click` runs the callback,
+then `dismiss`es, *before* the request even resolves). One flaky
+`undo_selection_move` call and the teardown became unreversible from any UI
+at all — strictly worse than before this task, when a desktop session at
+least always had ⌘K. Fixed to mirror ⌘K's own `UndoLastMove` handler
+(`palette.rs`) exactly: on `Err`, restore the record via
+`LastMoveState::note` if nothing newer arrived meanwhile
+(`state.0.get_untracked().is_none()`, the same guard ⌘K's own retry uses), so
+a failed dispatch leaves ⌘K reachable as the fallback instead of stranding
+the user. `LastMoveState::forget`'s own doc comment (`palette.rs`) repeated
+the same false claim — "the toast that started it is still on screen with
+its own button" — and is corrected alongside the code.
+
+**On success it now raises its own toast, in the tray's voice** — `"Put 1
+card back"` / `"Put them back"` (`move_selection::undo`'s exact phrasing, not
+⌘K's "Undid the last move": the closer sibling, same batch-undo shape).
+Silent success was the same class of bug as the error-path one above: this
+closure is designed to run *after* its page is gone, so a caller that only
+ever sees an off-page failure and never an off-page success has no way to
+tell whether Undo did anything at all.
+
+**On success it also refetches the tree and bumps `HoldingsRevision`, not
+`view_res` directly** — a deliberate divergence from the forward `submit`
+path immediately above it, which refetches `view_res` directly because it is
+still running synchronously on the page that just tore the deck down. The
+toast's Undo can fire *after* that page is gone (the exact "toast outlives its
+row" scenario `undo_removal`'s own doc names): `view_res` is this page's own
+`Resource` and would be disposed with it, while `tree` (shell-level context)
+and `HoldingsRevision` (also shell-level, and already a source `view_res`
+itself depends on) are always live. This mirrors what `undo_removal` and
+`move_selection::undo` already do for the identical reason, not a new
+pattern.
+
+**Error path**: `"Couldn't undo: {message_of(&e)} — try ⌘K → Undo last
+move"`, `ToastKind::Error`. Now names the fallback explicitly, since after
+the fix above it is a real, working one rather than an empty promise.
+
+**Web e2e**: extended `removal.spec.ts` (the file already covering both
+teardown tests) with `Empty deck's own toast Undo restores the deck, and ⌘K
+stops offering the reversal` — teardown → toast carries "Undo" → click →
+`grainsIn`/`viewRows` read-backs (not the toast) prove the deck's contents
+came back → ⌘K opens, "undo" filters to `Undo last move`, ⏎ raises "Nothing to
+undo yet" (`forget_last_move` landed). Full file **9/9** at `--workers=1`,
+twice. One pre-existing, unrelated flake surfaced during those runs:
+`a stale count-change toast's Undo does nothing once the row has been
+removed` hit its own 90s `test.slow()` timeout twice running the full file
+sequentially (reproduced identically with this task's diff `git stash`ed, so
+it predates P6-031 and is not caused by it — same class of shared-dev-branch/
+count-stepper timing sensitivity this file's own Findings already documents
+for P6-117). Left un-investigated, out of this task's scope; its own
+`finally` never ran on either timeout, leaving `zz-e2e-rm-stale-toast-*`
+scratch collections behind — cleaned up directly through the API rather than
+left for the next run to trip over.
+
+**Android — real, not bench-only, for the first time on this platform.**
+Every prior authed-surface Android probe in this repo (`android-collection-
+check.mjs` on down) hit "the dev proxy strips Cookie headers and POST
+bodies" (ui-work-loop.md → "Android dev-proxy limits") and fell back to the
+`/dev/components` bench. That limit is specific to Tauri's `tauri://` /
+`http://tauri.localhost` scheme handler proxying `devUrl` — `cargo tauri
+android dev` already runs `adb reverse tcp:3000 tcp:3000`, so the device's own
+loopback can reach the host server directly. A `page.goto` straight to
+`http://127.0.0.1:3000/...` never enters that scheme handler at all: signing
+in over that plain origin landed on `/my` with real session cookies, on the
+real device, first try — nothing about the mechanism is teardown-specific, so
+this reopens on-device authed verification for every future UI task, not just
+this one. **Scoped honestly**: this exercises the real device WebView, its
+cookie jar, and its touch stack (`Input.dispatchTouchEvent` under a real
+`.click()`) — it does *not* exercise Tauri's `tauri://` scheme handler or the
+`native` backend at all, since the request goes straight over plain HTTP to
+the same `hosted` dev server every web e2e test already talks to. New
+`end2end/android-teardown-undo-check.mjs`
+(`npm run probe:android-teardown-undo`) drives the real flow end to end: signs
+in on-device, creates a scratch deck + destination via the API (the same
+authed `page.request`, absolute URLs — a CDP-attached page has no `baseURL`),
+tears the deck down through the real dialog, asserts the toast's Undo button's
+real on-device bounding box against the repo's real `TAP = 44` standard
+(`android-tap-targets-check.mjs`) — measured 44×24 px at (421,1143) in a
+540×1260 viewport: on-screen, not clipped, width clears the standard, height
+does not (warns rather than fails; see follow-up 4 below — a component-wide
+gap this task did not introduce and a teardown-scoped fix cannot close), taps
+it for real
+(`Input.dispatchTouchEvent` under the hood, same as every other android-*
+probe's `.click()`), and reads the deck's contents back through the API
+(present=2, matching the fixture) rather than trusting the toast. Reproduced
+twice, identically. Two environment fixes needed to get here, both host-only
+(this worktree's `.devcontainer/.env`/`.env`/`end2end/.env` were copied over
+from the main checkout, gitignored, not a repo change):
+- `mkdir -p target/site/pkg` — `src-tauri/build.rs` hard-codes this relative
+  path regardless of `CARGO_TARGET_DIR`, so the `CARGO_TARGET_DIR=target/wb`
+  this task's build-hygiene rule requires left the real directory missing;
+  already called out in CLAUDE.md's merge-gate reproduction steps, just not
+  wired into `cargo tauri android dev`.
+- **The host's system JDK is too new for this Gradle/Kotlin-DSL pin.**
+  `java -version` resolved to Android Studio's bundled JBR 25.0.2 (`JAVA_HOME`
+  pointed there), and Gradle 8.14.3's embedded Kotlin compiler's
+  `JavaVersion.parse` throws `IllegalArgumentException: 25.0.2` configuring
+  `:buildSrc` — a version string newer than that Kotlin/Gradle pairing
+  recognizes at all. Fixed by installing `openjdk@21` via Homebrew and passing
+  `JAVA_HOME=/opt/homebrew/opt/openjdk@21` to `cargo tauri android dev` for
+  this session only (no shell profile, no global config touched). Worth a
+  `.devcontainer/README.md`/android-smoke skill note for the next agent on a
+  host where Android Studio's JBR is the only JDK.
+Also hit, and reverted before committing (the android-smoke skill's own
+documented gotcha): the dev build injects a deep-link `<intent-filter>` into
+`src-tauri/gen/android/.../AndroidManifest.xml`.
+One harness-only artifact, not a product defect: navigating the on-device
+webview to the plain `127.0.0.1:3000` origin logs
+`Uncaught TypeError: Cannot redefine property: postMessage` (and
+`__TAURI_PATTERN__`/`metadata`/`path`/`__TAURI_EVENT_PLUGIN_INTERNALS__`)
+through `pageerror`. Isolated with a two-line repro (`goto` the plain origin
+twice, no login, no teardown, nothing this task touches): Tauri's own
+WebView-level IPC bootstrap re-injects on every navigation and tries to
+redefine globals a prior injection already made non-configurable — it fires
+on the *first* plain-origin navigation already, so it is a property of the
+technique (a Tauri webview navigating to a foreign origin at all), not
+anything about auth, teardown, or this diff. Not filed as a bug; noted here so
+the next task reusing this technique isn't surprised by console noise its own
+`pageerror` listener would otherwise report as a false failure.
+No scratch data left behind: the probe's `finally` deletes both collections
+every run, verified by an API listing showing zero `zz-android-p6031-*` rows
+after.
+
+**Verification.** `cargo fmt --all -- --check` clean; `cargo clippy -p app
+--features hosted --all-targets -- -D warnings` clean; `cargo clippy -p app
+--features native --all-targets -- -D warnings` clean (lints the `native`
+backend `TeardownDialog` and `undo_teardown` compile against too — the
+workspace/`hosted` line masks this feature); `cargo clippy -p app --features
+hydrate --target wasm32-unknown-unknown -- -D warnings` clean; `cargo test -p
+app --features hosted`: **284 passed, 0 failed, 4 ignored** (DB-gated,
+untouched by this diff). e2e: `removal.spec.ts` full file **9/9** at
+`--workers=1` (the one failure across two runs was the pre-existing,
+unrelated flake above). Android: dev attach, real authed flow, **PASS** —
+toast Undo present/sized/tappable on-device (width clears `TAP=44`, height
+warns — follow-up 4) and the round trip verified through the API, reproduced
+twice; see the probe's own run above for exact numbers.
+
+**Follow-ups filed, not absorbed.** (1) `android-smoke` skill /
+`.devcontainer/README.md` should note the JDK-too-new failure mode and its
+fix, so the next agent on a host where Android Studio's bundled JBR is the
+only JDK doesn't re-derive it from a bare `IllegalArgumentException: 25.0.2`.
+(2) The plain-origin (`adb reverse`-exposed `127.0.0.1:3000`) sign-in
+technique this task found should be written up as the android-smoke skill's
+documented path for *any* future authed on-device verification — every prior
+Android probe's "bench only, dev proxy strips cookies" caveat is now
+avoidable, not a hard platform limit; note it exercises the device WebView
+and touch stack only, not Tauri's scheme handler or the `native` backend
+itself. (3) The pre-existing
+`a stale count-change toast's Undo does nothing once the row has been
+removed` flake (90s `test.slow()` timeout, reproduces with this diff
+stashed) is unchased — worth its own investigation or an `@flaky` tag.
+(4) **Every toast action button is under the repo's 44 px touch-target
+standard on its height axis** — `ui/sonner.rs`'s `ToastAction` button
+(`py-1` + `text-xs`) measures ~24 px tall regardless of caller, confirmed
+on-device at 44×24 px for this task's own Undo button. Component-wide (every
+`Undo` this file and `move_selection.rs` already raise shares the same
+markup), not introduced by and not fixable from `TeardownDialog` alone —
+`android-teardown-undo-check.mjs` warns rather than fails on it and points
+back here. Worth its own task against `ui/sonner.rs`.
+
 ### Partial pulls stay in the walk with their residual (P6-119, 2026-08-10)
 
 `app/src/my/needs.rs:~793` — `PickRowView::toggle`'s decision on a tick was

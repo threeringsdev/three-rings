@@ -665,3 +665,77 @@ test("@fast Return to previous locations sends each card back where it came from
     }
   }
 });
+
+// P6-031: the teardown's own success toast gains an Undo, reusing ⌘K's
+// `undo_selection_move` reversal (`app/src/my/collection.rs`'s
+// `undo_teardown`). Two things pin the whole point of the task, not just that
+// clicking the button writes something: the deck's contents actually come
+// back (read from the database, not the toast), and the palette's own
+// `Undo last move` — which used to be the *only* way to reverse a teardown —
+// must stop offering to reverse this one a second time, per `forget_last_move`.
+test("@fast Empty deck's own toast Undo restores the deck, and ⌘K stops offering the reversal", async ({
+  page,
+  request,
+}) => {
+  const [card] = await unownedCards(request, 1, 12);
+  const deck = await createCollection(request, "deck", "tdtoastundo");
+  const dest = await createCollection(request, "binder", "tdtoastdest");
+  try {
+    await addHave(request, deck.id, card.printing_id as string, 2);
+    const where = { [deck.id]: "deck", [dest.id]: "dest" };
+
+    await page.goto(`/my/collections/${deck.id}`);
+    await hydrated(page);
+    await page.locator('[data-testid="teardown-open"]').click();
+    await page
+      .locator('[data-testid="teardown-destination"]')
+      .selectOption({ label: dest.name });
+    await page.locator('[data-testid="teardown-confirm"]').click();
+
+    const toast = page.locator(TOAST, { hasText: "Emptied" });
+    await expect(toast).toContainText("1 card moved");
+    // A single unretried read, not a `toPass` poll: the server write already
+    // committed before the toast rendered (`teardown_collection` is awaited
+    // before `toast.show` runs), so there is nothing to wait out here — and
+    // this toast auto-dismisses at 5000ms, the same window a `toPass({
+    // timeout: 5000 })` could itself burn through before Undo is ever
+    // clicked (P6-119's Findings: the same shape of race, elsewhere). Click
+    // promptly after the toast's own text confirms the teardown; every other
+    // read-back happens after.
+    expect(await grainsIn(request, card.oracle_id, where)).toEqual([
+      "dest: nonfoil/nm/en/main x2",
+    ]);
+
+    // The toast the phone has no other way to reach it from — the button must
+    // actually be there, and clicking it is the whole verification.
+    await toast.getByRole("button", { name: "Undo" }).click();
+
+    // Read back, not off the toast: the deck's copies are actually restored.
+    await expect(async () => {
+      expect(await grainsIn(request, card.oracle_id, where)).toEqual([
+        "deck: nonfoil/nm/en/main x2",
+      ]);
+    }).toPass({ timeout: 5000 });
+    expect(await viewRows(request, deck.id)).toHaveLength(1);
+    expect(await viewRows(request, dest.id)).toHaveLength(0);
+
+    // ⌘K must not offer to reverse an already-reversed teardown — the same
+    // "Nothing to undo yet" arm `command-palette.spec.ts` pins for a session
+    // with no recorded move at all.
+    await page.keyboard.press("ControlOrMeta+k");
+    await expect(page.locator("#command-palette[role=dialog]")).toHaveAttribute(
+      "data-state",
+      "open",
+    );
+    await page.keyboard.type("undo");
+    await expect(
+      page.locator("#command-palette [data-name=CommandItem]").first(),
+    ).toContainText("Undo last move");
+    await page.keyboard.press("Enter");
+    await expect(page.getByText(/Nothing to undo yet/)).toBeVisible();
+    await expect(page.getByText("Undid the last move")).toHaveCount(0);
+  } finally {
+    await deleteCollection(request, deck.id);
+    await deleteCollection(request, dest.id);
+  }
+});
