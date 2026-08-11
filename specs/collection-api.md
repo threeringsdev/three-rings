@@ -569,3 +569,86 @@ resolves.
   contexts). Caught immediately by the first e2e run against the real
   database — a `cargo test`-only pass would not have caught it, since no unit
   test exercises real SQL.
+
+- 2026-08-10 — **Hardened `jsonb_array_elements(p.faces)` against a non-array
+  shape** (P6-124, originally filed as a hard prerequisite of P6-108's full
+  Scryfall bulk load — corrected below). Three sites in `hosted.rs` gated the
+  face-extraction subquery on `p.faces IS NOT NULL` — `card_detail`'s
+  printings query, `collection_view`'s card-row query, and the
+  `REPRESENTATIVE_PRINTING_JOIN` const shared by
+  `card_summary`/`search`/`all_cards`. That check only excludes SQL NULL: a
+  scalar, an object, or the JSON literal `null` all pass it and still make
+  `jsonb_array_elements` throw ("cannot extract elements from a
+  scalar"/"…object"), erroring the *entire* query — every OTHER row on that
+  catalog page too, not just the malformed one. Fixed by gating all three
+  sites on `jsonb_typeof(p.faces) = 'array'` instead, so a malformed row's
+  `face_image_uris` degrades to NULL and the rest of that row (and every
+  sibling row) still renders. Pinned with a structural test,
+  `faces_shape_guard` (the `owned_definition_guard`/`soft_delete_guard`
+  allowlist convention — needles assembled at runtime so `include_str!`
+  can't self-match): asserts every `jsonb_array_elements(p.faces)` call is
+  wrapped in the `jsonb_typeof` CASE and that the old bare not-null gate is
+  gone outright, not merely outnumbered.
+
+  **Correction to the original task premise.** P6-124 was filed on the
+  belief that a non-array `faces` was reachable via a large enough ingest —
+  "unreachable today only because the POC subset happens not to produce
+  one," implying the 116K-row full load (P6-108) would eventually surface
+  it. That's mistaken, checked directly against the ingester:
+  `SourceCard.card_faces` is typed `Option<Vec<Value>>`
+  (`app/src/ingest/extract.rs:63`) — serde rejects any Scryfall card object
+  whose `card_faces` field isn't a JSON array before extraction ever runs —
+  and `subset_array`, the function that produces `printings.faces` from it,
+  always returns `Value::Array`. A non-array `printings.faces` is
+  **structurally impossible via the ingester at any input size**; the full
+  bulk load cannot surface this shape, so this guard is not actually a
+  bulk-load blocker. What it *is*: defense-in-depth against **out-of-band
+  writes** — manual `psql`, a future ingester bug, a hand-run fixture — the
+  only route that can put a non-array value in `printings.faces` today.
+  Three things worth being honest about in that light:
+  - (a) **No CHECK constraint or ingest-side assertion enforces the array
+    shape** — `printings.faces` (migration `0002_catalog.sql`) is bare
+    `jsonb`, so this read-side guard is the *only* barrier, and a bad row
+    still degrades silently (NULL `face_image_uris`, no alert raised)
+    rather than failing loudly. Accepted for now given the shape is
+    structurally unreachable through the one write path that exists
+    (ingestion); revisit if a second writer (a hand-authored fixture, an
+    admin tool) is ever added.
+  - (b) **`cards.card_faces` has the identical out-of-band exposure and is
+    deliberately left unguarded**, because every site that reads it was
+    checked and is non-erroring on a shape mismatch regardless: the
+    generated search column uses
+    `jsonb_path_query_array(card_faces, '$[*].oracle_text')` (migration
+    `0008_search_indexes.sql`), and `search::sql` uses
+    `coalesce(c.card_faces, '[]'::jsonb) @> …` plus another
+    `jsonb_path_query_array` call — jsonb `@>` never errors on a shape
+    mismatch (it evaluates false), and Postgres jsonpath's default lax mode
+    silently wraps/skips non-array, non-object operands instead of raising.
+    `hosted.rs`'s own reads of `card_faces` never unnest it at all (`CASE
+    WHEN … THEN c.card_faces END`, a passthrough), so there is no
+    `jsonb_array_elements`-shaped hazard on that column to guard against.
+  - (c) The live-verification follow-up this entry originally promised for
+    `collection_view`'s copy of the guard is **dropped, not filed**: its
+    only value was closing a gap before the bulk load, and the premise that
+    motivated it collapsed. The SQL is byte-identical to the two sites that
+    *were* live-verified below, and the only scenario it would catch is the
+    out-of-band one (a) already names as an accepted risk.
+
+  **Live-DB proof** (Neon dev, as `app_runtime` — catalog reads carry no RLS,
+  so no `scoped_tx`/GUC is needed here, unlike the collection-table checks
+  this pattern follows). Inserted a fully scratch card + printing (fresh
+  UUIDs, an existing set for the FK, `faces = '"oops"'::jsonb` — a JSON
+  string scalar) as `neondb_owner`, simulating exactly the out-of-band write
+  this guard now exists for. On the pre-fix SQL (byte-identical to the
+  `card_detail` and `REPRESENTATIVE_PRINTING_JOIN` literals): both the
+  scratch card's own printings query, and the lateral-join pattern run across
+  the scratch card *plus* a real `transform` card (Ral, Monsoon Mage //
+  Leyline Prodigy), errored outright (`cannot extract elements from a
+  scalar`) — the transform card's own well-formed row never got a chance to
+  render, which is the blast-radius claim. On the fixed SQL both queries
+  returned successfully: the scratch row's `face_image_uris` is NULL (its
+  `image_uri`/`finishes` degrade too, as expected for a card with no real
+  image data) while the transform card's two-element `face_image_uris` array
+  is untouched. Cleanup: deleted both scratch rows as owner; `cards`/
+  `printings`/`sets` counts returned to the pre-test 2637/2976/1045 and a
+  `jsonb_typeof(faces) <> 'array'` sweep over `printings` returns 0.
