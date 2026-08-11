@@ -333,6 +333,129 @@ test.describe("create", () => {
   });
 });
 
+// Dialog's Tab/Shift+Tab focus trap (P6-125, dialog.rs), exercised through
+// the create dialog — one of the four `DialogContent` consumers in this
+// file, and the one with no autofocus effect of its own (unlike the move
+// picker below), so the starting focus is set explicitly rather than relied
+// on. The trap is one fix at the `DialogContent` level (specs/app-ui.md); this
+// is a regression check on this consumer, not a re-test of the mechanism
+// itself (covered per-boundary in the `dialog` bench section /
+// `end2end/bench-check.mjs`).
+test.describe("Tab focus trap (P6-125)", () => {
+  test("Tab cycles through the create dialog and wraps at the end @fast", async ({
+    page,
+  }) => {
+    const parent = await createCollection(page, { name: scratchName("trap-cyc") });
+    try {
+      await page.goto("/my");
+      await hydrated(page);
+      const menu = await openRowMenu(page, parent.id);
+      await menu.locator('[role="menuitem"]', { hasText: "New binder inside…" }).click();
+
+      const dialog = page.locator("#tree-create");
+      await expect(dialog).toBeVisible();
+
+      // Deterministic starting point — this dialog installs no autofocus of
+      // its own, so nothing puts the caret in the Name field on open.
+      const nameInput = dialog.locator("#tree-create-name");
+      await nameInput.focus();
+      await expect(nameInput).toBeFocused();
+
+      // DOM order inside DialogContent: close button, Name field, Cancel,
+      // Create — the close button precedes the children `DialogContent`
+      // wraps, so it (not the Name field) is the first tabbable stop.
+      const closeBtn = page.locator('#tree-create > button[aria-label="Close dialog"]');
+      const cancelBtn = dialog.locator("footer button", { hasText: "Cancel" });
+      const createBtn = dialog.locator("#tree-create-confirm");
+
+      await page.keyboard.press("Tab");
+      await expect(cancelBtn).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(createBtn).toBeFocused();
+      // Create is the last tabbable — Tab from here wraps to the first
+      // (the close button), never escaping to whatever is behind the scrim.
+      await page.keyboard.press("Tab");
+      await expect(closeBtn).toBeFocused();
+
+      await page.keyboard.press("Escape");
+    } finally {
+      await deleteCollection(page, parent.id);
+    }
+  });
+
+  test("Shift+Tab from the first tabbable wraps to the last @fast", async ({
+    page,
+  }) => {
+    const parent = await createCollection(page, { name: scratchName("trap-shift") });
+    try {
+      await page.goto("/my");
+      await hydrated(page);
+      const menu = await openRowMenu(page, parent.id);
+      await menu.locator('[role="menuitem"]', { hasText: "New binder inside…" }).click();
+
+      const dialog = page.locator("#tree-create");
+      await expect(dialog).toBeVisible();
+
+      const closeBtn = page.locator('#tree-create > button[aria-label="Close dialog"]');
+      const createBtn = dialog.locator("#tree-create-confirm");
+
+      await closeBtn.focus();
+      await expect(closeBtn).toBeFocused();
+      // The close button is the first tabbable — Shift+Tab from here wraps
+      // to the last (Create), not out to the page behind the scrim.
+      await page.keyboard.press("Shift+Tab");
+      await expect(createBtn).toBeFocused();
+
+      await page.keyboard.press("Escape");
+    } finally {
+      await deleteCollection(page, parent.id);
+    }
+  });
+
+  test("clicking non-interactive dialog chrome does not leak focus past the scrim @fast", async ({
+    page,
+  }) => {
+    const parent = await createCollection(page, { name: scratchName("trap-chr") });
+    try {
+      await page.goto("/my");
+      await hydrated(page);
+      const menu = await openRowMenu(page, parent.id);
+      await menu.locator('[role="menuitem"]', { hasText: "New binder inside…" }).click();
+
+      const dialog = page.locator("#tree-create");
+      await expect(dialog).toBeVisible();
+
+      const closeBtn = page.locator('#tree-create > button[aria-label="Close dialog"]');
+      const createBtn = dialog.locator("#tree-create-confirm");
+      const description = dialog.locator('[data-name="DialogDescription"]');
+
+      // Click non-interactive chrome (the description line, "At the top
+      // level."). It has no focusable target of its own, so the browser's
+      // focus algorithm walks up to the nearest focusable ancestor —
+      // DialogContent's own `tabindex="-1"` (added for the zero-tabbables
+      // fallback) — and lands there instead. That state is routine (any
+      // click on a title/description/padding reaches it), not a rare edge
+      // case: the container itself does not appear in the tabbable set, so
+      // without the fix Shift+Tab here fell through to the browser's own
+      // native Tab and walked backward out of the dialog entirely.
+      await description.click();
+      await expect(dialog).toBeFocused();
+      await page.keyboard.press("Shift+Tab");
+      await expect(createBtn).toBeFocused(); // not a control behind the scrim
+
+      // Forward Tab from the same state redirects the other direction.
+      await description.click();
+      await expect(dialog).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(closeBtn).toBeFocused();
+
+      await page.keyboard.press("Escape");
+    } finally {
+      await deleteCollection(page, parent.id);
+    }
+  });
+});
+
 test("Rename edits the name in place @fast", async ({ page }) => {
   const before = scratchName("rn-before");
   const after = scratchName("rn-after");

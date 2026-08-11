@@ -202,6 +202,35 @@ test("@fast ⌘K opens the palette at rest, toggles, and esc closes it", async (
   await expect(dialog(page)).toHaveAttribute("data-state", "closed");
 });
 
+// Dialog's Tab focus trap (P6-125, dialog.rs) composes with the palette's own
+// field-focus-on-open (`palette.rs`'s open `Effect`, which the trap does not
+// replace — it takes over from wherever that autofocus left off). The
+// search field is the palette's *only* tabbable stop: `CommandDialog` opens
+// with `show_close_button=false` (the close button is in the DOM but
+// `display:none`, filtered out same as a closed sibling `Popover`) and every
+// `CommandItem` row carries `tabindex="-1"` (roving ↑↓, not Tab, is its own
+// navigation model — command.rs). So this is also the trap's "one tabbable"
+// edge case: Tab must not move focus off the field, and must not let it
+// escape the dialog either.
+test("@fast the search field keeps the autofocus, and Tab/Shift+Tab cannot move off it", async ({
+  page,
+}) => {
+  await page.goto("/my");
+  await hydrated(page);
+  await openPalette(page);
+
+  const input = page.locator("#command-palette-input");
+  await expect(input).toBeFocused();
+
+  await page.keyboard.press("Tab");
+  await expect(input).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(input).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(dialog(page)).toHaveAttribute("data-state", "closed");
+});
+
 test("@fast typing ranks places and commands into groups, and ↑↓ follows the drawn order", async ({
   page,
 }) => {

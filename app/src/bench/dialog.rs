@@ -1,4 +1,10 @@
 //! Bench section for the vendored `dialog` (Leptos-rewired open state).
+//! The "Confirm move…" dialog also doubles as the Tab focus trap's demo
+//! (P6-125): three tabbable stops (the close button, Cancel, Move) — enough
+//! to exercise a forward wrap (Move → close button), a backward wrap
+//! (close button → Move via Shift+Tab), and an ordinary in-between Tab
+//! (close button → Cancel) without adding dedicated markup. Driven by
+//! `end2end/bench-check.mjs`.
 
 use leptos::prelude::*;
 
@@ -38,6 +44,9 @@ pub fn demo() -> AnyView {
             >
                 "open programmatically (the m-key path)"
             </button>
+            <p class="text-muted-foreground text-xs">
+                "Open, then Tab: close button → Cancel → Move → wraps to close button. Shift+Tab from the close button wraps to Move."
+            </p>
         </div>
     }
     .into_any()
