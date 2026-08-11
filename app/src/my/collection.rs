@@ -1919,10 +1919,72 @@ fn TeardownDialog(
     // move — the confirm below promises "every move is in the history", and this
     // is what makes that promise reachable.
     let last_move = use_context::<crate::components::palette::LastMoveState>();
+    // Shell-level, like `last_move` above — and for the same reason
+    // `undo_teardown` below reaches for it instead of `view_res` directly: the
+    // toast this dialog raises can fire its Undo after the page that raised it
+    // is gone (P6-117's "toast outlives its row"), and `view_res` is *this
+    // page's* resource, disposed with it, while the tree and this revision are
+    // shell-level and always live.
+    let revision = use_context::<crate::my::move_selection::HoldingsRevision>();
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     // "" = return to previous locations; otherwise a collection id.
     let destination = RwSignal::new(String::new());
+
+    // Reverse the whole teardown through the same batch undo the tray's own
+    // Undo and ⌘K's `Undo last move` both call — `undo_selection_move`, the
+    // one-transaction counterpart of `undo_move` (specs/collection-api.md →
+    // Undo). Unlike `undo_removal` (`HereCount`, this module) a teardown has no
+    // single row to rewire: every card left the deck, so there is nothing here
+    // to address back in place — refetching the tree and bumping the revision
+    // is the whole of "refresh what the page shows".
+    let undo_teardown = move |move_ids: Vec<Id>| {
+        let count = move_ids.len();
+        // The palette must stop offering the same reversal (`forget`'s doc) —
+        // but restored below if the dispatch fails, mirroring ⌘K's own
+        // `UndoLastMove` handler (`palette.rs`) exactly. The toast itself
+        // cannot be the fallback: `Toaster` dismisses it the instant this
+        // button is clicked, before the request below even resolves (sonner.rs
+        // `on:click`), so forgetting unconditionally here would leave a failed
+        // reversal unreachable from *any* UI — strictly worse than before this
+        // task, when a desktop session at least always had ⌘K.
+        crate::components::palette::forget_last_move(last_move, &move_ids);
+        let restore = move_ids.clone();
+        spawn_local(async move {
+            match crate::undo_selection_move(move_ids).await {
+                Ok(()) => {
+                    tree.refetch();
+                    if let Some(r) = revision {
+                        r.bump();
+                    }
+                    // The tray's own phrasing (`move_selection::undo`), not
+                    // ⌘K's: this is the same batch-undo shape, and this toast
+                    // is designed to fire after its page is gone, so it must
+                    // say something rather than succeed silently off-page.
+                    let cards = if count == 1 { "1 card" } else { "them" };
+                    toast.show(ToastOptions::message(format!("Put {cards} back")));
+                }
+                Err(e) => {
+                    // Put the reversal back within ⌘K's reach — only if
+                    // nothing newer arrived meanwhile (the same guard ⌘K's
+                    // own retry uses), since the toast that started this is
+                    // already gone regardless of how this call turns out.
+                    if let Some(state) = last_move {
+                        if state.0.get_untracked().is_none() {
+                            state.note(restore);
+                        }
+                    }
+                    toast.show(
+                        ToastOptions::message(format!(
+                            "Couldn't undo: {} — try ⌘K → Undo last move",
+                            message_of(&e)
+                        ))
+                        .kind(ToastKind::Error),
+                    );
+                }
+            }
+        });
+    };
 
     let submit = move || {
         if busy.get_untracked() {
@@ -1947,12 +2009,22 @@ fn TeardownDialog(
                 Ok(receipt) => {
                     busy.set(false);
                     open.set(false);
-                    let moved = receipt.move_ids.len();
-                    crate::components::palette::note_last_move(last_move, receipt.move_ids);
-                    toast.show(ToastOptions::message(format!(
+                    let move_ids = receipt.move_ids;
+                    let moved = move_ids.len();
+                    crate::components::palette::note_last_move(last_move, move_ids.clone());
+                    let mut opts = ToastOptions::message(format!(
                         "Emptied — {moved} card{} moved",
                         if moved == 1 { "" } else { "s" },
-                    )));
+                    ));
+                    // Nothing moved, nothing to undo — `note_last_move` above
+                    // already no-ops on an empty vec for the same reason.
+                    if !move_ids.is_empty() {
+                        opts = opts.action(
+                            "Undo",
+                            Callback::new(move |()| undo_teardown(move_ids.clone())),
+                        );
+                    }
+                    toast.show(opts);
                     view_res.refetch();
                     tree.refetch();
                 }
