@@ -250,14 +250,18 @@ pub trait CatalogStore {
     /// Ownership never affects *which* cards a search returns or how it pages.
     async fn search(&self, query: SearchQuery, page: Page) -> ApiResult<SearchResults>;
 
-    /// One window of the set list, newest first — the vocabulary behind the
-    /// filter rail's Set facet, so a user picks *Modern Horizons 3* instead of
-    /// remembering `mh3`.
+    /// The set list, newest first, narrowed by [`SetQuery::term`] — the
+    /// vocabulary behind the filter rail's Set facet, so a user picks *Modern
+    /// Horizons 3* instead of remembering `mh3`.
     ///
-    /// Bounded by [`SetQuery::limit`] and filtered by [`SetQuery::term`] rather
-    /// than returning all ~1050 sets; the reason is the picker's, and it is
-    /// recorded on `SetQuery`. Public/anonymous like the rest of this trait —
-    /// sets carry no ownership, so the answer never depends on the session.
+    /// Unbounded by default (P6-137): [`SetQuery::limit`] returns no cap for
+    /// an unrequested `limit`, so a blank term returns the whole catalog
+    /// (~1050 sets) rather than a truncated window — the picker is a
+    /// scrollable dropdown, not a paged list, and the reasoning is recorded on
+    /// `SetQuery`. An explicit `limit` (the public JSON route's query param)
+    /// is still honored and clamped. Public/anonymous like the rest of this
+    /// trait — sets carry no ownership, so the answer never depends on the
+    /// session.
     async fn list_sets(&self, query: SetQuery) -> ApiResult<Vec<SetSummary>>;
 }
 

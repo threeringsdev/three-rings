@@ -247,12 +247,14 @@ pub struct SetSummary {
 
 /// A set-picker request (`CatalogStore::list_sets`).
 ///
-/// **It is a search, not a dump.** There are ~1050 sets today, and the picker
-/// mounts one `command` item per row: that primitive's registry is O(n) per item
-/// (each item's highlight memo walks every item), so a full list is O(n²) work
-/// on mount and again on every keystroke. Asking the server for a bounded window
-/// is what keeps the widget usable, and it is why this carries a `q` at all
-/// rather than the UI filtering a preloaded list.
+/// **It still narrows server-side, but no longer truncates.** `q` filters —
+/// blank browses the newest sets, a typed term substring-matches code or name
+/// — but the result window is not capped by default (P6-137, explicit
+/// maintainer ruling): the catalog is ~1050 sets (~44KB), trivially servable
+/// in full, and the picker is a Scryfall-style scrollable dropdown rather than
+/// a paged list. Silently showing 25 of 109 matches for "commander" was worse
+/// than the earlier O(n²) mount-cost worry — measured acceptable at the full
+/// 1,047-row catalog (see the note on [`SetQuery::limit`]).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct SetQuery {
     /// Case-insensitive substring of the set's code **or** name. `None` (or
@@ -260,15 +262,26 @@ pub struct SetQuery {
     /// is nearly always about a recent release.
     #[serde(default)]
     pub q: Option<String>,
+    /// An explicit window size, still honored (and still clamped) for any
+    /// caller that wants one. `None` — the picker's request — means "every
+    /// match", not the old 25-row default; see [`SetQuery::limit`].
     #[serde(default)]
     pub limit: Option<u32>,
 }
 
 impl SetQuery {
-    /// The effective window size, clamped (default 25 — a rail-width list you
-    /// scroll a little, not a page you page through).
+    /// The effective window size passed to `LIMIT`. An explicit `limit` is
+    /// still clamped to a sane range (this is also what the public
+    /// `GET /api/catalog/sets?limit=` route sees). `None` — the picker's
+    /// default — carries no cap at all: `i64::MAX` as a `LIMIT` bound is a
+    /// no-op in Postgres (it never materializes rows beyond what the query
+    /// actually matches), so this is "no LIMIT clause" without a second SQL
+    /// string to maintain.
     pub fn limit(&self) -> i64 {
-        self.limit.unwrap_or(25).clamp(1, 200) as i64
+        match self.limit {
+            Some(n) => n.clamp(1, 5_000) as i64,
+            None => i64::MAX,
+        }
     }
 
     /// The search term with surrounding space trimmed, or `None` when it is
@@ -276,6 +289,41 @@ impl SetQuery {
     /// substring, and the two backends have to agree on that.
     pub fn term(&self) -> Option<&str> {
         self.q.as_deref().map(str::trim).filter(|t| !t.is_empty())
+    }
+}
+
+#[cfg(test)]
+mod set_query_tests {
+    use super::SetQuery;
+
+    /// P6-137: an unrequested `limit` must carry no cap — the regression this
+    /// guards is `limit()` silently reintroducing the old 25-row (or any
+    /// other finite) default.
+    #[test]
+    fn unrequested_limit_is_uncapped() {
+        let query = SetQuery {
+            q: None,
+            limit: None,
+        };
+        assert_eq!(query.limit(), i64::MAX);
+    }
+
+    /// An explicit `limit` — the shape the public `GET /api/catalog/sets`
+    /// route accepts — is still honored and still clamped, both directions.
+    #[test]
+    fn requested_limit_is_clamped_to_1_through_5000() {
+        let at = |n: u32| {
+            SetQuery {
+                q: None,
+                limit: Some(n),
+            }
+            .limit()
+        };
+        assert_eq!(at(0), 1, "clamps up from below the floor");
+        assert_eq!(at(1), 1);
+        assert_eq!(at(200), 200, "the old cap is just an ordinary value now");
+        assert_eq!(at(5_000), 5_000);
+        assert_eq!(at(u32::MAX), 5_000, "clamps down from above the ceiling");
     }
 }
 
