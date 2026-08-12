@@ -204,6 +204,30 @@ primitives lose their focus-ring colour", cite
 accessibility-visible defect on the app's two most-used primitives, so it is not
 an `Item` footnote. **blocked-by:** none.
 
+**Resolution (2026-08-11):** fixed locally — `ring-[3px]` → `ring-3` in all five
+class strings (Tailwind v4 bare numeric width; `"3".parse::<usize>()` succeeds,
+so `get_collision_id.rs:618` classifies it as `ring-width` and the collision
+disappears). The pinned Tailwind v4.2.1 emits byte-identical
+`calc(3px + var(--tw-ring-offset-width))` bodies for both spellings, including
+the `has-[…]` compound — exact visual parity. Verified live: a keyboard-focused
+`Button` settles at `box-shadow: oklab(0.556 0 0 / 0.5) 0 0 0 3px` (the themed
+`ring/50`). Two corrections to the analysis above:
+
+- **`input_group.rs` was never affected.** `tw_merge`'s `parse_variant`
+  (`ast/parser.rs:82-92`) cannot consume the `has-[[…]]:` prefix, so the whole
+  class fails `parse_style` and is passed through verbatim — it never entered
+  the collision set. Four primitives were affected, not five; the change there
+  is spelling-consistency only.
+- **`ButtonVariant::Destructive` was worse than described**: its own
+  `focus-visible:ring-destructive/20` also collided with the misclassified
+  width, so destructive buttons had *no* focus ring at all; the fix restores it.
+
+Regression tests pin `BUTTON_BASE` and `ITEM_BASE` surviving `tw_merge` with
+both classes intact. Residual polish (doc comments still spelling `ring-[3px]`,
+which Tailwind's scanner keeps alive as dead CSS; test coverage for
+checkbox/toggle_group; `ring-2` vs `ring-3` width inconsistency with
+`input.rs`/`count_stepper.rs`) is filed as a follow-up Workbook task.
+
 ---
 
 ## P6-083 — server-fn error channel collapses every `ApiError` onto 500
