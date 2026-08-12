@@ -864,13 +864,20 @@ fn set_list_loading() -> impl IntoView {
 /// Order matters: appending a new code rather than sorting is what makes an edit
 /// rewrite the `s:` term *in place* instead of reshuffling text a user may also
 /// be typing in the query box — the same rule [`rewrite`] follows for terms.
+///
+/// Normalizes `code` to lowercase *before* the membership check, not just
+/// before the push: comparing the raw (possibly differently-cased) `code`
+/// against an already-lowercased `codes` could miss a match and append a
+/// second, differently-cased copy of a code already selected — the picker
+/// analogue of the hand-typed `s:MH3,mh3` dedupe bug `csv()` fixes.
 fn toggle_code(codes: &[String], code: &str) -> Vec<String> {
+    let code = code.to_ascii_lowercase();
     let mut next = codes.to_vec();
-    match next.iter().position(|c| c == code) {
+    match next.iter().position(|c| c == &code) {
         Some(i) => {
             next.remove(i);
         }
-        None => next.push(code.to_ascii_lowercase()),
+        None => next.push(code),
     }
     next
 }
@@ -1650,6 +1657,16 @@ mod tests {
         let codes = read(&q).unwrap().set;
         let out = rewrite(&q, Field::Set, set_term(&toggle_code(&codes, "mh3"))).unwrap();
         assert_eq!(out, "s:lea bolt");
+    }
+
+    #[test]
+    fn toggle_code_cannot_create_a_duplicate() {
+        // A code already selected, offered again in a different case (the
+        // membership check normalizes before comparing, not just before the
+        // push) must remove it, not append a second, differently-cased copy.
+        assert_eq!(toggle_code(&["mh3".into()], "MH3"), Vec::<String>::new());
+        // And toggling in fresh never appends what's already there verbatim.
+        assert_eq!(toggle_code(&["mh3".into()], "mh3"), Vec::<String>::new());
     }
 
     #[test]
