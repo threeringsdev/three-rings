@@ -2016,6 +2016,16 @@ chromium e2e **162/162** at `--workers=1` (4.3 min); hydration CLEAN; SSR curl o
 renders zero rows (lazy fetch confirmed); Android webview rail probe 11/11
 including chip reflect, search-by-name, multi-select and the badge.
 
+**Fixed 2026-08-12 (P6-136):** `list_sets`' code/name `ILIKE` match now
+escapes the term's `%`, `_`, and `\` before binding (the same
+`crate::search::sql::escape_like` helper `/catalog` and `/my` use) with an
+explicit `ESCAPE '\'`, so typed wildcard characters are literal rather than
+LIKE metacharacters. Its `ORDER BY` was also sorting the `released_at::text AS
+released_at` output alias — lexicographic, correct only by ISO-collation luck
+— instead of the `date` column; it now sorts `s.released_at` directly. The
+identical alias-capture pattern was found and fixed in the card-detail rulings
+query.
+
 ### Catalog paging via `?cursor=` (2026-07-25)
 
 `app/src/catalog.rs` + `app/src/catalog/rail.rs` — the slice deferred from the

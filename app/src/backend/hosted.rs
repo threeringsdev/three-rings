@@ -258,8 +258,13 @@ impl CatalogStore for HostedBackend {
         .map_err(upstream)?;
 
         let rulings: Vec<RulingSql> = sqlx::query_as(
-            "SELECT published_at::text AS published_at, source, comment \
-             FROM rulings WHERE oracle_id = $1 ORDER BY published_at NULLS LAST",
+            // `r.published_at` in ORDER BY, not the `published_at::text AS
+            // published_at` output alias — same alias-capture pattern as
+            // `list_sets` (P6-136): an unqualified ORDER BY name resolves to
+            // the SELECT list first, so sorting `published_at` would be
+            // lexicographic text order rather than date order.
+            "SELECT r.published_at::text AS published_at, r.source, r.comment \
+             FROM rulings r WHERE r.oracle_id = $1 ORDER BY r.published_at NULLS LAST",
         )
         .bind(oracle_id)
         .fetch_all(self.pool)
@@ -431,26 +436,38 @@ impl CatalogStore for HostedBackend {
         // `card_count`). `term()` — not the raw `q` — so a blank box browses
         // instead of substring-matching every set with `''`.
         let term = query.term();
+        // `%`/`_`/`\` in a typed term must stay literal, not act as LIKE
+        // wildcards — same escaping helper `/catalog` and `/my` use (P6-136).
+        // The escaped term feeds every ILIKE pattern below (both the
+        // substring match and the "starts with" tie-break); $1 keeps the raw
+        // term for the exact-code tier, where equality must compare the
+        // literal text, not a backslash-escaped pattern.
+        let escaped = term.map(crate::search::sql::escape_like);
         let rows: Vec<SetRowSql> = sqlx::query_as(
-            "SELECT code, name, set_type, released_at::text AS released_at \
-             FROM sets \
+            "SELECT s.code, s.name, s.set_type, s.released_at::text AS released_at \
+             FROM sets s \
              WHERE $1::text IS NULL \
-                OR code ILIKE '%' || $1 || '%' \
-                OR name ILIKE '%' || $1 || '%' \
+                OR s.code ILIKE '%' || $2 || '%' ESCAPE '\\' \
+                OR s.name ILIKE '%' || $2 || '%' ESCAPE '\\' \
              ORDER BY CASE \
-                        WHEN lower(code) = lower(coalesce($1, '')) THEN 0 \
-                        WHEN code ILIKE coalesce($1, '') || '%' \
-                          OR name ILIKE coalesce($1, '') || '%' THEN 1 \
+                        WHEN lower(s.code) = lower(coalesce($1, '')) THEN 0 \
+                        WHEN s.code ILIKE coalesce($2, '') || '%' ESCAPE '\\' \
+                          OR s.name ILIKE coalesce($2, '') || '%' ESCAPE '\\' THEN 1 \
                         ELSE 2 \
                       END, \
-                      released_at DESC NULLS LAST, code \
-             LIMIT $2",
+                      s.released_at DESC NULLS LAST, s.code \
+             LIMIT $3",
         )
         // The three ORDER BY tiers exist because the window is bounded: typing
         // `mh3` matches `amh3`/`tmh3`/`pmh3` as well, and without exact-code-first
         // the set the user named can fall off the end of the page. Newest-first
         // within a tier — a set filter is nearly always about a recent release.
+        // `s.released_at` — not the `released_at::text AS released_at` output
+        // alias — because ORDER BY resolves a bare name against the SELECT
+        // list first; sorting the alias would be lexicographic text order
+        // rather than date order (P6-136).
         .bind(term)
+        .bind(escaped)
         .bind(query.limit())
         .fetch_all(self.pool)
         .await
@@ -4024,6 +4041,31 @@ mod search_live {
             ApiError::Validation(msg) => assert!(msg.contains("pow>3"), "{msg}"),
             other => panic!("expected Validation, got {other:?}"),
         }
+    }
+
+    /// `list_sets` must treat `_`/`%` as literal, not as LIKE wildcards
+    /// (P6-136): no Scryfall set code or name contains a literal underscore,
+    /// so an unescaped `_` would act as a single-character wildcard and match
+    /// almost every set. Asserts on the actual returned rows rather than
+    /// hard-coding "zero", so it stays true even if that ever changes.
+    #[tokio::test]
+    #[ignore = "hits the live dev catalog (DATABASE_URL required)"]
+    async fn set_search_treats_wildcards_as_literal() {
+        let b = HostedBackend::anonymous().await.expect("pool");
+        let sets = CatalogStore::list_sets(
+            &b,
+            SetQuery {
+                q: Some("_".into()),
+                limit: Some(200),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            sets.iter()
+                .all(|s| s.code.contains('_') || s.name.contains('_')),
+            "an escaped `_` must only match sets that actually contain one: {sets:?}"
+        );
     }
 }
 
