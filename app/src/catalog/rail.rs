@@ -1098,7 +1098,8 @@ fn SetPicker(#[prop(into)] id: String, codes: Signal<Vec<String>>) -> impl IntoV
     // cancels its timer, so the two writers produce one navigation carrying both
     // intents (P6-086). This timer adds no writer at all, and the picker's own
     // commits — which go through `use_commit`, so they get that same treatment —
-    // are synchronous on click.
+    // land one microtask after the click (via the `requested` signal's Effect),
+    // still ahead of any 250 ms timer.
     let pending = StoredValue::new(None::<leptos::leptos_dom::helpers::TimeoutHandle>);
     let clear_pending = move || {
         pending.update_value(|h| {

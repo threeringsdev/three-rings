@@ -245,8 +245,9 @@ and was louder: it cleared the rail's terms and the debounce put every one of
 them back.
 
 Note the asymmetry that makes this one-directional. Rail commits *re-read* the
-URL when they fire (`use_commit` calls `query_map.read_untracked()` at fire
-time), so a rail text field's own debounce rebases onto whatever landed while
+current query when they fire (before this fix directly off the URL; now via
+`QueryBase::read`, which prefers the bar's pending text over the URL), so a
+rail text field's own debounce rebases onto whatever landed while
 it was armed — including a facet click. The query bar cannot do the same,
 because its box text is the *whole* query string: re-reading it late would not
 pick up a facet edit, it would overwrite one.
@@ -294,7 +295,7 @@ second writer of `?q=`: tray moves and tree mutations bump `holdings_revision`
 other producers of a `?q=` URL on those pages are pager links, which carry the
 payload's `q` forward unchanged. (Their own interaction with the debounce is
 the P6-130 `displaced_by` family, which `/my`'s pager does not yet implement —
-noted as a separate follow-up, not folded in here.)
+filed on the pager-extraction task `WB-01KZVHYHMG`, not folded in here.)
 
 **e2e.** `filter-rail.spec.ts` — "a facet click survives the query bar's
 debounce window @fast" and "Reset mid-debounce clears the filters instead of
