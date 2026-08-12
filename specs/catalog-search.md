@@ -220,6 +220,37 @@ Negation still wraps the whole group, so `-t:a,b` is "neither".
 Colors deliberately did **not** get this: `c:` means "has all of these", so its
 values are one letter-set (`c:ur`), not an OR list.
 
+### What a keyset page may claim about the result set (2026-08-12)
+
+"Result order and keyset" settles the *order*; this settles what the UI is
+allowed to say about a page of it, which the paging-honesty batch (P6-130…133,
+app-ui Findings) had to decide.
+
+The endpoint runs no `COUNT` and a keyset cursor carries no offset, so a page
+knows its own rows and nothing else. The rendering follows exactly that:
+
+- **page one, no `next_cursor`** — `23 results`. The page *is* the result set.
+- **page one, with `next_cursor`** — `50+ results`. "At least 50", the reading
+  already recorded for the first-page count.
+- **past a cursor** — `50 results on this page`. The rows before the cursor are
+  not counted and cannot be, so a bare "50 results" is false and "50+" is worse
+  (it reads as a claim about the total). No `+` here even when more follows: the
+  page holds exactly what it holds, and the qualifier already refuses the total.
+
+Rejected: a `COUNT` query (this box searches as you type — it would run per
+keystroke) and a page ordinal in the URL (a new parameter every writer of a
+catalog URL must thread, kept in sync with a cursor that can arrive from a
+shared link with no ordinal beside it). Both remain available if a real total is
+ever wanted; neither is needed to stop lying.
+
+Two adjacent rules the same batch settled, recorded here because they are
+properties of the cursor rather than of the screen: **a cursor is only ever
+actionable for its own query** — while the results on screen answer a query the
+box no longer holds, the pager is inert rather than pointing back at the old
+pair — and **a cursored page is never retained as "previous results"** under a
+later parse error, since it names a position in a search nobody is editing any
+more.
+
 ## Open questions
 
 - ~~Which Scryfall syntax subset ships in v1?~~ **Proposed above** (the

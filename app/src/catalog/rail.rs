@@ -440,7 +440,14 @@ pub fn FilterRail() -> impl IntoView {
 /// The mobile slide-over (wireframes: "Mobile — Catalog filter sheet"). The
 /// trigger carries the active-filter badge the spec asks for.
 #[component]
-pub fn FilterSheet(#[prop(into)] result_count: Signal<Option<usize>>) -> impl IntoView {
+pub fn FilterSheet(
+    /// The footer's count phrase — already qualified for the page it describes
+    /// (`super::count_label`), because "Show 23 results" on the last page of a
+    /// 73-row search is the same lie the toolbar count used to tell. `None`
+    /// while nothing has resolved yet.
+    #[prop(into)]
+    result_label: Signal<Option<String>>,
+) -> impl IntoView {
     let state = use_rail_state();
     let open = RwSignal::new(false);
     let total = Signal::derive(move || state.get().map(|s| s.total()).unwrap_or(0));
@@ -467,8 +474,8 @@ pub fn FilterSheet(#[prop(into)] result_count: Signal<Option<usize>>) -> impl In
                     <RailBody heading_id="filter-sheet" />
                     <div class="mt-6">
                         <SheetClose variant=ButtonVariant::Default class="w-full">
-                            {move || match result_count.get() {
-                                Some(n) => format!("Show {n} results"),
+                            {move || match result_label.get() {
+                                Some(label) => format!("Show {label}"),
                                 None => "Show results".to_string(),
                             }}
                         </SheetClose>
