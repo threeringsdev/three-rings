@@ -220,6 +220,25 @@ Negation still wraps the whole group, so `-t:a,b` is "neither".
 Colors deliberately did **not** get this: `c:` means "has all of these", so its
 values are one letter-set (`c:ur`), not an OR list.
 
+### Comma-OR values dedupe (2026-08-12, P6-139)
+
+A comma-OR list is a **set**, not a sequence — `s:mh3,lea,mh3` means the same
+thing as `s:mh3,lea`. The parser now dedupes it that way: order-preserving,
+first occurrence wins, case-insensitively (values are already lowercased
+before the comparison). This applies to every comma-OR facet (`s:`/`set:`/
+`e:`, `r:`/`rarity:`, `t:`/`type:`) since all three are set-semantics the same
+way `id:`'s letter-set already was (`color_letters` has deduped since it
+shipped; `csv` — the comma-list counterpart — simply hadn't caught up).
+
+Without this, a hand-typed `s:mh3,mh3` parsed to two identical `Set` values,
+and the rail rendered one chip per value — two chips sharing one
+`data-testid`/`data-code`, a Playwright strict-mode landmine, and confusing on
+screen besides (removing one chip dropped the badge count but left the picker
+row's ✓ showing, since the other duplicate was still selected). The picker's
+own `toggle_code` got the matching fix: it now lowercases before the
+membership check, not just before the push, so it can't append a
+differently-cased duplicate of a code already selected either.
+
 ### What a keyset page may claim about the result set (2026-08-12)
 
 "Result order and keyset" settles the *order*; this settles what the UI is

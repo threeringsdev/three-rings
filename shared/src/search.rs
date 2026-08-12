@@ -169,16 +169,22 @@ fn unquote(s: &str) -> String {
     s.trim_matches('"').to_string()
 }
 
-/// Comma-split a term's values (the rail's multi-select OR), lowercased.
+/// Comma-split a term's values (the rail's multi-select OR), lowercased,
+/// deduped (first occurrence wins, order preserved) — mirrors
+/// [`color_letters`] below, whose values are a comma-free variant of the same
+/// set-semantics facet grammar.
 fn csv(raw: &str, val: &str) -> Result<Vec<String>, ParseError> {
-    let vals: Vec<String> = val
-        .split(',')
-        .map(|v| unquote(v.trim()).to_ascii_lowercase())
-        .collect();
-    if vals.iter().any(String::is_empty) {
-        return Err(ParseError::BadValue(raw.to_string()));
+    let mut out = Vec::new();
+    for v in val.split(',') {
+        let v = unquote(v.trim()).to_ascii_lowercase();
+        if v.is_empty() {
+            return Err(ParseError::BadValue(raw.to_string()));
+        }
+        if !out.contains(&v) {
+            out.push(v);
+        }
     }
-    Ok(vals)
+    Ok(out)
 }
 
 /// WUBRG letters (any case, deduped, order preserved).
@@ -366,6 +372,38 @@ mod tests {
                 t(Pred::Rarity(vec!["rare".into(), "mythic".into()])),
                 t(Pred::TypeLine(vec!["instant".into(), "sorcery".into()])),
             ]
+        );
+    }
+
+    #[test]
+    fn comma_or_dedupes_repeated_codes() {
+        // Hand-typed `s:mh3,mh3` used to parse to two identical Set values,
+        // which rendered two chips sharing one data-testid/data-code — a
+        // Playwright strict-mode landmine, and confusing in the UI besides
+        // (removing one chip dropped the badge count but left the picker
+        // row's ✓ showing, since the other duplicate was still selected).
+        assert_eq!(
+            parse("s:mh3,mh3").unwrap(),
+            vec![t(Pred::Set(vec!["mh3".into()]))]
+        );
+        // Mixed-case dupes are equal after the existing lowercasing, so they
+        // dedupe too — csv() lowercases before comparing, not after.
+        assert_eq!(
+            parse("s:MH3,mh3").unwrap(),
+            vec![t(Pred::Set(vec!["mh3".into()]))]
+        );
+        assert_eq!(
+            parse("t:Instant,instant,INSTANT").unwrap(),
+            vec![t(Pred::TypeLine(vec!["instant".into()]))]
+        );
+        assert_eq!(
+            parse("r:rare,mythic,rare").unwrap(),
+            vec![t(Pred::Rarity(vec!["rare".into(), "mythic".into()]))]
+        );
+        // Distinct codes keep first-occurrence order — dedupe must not sort.
+        assert_eq!(
+            parse("s:lea,mh3,lea,c16").unwrap(),
+            vec![t(Pred::Set(vec!["lea".into(), "mh3".into(), "c16".into()]))]
         );
     }
 

@@ -503,6 +503,26 @@ test("unpicking the last set removes the term entirely @fast", async ({
   await expect(rail.getByTestId("filter-count-set")).toHaveCount(0);
 });
 
+test("a hand-typed duplicate code renders exactly one chip @fast", async ({
+  page,
+}) => {
+  // P6-139: `s:mh3,mh3` used to parse to two identical Set values, and the
+  // rail rendered one chip per value — two elements sharing one
+  // data-testid/data-code, a Playwright strict-mode landmine (`chip(...)`
+  // below would refuse to resolve to a single element). The parser now
+  // dedupes the comma-OR list, so only one chip — and one count — comes out
+  // the other side.
+  await page.goto("/catalog");
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+
+  await page.fill("#catalog-query", "s:mh3,mh3");
+  await page.waitForURL((url) => url.searchParams.get("q") === "s:mh3,mh3");
+
+  await expect(chip(page, "mh3")).toHaveCount(1);
+  await expect(rail.getByTestId("filter-count-set")).toContainText("1");
+});
+
 test("a code the picker never lists is still the user's selection @fast", async ({
   page,
 }) => {
