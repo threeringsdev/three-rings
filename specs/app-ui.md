@@ -2257,10 +2257,10 @@ fails with `leb` chip present (`toHaveCount(0)` receives `1`); the
 positive-control test still passes on unpatched code, confirming it is not
 accidentally exercising the fix.
 
-Full `filter-rail.spec.ts` (32 tests) and the primitive's other three
+Full `filter-rail.spec.ts` and the primitive's other three
 consumers — `command-palette.spec.ts`, `quick-add.spec.ts`,
-`destination-picker.spec.ts` (65 tests total across all four files) —
-chromium, `--workers=1`: **62 passed, 3 failed**, the three failures being
+`destination-picker.spec.ts` — chromium, `--workers=1`, 65 run outcomes
+across the four files: **62 passed, 3 failed**, the three failures being
 exactly the pre-existing `command-palette.spec.ts` "Undo last move"
 fixture-pool flakes already on record above (P6-137) and in
 `.claude/skills/e2e-suite/SKILL.md`'s residual-failure enumeration —
