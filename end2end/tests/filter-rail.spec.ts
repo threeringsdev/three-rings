@@ -82,6 +82,77 @@ test("checking a color rewrites its term in the URL and the box @fast", async ({
   await expect(rail.getByTestId("filter-count-color")).toContainText("2");
 });
 
+test("a facet click survives the query bar's debounce window @fast", async ({
+  page,
+}) => {
+  // P6-086. The two surfaces that write this one `?q=` disagree for the whole
+  // 250 ms after a keystroke: the query bar's timer holds the box text it
+  // captured, the URL still holds the pre-typing query. A facet clicked in that
+  // window committed against the URL's stale copy and was then overwritten when
+  // the timer fired — the click silently undone a quarter-second later.
+  await page.goto("/catalog?q=bolt");
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+
+  await page.locator("#catalog-query").fill("bolt mv<=2");
+  // We really are inside the window: the URL has not moved, so the newest query
+  // text exists *only* in the bar's armed timer. (Without this the test would
+  // still pass on a build where the debounce had already fired, proving
+  // nothing.)
+  expect(q(page)).toBe("bolt");
+
+  await rail.getByRole("checkbox", { name: "Red" }).click();
+
+  // One navigation carrying both intents: what you typed plus what you clicked.
+  await page.waitForURL(
+    (url) => url.searchParams.get("q") === "bolt mv<=2 c:r",
+  );
+
+  // ...and the armed debounce does not undo it. Kill-verify: on base the timer
+  // fires here with the pre-click text and the URL reverts to "bolt mv<=2" —
+  // the facet edit gone — while the box is left reading "bolt c:r", which the
+  // URL no longer says either.
+  await page.waitForTimeout(600);
+  expect(q(page)).toBe("bolt mv<=2 c:r");
+  await expect(page.locator("#catalog-query")).toHaveValue("bolt mv<=2 c:r");
+  await expect(rail.getByRole("checkbox", { name: "Red" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(rail.getByTestId("filter-count-color")).toContainText("1");
+  await expect(rail.getByTestId("filter-count-mana-value")).toContainText("1");
+  await expect(page.getByTestId("search-error")).toHaveCount(0);
+  await expect(page.getByTestId("results-grid")).toBeVisible();
+});
+
+test("Reset mid-debounce clears the filters instead of restoring them @fast", async ({
+  page,
+}) => {
+  // Same race, the other rail writer: Reset drops the rail-owned terms, so a
+  // debounce left armed would put every one of them straight back ~250 ms
+  // later. The hand-typed `-t:land` survives, exactly as it does outside the
+  // window.
+  await page.goto("/catalog?q=bolt%20c%3Ar%20-t%3Aland");
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+
+  await page.locator("#catalog-query").fill("bolt c:r -t:land o:flying");
+  expect(q(page)).toBe("bolt c:r -t:land");
+
+  await rail.getByRole("button", { name: "Reset" }).click();
+  // Reset saw the typed `o:flying` (it is the newest query text) and cleared it
+  // along with the rest of the rail's terms.
+  await page.waitForURL((url) => url.searchParams.get("q") === "-t:land");
+
+  await page.waitForTimeout(600);
+  expect(q(page)).toBe("-t:land");
+  await expect(page.locator("#catalog-query")).toHaveValue("-t:land");
+  await expect(rail.getByRole("checkbox", { name: "Red" })).toHaveAttribute(
+    "aria-checked",
+    "false",
+  );
+});
+
 test("unchecking the last value removes the term entirely @fast", async ({
   page,
 }) => {

@@ -195,6 +195,11 @@ pub fn AppShell() -> impl IntoView {
     // `<Outlet/>` subtree for the length of the fetch. Fixed in P6-068 (the
     // reads go through plain `RwSignal`s now); the first two reasons are why
     // this still lives here.
+    // Shell-level because the two surfaces that write the same `?q=` sit on
+    // opposite sides of this component: the query bar is inside the `<Outlet/>`,
+    // the filter rail is inside `SidebarRail` beside it. Context only flows
+    // *down*, so the slot they share has to be provided above both (P6-086).
+    crate::components::query_bar::provide_pending_query();
     let selection = provide_selection();
     // Bumped by the tray's batch move (and its undo); every page whose table
     // renders holdings takes it as a resource *source*, so a move refetches
