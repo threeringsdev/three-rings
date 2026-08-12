@@ -2070,6 +2070,8 @@ step, filed.
 no page qualifier, so the last page of a 73-result search reads "23 results"
 while mid-pages read "50+ results". Keyset has no offset, so a "51–73 of 73"
 form needs a separate count query or a page ordinal in the URL.
+*(Closed 2026-08-12 — see "Catalog paging honesty" below: the count is qualified
+past a cursor rather than counted, so neither of those two costs is paid.)*
 
 **Evidence.** `cargo test --workspace --exclude frontend` 138 + 26 green; full
 chromium e2e **151/151** at `--workers=1` (4.1 min); hydration CLEAN on four
@@ -2948,7 +2950,10 @@ destination picker, and mobile filter sheet are their own queued tasks.
   and deliberately runs no `COUNT` (catalog-search), so the wireframe's
   "128 results" is not obtainable; "at least N" is the honest rendering.
   Paging beyond the first page (`?cursor=`) is **deferred** — filed as a
-  follow-up task rather than absorbed.
+  follow-up task rather than absorbed. *(Amended 2026-08-12: `N` / `N+` are
+  page-one forms only. Past a cursor the page says `N results on this page` —
+  "at least N" is false there, since the rows before the cursor are not
+  counted. See "Catalog paging honesty".)*
 - **Codex adversarial review — 2 fixed, 1 accepted-as-documented, 1 disputed:**
   - *Grammar errors blanked the result set* (high) — **confirmed by probe**
     (grid count 1 → 0 on `bolt pow>3`) and **fixed**: the last OK page is
@@ -4193,3 +4198,82 @@ rebuilds the row cannot turn the undo into a no-op.
 Pinned by `collection-tree-manage.spec.ts` → "a rename mid-toast leaves the
 stepper's Undo working", kill-verified against the pre-fix code (the count stuck
 at 5 after Undo).
+
+### Catalog paging honesty (2026-08-12)
+
+`app/src/catalog.rs` + `app/src/catalog/rail.rs` — four defects from the catalog
+paging review (P6-130…133), batched because they are one defect wearing four
+hats: **`<Transition>` keeps the previously-resolved page on screen while a
+newer search runs, so the URL and the rendered results routinely disagree, and
+every one of these read the URL.**
+
+**The fix is structural, not four patches.** `SearchPayload` now echoes the
+request it answered (`q`, `cursor`) alongside the result, and everything that
+describes *the page on screen* — which page it is, how many rows it holds,
+whether its pager can be clicked — reads the payload. The URL is still the
+source of truth for *what to fetch*; it stopped being the source of truth for
+what is displayed. (This is also half of the payload-echo the file's own
+`initial_value` note asks for against same-type cross-decode; the rejection half
+is still not built.)
+
+- **P6-130 — a stale "Next page →" reverted typed text.** The old pager's href
+  carries the old `(q, cursor)`, and an anchor click goes around
+  `QueryBar::commit`, so the query bar's re-seed effect sees the URL move
+  without it and rewrites the box. Both pager links are now **inert while the
+  results under them no longer answer the box** — `aria-disabled`, dimmed, and a
+  click that calls `preventDefault` (which `leptos_router`'s window bubble
+  listener honors — load-bearing on `tachys/delegation` being OFF in this
+  build; see `PageLink`'s doc for the `on:click:undelegated` escape hatch if
+  that ever changes). *Inert, not removed*: the results deliberately stay on screen
+  during a search, so dropping the control — or its `href`, which is the same
+  thing to the tab order — would flicker the pager and lose keyboard focus
+  mid-navigation. Staleness is `rendered q ≠ url_q ∨ rendered q ≠ box text`; the
+  second disjunct covers the ~250 ms before the debounce fires, the first covers
+  the flight after it.
+- **P6-131 — `last_good` leaked a page-N set across queries.** It kept whatever
+  resolved OK last, including a cursored page, and the error arm rendered it
+  dimmed under the next grammar error — rows 2..n of a search the reader had
+  left, labelled "Previous results". Now **only page one is retained and paging
+  away forgets it**, and the kept page is tagged with its query: the error arm
+  shows it only when one query is a prefix of the other (`same_search`), which
+  is what "still editing this search" looks like as a string. The behavior the
+  set exists for — `bolt` → `bolt pow>3` keeping `bolt`'s page dimmed — is
+  unchanged and still pinned by its own test.
+- **P6-132 — the count misstated page N as the whole set.** Now `count_label`:
+  `23 results` / `50+ results` on page one, `50 results on this page` past a
+  cursor. **No count query and no page ordinal**, deliberately — a count query
+  behind a search-as-you-type box runs per keystroke, and an ordinal is a new
+  URL parameter every writer of a catalog URL must thread and keep in sync with
+  a cursor that can also arrive from a shared link with no ordinal beside it.
+  The qualifier needs no new state to be true. The mobile sheet's footer renders
+  the same phrase (`Show 50 results on this page`), because it was the same
+  claim from the same number.
+- **P6-133 — two pager rendering edges.** (a) "Am I past the start?" is the
+  rendered payload's cursor, not the URL's, so page one no longer grows a "Back
+  to the start" the instant Next is clicked. (b) `<nav aria-label="Pagination">`
+  is not rendered at all when there is nothing to page — it used to wrap an
+  empty `<span>`, which is a named landmark announced as navigation that then
+  contains nothing.
+
+**`/my` shares the bug class but not the component.** `all_cards.rs:612` and
+`collection.rs:2186` each carry their own copy of `Pager` (three near-identical
+components, no shared one), and both read a `paged: Memo<bool>` off the URL and
+render the same empty `<nav>` on a single-page set. Not touched here — the brief
+scoped this to `/catalog`, and the honest fix for `/my` is to extract the one
+pager rather than patch two copies. Filed rather than absorbed.
+
+**Evidence.** `cargo test -p app --features hosted` 298 green (3 new unit tests:
+the count phrase, the pager-landmark decision, the refinement predicate); fmt +
+clippy (workspace, wasm, `native`, `hosted,component-bench`) clean; six new
+`catalog.spec.ts` tests, **all six kill-verified** in one stash cycle against
+the pre-fix build (26 pre-existing catalog tests stayed green in that same run,
+so the six fail for their own reasons); `@fast` catalog + filter-rail + states
+68/68; hydration CLEAN on `/catalog`, `?q=bolt`, an error query, a cursored
+browse-all and `?q=bolt&view=list`.
+
+**The in-flight window is now testable.** `holdSearches(page)` gates
+`**/api/search_catalog*` behind a promise the test releases, which is the only
+way to stand inside "old results, new URL, nothing resolved". Two of the six
+tests are meaningless without it. One trap it cost: `page.unroute` while a
+handler is mid-`continue` fulfils the route itself and the `continue` then
+throws "Route is already handled" — the handler stays installed instead.

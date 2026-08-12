@@ -15,6 +15,13 @@
 //!   keyset shape `/my` uses. A cursor names a position in the result set the
 //!   query produced, so **every path that edits the query drops it**; see
 //!   [`catalog_url`].
+//! - **What is *displayed* comes from the payload, not the URL.** The two
+//!   disagree for the whole of every search — `<Transition>` holds the previous
+//!   page on screen while the next resolves — so which page this is, how many
+//!   rows it holds and where its pager points all read [`SearchPayload`]'s
+//!   echoed `q`/`cursor`. Reading the URL for any of them is how the pager grew
+//!   a premature "Back to the start" and how its Next reverted typed text
+//!   (specs/app-ui.md "Catalog paging honesty").
 //! - **Live typing: ~250 ms debounce, stale-response discard.** Both live in
 //!   the shared [`QueryBar`](crate::components::query_bar) — the debounce is
 //!   ours, the discard is the reactive layer's. Note what this is *not*: an
@@ -178,9 +185,22 @@ pub(crate) fn describe_error(e: &ServerFnError<String>) -> (bool, String) {
 /// cross-decode a correctly-shaped but wrong-query payload. Closing that needs
 /// the payload to echo the request it answered and the consumer to reject a
 /// mismatch. Measured not to occur at today's id layout — latent, not active.
+///
+/// **The payload echoes its request** (`q`, `cursor`) — added 2026-08-12 with
+/// the paging-honesty batch. It is not (yet) the mismatch *rejection* the
+/// paragraph above asks for, but it is the half that everything downstream
+/// needed anyway: `<Transition>` keeps a previously-resolved page on screen
+/// while a newer search runs, so the URL and the rendered results routinely
+/// disagree. Anything that describes what is *on screen* — which page it is,
+/// how many rows it holds, where its pager points — has to read the payload
+/// that produced it, not the URL that has already moved on.
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SearchPayload {
+    /// The query these results answer.
+    pub(crate) q: String,
+    /// The cursor they were fetched with; empty means page one.
+    pub(crate) cursor: String,
     pub(crate) search: Result<shared::SearchResults, ServerFnError<String>>,
 }
 
@@ -207,26 +227,34 @@ pub fn CatalogPage() -> impl IntoView {
     let results = Resource::new(
         move || (url_q.get(), url_cursor.get()),
         |(q, cursor)| async move {
-            SearchPayload {
-                search: crate::search_catalog(q, (!cursor.is_empty()).then_some(cursor)).await,
-            }
+            let search =
+                crate::search_catalog(q.clone(), (!cursor.is_empty()).then(|| cursor.clone()))
+                    .await;
+            SearchPayload { q, cursor, search }
         },
     );
 
-    // Whether we are past page one — the pager's "Back to the start" affordance,
-    // and the reason an empty page is not necessarily an empty search.
-    let paged = Memo::new(move |_| !url_cursor.read().is_empty());
-
-    // The last result set that came back OK. A rejected query must not take
-    // the results down with it (specs/catalog-search.md: half-typed queries hit
-    // the grammar's term-naming error constantly), so the error renders *over*
-    // the last good page rather than replacing it. Effects don't run during
-    // SSR, which is correct here — a cold load that errors has no previous
-    // page to keep.
-    let last_good = RwSignal::new(None::<Vec<CardSummary>>);
+    // The last result set that came back OK, and the query it answered. A
+    // rejected query must not take the results down with it
+    // (specs/catalog-search.md: half-typed queries hit the grammar's
+    // term-naming error constantly), so the error renders *over* the last good
+    // page rather than replacing it. Effects don't run during SSR, which is
+    // correct here — a cold load that errors has no previous page to keep.
+    //
+    // **Only page one is ever kept, and paging away forgets it** (P6-131). The
+    // set exists to survive a *typing* error, and every edit to the query drops
+    // the cursor, so the page an error lands on is always page one. Retaining a
+    // cursored page instead put "rows 51–73 of a search you have since left"
+    // under an error about a different one — dimmed and labelled "Previous
+    // results", which made it look deliberate.
+    let last_good = RwSignal::new(None::<(String, Vec<CardSummary>)>);
     Effect::new(move |_| {
-        if let Some(Ok(r)) = results.get().map(|p| p.search) {
-            last_good.set(Some(r.cards));
+        let Some(p) = results.get() else { return };
+        match p.search {
+            Ok(r) if p.cursor.is_empty() => last_good.set(Some((p.q, r.cards))),
+            Ok(_) => last_good.set(None),
+            // An error keeps whatever is there — that *is* the feature.
+            Err(_) => {}
         }
     });
 
@@ -277,9 +305,57 @@ pub fn CatalogPage() -> impl IntoView {
                 aria_label="Search the catalog"
             />
             <ResultsToolbar results list_view />
-            <Results results last_good list_view url_q paged />
+            <Results results last_good list_view url_q query_text />
         </div>
     }
+}
+
+/// The result-count phrase — and the whole honest claim keyset paging supports.
+///
+/// There is no offset in a keyset cursor and the endpoint deliberately runs no
+/// `COUNT` (specs/catalog-search.md), so this screen cannot say "51–73 of 73".
+/// What it *can* say is exact, and it differs by page:
+///
+/// - **page one, complete** — `23 results`: the page is the result set.
+/// - **page one, with more** — `50+ results`: "at least 50", the reading
+///   specs/app-ui.md settled on when the wireframe's "128 results" turned out
+///   not to be obtainable.
+/// - **past a cursor** — `50 results on this page`: the row count is a fact
+///   about this page only. Saying it unqualified is what made the last page of
+///   a 73-row search read "23 results" and every middle page read "50+"
+///   (P6-132). No `+` here: the page holds exactly what it holds, and the
+///   qualifier already refuses the claim about the total.
+///
+/// A page ordinal (`Page 2 · 50 results`) was the other candidate and is the
+/// bigger change: it needs a new URL parameter threaded through every writer of
+/// a catalog URL, kept in sync with a cursor that can also arrive from a shared
+/// link with no ordinal beside it. Deferred in favour of the qualifier, which
+/// needs no new state to be true.
+pub(crate) fn count_label(n: usize, has_more: bool, paged: bool) -> String {
+    match (paged, has_more) {
+        (true, _) => format!("{n} results on this page"),
+        (false, true) => format!("{n}+ results"),
+        (false, false) => format!("{n} results"),
+    }
+}
+
+/// Is the query now in the box an edit of the one `kept` answered — the same
+/// search being refined — or a different search entirely?
+///
+/// This gates the dimmed "Previous results" block. Keeping the last good page
+/// under a grammar error is *for* refinement: `bolt` → `bolt pow>3` errors by
+/// design and blanking the page there would strobe the results away under the
+/// user's fingers. But results from a search the user has abandoned are not
+/// "previous results", they are somebody else's, and the badge does not say
+/// which query they answer.
+///
+/// Prefix in either direction is the honest test for "still editing this":
+/// appending a term or backspacing one keeps the pair related, replacing the
+/// whole string does not. It is a heuristic and it fails safe — a mid-string
+/// edit simply drops the kept page, which is the pre-`last_good` behavior for
+/// that one keystroke, not a wrong page.
+fn same_search(kept: &str, now: &str) -> bool {
+    kept.starts_with(now) || now.starts_with(kept)
 }
 
 /// Result count on the left of the grid/list switch. The destination picker
@@ -302,27 +378,41 @@ fn ResultsToolbar(results: Resource<SearchPayload>, list_view: Memo<bool>) -> im
     // staleness: Effects don't run during SSR (so SSR still renders the `None`
     // branch, deterministically), and the post-hydration write is a real signal
     // change, which does update the DOM.
-    let count_after_hydrate = RwSignal::new(None::<usize>);
+    //
+    // The phrase, not the bare number: the footer makes the same claim the
+    // count beside the view switch does, so it has to be qualified the same way
+    // past a cursor (P6-132). Both read the *payload's* cursor rather than the
+    // URL's — during a search the URL has already moved and these still
+    // describe the page on screen.
+    let count_after_hydrate = RwSignal::new(None::<String>);
     Effect::new(move |_| {
-        if let Some(Ok(r)) = results.get().map(|p| p.search) {
-            count_after_hydrate.set(Some(r.cards.len()));
+        let Some(p) = results.get() else { return };
+        if let Ok(r) = p.search {
+            count_after_hydrate.set(Some(count_label(
+                r.cards.len(),
+                r.next_cursor.is_some(),
+                !p.cursor.is_empty(),
+            )));
         }
     });
-    let result_count: Signal<Option<usize>> = count_after_hydrate.into();
+    let result_label: Signal<Option<String>> = count_after_hydrate.into();
 
     view! {
         <div class="flex flex-wrap items-center gap-3">
-            <rail::FilterSheet result_count />
+            <rail::FilterSheet result_label />
             <p class="text-muted-foreground text-sm" data-testid="result-count">
                 <Transition fallback=|| {
                     view! { <span>"Searching…"</span> }
                 }>
                     {move || Suspend::new(async move {
-                        match results.await.search {
+                        let p = results.await;
+                        match p.search {
                             Ok(r) => {
-                                let n = r.cards.len();
-                                let more = if r.next_cursor.is_some() { "+" } else { "" };
-                                format!("{n}{more} results")
+                                count_label(
+                                    r.cards.len(),
+                                    r.next_cursor.is_some(),
+                                    !p.cursor.is_empty(),
+                                )
                             }
                             Err(_) => String::new(),
                         }
@@ -451,10 +541,10 @@ fn focus_switch_item(ev: &leptos::ev::KeyboardEvent, index: u32) {
 #[component]
 fn Results(
     results: Resource<SearchPayload>,
-    last_good: RwSignal<Option<Vec<CardSummary>>>,
+    last_good: RwSignal<Option<(String, Vec<CardSummary>)>>,
     list_view: Memo<bool>,
     url_q: Memo<String>,
-    paged: Memo<bool>,
+    query_text: RwSignal<String>,
 ) -> impl IntoView {
     view! {
         // Transition, not Suspense: re-searching keeps the previous results on
@@ -463,26 +553,36 @@ fn Results(
             view! { <ResultsSkeleton /> }
         }>
             {move || {
-                // Read the query *here*, in the tracked render scope — not inside
-                // the async block, where the read would land after the await and
-                // outside this effect's dependency set (`/my` learned this one).
-                let q = url_q.get();
                 Suspend::new(async move {
-                match results.await.search {
+                // Everything about *which page this is* comes out of the
+                // payload, never out of the URL. Under a Transition this block
+                // stays on screen while a newer search runs, so the URL has
+                // routinely moved past what is rendered here (P6-133a: reading
+                // `?cursor=` grew a "Back to the start" on a page that was
+                // still page one).
+                let SearchPayload { q, cursor, search } = results.await;
+                let paged = !cursor.is_empty();
+                let stale = displaced_by(q.clone(), url_q, query_text);
+                match search {
                     Ok(r) if r.cards.is_empty() => {
-                        view! { <NoResults q paged list_view /> }.into_any()
+                        view! { <NoResults q paged list_view stale /> }.into_any()
                     }
                     Ok(r) => {
                         let shared::SearchResults { cards, next_cursor } = r;
                         view! {
                             <ResultCards cards list_view stale=false />
-                            <Pager next=next_cursor paged q list_view />
+                            <Pager next=next_cursor paged q list_view stale />
                         }
                             .into_any()
                     }
                     Err(e) => {
                         let (is_query_error, message) = describe_error(&e);
-                        let kept = last_good.get_untracked();
+                        // The kept page has to answer the query this error is
+                        // about; see `same_search`.
+                        let kept = last_good
+                            .get_untracked()
+                            .filter(|(kept_q, _)| same_search(kept_q, &q))
+                            .map(|(_, cards)| cards);
                         // Kept for the escape hatch below, which keeps the
                         // query and drops only the cursor: a bad cursor must
                         // not cost the user the search they typed.
@@ -511,17 +611,22 @@ fn Results(
                             // it and nothing wrong with the box to fix. `/my`
                             // leaves that a dead end; here the pager's own
                             // affordance covers it.
-                            <Show when=move || paged.get()>
-                                <p class="text-muted-foreground pt-3 text-sm">
-                                    <a
-                                        href=move || catalog_url(&q.get_value(), list_view.get(), None)
-                                        class="underline"
-                                        data-testid="page-first"
-                                    >
-                                        "← Back to the start"
-                                    </a>
-                                </p>
-                            </Show>
+                            {paged
+                                .then(|| {
+                                    view! {
+                                        <p class="text-muted-foreground pt-3 text-sm">
+                                            <PageLink
+                                                href=Signal::derive(move || {
+                                                    catalog_url(&q.get_value(), list_view.get(), None)
+                                                })
+                                                class="underline"
+                                                testid="page-first"
+                                                stale
+                                                label="← Back to the start"
+                                            />
+                                        </p>
+                                    }
+                                })}
                             {kept
                                 .filter(|c| !c.is_empty())
                                 .map(|cards| {
@@ -560,25 +665,32 @@ fn Results(
 /// cursor it may only mean the reader walked off the end, which needs a way
 /// home rather than a verdict on the query (`/my`'s `EmptyState`, same reason).
 #[component]
-fn NoResults(q: String, paged: Memo<bool>, list_view: Memo<bool>) -> impl IntoView {
+fn NoResults(q: String, paged: bool, list_view: Memo<bool>, stale: Signal<bool>) -> impl IntoView {
     let q = StoredValue::new(q);
+    // `paged` is a fact about the payload that produced this empty page, not a
+    // signal: it cannot change without a new render (P6-133a).
+    let body = if paged {
+        view! {
+            <p>
+                "Nothing on this page. "
+                <PageLink
+                    href=Signal::derive(move || {
+                        catalog_url(&q.get_value(), list_view.get(), None)
+                    })
+                    class="underline"
+                    testid="page-first"
+                    stale
+                    label="Back to the start"
+                /> "."
+            </p>
+        }
+        .into_any()
+    } else {
+        view! { <p>"No cards match that search."</p> }.into_any()
+    };
     view! {
         <div class="text-muted-foreground py-12 text-center text-sm" data-testid="no-results">
-            <Show
-                when=move || paged.get()
-                fallback=|| view! { <p>"No cards match that search."</p> }
-            >
-                <p>
-                    "Nothing on this page. "
-                    <a
-                        href=move || catalog_url(&q.get_value(), list_view.get(), None)
-                        class="underline"
-                        data-testid="page-first"
-                    >
-                        "Back to the start"
-                    </a> "."
-                </p>
-            </Show>
+            {body}
         </div>
     }
 }
@@ -595,48 +707,146 @@ fn NoResults(q: String, paged: Memo<bool>, list_view: Memo<bool>) -> impl IntoVi
 /// deliberately does *not* re-render this block (that is what `ResultCards`'
 /// inner closure buys), so a fixed href would page a list-view reader back into
 /// the grid.
+///
+/// **`paged` is the rendered page's own fact, not the URL's** (P6-133a), and
+/// there is **no `<nav>` at all when there is nothing to page** (P6-133b): a
+/// named landmark wrapping an empty `<span>` promises navigation it does not
+/// have, and a single-page result set is the common case here.
 #[component]
 fn Pager(
     next: Option<String>,
-    paged: Memo<bool>,
+    paged: bool,
     q: String,
     list_view: Memo<bool>,
+    stale: Signal<bool>,
 ) -> impl IntoView {
     const LINK: &str =
         "border-input hover:bg-accent hover:text-accent-foreground rounded-md border px-3 py-1.5 text-sm";
-    // StoredValue, not a plain String: the hrefs are `Fn` closures and `Show`
-    // rebuilds its children, so the query has to be cloneable out on every call
+    // Nothing before this page and nothing after it: the whole landmark is
+    // noise, so it is not rendered.
+    if !pager_is_needed(paged, next.is_some()) {
+        return ().into_any();
+    }
+    // StoredValue, not a plain String: the hrefs are `Fn` closures called on
+    // every layout change, so the query has to be cloneable out on every call
     // rather than moved once.
     let q = StoredValue::new(q);
 
     view! {
         <nav aria-label="Pagination" class="flex items-center justify-between gap-2">
-            <Show when=move || paged.get() fallback=|| view! { <span></span> }>
-                <a
-                    href=move || catalog_url(&q.get_value(), list_view.get(), None)
-                    class=LINK
-                    data-testid="page-first"
-                >
-                    "← Back to the start"
-                </a>
-            </Show>
+            {paged
+                .then(|| {
+                    view! {
+                        <PageLink
+                            href=Signal::derive(move || {
+                                catalog_url(&q.get_value(), list_view.get(), None)
+                            })
+                            class=LINK
+                            testid="page-first"
+                            stale
+                            label="← Back to the start"
+                        />
+                    }
+                })}
             {next
                 .map(|cursor| {
                     let cursor = StoredValue::new(cursor);
                     view! {
-                        <a
-                            href=move || {
+                        // `ml-auto`, so Next sits right whether or not the
+                        // start link is beside it.
+                        <PageLink
+                            href=Signal::derive(move || {
                                 let cursor = cursor.get_value();
                                 catalog_url(&q.get_value(), list_view.get(), Some(&cursor))
-                            }
+                            })
                             class=format!("{LINK} ml-auto")
-                            data-testid="page-next"
-                        >
-                            "Next page →"
-                        </a>
+                            testid="page-next"
+                            stale
+                            label="Next page →"
+                        />
                     }
                 })}
         </nav>
+    }
+    .into_any()
+}
+
+/// Does this page have anywhere to go? A single-page result set has neither a
+/// page before it nor one after, and `<nav aria-label="Pagination">` around an
+/// empty `<span>` is a named landmark with no content in it — announced to a
+/// screen reader as navigation that then contains nothing (P6-133b).
+fn pager_is_needed(paged: bool, has_next: bool) -> bool {
+    paged || has_next
+}
+
+/// Is the page these results describe no longer the page the reader is asking
+/// for — because a newer search is in flight, or because the box has been typed
+/// into and the debounce has not fired yet?
+///
+/// `<Transition>` deliberately keeps the old result set on screen through a
+/// search (no strobing), and the pager that came with it points at
+/// `(old_q, old_cursor)`. Clicking it navigates *around* `QueryBar::commit`
+/// straight to the old query, whose re-seed effect then sees the URL move
+/// without it and rewrites the box — silently reverting what the user just
+/// typed (P6-130). A cursor is only ever valid for its own query, so the honest
+/// state for that control is "not actionable yet", not "actionable, wrongly".
+///
+/// Both halves are needed: `url_q` catches the in-flight window after the
+/// debounce fires, `query_text` catches the ~250 ms before it.
+fn displaced_by(
+    rendered_q: String,
+    url_q: Memo<String>,
+    query_text: RwSignal<String>,
+) -> Signal<bool> {
+    Signal::derive(move || {
+        url_q.with(|q| q != &rendered_q) || query_text.with(|t| t != &rendered_q)
+    })
+}
+
+/// One pager link, inert while the page it belongs to is stale.
+///
+/// **Inert, not gone.** The results stay on screen during a search, so removing
+/// the control — or its `href`, which is the same thing to the tab order —
+/// would make the pager flicker under the reader and drop keyboard focus
+/// mid-navigation. `aria-disabled` plus a click that does not navigate keeps
+/// the tab stop, tells assistive tech the truth, and is the only combination
+/// that also survives `Enter` (a keyboard activation dispatches a real click,
+/// and `leptos_router`'s *window* bubble listener bails on `defaultPrevented`).
+///
+/// **Load-bearing build assumption:** this works because `tachys/delegation`
+/// is OFF in this build, so `on:click` attaches directly to the anchor and
+/// fires (target phase) before the router's window listener. Enabling
+/// `leptos/delegation` would move our handler after the router's and silently
+/// re-arm stale-pager navigation — if that feature is ever turned on, switch
+/// this to `on:click:undelegated`.
+#[component]
+fn PageLink(
+    #[prop(into)] href: Signal<String>,
+    #[prop(into)] class: String,
+    testid: &'static str,
+    stale: Signal<bool>,
+    label: &'static str,
+) -> impl IntoView {
+    view! {
+        <a
+            href=move || href.get()
+            class=move || {
+                if stale.get() {
+                    format!("{class} pointer-events-none opacity-50")
+                } else {
+                    class.clone()
+                }
+            }
+            aria-disabled=move || stale.get().then_some("true")
+            data-testid=testid
+            on:click=move |ev: leptos::ev::MouseEvent| {
+                if stale.get() {
+                    ev.prevent_default();
+                }
+            }
+        >
+            {label}
+        </a>
     }
 }
 
@@ -1129,7 +1339,48 @@ pub(crate) fn raise_add_toast(t: AddToast) {
 
 #[cfg(test)]
 mod tests {
-    use super::{catalog_url, encode_query_value};
+    use super::{catalog_url, count_label, encode_query_value, pager_is_needed, same_search};
+
+    #[test]
+    fn a_single_page_result_set_renders_no_pagination_landmark() {
+        assert!(!pager_is_needed(false, false));
+        // Page one of many, a middle page, and the last page all have a control
+        // worth wrapping.
+        assert!(pager_is_needed(false, true));
+        assert!(pager_is_needed(true, true));
+        assert!(pager_is_needed(true, false));
+    }
+
+    #[test]
+    fn the_count_qualifies_itself_past_page_one() {
+        // Page one is allowed to speak for the whole result set, because it is
+        // the whole result set when nothing follows it.
+        assert_eq!(count_label(23, false, false), "23 results");
+        assert_eq!(count_label(50, true, false), "50+ results");
+        // Past a cursor there is no offset to add, so the only true statement
+        // left is about this page. The old form said "23 results" on the last
+        // page of a 73-row search (P6-132).
+        assert_eq!(count_label(23, false, true), "23 results on this page");
+        // ...and no `+` there: 50 is exactly what the page holds; the "more"
+        // claim is already refused by the qualifier.
+        assert_eq!(count_label(50, true, true), "50 results on this page");
+    }
+
+    #[test]
+    fn a_refinement_is_the_same_search_and_a_replacement_is_not() {
+        // Appending a term (the case `last_good` exists for: `bolt pow>3`
+        // errors by design) and backspacing one both stay related.
+        assert!(same_search("bolt", "bolt pow>3"));
+        assert!(same_search("bolt pow>3", "bolt"));
+        assert!(same_search("bolt", "bolt"));
+        // Browse-all is a prefix of everything, which is right: it is what was
+        // on screen before the first character was typed.
+        assert!(same_search("", "pow>3"));
+        // A different search entirely. Its page is not "previous results",
+        // it answers a question nobody asked (P6-131).
+        assert!(!same_search("bolt", "counter pow>3"));
+        assert!(!same_search("t:instant", "t:creature"));
+    }
 
     #[test]
     fn url_omits_empty_parts() {

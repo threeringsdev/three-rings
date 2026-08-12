@@ -530,6 +530,228 @@ test("a corrupt cursor renders an error with a way back @fast", async ({
 });
 
 // ---------------------------------------------------------------------------
+// Paging honesty (P6-130…133). One theme: `<Transition>` keeps the previous
+// result set on screen while a newer search runs, so the URL and the rendered
+// page routinely disagree. Everything that describes the page on screen — which
+// page it is, how many rows it holds, whether its pager can be clicked — has to
+// follow the payload that produced it, and the pager has to stop being
+// actionable while the two disagree.
+// ---------------------------------------------------------------------------
+
+/// Hold every catalog search until the returned `release` is called. This is
+/// the only way to *stand inside* the in-flight window these tests are about:
+/// the results on screen are the previous query's, the URL is already the new
+/// one, and nothing has resolved.
+async function holdSearches(page: import("@playwright/test").Page) {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  await page.route("**/api/search_catalog*", async (route) => {
+    await gate;
+    // The handler stays installed after the gate opens — `unroute` while a
+    // handler is mid-`continue` fulfils the route itself and the continue then
+    // throws "Route is already handled". Once the gate is open every later
+    // request passes straight through anyway.
+    await route.continue().catch(() => {});
+  });
+  return () => release();
+}
+
+test("a stale pager cannot revert what you just typed @fast", async ({
+  page,
+  request,
+}) => {
+  // P6-130. The pager rendered with the *old* results carries the old
+  // `(q, cursor)`. An anchor click goes around `QueryBar::commit` straight to
+  // that pair, and the query bar's re-seed effect — seeing the URL move without
+  // it — rewrites the box, undoing what the user just typed. A cursor is only
+  // valid for its own query, so the control is inert until the results under it
+  // catch up.
+  const browse = await search(request);
+  expect(browse.next_cursor, "browse-all must have a page two").toBeTruthy();
+
+  await page.goto("/catalog");
+  await hydrated(page);
+  const next = page.getByTestId("page-next");
+  await expect(next).toBeVisible();
+
+  // A query with a page two of its own, so the pager is still there afterwards
+  // and "it came back to life" is assertable rather than "it disappeared".
+  const typed = "t:creature";
+  const release = await holdSearches(page);
+  await page.fill("#catalog-query", typed);
+  await page.waitForURL((url) => url.searchParams.get("q") === typed);
+
+  // No strobing: the previous results are still on screen. That is *why* the
+  // stale pager is reachable at all, so it has to stay true here.
+  await expect(tileFor(page, browse.cards[0].oracle_id)).toBeVisible();
+  // Inert, and it says so — not removed, which would move the tab stop out from
+  // under a keyboard user mid-navigation.
+  await expect(next).toHaveAttribute("aria-disabled", "true");
+
+  // `dispatchEvent`, not `click()`: this is exactly what a keyboard Enter on
+  // the focused link produces, and it bypasses the CSS that already stops the
+  // mouse. If the handler does not refuse it, the browser navigates.
+  await next.dispatchEvent("click");
+  await page.waitForTimeout(300);
+  expect(new URL(page.url()).searchParams.get("q")).toBe(typed);
+  await expect(page.locator("#catalog-query")).toHaveValue(typed);
+
+  // And it comes back to life once the results answer the box again — inert
+  // during the search, not broken.
+  release();
+  await expect(page.getByTestId("result-count")).toHaveText(/^\d+\+ results$/);
+  await expect(page.getByTestId("page-next")).not.toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+  await expect(page.locator("#catalog-query")).toHaveValue(typed);
+});
+
+test("a grammar error after paging does not resurrect the old page @fast", async ({
+  page,
+  request,
+}) => {
+  // P6-131. `last_good` kept whatever came back OK last, including a *cursored*
+  // page, and the error arm rendered it dimmed under the next error — so a
+  // half-typed term put rows 2..n of a search you had left on screen, labelled
+  // "Previous results". Only page one is retained now, and paging away forgets
+  // it. (The refinement case this feature exists for — an error while editing
+  // page one — is pinned by "a mid-typing grammar error keeps the last good
+  // results" above.)
+  const one = await search(request, { q: "bolt", limit: 1 });
+  expect(one.next_cursor).toBeTruthy();
+  const rest = await search(request, { q: "bolt", cursor: one.next_cursor! });
+  expect(rest.cards.length).toBeGreaterThan(0);
+
+  await page.goto(`/catalog?q=bolt&cursor=${one.next_cursor}`);
+  await hydrated(page);
+  const pageTwoCard = rest.cards[0].oracle_id;
+  await expect(tileFor(page, pageTwoCard)).toBeVisible();
+
+  await page.fill("#catalog-query", "bolt pow>3");
+  await expect(page.getByTestId("search-error")).toBeVisible();
+  // The rows themselves, not just the marker: "no dimmed block" would also pass
+  // on a page that rendered the old cards undimmed.
+  await expect(tileFor(page, pageTwoCard)).toHaveCount(0);
+  await expect(page.locator("[data-stale=true]")).toHaveCount(0);
+});
+
+test("the count says which page it is counting @fast", async ({
+  page,
+  request,
+}) => {
+  // P6-132. Keyset paging has no offset and the endpoint runs no COUNT, so a
+  // page past the first can only speak for itself. Unqualified, the last page
+  // of a 73-row search read "23 results".
+  const one = await search(request, { q: "bolt", limit: 1 });
+  const rest = await search(request, { q: "bolt", cursor: one.next_cursor! });
+  expect(rest.next_cursor, "the rest of `bolt` must fit one page").toBeNull();
+
+  await page.goto(`/catalog?q=bolt&cursor=${one.next_cursor}`);
+  await hydrated(page);
+  // The exact number as well as the qualifier: a page that qualified the claim
+  // but counted the wrong rows would still be lying.
+  await expect(page.getByTestId("result-count")).toHaveText(
+    `${rest.cards.length} results on this page`,
+  );
+
+  // Page one is allowed to speak for the whole set, because it is the whole
+  // set — `bolt` fits one page, so there is no "+" and no qualifier.
+  const all = await search(request, { q: "bolt" });
+  expect(all.next_cursor).toBeNull();
+  await page.goto("/catalog?q=bolt");
+  await hydrated(page);
+  await expect(page.getByTestId("result-count")).toHaveText(
+    `${all.cards.length} results`,
+  );
+
+  // ...and the start of a longer set says "at least".
+  await page.goto("/catalog");
+  await hydrated(page);
+  await expect(page.getByTestId("result-count")).toHaveText(/^\d+\+ results$/);
+});
+
+test("no premature Back to the start while the next page loads @fast", async ({
+  page,
+  request,
+}) => {
+  // P6-133a. "Am I past the start?" used to be read off the URL, which moves the
+  // instant Next is clicked — so page one, still on screen through the load,
+  // grew a "Back to the start" pointing at itself.
+  const browse = await search(request);
+  expect(browse.next_cursor).toBeTruthy();
+
+  await page.goto("/catalog");
+  await hydrated(page);
+  await expect(page.getByTestId("page-first")).toHaveCount(0);
+
+  const release = await holdSearches(page);
+  await page.getByTestId("page-next").click();
+  await page.waitForURL(`/catalog?cursor=${browse.next_cursor}`);
+  // The URL is page two; the DOM is still page one. The pager belongs to what
+  // is rendered.
+  await expect(tileFor(page, browse.cards[0].oracle_id)).toBeVisible();
+  await expect(page.getByTestId("page-first")).toHaveCount(0);
+
+  // Positive control: it appears the moment page two actually renders, so this
+  // test cannot pass on a build that never offers the control at all.
+  release();
+  await expect(page.getByTestId("page-first")).toBeVisible();
+});
+
+test("a single-page result set renders no pagination landmark @fast", async ({
+  page,
+  request,
+}) => {
+  // P6-133b. `<nav aria-label="Pagination">` wrapped an empty `<span>` when
+  // there was nothing to page — a named landmark a screen reader announces as
+  // navigation and which then contains nothing.
+  const all = await search(request, { q: "bolt" });
+  expect(all.next_cursor, "`bolt` must fit one page for this to mean anything")
+    .toBeNull();
+
+  await page.goto("/catalog?q=bolt");
+  await hydrated(page);
+  await expect(page.getByTestId("results-grid")).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Pagination" })).toHaveCount(
+    0,
+  );
+
+  // Positive control: browse-all does have somewhere to go, and gets the
+  // landmark. Otherwise "no nav" passes on a page with no pager at all.
+  await page.goto("/catalog");
+  await hydrated(page);
+  await expect(
+    page.getByRole("navigation", { name: "Pagination" }),
+  ).toBeVisible();
+});
+
+test.describe("mobile", () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test("the filter sheet's footer count is qualified too @fast", async ({
+    page,
+    request,
+  }) => {
+    // The sheet's "Show N results" is the same claim as the toolbar count and
+    // was built from the same unqualified row count (P6-132).
+    const one = await search(request, { q: "bolt", limit: 1 });
+    const rest = await search(request, { q: "bolt", cursor: one.next_cursor! });
+
+    await page.goto(`/catalog?q=bolt&cursor=${one.next_cursor}`);
+    await hydrated(page);
+    await page.getByRole("button", { name: /Filters/ }).click();
+    // The SheetContent carries the open state; a closed sheet is still
+    // "visible" to Playwright (it slides via a transform).
+    const panel = page.locator('[data-name=SheetContent][aria-label="Filters"]');
+    await expect(panel).toHaveAttribute("data-state", "open");
+    await expect(panel).toContainText(
+      `Show ${rest.cards.length} results on this page`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The "N owned" badge — authed only. `CardSummary::owned` is data-model's
 // global per-user, per-oracle count (specs/collection-api.md read models), and
 // `null` on the wire means *unknown*, which is a different claim from 0.
