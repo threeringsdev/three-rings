@@ -896,9 +896,11 @@ fn set_year(released_at: Option<&str>) -> String {
 ///   "unrecognized code" state to get wrong because recognition never happens:
 ///   validating the selection against the list is the only way this widget could
 ///   silently drop part of someone's query, so it doesn't do it.
-/// * **The list is a discovery affordance**, fetched from the server a bounded
-///   window at a time. It is not the vocabulary of what may be selected — the
-///   query bar remains the way to name a code the picker can't find.
+/// * **The list is a discovery affordance**, fetched from the server —
+///   narrowed by the typed term, but not truncated (P6-137: every match
+///   renders, in a scrollable list, browse-all included). It is not the
+///   vocabulary of what may be selected — the query bar remains the way to
+///   name a code the picker can't find.
 ///
 /// The list is fetched only once the section is actually open (`expanded`,
 /// written by the disclosure's own `toggle`): the rail renders twice per page

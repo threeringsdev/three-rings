@@ -649,6 +649,61 @@ test("the set list never flashes an empty verdict before it loads @fast", async 
   await expect(rail.getByTestId("set-error")).toHaveCount(0);
 });
 
+test("a broad term returns every match, not a 25-row cap @fast", async ({
+  page,
+  request,
+}) => {
+  // P6-137, maintainer ruling: the old 25-row default silently truncated —
+  // "commander" alone matches well over a hundred sets by name or code. This
+  // is kill-verifiable: capped at the old default, the list stops at exactly
+  // 25 rows regardless of how many actually match.
+  const res = await request.get("/api/list_sets?q=commander");
+  expect(res.status()).toBe(200);
+  const rows = (await res.json()) as Array<{ code: string }>;
+  expect(rows.length).toBeGreaterThan(25);
+
+  await page.goto("/catalog");
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+  await rail.locator("summary").filter({ hasText: "Set" }).click();
+  await rail.locator(SET_SEARCH).fill("commander");
+  // Row count in the DOM equals the API's full match count — not a capped
+  // window of it.
+  await expect(rail.locator("[data-testid=set-option]")).toHaveCount(
+    rows.length,
+  );
+});
+
+test("browsing with a blank term reaches the whole catalog, not just the newest window @fast", async ({
+  page,
+  request,
+}) => {
+  // Blank `q` browses the newest sets first (SetQuery::term), so the picker's
+  // *own* list — not a search — is the sharpest test of the cap's removal: an
+  // old set like Limited Edition Alpha sits nowhere near the top of a
+  // newest-first ordering, so it is reachable in the DOM only because the
+  // list is no longer truncated to a small window.
+  // `q` is a required param on the server fn — blank, not omitted, is what
+  // "browse" means here (SetQuery::term treats both as the same "browse the
+  // newest sets" case, but an *omitted* q is a 500, not a blank one).
+  const res = await request.get("/api/list_sets?q=");
+  expect(res.status()).toBe(200);
+  const rows = (await res.json()) as Array<{ code: string }>;
+  // Sanity floor on the fixture itself — the catalog is ~1050 sets today.
+  expect(rows.length).toBeGreaterThan(1000);
+
+  await page.goto("/catalog");
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+  await rail.locator("summary").filter({ hasText: "Set" }).click();
+  await expect(rail.locator("[data-testid=set-option]")).toHaveCount(
+    rows.length,
+  );
+  // Reachable only by scrolling past everything newer — the DOM holds it
+  // even though nothing scrolled it into view.
+  await expect(option(page, "lea")).toHaveCount(1);
+});
+
 /// A real first-page cursor for `q`, from the hosted JSON route at `limit=1` —
 /// the page always asks for 50, so a small page is the only way to get a cursor
 /// out of a small result set.

@@ -337,11 +337,12 @@ pub async fn search_catalog(
     }
 }
 
-/// One window of the set list for the filter rail's Set facet
+/// The full set list for the filter rail's Set facet, narrowed by `q`
 /// (specs/catalog-search.md → the `s:` term). A thin projection of
 /// `CatalogStore::list_sets`, GET for the same two reasons as
 /// [`search_catalog`]: a pure cacheable read, and the Tauri Android dev proxy
-/// strips POST bodies.
+/// strips POST bodies. `limit: None` here is deliberate (P6-137): the picker
+/// wants every match, not a truncated window — see [`shared::SetQuery::limit`].
 ///
 /// **Anonymous on both backends** — sets carry no ownership, so unlike the card
 /// reads there is no opportunistic-session arm here. `q` blank means "browse the

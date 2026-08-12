@@ -27,6 +27,14 @@
 //!   `CommandDialog` was simply hiding it.
 //! - `leptos_ui`'s `clx!` swapped for the vendored clx.rs; the `icons` `Check`
 //!   inlined (Lucide, ISC).
+//! - **The registry's visible-id list is memoized once, shared by every
+//!   item**, rather than each `CommandItem` recomputing it from scratch in its
+//!   own `highlighted` `Memo` (upstream's shape, kept until now). Harmless at
+//!   the small lists this component saw until the catalog set picker uncapped
+//!   to ~1,050 rows (specs/app-ui.md, P6-137): the per-item recompute made a
+//!   single `highlight` reset — which fires on every keystroke — an O(N²)
+//!   pass, measured at ~31s for one keystroke against the full list in a debug
+//!   build. See [`CommandContext::visible`].
 
 use leptos::prelude::*;
 use tw_merge::tw_merge;
@@ -64,10 +72,25 @@ struct CommandContext {
     items: RwSignal<Vec<ItemReg>>,
     /// Index into the *visible* items of the currently-highlighted row.
     highlight: RwSignal<usize>,
+    /// Visible item ids in registration order — **memoized once**, not
+    /// recomputed by every [`CommandItem`] (P6-137 perf finding). Every
+    /// mounted item used to call [`CommandContext::visible_ids`] fresh from
+    /// its own `highlighted` `Memo`, which re-derives the whole filtered list
+    /// from `items` on every dependency change; with N items registered, a
+    /// single `highlight` reset (the [`Command`] effect fires one on *every*
+    /// keystroke) reran N of those Memos, each doing O(N) work — O(N²) per
+    /// keystroke. Harmless at the small lists every consumer had until the
+    /// set picker's uncap (specs/app-ui.md, P6-137): a 1,047-row list froze
+    /// typing for ~30s in a dev build (measured). Hoisting the filter into one
+    /// shared `Memo` here — computed once per `items`/visibility change,
+    /// read back with [`Memo::with`] (no per-read clone) — turns that into a
+    /// single O(N) pass plus N O(1) lookups: O(N) total, not O(N²).
+    visible: Memo<Vec<usize>>,
 }
 
 impl CommandContext {
-    /// Visible item ids in registration order.
+    /// Visible item ids in registration order — the shared [`Self::visible`]
+    /// memo's current value.
     ///
     /// **Registration happens in [`CommandItem`]'s component body, i.e. when the
     /// view is *constructed* — not when it is inserted.** So "registration
@@ -93,6 +116,9 @@ impl CommandContext {
     ///   registrations, and building the groups eagerly reversed the registry
     ///   against the DOM whenever a command outranked every place.
     ///   `command-palette.spec.ts` pins both.
+    /// * **set picker** — browses newest-first and hides nothing while typing
+    ///   (server-filtered, `should_filter=false`), so order is exactly
+    ///   registration order (specs/app-ui.md, P6-137).
     ///
     /// In-place keyed *reorder* of persistent items would diverge from DOM
     /// order and want a `compareDocumentPosition` sort here. No consumer does
@@ -100,12 +126,7 @@ impl CommandContext {
     /// the sort is still deferred (noted in app-ui). Anything that starts
     /// reordering rows without remounting them needs it.
     fn visible_ids(&self) -> Vec<usize> {
-        self.items
-            .get()
-            .into_iter()
-            .filter(|i| i.visible.get())
-            .map(|i| i.id)
-            .collect()
+        self.visible.get()
     }
 
     /// Move the highlight one row down, clamped at the last visible item.
@@ -217,12 +238,25 @@ pub fn Command(
     #[prop(default = true)]
     should_filter: bool,
 ) -> impl IntoView {
+    let items = RwSignal::new(Vec::new());
+    // Computed once per `items`/visibility change and shared by every
+    // `CommandItem` — see `CommandContext::visible` for why this is not
+    // inlined back into each item's own `Memo`.
+    let visible = Memo::new(move |_| {
+        items
+            .get()
+            .into_iter()
+            .filter(|i: &ItemReg| i.visible.get())
+            .map(|i| i.id)
+            .collect::<Vec<_>>()
+    });
     let ctx = CommandContext {
         query: RwSignal::new(String::new()),
         should_filter,
         next_id: RwSignal::new(0),
-        items: RwSignal::new(Vec::new()),
+        items,
         highlight: RwSignal::new(0),
+        visible,
     };
     provide_context(ctx);
 
@@ -377,13 +411,21 @@ pub fn CommandItem(
     // index clamped to the last visible row so a set that shrank (conditional
     // items / server results) beneath a stale highlight still shows one
     // selection instead of none.
+    //
+    // `ctx.visible.with(...)` — not `ctx.visible_ids()` — on purpose: `with`
+    // borrows the shared memo's cached `Vec` in place instead of cloning it,
+    // so this Memo (one per mounted item, up to N of them) does O(1) work off
+    // an already-computed list rather than an O(N) clone each. See
+    // `CommandContext::visible`'s doc for the O(N²)-per-keystroke bug this
+    // closes (P6-137).
     let highlighted = Memo::new(move |_| {
-        let visible = ctx.visible_ids();
-        if visible.is_empty() {
-            return false;
-        }
-        let h = ctx.highlight.get().min(visible.len() - 1);
-        visible[h] == id
+        ctx.visible.with(|visible| {
+            if visible.is_empty() {
+                return false;
+            }
+            let h = ctx.highlight.get().min(visible.len() - 1);
+            visible[h] == id
+        })
     });
 
     let merged_class = tw_merge!(
