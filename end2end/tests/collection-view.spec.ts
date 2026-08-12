@@ -873,8 +873,9 @@ test("a `?q=` refresh keeps the page mounted, focused and filtered @fast", async
       }).observe(document.body, { childList: true, subtree: true });
     });
 
-    // Several characters, slower than the 250 ms query debounce, so this is
-    // several real `?q=` navigations and not one.
+    // Several characters at 120 ms — the 250 ms trailing debounce collapses
+    // the burst into a single real `?q=` navigation, which is all the
+    // assertion needs (one detach ≠ 0).
     await box.pressSequentially(needle, { delay: 120 });
 
     // The rows followed the URL, i.e. the navigations and their fetches really

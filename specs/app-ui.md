@@ -2376,8 +2376,8 @@ checkbox.
 `ParentRoute` view above `/catalog`, `/cards/:id` and the whole `/my` subtree —
 so no navigation among them re-runs it, including the `/my/collections/:id`
 route's DOM detach/re-attach (fixed since, P6-068). `Checkbox` is fully
-controlled, so a
-re-mounted row re-derives its checked state from the shell signal. Sign-out is a
+controlled, so a re-mounted row re-derives its checked state from the shell
+signal. Sign-out is a
 `hard_navigate`, so a selection cannot outlive a session. The selection is
 in-memory only: it survives every SPA navigation and mode switch but not a
 document load, which the spec does not require.
