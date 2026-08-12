@@ -433,6 +433,84 @@ test.describe("deleting what you are looking at", () => {
       if (!deleted) await deleteCollection(page, col.id);
     }
   });
+
+  test("leaving mid-delete is not overridden by a stale navigation (P6-128) @fast", async ({
+    page,
+  }) => {
+    // The deliberate 1.5s response hold below eats into the default 30s
+    // budget on a cold Neon hop; give it room the way other timing-sensitive
+    // tests in this suite do.
+    test.slow();
+    // `submit_delete` used to decide `route_after_delete` off the pathname
+    // captured *before* `delete_collection`'s await — so a user who left
+    // during the round trip still got yanked to the deleted node's parent
+    // when the response landed, overriding wherever they had actually gone.
+    // The fix moves the decision to *after* the await, off the pathname at
+    // that time. Proven deterministically by holding the response open past
+    // a real navigation away.
+    //
+    // The confirm dialog's own backdrop (`fixed inset-0 z-60`,
+    // `dialog.rs`) stays up and blocks pointer events for the *entire*
+    // round trip — it only closes inside the Ok arm, after the await — so a
+    // click on any other on-page link cannot land until the same instant the
+    // Ok arm itself runs, which races the very thing under test instead of
+    // preceding it. Browser **back** is the one navigation a real user can
+    // still make with a modal open (native chrome, not a page hit-test), so
+    // it is what actually reproduces "already left" deterministically: a
+    // real SPA `<A>` click first (so the back-target is a same-document
+    // `pushState` entry, not a separate document — otherwise `goBack` would
+    // reload and abort the in-flight fetch, defeating the point).
+    const rand = Math.random().toString(36).slice(2, 8);
+    const parent = await createCollection(page, {
+      name: scratchName(`race-p-${rand}`),
+    });
+    const child = await createCollection(page, {
+      parent_id: parent.id,
+      name: scratchName(`race-k-${rand}`),
+    });
+    try {
+      await page.goto("/my");
+      await hydrated(page);
+      await page.locator(`li[data-tree-row="${child.id}"] a`).click();
+      await expect(page).toHaveURL(new RegExp(`/my/collections/${child.id}$`));
+      await expect(page.getByTestId("collection-title")).toHaveText(
+        child.name,
+      );
+
+      await page.route("**/api/delete_collection*", async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        await route.continue();
+      });
+
+      await openKebab(page);
+      await items(page).filter({ hasText: "Delete…" }).click();
+      await expect(page.locator('[role="dialog"]#tree-delete')).toHaveAttribute(
+        "data-state",
+        "open",
+      );
+      await page.locator("#tree-delete-confirm").click();
+
+      // Leave immediately — before the held-open response has resolved.
+      await page.goBack();
+      await expect(page).toHaveURL(/\/my$/);
+
+      // Let the delete actually finish…
+      await page.waitForResponse(
+        (r) => r.url().includes("/api/delete_collection") && r.status() === 200,
+      );
+      // …and give the success handler's (now post-await) navigation decision
+      // a beat to run, if it were ever going to.
+      await page.waitForTimeout(500);
+
+      // Still on /my — the stale, pre-await decision did not fire a
+      // navigation back to the deleted node's parent.
+      await expect(page).toHaveURL(/\/my$/);
+    } finally {
+      await page.unroute("**/api/delete_collection*");
+      await deleteCollection(page, child.id);
+      await deleteCollection(page, parent.id);
+    }
+  });
 });
 
 test.describe("deleting something else you can see", () => {

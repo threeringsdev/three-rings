@@ -728,8 +728,6 @@ pub fn TreeDialogs() -> impl IntoView {
         }
         manage.busy.set(true);
         manage.error.set(None);
-        // Decided *before* the await, off the route the confirm was answered on.
-        let leaving = route_after_delete(&pathname.get_untracked(), &req);
         let navigate = navigate.clone();
         // The pickers' choices, translated to the server-fn's scalar wire
         // shape (`HaveChoice`/`WantChoice::to_wire`) — see `delete_collection`
@@ -743,6 +741,16 @@ pub fn TreeDialogs() -> impl IntoView {
                     manage.busy.set(false);
                     manage.delete_open.set(false);
                     tree.refetch();
+                    // Decided *after* the await, off the route the user is
+                    // standing on *now* — not the one the confirm was answered
+                    // on. `pathname` comes from the router's own `Location`
+                    // (app-root context, never disposed by a page swap), so
+                    // this read reflects wherever the round-trip left the
+                    // user, including a click away mid-flight. Deciding this
+                    // before the await fired a stale navigate on success: a
+                    // user who had already left for another page got yanked
+                    // back to the deleted node's parent.
+                    let leaving = route_after_delete(&pathname.get_untracked(), &req);
                     match leaving {
                         // Deleting the collection you are standing on — and only
                         // that one, since its descendants survive — leaves the
