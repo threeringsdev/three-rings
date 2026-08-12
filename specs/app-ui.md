@@ -4155,8 +4155,11 @@ destination's name, and the header kebab's `menu_target` snapshot (subject name,
 `parent_id` and child count). Every one falls back to the payload's own copy
 when the tree does not know the node — a collection the cached tree predates, or
 a failed tree read — so a broken tree leaves the page exactly as complete as it
-was before, and P6-111's "don't source the delete confirm's child count from a
-tree that may be stale or failed" stays honoured.
+was before. P6-111's ruling is honoured in its *failed*-tree half (the fallback);
+its *stale*-tree half is deliberately traded away: a tree read in flight after a
+delete/reparent can transiently disagree with the fresher payload (child count,
+folder rows) until the round trip lands. See the amendment in
+specs/collection-deletion.md.
 
 Three consequences worth knowing before editing that file again:
 
