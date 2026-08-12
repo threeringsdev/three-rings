@@ -113,6 +113,41 @@ impl HostedBackend {
         tx.commit().await.map_err(upstream)?;
         Ok(Some(rows.into_iter().collect()))
     }
+
+    /// The card page's "you hold N copies, here" per-collection breakdown for
+    /// one oracle id — the ownership half of [`CatalogStore::card_detail`],
+    /// split out so its failure can be degraded independently of the public
+    /// card/printings/rulings reads already in hand (see [`degrade_or`]).
+    /// Callers must already know `self.session.is_some()`.
+    async fn ownership_entries(&self, oracle_id: Uuid) -> ApiResult<Vec<OwnershipEntry>> {
+        let mut tx = self.scoped_tx().await?;
+        // `c.deleted_at IS NULL`: the "you hold N copies, here" block on the
+        // card page is a per-collection breakdown, so a soft-deleted
+        // collection's copies must drop out of it exactly as they drop out
+        // of `owned` (specs/collection-deletion.md).
+        let rows: Vec<OwnershipSql> = sqlx::query_as(
+            "SELECT h.collection_id, c.name AS collection_name, h.printing_id, \
+                    sum(h.quantity)::int AS quantity \
+             FROM holdings h JOIN printings p ON p.id = h.printing_id \
+             JOIN collections c ON c.id = h.collection_id \
+             WHERE p.oracle_id = $1 AND c.deleted_at IS NULL \
+             GROUP BY h.collection_id, c.name, h.printing_id",
+        )
+        .bind(oracle_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+        Ok(rows
+            .into_iter()
+            .map(|o| OwnershipEntry {
+                collection_id: o.collection_id,
+                collection_name: o.collection_name,
+                printing_id: o.printing_id,
+                quantity: o.quantity,
+            })
+            .collect())
+    }
 }
 
 /// One card's `owned` out of [`HostedBackend::owned_by_oracle`]'s answer:
@@ -121,6 +156,27 @@ fn owned_of(owned: &Option<HashMap<Uuid, i32>>, oracle_id: Uuid) -> Option<i32> 
     owned
         .as_ref()
         .map(|m| m.get(&oracle_id).copied().unwrap_or(0))
+}
+
+/// Degrade a failed **decoration** read to "unknown" instead of `?`-failing a
+/// request whose public rows are already in hand (P6-135, was P6-038a): a
+/// signed-in reader whose session-scoped ownership lookup errors should see
+/// exactly what an anonymous reader sees — the badge/section absent — not a
+/// 500 for a page the public catalog answered fine. `Ok(v)` passes through as
+/// `Some(v)`; `Err(e)` degrades to `None` and hands `e` back so the caller can
+/// log it with its own site-specific context (kept pure — no logging idiom
+/// here — so it needs no logger to unit-test).
+///
+/// Callers whose success value is itself `owned_by_oracle`'s
+/// `Option<HashMap<Uuid, i32>>` (search, `card_summary`) `.flatten()` the
+/// result: `Ok(None)` (anonymous) and `Err(_)` (degraded) both collapse to the
+/// same outer `None`, which is the point — the two cases must render
+/// identically.
+fn degrade_or<T>(result: ApiResult<T>) -> (Option<T>, Option<ApiError>) {
+    match result {
+        Ok(v) => (Some(v), None),
+        Err(e) => (None, Some(e)),
+    }
 }
 
 /// The `collections` projection matching [`CollectionRow`] — `kind`/`position`
@@ -210,35 +266,22 @@ impl CatalogStore for HostedBackend {
         .await
         .map_err(upstream)?;
 
+        // Same degrade-not-500 contract as `search`/`card_summary` (P6-135,
+        // was P6-038a): the card/printings/rulings above are already in
+        // hand, so a failure in this session-scoped decoration must not 500
+        // the whole page — it drops to `None`, exactly the shape an
+        // anonymous reader already gets (`YourCopies` in app/src/cards.rs
+        // simply doesn't render, same as the section never being there for
+        // an anonymous visitor — confirmed sane, not a misleading "you own
+        // 0" message).
         let ownership = if self.session.is_some() {
-            let mut tx = self.scoped_tx().await?;
-            // `c.deleted_at IS NULL`: the "you hold N copies, here" block on the
-            // card page is a per-collection breakdown, so a soft-deleted
-            // collection's copies must drop out of it exactly as they drop out
-            // of `owned` (specs/collection-deletion.md).
-            let rows: Vec<OwnershipSql> = sqlx::query_as(
-                "SELECT h.collection_id, c.name AS collection_name, h.printing_id, \
-                        sum(h.quantity)::int AS quantity \
-                 FROM holdings h JOIN printings p ON p.id = h.printing_id \
-                 JOIN collections c ON c.id = h.collection_id \
-                 WHERE p.oracle_id = $1 AND c.deleted_at IS NULL \
-                 GROUP BY h.collection_id, c.name, h.printing_id",
-            )
-            .bind(oracle_id)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(upstream)?;
-            tx.commit().await.map_err(upstream)?;
-            Some(
-                rows.into_iter()
-                    .map(|o| OwnershipEntry {
-                        collection_id: o.collection_id,
-                        collection_name: o.collection_name,
-                        printing_id: o.printing_id,
-                        quantity: o.quantity,
-                    })
-                    .collect(),
-            )
+            let (entries, err) = degrade_or(self.ownership_entries(oracle_id).await);
+            if let Some(e) = &err {
+                leptos::logging::error!(
+                    "card_detail: ownership read failed, degrading to anonymous view: {e}"
+                );
+            }
+            entries
         } else {
             None
         };
@@ -295,7 +338,16 @@ impl CatalogStore for HostedBackend {
         .map_err(upstream)?
         .ok_or_else(|| ApiError::NotFound("card".into()))?;
 
-        let owned = self.owned_by_oracle(&[oracle_id]).await?;
+        // Same degrade-not-500 contract as `search` above: the card row is
+        // already in hand, so an ownership-read failure drops to the badge
+        // an anonymous caller sees rather than failing the whole request.
+        let (owned, err) = degrade_or(self.owned_by_oracle(&[oracle_id]).await);
+        if let Some(e) = &err {
+            leptos::logging::error!(
+                "card_summary: ownership read failed, degrading badge to unknown: {e}"
+            );
+        }
+        let owned = owned.flatten();
         Ok(card.into_summary(owned_of(&owned, oracle_id)))
     }
 
@@ -349,8 +401,19 @@ impl CatalogStore for HostedBackend {
         // comes out of the same helper `card_summary` uses, so tile and detail
         // page cannot drift. Runs after `truncate`, so the discarded has-more
         // probe row is not looked up.
+        //
+        // The rows above are already in hand — a failure here must not turn a
+        // successful catalog read into a 500 (P6-135, was P6-038a). Degrade
+        // instead: log it and serve the page exactly as an anonymous caller
+        // would see it (badges absent).
         let ids: Vec<Uuid> = rows.iter().map(|r| r.oracle_id).collect();
-        let owned = self.owned_by_oracle(&ids).await?;
+        let (owned, err) = degrade_or(self.owned_by_oracle(&ids).await);
+        if let Some(e) = &err {
+            leptos::logging::error!(
+                "search: ownership read failed, degrading badges to unknown: {e}"
+            );
+        }
+        let owned = owned.flatten();
         Ok(SearchResults {
             cards: rows
                 .into_iter()
@@ -4964,5 +5027,64 @@ mod faces_shape_guard {
              (specs/collection-api.md, P6-124).",
             total - guarded,
         );
+    }
+}
+
+/// Unit coverage for [`degrade_or`] (P6-135, was P6-038a): the pure
+/// Ok-passes-through / Err-degrades-and-returns-for-logging shape a live DB
+/// isn't needed to exercise. `owned_by_oracle`'s failure itself can't be
+/// injected without a mock backend, so this is what stands in for it — see
+/// specs/collection-api.md Findings for the note on why the success path
+/// (search/card_summary/card_detail unchanged when ownership reads succeed)
+/// is covered by the existing e2e catalog search specs instead.
+#[cfg(test)]
+mod degrade_or_tests {
+    use super::*;
+
+    #[test]
+    fn ok_passes_through_untouched() {
+        let (v, err) = degrade_or::<i32>(Ok(7));
+        assert_eq!(v, Some(7));
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn err_degrades_to_none_and_is_returned_for_logging() {
+        let (v, err) = degrade_or::<i32>(Err(ApiError::Upstream("db exploded".into())));
+        assert_eq!(v, None);
+        match err {
+            Some(ApiError::Upstream(msg)) => assert_eq!(msg, "db exploded"),
+            other => panic!("expected the original error back, got {other:?}"),
+        }
+    }
+
+    /// The shape `search`/`card_summary` actually consume: `owned_by_oracle`
+    /// returns `ApiResult<Option<HashMap<..>>>`, where `Ok(None)` already
+    /// means "anonymous" (see [`owned_of`]). Both `Ok(None)` and a degraded
+    /// `Err(_)` must `.flatten()` to the same outer `None` — a signed-in
+    /// reader whose ownership read fails has to render byte-identically to
+    /// an anonymous one, not as "owns 0 of everything".
+    #[test]
+    fn anonymous_and_degraded_flatten_to_the_same_none() {
+        let anonymous: ApiResult<Option<HashMap<Uuid, i32>>> = Ok(None);
+        let (anon_owned, anon_err) = degrade_or(anonymous);
+        assert_eq!(anon_owned.flatten(), None);
+        assert!(anon_err.is_none());
+
+        let failed: ApiResult<Option<HashMap<Uuid, i32>>> =
+            Err(ApiError::Upstream("db exploded".into()));
+        let (degraded_owned, degraded_err) = degrade_or(failed);
+        assert_eq!(degraded_owned.flatten(), None);
+        assert!(degraded_err.is_some());
+    }
+
+    #[test]
+    fn success_map_flattens_to_some() {
+        let mut m = HashMap::new();
+        m.insert(Uuid::nil(), 3);
+        let ok: ApiResult<Option<HashMap<Uuid, i32>>> = Ok(Some(m.clone()));
+        let (owned, err) = degrade_or(ok);
+        assert_eq!(owned.flatten(), Some(m));
+        assert!(err.is_none());
     }
 }

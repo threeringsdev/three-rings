@@ -1912,6 +1912,9 @@ spread trap bit again: a component prop ending in a bare path immediately before
 now opens an RLS transaction it previously never needed, so a failure in the
 ownership read turns a working catalog search into a 500 **for signed-in users
 only**, with no fallback degrading `owned` to `None` while still serving results.
+**Fixed 2026-08-12 (P6-135, was P6-038a):** `search`, `card_summary`, and
+`card_detail` now degrade a failed ownership read to `None`/anonymous shape
+instead of `?`-failing the request — see collection-api.md Findings.
 
 **Evidence.** `cargo test --workspace --exclude frontend` 138 + 26 green; full
 chromium e2e **153/153** at `--workers=1` (4.2 min); hydration CLEAN on three
