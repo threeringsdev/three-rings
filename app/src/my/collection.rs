@@ -15,10 +15,13 @@
 //! **Folder rows are rows.** The wireframe puts child collections in the same
 //! table as the cards, above them, sharing the three numeric columns — a
 //! folder's HERE is its rolled-up count, italic and dimmed because it is
-//! elsewhere. Their counts come from the shell's collection-tree resource, not
-//! from a second read, so a folder row and the sidebar badge for the same node
-//! cannot disagree. The breadcrumb (and the mobile back link) walk that same
-//! assembled tree.
+//! elsewhere. Their counts *and, since P6-127, which rows exist at all* come
+//! from the shell's collection-tree resource, not from a second read, so a
+//! folder row and the sidebar badge for the same node cannot disagree — and a
+//! rename or a `New binder inside…` reaches them without refetching the card
+//! table. The payload's own `children` remains the fallback for a tree that
+//! does not know this node. The breadcrumb (and the mobile back link) walk that
+//! same assembled tree.
 //!
 //! **HERE is editable and the header follows it.** A card cell backed by
 //! exactly one `holdings` row carries the [`CountStepper`]; a cell that sums
@@ -62,13 +65,32 @@
 //!
 //! **The header's `⋯` is the tree's menu, aimed at this route** ([`HeaderKebab`]):
 //! one `menu_target`, one `TreeMenu`, one set of dialogs, a second `context_menu`
-//! instance. Two consequences land in *this* file. The page takes
-//! `TreeManage::revision` as a resource source, because a rename/create/move
-//! changes what `collection_view` says and no tree refetch can tell it. And
-//! deleting *this* collection navigates up instead of leaving the page on a
-//! dead id — `tree_manage::route_after_delete`. Only this one: deleting an
-//! ancestor no longer takes the route with it, because the children survive by
-//! moving up a level (specs/collection-deletion.md).
+//! instance. Two consequences land in *this* file. Deleting *this* collection
+//! navigates up instead of leaving the page on a dead id —
+//! `tree_manage::route_after_delete`. Only this one: deleting an ancestor no
+//! longer takes the route with it, because the children survive by moving up a
+//! level (specs/collection-deletion.md). And a tree mutation has to reach this
+//! page's own read somehow, which is the next paragraph.
+//!
+//! **A tree mutation reaches this page two ways, and which one matters**
+//! (P6-127). `view_res` takes `TreeManage::content_revision` as a source — the
+//! *subset* of tree mutations that can move copies or move which collection
+//! they roll up into (a delete and its undo, a reparent). It deliberately does
+//! **not** take `TreeManage::revision`, which every tree mutation bumps: a
+//! refetch rebuilds the card table, and rebuilding the card table re-seeds
+//! every stepper and disposes the row its undo toast is pointing at — the
+//! "Undo silently did nothing" defect recorded below against awaiting the
+//! *tree*, resurrected from the other side. Renaming a collection cannot
+//! change a card row, so it must not be able to rebuild one.
+//!
+//! Everything a create or a rename *does* change here is therefore taken from
+//! the collection tree, which those mutations already refetch, published out of
+//! one nested boundary as [`TreeFacts`] and read as a plain signal: the `<h1>`,
+//! the folder rows' identity, the quick-add destination's name, and the kebab's
+//! snapshot. Each of them falls back to the payload's own copy when the tree
+//! does not know this node (a collection the cached tree predates, or a failed
+//! tree read), so a broken tree read still leaves the page exactly as complete
+//! as it was before.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -179,6 +201,55 @@ struct QuickAddFacts {
     present: Vec<PresentMatch>,
 }
 
+/// What the **collection tree** says about the collection this route names —
+/// the naming-and-shape half of the page, published as a plain value so the
+/// page can read it without a second read of `collection_view` (P6-127).
+///
+/// It exists because `view_res` no longer refetches on a create or a rename
+/// (see the module doc): those two change a name and a child list, both of
+/// which the tree already carries and every tree mutation already refetches.
+/// Resolved in **one** nested boundary rather than per-consumer, so the `<h1>`,
+/// the folder rows and the kebab's snapshot cannot disagree about which name
+/// this collection has.
+///
+/// Every consumer keys on `id` before using it: the tree resolves from cache
+/// almost immediately while a payload takes a round trip, so on a navigation
+/// these facts describe the *new* collection while the table still shows the
+/// old one's rows. Keyed, that window falls back to the payload's own copies —
+/// exactly what the page showed before this existed.
+#[derive(Clone, PartialEq)]
+struct TreeFacts {
+    id: Id,
+    name: String,
+    /// This node's children, in the tree's order — which is the server's
+    /// `(position, name)`, the same order `CollectionView::children` uses.
+    children: Vec<shared::CollectionSummary>,
+}
+
+/// The tree's name for `id`, when it has one. `None` falls the caller back to
+/// the payload's own name (see [`TreeFacts`]).
+fn tree_name(facts: RwSignal<Option<TreeFacts>>, id: Id) -> Option<String> {
+    facts.with(|f| f.as_ref().filter(|f| f.id == id).map(|f| f.name.clone()))
+}
+
+/// The folder rows to render under `id`: the tree's children when it knows this
+/// node, else `fallback` — the payload's own `children`, which is where this row
+/// set came from before P6-127.
+///
+/// Pure, and split out for it: this is the whole of "a `New binder inside…`
+/// still adds its row without refetching the card table", and the fallback is
+/// the whole of "a failed tree read leaves the page no worse than before".
+fn folder_rows(
+    facts: Option<&TreeFacts>,
+    id: Id,
+    fallback: &[shared::CollectionSummary],
+) -> Vec<shared::CollectionSummary> {
+    match facts {
+        Some(f) if f.id == id => f.children.clone(),
+        _ => fallback.to_vec(),
+    }
+}
+
 /// Fold a rendered payload into what the quick-add panel reads. All three come
 /// from the one `collection_view` the header is rendering, so the panel adds
 /// *here*, names this collection in its toast, and lists what is already here —
@@ -216,12 +287,14 @@ pub fn CollectionPage() -> impl IntoView {
     // as a source makes the refetch structural: a move bumps it, the resource
     // re-runs, HERE and the totals move with the database.
     let revision = crate::my::move_selection::holdings_revision();
-    // The same trick for the *collection tree's* mutations, and the header kebab
-    // is what made it necessary: this page's title, counts and folder rows all
-    // come from `collection_view`, which no `tree.refetch()` can update. A rename
-    // from the header left the `<h1>` stale beside a breadcrumb that had already
-    // caught up; a `New binder inside…` added a folder row that never appeared.
-    // See `TreeManage::revision`.
+    // The same trick for the *collection tree's* mutations — but only for the
+    // ones that can have moved copies (`content_revision`, not `revision`).
+    // A delete relocates the deleted node's holdings, its Undo brings them back,
+    // and a reparent moves a whole subtree's copies from one rollup to another;
+    // all three change numbers in this table and must refetch it. A create or a
+    // rename changes no copy anywhere, and refetching for one would rebuild the
+    // card table under a live undo toast — see the module doc (P6-127). What
+    // *those* change here comes from `tree_facts` below instead.
     let manage = expect_context::<TreeManage>();
 
     let view_res = Resource::new(
@@ -231,10 +304,10 @@ pub fn CollectionPage() -> impl IntoView {
                 url_q.get(),
                 url_cursor.get(),
                 revision.get(),
-                manage.revision.get(),
+                manage.content_revision.get(),
             )
         },
-        |(id, q, cursor, _revision, _tree_revision)| async move {
+        |(id, q, cursor, _revision, _tree_content_revision)| async move {
             let id = Id::parse_str(&id).map_err(|_| {
                 // `validation:` deliberately — the wire vocabulary is what the
                 // UI classifies on, and a malformed id in the URL is a *request*
@@ -293,12 +366,31 @@ pub fn CollectionPage() -> impl IntoView {
         facts.get().filter(|f| Some(f.collection_id) == want)
     });
 
+    // The tree's answer to "what is this collection called, and what is inside
+    // it" — the third thing readable from outside every boundary, written by
+    // the nested `<Suspense>` below rather than by the header's `Transition`,
+    // because it is the *tree* it awaits and nothing else on this page may
+    // (P6-127; see [`TreeFacts`] and the module doc).
+    let tree_facts = RwSignal::new(None::<TreeFacts>);
+
     let paged = Memo::new(move |_| !url_cursor.read().is_empty());
     let teardown_open = RwSignal::new(false);
 
     // Memos, not raw reads: the panel re-renders on every keystroke.
-    let quick_add_destination =
-        Memo::new(move |_| live_facts.with(|f| f.as_ref().map(|f| f.destination.clone())));
+    // The name comes from the tree when it has one: the toast this destination
+    // titles ("Added X to Y") must not still say the old Y after a rename, and
+    // a rename no longer refetches the payload `facts` was folded out of.
+    let quick_add_destination = Memo::new(move |_| {
+        live_facts.with(|f| {
+            f.as_ref().map(|f| {
+                let mut destination = f.destination.clone();
+                if let Some(name) = tree_name(tree_facts, destination.id) {
+                    destination.name = name;
+                }
+                destination
+            })
+        })
+    });
     // Have until the first payload lands. Nothing can be added before then
     // either (the destination is `None` too), so the footer's hint is the only
     // thing briefly generic.
@@ -316,8 +408,9 @@ pub fn CollectionPage() -> impl IntoView {
             // input under the caret mid-search.
             //
             // NB neither block awaits the *tree* resource. Everything tree-
-            // derived (breadcrumb, folder counts, teardown destinations) awaits
-            // it in its own nested boundary instead, so a `tree.refetch()` —
+            // derived (breadcrumb, folder rows and their counts, teardown
+            // destinations, the `TreeFacts` above) awaits it in its own nested
+            // boundary instead, so a `tree.refetch()` —
             // which every stepper commit fires, to keep the sidebar badges
             // honest — re-renders those and nothing else. Awaiting it out here
             // remounted every card row on each commit, which re-seeded the
@@ -355,6 +448,7 @@ pub fn CollectionPage() -> impl IntoView {
                                     teardown_open
                                     view_res
                                     tree
+                                    tree_facts
                                 />
                             }
                                 .into_any()
@@ -409,25 +503,15 @@ pub fn CollectionPage() -> impl IntoView {
                             Ok(view) => {
                                 let next = view.next_cursor.clone();
                                 let searching = !q.is_empty();
-                                // A search filters *cards*; child collections
-                                // are not what you typed a card name to find,
-                                // so they step aside while one is running. Their
-                                // identity comes from the view's own `children`
-                                // (ordered by position, name, like the tree);
-                                // only the rolled-up badge needs the tree.
-                                let folders = if searching {
-                                    Vec::new()
-                                } else {
-                                    view.children.clone()
-                                };
-                                let body = if view.cards.is_empty() && folders.is_empty() {
-                                    view! { <EmptyState searching paged /> }.into_any()
-                                } else {
-                                    view! { <CollectionTable view folders here_delta tree /> }
-                                        .into_any()
-                                };
                                 view! {
-                                    {body}
+                                    <CollectionBody
+                                        view
+                                        searching
+                                        paged
+                                        here_delta
+                                        tree
+                                        tree_facts
+                                    />
                                     <Pager next paged q id />
                                 }
                                     .into_any()
@@ -439,6 +523,52 @@ pub fn CollectionPage() -> impl IntoView {
                     })
                 }}
             </Transition>
+
+            // The tree-derived naming and shape of this collection, resolved in
+            // its own boundary and published as a plain signal (P6-127). It
+            // renders nothing: the consumers are the `<h1>`, the folder rows,
+            // the quick-add destination and the kebab's snapshot, which sit in
+            // three different places and must not each grow a tree read of
+            // their own. Own boundary for the reason every other tree read on
+            // this page has one — a `tree.refetch()` fires on every stepper
+            // commit, and it must re-render this and nothing else.
+            //
+            // **Last in the view on purpose.** This route is `SsrMode::Async`,
+            // which renders the whole page in document order once every
+            // resource has resolved, so a publisher placed above its consumers
+            // would put *tree*-derived names and rows in the server HTML while
+            // the client's first pass — where this signal starts at `None` —
+            // renders the payload's. Publishing after them makes both passes
+            // read the payload, and the correction lands one tick later on the
+            // client only.
+            <Suspense fallback=|| ()>
+                {move || {
+                    let id = url_id.get();
+                    Suspend::new(async move {
+                        let nodes = assembled_roots(tree.await);
+                        let next = Id::parse_str(&id)
+                            .ok()
+                            .and_then(|id| {
+                                find_tree_node(&nodes, id)
+                                    .map(|node| TreeFacts {
+                                        id,
+                                        name: node.row.summary.name.clone(),
+                                        children: node
+                                            .children
+                                            .iter()
+                                            .map(|c| c.row.summary.clone())
+                                            .collect(),
+                                    })
+                            });
+                        // Compare before writing: every stepper commit refetches
+                        // the tree, and an unconditional `set` would notify the
+                        // folder rows (and the quick-add panel) on each one.
+                        if tree_facts.with_untracked(|cur| *cur != next) {
+                            tree_facts.set(next);
+                        }
+                    })
+                }}
+            </Suspense>
         </div>
     }
 }
@@ -610,20 +740,27 @@ pub(crate) fn ancestor_path(nodes: &[TreeNode], id: Id) -> Option<Vec<Crumb>> {
     None
 }
 
-/// A node's own copies plus every descendant's — the number its sidebar badge
-/// shows, which is what a folder row must agree with. `None` when the tree does
-/// not contain the node (a collection created since the shell's tree was
-/// fetched); the row then shows no badge rather than a wrong one.
-fn rolled_up_of(nodes: &[TreeNode], id: Id) -> Option<i64> {
+/// The assembled node for `id`, anywhere in the forest. `None` when the tree
+/// does not contain it (a collection created since the shell's tree was
+/// fetched, or a failed tree read) — every caller here has a payload-derived
+/// fallback for that case rather than rendering something wrong.
+pub(crate) fn find_tree_node(nodes: &[TreeNode], id: Id) -> Option<&TreeNode> {
     for n in nodes {
         if n.row.summary.id == id {
-            return Some(n.rolled_up);
+            return Some(n);
         }
-        if let Some(hit) = rolled_up_of(&n.children, id) {
+        if let Some(hit) = find_tree_node(&n.children, id) {
             return Some(hit);
         }
     }
     None
+}
+
+/// A node's own copies plus every descendant's — the number its sidebar badge
+/// shows, which is what a folder row must agree with. `None` when the tree does
+/// not contain the node; the row then shows no badge rather than a wrong one.
+fn rolled_up_of(nodes: &[TreeNode], id: Id) -> Option<i64> {
+    find_tree_node(nodes, id).map(|n| n.rolled_up)
 }
 
 /// Every collection except `exclude`, depth-first, labelled with its path —
@@ -702,6 +839,10 @@ fn CollectionHeader(
     teardown_open: RwSignal<bool>,
     view_res: Resource<Result<CollectionViewPayload, ServerFnError<String>>>,
     tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
+    /// The tree's naming and shape for this collection, published by the page
+    /// (see [`TreeFacts`]). The `<h1>` and the kebab's snapshot read it because
+    /// a rename no longer refetches `view`.
+    tree_facts: RwSignal<Option<TreeFacts>>,
 ) -> impl IntoView {
     let id = view.collection.id;
     let name = view.collection.name.clone();
@@ -720,6 +861,7 @@ fn CollectionHeader(
     // last.
     let manage = expect_context::<TreeManage>();
     let collection = StoredValue::new(view.collection.clone());
+    let payload_name = StoredValue::new(name.clone());
     // Read *untracked at click time* rather than awaited in a nested `Suspense`.
     // Two reasons: a header action that pops into existence when a second read
     // lands is worse than one that is simply always there, and — decisively — a
@@ -730,20 +872,32 @@ fn CollectionHeader(
     // `totals.present`/`totals.desired` are this collection alone, unlike
     // `present_total()` which folds in every descendant's copies — a delete
     // relocates only this node's own holdings/desires, so the confirm's
-    // count must not overstate that. `children.len()` is the same read's
-    // **immediate** children, which is what actually re-parents; sourcing it
-    // from `collection_view` rather than the sidebar tree is the fix for the
-    // stale/failed-tree-read gap (specs/collection-deletion.md Problem
-    // section, absorbed P6-111): this is the very payload that already
-    // renders the header, so it cannot disagree with what's on screen the
-    // way a second, independently-fetched tree read could.
+    // count must not overstate that.
+    //
+    // The **name** and the **immediate children** are the tree's when it knows
+    // this node, and the payload's otherwise. P6-111 moved the child count off
+    // the sidebar tree and onto `collection_view` to close a stale/failed-tree
+    // gap (specs/collection-deletion.md Problem section); the fallback keeps
+    // that closed while P6-127 makes the tree the fresher of the two for
+    // exactly the two mutations that no longer refetch the payload — a create
+    // (which adds a child) and a rename (which is the name the confirm and the
+    // rename dialog both prefill from). Both reads happen at click time, off
+    // the same `roots` the `forbidden` set is already built from, so they
+    // cannot disagree with each other.
     let cards_here = i64::from(totals.present);
     let wants_here = i64::from(totals.desired);
-    let children_here = view.children.len() as i64;
+    let payload_children = StoredValue::new(view.children.clone());
     let aim = Callback::new(move |()| {
         let roots = assembled_roots(tree.get_untracked().flatten());
+        let node = find_tree_node(&roots, id);
+        let subject = node
+            .map(|n| n.row.summary.clone())
+            .unwrap_or_else(|| collection.get_value());
+        let children_here =
+            node.map(|n| n.children.len())
+                .unwrap_or_else(|| payload_children.with_value(Vec::len)) as i64;
         manage.menu_target.set(Some(MenuTarget::for_collection(
-            &collection.get_value(),
+            &subject,
             &roots,
             cards_here + i64::from(here_delta.get_untracked()),
             wants_here,
@@ -758,8 +912,18 @@ fn CollectionHeader(
             <div class="flex flex-wrap items-start gap-3">
                 <div class="min-w-0 flex-1">
                     <div class="flex flex-wrap items-center gap-2">
+                        // Reactive, over a plain signal: a rename bumps only
+                        // `TreeManage::revision` now, which this page's payload
+                        // deliberately does not take as a source (P6-127), so
+                        // the tree is what tells the title it changed. The
+                        // payload's own name is the fallback and the SSR value,
+                        // which is right there — on a fresh load the payload is
+                        // as new as the tree.
                         <h1 class="text-2xl font-bold" data-testid="collection-title">
-                            {name.clone()}
+                            {move || {
+                                tree_name(tree_facts, id)
+                                    .unwrap_or_else(|| payload_name.get_value())
+                            }}
                         </h1>
                         <Badge variant=BadgeVariant::Outline attr:data-testid="collection-kind">
                             {match kind {
@@ -1321,10 +1485,78 @@ fn section_slot_delta(old: i32, new: i32, desired: i32) -> i32 {
     new.max(desired) - old.max(desired)
 }
 
+/// The table, or the empty state instead of it — and the one reactive decision
+/// between them (P6-127).
+///
+/// The folder rows are tree-derived now, so a `New binder inside…` can put the
+/// **first** row into a collection whose payload still says it is empty. That
+/// makes "is there anything to show" a live question rather than a property of
+/// the payload, and the answer has to be able to flip without a refetch.
+///
+/// It is a [`Memo`] and not a raw read on purpose: this closure rebuilds the
+/// card table when it re-runs, which is the thing this whole task exists to
+/// stop happening on a tree mutation. Deduped to the *boolean*, a rename of a
+/// child collection moves the folder list without touching the cards, and only
+/// a genuine empty→non-empty flip (whose non-empty branch has no card rows in
+/// it anyway, since `cards_empty` is what got us here) rebuilds anything.
+#[component]
+fn CollectionBody(
+    view: CollectionView,
+    /// A quick search is running: child collections step aside for it (they are
+    /// not what you typed a card name to find), so the empty state's question
+    /// is about the cards alone.
+    searching: bool,
+    paged: Memo<bool>,
+    here_delta: RwSignal<i32>,
+    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
+    tree_facts: RwSignal<Option<TreeFacts>>,
+) -> impl IntoView {
+    let cards_empty = view.cards.is_empty();
+    let folders = folder_list(
+        view.collection.id,
+        view.children.clone(),
+        searching,
+        tree_facts,
+    );
+    let no_folders = Memo::new(move |_| folders.read().is_empty());
+    let view = StoredValue::new(view);
+    move || {
+        if cards_empty && no_folders.get() {
+            view! { <EmptyState searching paged /> }.into_any()
+        } else {
+            view! { <CollectionTable view=view.get_value() folders here_delta tree /> }.into_any()
+        }
+    }
+}
+
+/// The folder rows for a rendered payload: the tree's children of this
+/// collection, falling back to the payload's own (see [`folder_rows`]), and
+/// empty while a search is running.
+///
+/// A `Memo` so the rows survive a tree refetch that did not change them —
+/// **every stepper commit fires one** to keep the sidebar badges honest, and
+/// without the equality gate each would rebuild this row set for nothing.
+fn folder_list(
+    collection_id: Id,
+    payload_children: Vec<shared::CollectionSummary>,
+    searching: bool,
+    tree_facts: RwSignal<Option<TreeFacts>>,
+) -> Memo<Vec<shared::CollectionSummary>> {
+    let payload_children = StoredValue::new(payload_children);
+    Memo::new(move |_| {
+        if searching {
+            return Vec::new();
+        }
+        tree_facts.with(|f| {
+            payload_children.with_value(|fallback| folder_rows(f.as_ref(), collection_id, fallback))
+        })
+    })
+}
+
 #[component]
 fn CollectionTable(
     view: CollectionView,
-    folders: Vec<shared::CollectionSummary>,
+    folders: Memo<Vec<shared::CollectionSummary>>,
     here_delta: RwSignal<i32>,
     tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
 ) -> impl IntoView {
@@ -1362,11 +1594,17 @@ fn CollectionTable(
                 </TableHeader>
                 <TableBody>
                     // Child collections first — the wireframe's folder rows, in
-                    // the same table and the same columns as the cards.
-                    {folders
-                        .into_iter()
-                        .map(|folder| view! { <FolderTableRow folder tree /> })
-                        .collect_view()}
+                    // the same table and the same columns as the cards. Their
+                    // own closure, reading a memo the tree feeds: a rename or a
+                    // `New binder inside…` relabels or adds a row here without
+                    // touching a single card row below (P6-127).
+                    {move || {
+                        folders
+                            .get()
+                            .into_iter()
+                            .map(|folder| view! { <FolderTableRow folder tree /> })
+                            .collect_view()
+                    }}
                     {if is_deck {
                         sections
                             .into_iter()
@@ -1435,7 +1673,9 @@ fn CollectionTable(
 /// shell's collection tree so it is the same number the sidebar badge shows.
 /// The read is its own `Suspense` rather than the table's: a stepper commit
 /// refetches that tree, and re-rendering the whole table would re-seed every
-/// stepper (see [`CollectionPage`]).
+/// stepper (see [`CollectionPage`]). Which rows exist comes from that same tree
+/// (via [`TreeFacts`]) rather than the card payload, for the same reason from
+/// the other direction — see [`folder_rows`].
 #[component]
 fn FolderTableRow(
     folder: shared::CollectionSummary,
@@ -2484,6 +2724,48 @@ mod tests {
         assert_eq!(rolled_up_of(&t, Id::from_u128(3)), Some(18));
         // A collection the cached tree predates gets no badge, not a wrong one.
         assert_eq!(rolled_up_of(&t, Id::from_u128(99)), None);
+    }
+
+    fn tree_facts_of(nodes: &[TreeNode], id: Id) -> Option<TreeFacts> {
+        find_tree_node(nodes, id).map(|node| TreeFacts {
+            id,
+            name: node.row.summary.name.clone(),
+            children: node
+                .children
+                .iter()
+                .map(|c| c.row.summary.clone())
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn folder_rows_prefer_the_tree_and_fall_back_to_the_payload() {
+        // P6-127. The tree is the fresher of the two reads for the two tree
+        // mutations that no longer refetch this page's payload: a rename
+        // (relabels a row) and a `New binder inside…` (adds one).
+        let t = sample_tree();
+        let trade = Id::from_u128(2);
+        let payload = vec![tree_row(3, Some(2), "STALE NAME", 18).summary];
+
+        let facts = tree_facts_of(&t, trade);
+        let rows = folder_rows(facts.as_ref(), trade, &payload);
+        assert_eq!(
+            rows.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["Foils"],
+            "the tree knows this node, so its children win over the payload's"
+        );
+
+        // A collection the cached tree predates, or a tree read that failed:
+        // the payload's own `children` is what this row set was before P6-127,
+        // so the page is left exactly as complete as it used to be.
+        assert_eq!(folder_rows(None, trade, &payload), payload);
+        let other = tree_facts_of(&t, Id::from_u128(3));
+        assert_eq!(
+            folder_rows(other.as_ref(), trade, &payload),
+            payload,
+            "facts describing a *different* collection are never used — the \
+             tree resolves from cache before a navigation's payload lands"
+        );
     }
 
     #[test]
