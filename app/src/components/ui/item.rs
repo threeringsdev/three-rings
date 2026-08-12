@@ -56,7 +56,7 @@ impl ItemSize {
     }
 }
 
-const ITEM_BASE: &str = "group/item flex items-center border border-transparent text-sm rounded-md transition-colors duration-100 flex-wrap outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]";
+const ITEM_BASE: &str = "group/item flex items-center border border-transparent text-sm rounded-md transition-colors duration-100 flex-wrap outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-3";
 
 #[component]
 pub fn Item(
@@ -130,4 +130,26 @@ pub fn ItemSeparator(#[prop(into, optional)] class: String) -> impl IntoView {
     let merged_class = tw_merge::tw_merge!("my-0", class);
 
     view! { <super::separator::Separator attr:data-name="ItemSeparator" class=merged_class /> }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ITEM_BASE;
+
+    /// See the matching test in `button.rs` for the full tw_merge collision
+    /// story: an arbitrary `ring-[3px]` misclassifies as `ring-color` and
+    /// clobbers `focus-visible:ring-ring/50` in the same merge call. `ring-3`
+    /// parses as a width and both classes survive.
+    #[test]
+    fn focus_ring_color_and_width_both_survive_merge() {
+        let merged = tw_merge::tw_merge!(ITEM_BASE);
+        assert!(
+            merged.contains("focus-visible:ring-ring/50"),
+            "ring color class dropped by tw_merge collision: {merged}"
+        );
+        assert!(
+            merged.contains("focus-visible:ring-3"),
+            "ring width class missing or renamed: {merged}"
+        );
+    }
 }
