@@ -902,20 +902,50 @@ fn set_year(released_at: Option<&str>) -> String {
 ///   vocabulary of what may be selected — the query bar remains the way to
 ///   name a code the picker can't find.
 ///
-/// The list is fetched only once the section is actually open (`expanded`,
-/// written by the disclosure's own `toggle`): the rail renders twice per page
-/// (desktop + mobile sheet) and `/catalog` is the app's most-loaded route, so an
-/// eager fetch would be two round trips on every visit for a facet most visits
-/// never touch.
+/// The list is fetched only once the picker is actually **engaged** — not
+/// merely open. Those used to be the same signal, and a shared `?q=s:mh3`
+/// link broke that: `section_seeded_open` auto-opens this section whenever
+/// the URL already carries a set (`count > 0`), so the *old* "fetch when
+/// open" rule fired on page load with no interaction at all, and did it
+/// **twice** (the rail renders this component once for the desktop rail and
+/// once for the mobile `FilterSheet`, and `SheetContent` mounts its children
+/// unconditionally, off-screen, even while closed) — every such link paid for
+/// SSR-rendering ~2,094 rows of markup plus two ~1,047-row hydration payloads,
+/// on the app's most-loaded route, before anyone touched the picker (P6-137
+/// review). `engaged` is the fix: it starts `false` regardless of whether
+/// auto-open left the section visually open, and only flips true on a real
+/// interaction — a genuine disclosure toggle, or focusing/hovering the picker
+/// itself (see the `Effect` and `on:focusin`/`on:pointerenter` below). Auto-open
+/// still SSRs the chips and the search box (`codes` and the label/input do not
+/// depend on `engaged`) — a shared link visibly reflects its selected sets —
+/// it just does not SSR or eagerly hydrate the row list. `filter-rail.spec.ts`
+/// pins this: a `?q=s:...` URL's SSR HTML carries the chip but zero
+/// `set-option` rows.
 #[component]
 fn SetPicker(#[prop(into)] id: String, codes: Signal<Vec<String>>) -> impl IntoView {
     let commit = use_commit();
     let count = Signal::derive(move || codes.read().len());
-    let expanded = RwSignal::new(section_seeded_open(
-        SET_SECTION_DEFAULT_OPEN,
-        count.get_untracked(),
-    ));
+    let auto_opened = section_seeded_open(SET_SECTION_DEFAULT_OPEN, count.get_untracked());
+    let expanded = RwSignal::new(auto_opened);
     let search = RwSignal::new(String::new());
+
+    // Separate from `expanded` on purpose — see the component doc. Always
+    // starts `false`, even when `auto_opened` seeded the section open: a
+    // shared `?q=s:...` link must not pay for the row list before anyone
+    // touches it.
+    let engaged = RwSignal::new(false);
+    // A real disclosure toggle — open *or* close — is genuine interaction:
+    // the browser fires `toggle` only on an actual state change, never for
+    // the initial SSR-open state `auto_opened` seeds, so this effect's first
+    // run (the one that observes that seed) is exactly the run to ignore.
+    // `prev` is `None` only on that first run; every later run got here
+    // because `expanded` really changed.
+    Effect::new(move |prev: Option<()>| {
+        expanded.track();
+        if prev.is_some() {
+            engaged.set(true);
+        }
+    });
 
     // Bumped by the error arm's retry — a source-signal change is what makes the
     // resource fetch again for an unchanged query.
@@ -926,14 +956,18 @@ fn SetPicker(#[prop(into)] id: String, codes: Signal<Vec<String>>) -> impl IntoV
     // from *the fetch failed*, and collapsing any of those into an empty vector
     // renders a confident "No set matches." — a false claim about a catalog that
     // holds ~1050 sets — over a question that was never asked or never answered.
-    // `None` is the collapsed section (see the note above on why it doesn't
-    // fetch); `Some(Err)` is a real failure, which on the native backend is the
-    // *ordinary* case for an offline phone (`ApiError::Upstream`, kept distinct
-    // from an auth error precisely so callers can tell them apart).
+    // `None` is the not-yet-engaged state (see the note above on why it doesn't
+    // fetch — this guards the actual network call, both server- and
+    // client-side; the `Show` below guards what renders while it is `None` for
+    // that reason specifically, rather than showing "Loading…" for something
+    // that was never asked for); `Some(Err)` is a real failure, which on the
+    // native backend is the *ordinary* case for an offline phone
+    // (`ApiError::Upstream`, kept distinct from an auth error precisely so
+    // callers can tell them apart).
     let sets = Resource::new(
-        move || (expanded.get(), search.get(), attempt.get()),
-        |(expanded, q, _)| async move {
-            if !expanded {
+        move || (engaged.get(), search.get(), attempt.get()),
+        |(engaged, q, _)| async move {
+            if !engaged {
                 return None;
             }
             Some(crate::list_sets(q).await)
@@ -1022,7 +1056,13 @@ fn SetPicker(#[prop(into)] id: String, codes: Signal<Vec<String>>) -> impl IntoV
                 <Label html_for=id.clone() class="sr-only">
                     "Search sets"
                 </Label>
-                <Command should_filter=false class="border-input rounded-md border">
+                <Command
+                    should_filter=false
+                    class="border-input rounded-md border"
+                    {..}
+                    on:focusin=move |_| engaged.set(true)
+                    on:pointerenter=move |_| engaged.set(true)
+                >
                     <div class="border-b px-2">
                         <CommandInput
                             attr:id=id.clone()
@@ -1032,25 +1072,48 @@ fn SetPicker(#[prop(into)] id: String, codes: Signal<Vec<String>>) -> impl IntoV
                         />
                     </div>
                     <CommandList class="max-h-56 p-1">
-                        // `Transition`, not `Suspense`: re-keying on each
-                        // debounced keystroke must not strobe the list away and
-                        // back. The cost is that its fallback only ever runs when
-                        // *nothing* has resolved yet, which is why the
-                        // not-fetched arm below renders the same line rather than
-                        // leaning on this one.
-                        <Transition fallback=set_list_loading>
-                            {move || Suspend::new(async move {
+                        // Gated on `engaged`, not `expanded` — see the
+                        // component doc. This `Show`'s `fallback` is what an
+                        // auto-opened-but-untouched section renders: honest
+                        // about not having asked the server anything yet,
+                        // unlike the old "Loading sets…" a `None` resource
+                        // value used to imply here. Its `children` (the
+                        // `Transition`/`Suspend`/row match below) is not even
+                        // *constructed* while `!engaged`, which is what keeps
+                        // this off SSR and off the initial hydration payload —
+                        // the resource's own `if !engaged` guard (above) is
+                        // what keeps it from being *fetched*; the two together
+                        // are what close the P6-137-review gap.
+                        <Show
+                            when=move || engaged.get()
+                            fallback=|| {
+                                view! {
+                                    <p
+                                        class="text-muted-foreground p-2 text-xs"
+                                        data-testid="set-unengaged"
+                                    >
+                                        "Click or type to browse every set."
+                                    </p>
+                                }
+                            }
+                        >
+                            // `Transition`, not `Suspense`: re-keying on each
+                            // debounced keystroke must not strobe the list away
+                            // and back. The cost is that its fallback only ever
+                            // runs when *nothing* has resolved yet, which is why
+                            // the not-fetched arm below renders the same line
+                            // rather than leaning on this one.
+                            <Transition fallback=set_list_loading>
+                                {move || Suspend::new(async move {
                                 match sets.await {
-                                    // Not fetched: the section is collapsed, so
-                                    // this is invisible — except in the one
-                                    // moment that matters. Opening the section
-                                    // re-keys the resource, and a `Transition`
-                                    // holds the previous children while the new
-                                    // value loads, so *these* are what shows for
-                                    // the length of that first round trip. It has
-                                    // to read as "loading", never as an answer:
-                                    // an empty state here was the first thing
-                                    // anyone ever saw in this facet.
+                                    // Only reachable if the resource somehow
+                                    // resolves `None` while this `Show` branch
+                                    // is mounted — i.e. `engaged` flips back
+                                    // false, which nothing here does. Kept as a
+                                    // defensive fallback rather than an
+                                    // `unreachable!()`: a future change to the
+                                    // gating above should degrade to "Loading
+                                    // sets…", not panic.
                                     None => EitherOf4::A(set_list_loading()),
                                     Some(Err(e)) => {
                                         let (_, message) = crate::catalog::describe_error(&e);
@@ -1107,7 +1170,8 @@ fn SetPicker(#[prop(into)] id: String, codes: Signal<Vec<String>>) -> impl IntoV
                                     }
                                 }
                             })}
-                        </Transition>
+                            </Transition>
+                        </Show>
                     </CommandList>
                 </Command>
             </div>

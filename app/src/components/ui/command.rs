@@ -35,6 +35,13 @@
 //!   single `highlight` reset — which fires on every keystroke — an O(N²)
 //!   pass, measured at ~31s for one keystroke against the full list in a debug
 //!   build. See [`CommandContext::visible`].
+//! - **`CommandItem` scrolls itself into view (`block: "nearest"`) when it
+//!   becomes highlighted** — upstream leaves ↑↓ nav to whatever the browser's
+//!   default focus-follows-key scrolling does, which does nothing here since
+//!   nothing but the highlight state actually moves DOM focus. Not visible at
+//!   a handful of rows; ↑↓ across a list taller than `CommandList`'s `max-h`
+//!   was otherwise blind past the first screenful (P6-137 review, once the
+//!   set picker made a 1,047-row list a real case).
 
 use leptos::prelude::*;
 use tw_merge::tw_merge;
@@ -428,6 +435,31 @@ pub fn CommandItem(
         })
     });
 
+    // Scrolls the highlighted row into view on ↑↓ (P6-137 review). Without
+    // this, keyboard nav across a list taller than `CommandList`'s `max-h`
+    // was blind past whatever fit on screen — harmless at the handful of rows
+    // every consumer had, a real gap once the set picker's cap lifted to
+    // ~1,047 (the whole point of a keyboard-reachable "every match" list).
+    // `block: "nearest"` — not `"center"` — so a row already fully visible
+    // never causes a jump; the browser scrolls the minimum needed. Hydrate-
+    // only: `ScrollIntoViewOptions` needs `dep:web-sys`, unavailable in a
+    // non-hydrate build, and scrolling has nothing to do during SSR (no DOM)
+    // or before hydration attaches (nothing has moved yet).
+    let node_ref: NodeRef<leptos::html::Div> = NodeRef::new();
+    Effect::new(move |_| {
+        let is_highlighted = highlighted.get();
+        #[cfg(feature = "hydrate")]
+        if is_highlighted {
+            if let Some(el) = node_ref.get() {
+                let opts = web_sys::ScrollIntoViewOptions::new();
+                opts.set_block(web_sys::ScrollLogicalPosition::Nearest);
+                el.scroll_into_view_with_scroll_into_view_options(&opts);
+            }
+        }
+        #[cfg(not(feature = "hydrate"))]
+        let _ = is_highlighted;
+    });
+
     let merged_class = tw_merge!(
         "group relative flex gap-2 items-center px-2 py-1.5 text-sm rounded-sm cursor-default select-none outline-none aria-selected:bg-accent aria-selected:text-accent-foreground hover:bg-accent hover:text-accent-foreground",
         class
@@ -435,6 +467,7 @@ pub fn CommandItem(
 
     view! {
         <div
+            node_ref=node_ref
             data-name="CommandItem"
             class=merged_class
             role="option"

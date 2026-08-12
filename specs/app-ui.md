@@ -2027,7 +2027,7 @@ identical alias-capture pattern was found and fixed in the card-detail rulings
 query.
 
 **Truncation removed 2026-08-12 (P6-137), explicit maintainer ruling.** The
-25-row default above silently truncated: searching "commander" matched 108
+25-row default above silently truncated: searching "commander" matched 109
 sets and showed 25 with no indication anything was cut off. The maintainer's
 call was not to add a "showing 25 of N" indicator but to remove the cap
 entirely — the picker is now a Scryfall-style scrollable dropdown listing
@@ -2036,8 +2036,17 @@ newest first). Typing still narrows server-side exactly as before; only the
 window size changed.
 
 The 25 lived in `SetQuery::limit()` (`shared/src/catalog.rs`): `self.limit
-.unwrap_or(25).clamp(1, 200)`. It is now `self.limit.unwrap_or(i64::MAX)` for
-an unrequested limit — an explicit `limit` (the same field the public `GET
+.unwrap_or(25).clamp(1, 200) as i64`. It is now:
+
+```rust
+match self.limit {
+    Some(n) => n.clamp(1, 5_000) as i64,
+    None => i64::MAX,
+}
+```
+
+— an unrequested `limit` (`self.limit: Option<u32>` is `None`) carries no cap
+at all; an explicit `limit` (the same field the public `GET
 /api/catalog/sets?limit=` route reads) is still clamped, to `1..=5_000` rather
 than `1..=200`. `i64::MAX` as a Postgres `LIMIT` bound is a no-op — it never
 truncates a result set smaller than it, so this is "no `LIMIT` clause" without
@@ -2097,6 +2106,64 @@ on its 109-row narrowed result ≈ 670ms (includes the existing debounce);
 clearing back to the full browse-all list ≈ 780ms; two `ArrowDown` + `Enter`
 keyboard-nav picks ≈ 640ms combined, landing the pick correctly. All
 comfortably responsive — no fallback cap needed.
+
+**Round-1 review, fixed 2026-08-12 (P6-137): auto-open was still fetching the
+full list, twice, on every set-filtered page load.** The truncation fix above
+lifted `SetQuery::limit()`'s cap correctly, but conflated "the section is
+open" with "the picker was engaged" — the same signal drove both. A
+`?q=s:mh3` link auto-opens the Set section (`section_seeded_open`: any URL
+already carrying a set seeds it open, so the chip is visible without a click),
+and the old "fetch when open" rule fired on that seed with zero interaction.
+Worse, this component renders **twice** per page — the desktop rail and the
+mobile `FilterSheet`, and `SheetContent` mounts its children unconditionally,
+off-screen via a CSS transform, rather than unmounting while closed (a
+separate, pre-existing trap, filed rather than fixed here) — so every shared
+or refreshed set-filtered link paid for SSR-rendering **~2,094 rows of
+markup** (2 × 1,047) plus two full hydration payloads, before anyone touched
+the picker. Measured directly: `curl "/catalog?q=s:mh3"` was **2,432,307
+bytes** with 2,094 `data-testid="set-option"` occurrences (exactly 2 × 1,047,
+confirming the double-render).
+
+Fixed by splitting the one signal into two, in `SetPicker`
+(`app/src/catalog/rail.rs`): `expanded` still seeds open/closed exactly as
+before (the `<details>` state, the badge, the SSR'd chips — none of that
+changed, a shared link still visibly reflects its selection) and a new
+`engaged` signal — always starting `false`, even when `expanded` seeded open —
+gates the row list. The resource's fetch fn now checks `engaged`, not
+`expanded`; the row-rendering `Transition`/`Suspend` is wrapped in a `<Show
+when=engaged>` so it is not even *constructed* (let alone SSR'd) while
+un-engaged, replaced by a small, honest "Click or type to browse every set."
+hint (`data-testid="set-unengaged"`) instead of the old `None`-resource arm's
+misleading "Loading sets…" (nothing was loading — nothing had been asked).
+`engaged` flips true on either a genuine disclosure toggle (an `Effect`
+watching `expanded`'s *transitions*, not its seed value — the browser only
+fires a real `toggle` event on an actual state change, never for the initial
+SSR-open state, so the effect's own first run is exactly the run to ignore
+via the `prev.is_some()` idiom) or on focusing/hovering the picker itself
+(`on:focusin`/`on:pointerenter` on the `Command` root, spread via `{..}` —
+covers keyboard-tab-in, mouse-hover-intent, and touch-tap-to-focus). Measured
+after: the same `curl` is **359,697 bytes**, zero `set-option` rows — an 85%
+reduction. `filter-rail.spec.ts`'s SSR test now asserts the negative directly
+(chip present, `set-option` absent, `set-unengaged` present) and a new test
+pins the same for the mobile sheet's independent `SetPicker` instance.
+
+**Also fixed, same pass:** ↑↓ never scrolled the highlighted row into view
+(`app/src/components/ui/command.rs`) — invisible at a handful of rows, a real
+gap now that the set picker made a 1,047-row keyboard-reachable list the
+point. `CommandItem` now calls `scroll_into_view_with_scroll_into_view_options`
+(`block: "nearest"`, hydrate-only) when it becomes highlighted; verified
+against `quick-add.spec.ts`, `destination-picker.spec.ts`, and
+`command-palette.spec.ts` (the primitive's other keyboard-nav consumers) —
+same pass/fail set before and after (the three pre-existing
+`command-palette.spec.ts` "Undo last move" fixture-pool flakes, reproduced
+against unmodified code too, are unrelated). Two doc-only fixes for accuracy:
+`CatalogStore::list_sets`'s trait doc (`app/src/backend/mod.rs`) still claimed
+the result was bounded; `hosted.rs`'s `ORDER BY` comment still framed the
+three ranking tiers as gating *reachability*, which was true only under the
+old cap. And a `shared/src/catalog.rs` unit test now pins `SetQuery::limit()`
+directly: `None` → `i64::MAX`, an explicit value clamped to `1..=5_000` both
+directions — the shape the maintainer flagged as worth a test of its own
+rather than relying only on the e2e layer.
 
 ### Catalog paging via `?cursor=` (2026-07-25)
 

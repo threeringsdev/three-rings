@@ -252,7 +252,7 @@ pub struct SetSummary {
 /// — but the result window is not capped by default (P6-137, explicit
 /// maintainer ruling): the catalog is ~1050 sets (~44KB), trivially servable
 /// in full, and the picker is a Scryfall-style scrollable dropdown rather than
-/// a paged list. Silently showing 25 of 108 matches for "commander" was worse
+/// a paged list. Silently showing 25 of 109 matches for "commander" was worse
 /// than the earlier O(n²) mount-cost worry — measured acceptable at the full
 /// 1,047-row catalog (see the note on [`SetQuery::limit`]).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -289,6 +289,41 @@ impl SetQuery {
     /// substring, and the two backends have to agree on that.
     pub fn term(&self) -> Option<&str> {
         self.q.as_deref().map(str::trim).filter(|t| !t.is_empty())
+    }
+}
+
+#[cfg(test)]
+mod set_query_tests {
+    use super::SetQuery;
+
+    /// P6-137: an unrequested `limit` must carry no cap — the regression this
+    /// guards is `limit()` silently reintroducing the old 25-row (or any
+    /// other finite) default.
+    #[test]
+    fn unrequested_limit_is_uncapped() {
+        let query = SetQuery {
+            q: None,
+            limit: None,
+        };
+        assert_eq!(query.limit(), i64::MAX);
+    }
+
+    /// An explicit `limit` — the shape the public `GET /api/catalog/sets`
+    /// route accepts — is still honored and still clamped, both directions.
+    #[test]
+    fn requested_limit_is_clamped_to_1_through_5000() {
+        let at = |n: u32| {
+            SetQuery {
+                q: None,
+                limit: Some(n),
+            }
+            .limit()
+        };
+        assert_eq!(at(0), 1, "clamps up from below the floor");
+        assert_eq!(at(1), 1);
+        assert_eq!(at(200), 200, "the old cap is just an ordinary value now");
+        assert_eq!(at(5_000), 5_000);
+        assert_eq!(at(u32::MAX), 5_000, "clamps down from above the ceiling");
     }
 }
 

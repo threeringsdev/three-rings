@@ -458,10 +458,14 @@ impl CatalogStore for HostedBackend {
                       s.released_at DESC NULLS LAST, s.code \
              LIMIT $3",
         )
-        // The three ORDER BY tiers exist because the window is bounded: typing
-        // `mh3` matches `amh3`/`tmh3`/`pmh3` as well, and without exact-code-first
-        // the set the user named can fall off the end of the page. Newest-first
-        // within a tier — a set filter is nearly always about a recent release.
+        // The three ORDER BY tiers exist so the set someone actually typed
+        // ranks first: typing `mh3` also matches `amh3`/`tmh3`/`pmh3` by
+        // substring, and without exact-code-first those would interleave
+        // ahead of it by release date alone (P6-137: the window is no longer
+        // bounded by default, so this no longer gates *reachability* — an
+        // untiered list would still surface every match, just not with the
+        // named set necessarily near the top). Newest-first within a tier — a
+        // set filter is nearly always about a recent release.
         // `s.released_at` — not the `released_at::text AS released_at` output
         // alias — because ORDER BY resolves a bare name against the SELECT
         // list first; sorting the alias would be lexicographic text order

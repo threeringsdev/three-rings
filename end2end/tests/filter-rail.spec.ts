@@ -407,10 +407,20 @@ test("a shared set link SSRs its selection, and a bare one fetches nothing @fast
   ).text();
   expect(html).toContain('data-testid="set-chip" data-code="mh3"');
   expect(html).toContain('data-testid="set-chip" data-code="lea"');
-  // ...and the section is expanded because it carries filters, so the list is
-  // there too. This is the positive control for the negative assertions below:
-  // it proves the markup exists to be found when it should be.
-  expect(html).toContain('data-testid="set-option"');
+  // ...and the section is expanded because it carries filters, so the
+  // not-yet-engaged hint is there too (P6-137 review) — this is the positive
+  // control for the negative assertions below: it proves the markup exists to
+  // be found when it should be.
+  expect(html).toContain('data-testid="set-unengaged"');
+  // The load-bearing negative: `s:mh3,lea` used to auto-open the section AND
+  // eagerly fetch+SSR the *entire* set list (~1,047 rows) behind it, twice
+  // (once for the desktop rail, once for the mobile sheet, which mounts
+  // off-screen rather than unmounting while closed) — every shared/refreshed
+  // set-filtered link paid for that unconditionally. The chip alone is what a
+  // shared link needs to *look* right; the row list is deferred until someone
+  // actually engages the picker (focus, hover, or a real disclosure toggle —
+  // see `SetPicker`'s doc), so it must not be here.
+  expect(html).not.toContain('data-testid="set-option"');
 
   // On a bare /catalog the facet still renders, but nothing is selected and the
   // list has not been fetched — the section is collapsed, and `/catalog` is the
@@ -616,9 +626,16 @@ test("the set list never flashes an empty verdict before it loads @fast", async 
   // has not been asked for, so the SSR'd markup must not already contain an
   // answer. It did — `set-empty` shipped in the HTML with no loading state at
   // all, which made "No set matches." the first thing anyone ever saw here.
+  //
+  // `set-unengaged`, not `set-loading` — P6-137 review: the picker no longer
+  // fetches merely because the section is open (auto-open on a URL carrying
+  // sets was doing exactly that, unconditionally, twice per page — see the
+  // SSR test above), so a bare, never-touched section has never asked the
+  // server anything and must not claim it is loading either.
   const html = await (await request.get("/catalog")).text();
   expect(html).toContain(">Set<"); // positive control: the facet is on the page
-  expect(html).toContain('data-testid="set-loading"');
+  expect(html).toContain('data-testid="set-unengaged"');
+  expect(html).not.toContain('data-testid="set-loading"');
   expect(html).not.toContain('data-testid="set-empty"');
 
   // ...and in the browser. The response is held open so the window under
@@ -631,8 +648,9 @@ test("the set list never flashes an empty verdict before it loads @fast", async 
   await page.goto("/catalog");
   await hydrated(page);
   const rail = page.locator(RAIL);
-  // Hidden inside the closed disclosure until here, which is why the SSR'd
-  // loading state costs the user nothing.
+  // Not constructed at all until engaged, so this holds regardless — see the
+  // SSR assertion above for why `toBeHidden()` (which Playwright also passes
+  // on outright absence) is the right shape here rather than `toHaveCount(0)`.
   await expect(rail.getByTestId("set-loading")).toBeHidden();
 
   await rail.locator("summary").filter({ hasText: "Set" }).click();
@@ -667,11 +685,16 @@ test("a broad term returns every match, not a 25-row cap @fast", async ({
   const rail = page.locator(RAIL);
   await rail.locator("summary").filter({ hasText: "Set" }).click();
   await rail.locator(SET_SEARCH).fill("commander");
-  // Row count in the DOM equals the API's full match count — not a capped
-  // window of it.
-  await expect(rail.locator("[data-testid=set-option]")).toHaveCount(
-    rows.length,
-  );
+  // `>=`, not an exact match against `rows.length`: that count came from a
+  // *separate* request, moments earlier, against a catalog nothing here holds
+  // still — the point is "not capped at 25", not "byte-identical to a request
+  // this test itself raced." A longer timeout too: a loaded CI runner
+  // rendering ~100+ rows can outrun the default 5s poll.
+  await expect
+    .poll(() => rail.locator("[data-testid=set-option]").count(), {
+      timeout: 10_000,
+    })
+    .toBeGreaterThanOrEqual(rows.length);
 });
 
 test("browsing with a blank term reaches the whole catalog, not just the newest window @fast", async ({
@@ -696,12 +719,44 @@ test("browsing with a blank term reaches the whole catalog, not just the newest 
   await hydrated(page);
   const rail = page.locator(RAIL);
   await rail.locator("summary").filter({ hasText: "Set" }).click();
-  await expect(rail.locator("[data-testid=set-option]")).toHaveCount(
-    rows.length,
-  );
+  // `>=`, not exact — see the sibling test above for why. 10s: rendering
+  // ~1,047 rows on a loaded runner can outrun the default 5s poll.
+  await expect
+    .poll(() => rail.locator("[data-testid=set-option]").count(), {
+      timeout: 10_000,
+    })
+    .toBeGreaterThanOrEqual(rows.length);
   // Reachable only by scrolling past everything newer — the DOM holds it
   // even though nothing scrolled it into view.
   await expect(option(page, "lea")).toHaveCount(1);
+});
+
+test("a set-filtered link auto-opens the section without fetching the row list @fast", async ({
+  request,
+}) => {
+  // The regression this guards (P6-137 review, major): `section_seeded_open`
+  // auto-opens the Set section whenever the URL already carries a set, and
+  // this component renders *twice* per page (the desktop rail and the mobile
+  // `FilterSheet`, which mounts its children off-screen rather than
+  // unmounting while closed — see `SheetContent`). The old "fetch when open"
+  // rule fired on page load with no interaction at all, so every such link
+  // paid for SSR-rendering ~2,094 rows of markup (all ~1,047 sets, twice)
+  // before anyone touched the picker. `filter-rail.spec.ts`'s SSR test above
+  // pins the desktop half of this; this one pins the *mobile* half, since the
+  // two are separate `SetPicker` instances that could regress independently.
+  const html = await (await request.get("/catalog?q=s%3Amh3")).text();
+  // The chip is the auto-open contract — a shared link must still visibly
+  // reflect its selected sets, in both renders.
+  const chipCount = (
+    html.match(/data-testid="set-chip" data-code="mh3"/g) ?? []
+  ).length;
+  expect(chipCount).toBe(2);
+  // Neither render fetched the row list.
+  expect(html).not.toContain('data-testid="set-option"');
+  const unengagedCount = (
+    html.match(/data-testid="set-unengaged"/g) ?? []
+  ).length;
+  expect(unengagedCount).toBe(2);
 });
 
 /// A real first-page cursor for `q`, from the hosted JSON route at `limit=1` —
@@ -767,6 +822,7 @@ test.describe("mobile", () => {
 
   test("the set picker works inside the filter sheet @fast", async ({
     page,
+    request,
   }) => {
     // The rail becomes a slide-over on mobile, and the picker is the one rail
     // widget that fetches — so it needs its own assertion that the sheet's copy
@@ -786,8 +842,17 @@ test.describe("mobile", () => {
       sheet.locator("[data-testid=set-chip][data-code=mh3]"),
     ).toBeVisible();
 
-    // Its own list, fetched through its own resource.
+    // Lazy-mount, mobile half (P6-137 review): the sheet auto-opened on the
+    // `s:mh3` URL same as the desktop rail, but engaging it is what's supposed
+    // to bring the row list in — until then it shows the chip and this hint,
+    // not rows.
+    await expect(sheet.getByTestId("set-unengaged")).toBeVisible();
+    await expect(sheet.locator("[data-testid=set-option]")).toHaveCount(0);
+
+    // Its own list, fetched through its own resource, engaged by focusing the
+    // search box (the same interaction `.fill()` performs first).
     await sheet.locator("#filter-sheet-set").fill("limited edition alpha");
+    await expect(sheet.getByTestId("set-unengaged")).toHaveCount(0);
     const lea = sheet.locator("[data-testid=set-option][data-code=lea]");
     await expect(lea).toHaveText("Limited Edition Alpha");
     await lea.click();
@@ -796,6 +861,20 @@ test.describe("mobile", () => {
     // The sheet stays open across a pick: this facet is multi-select, so closing
     // it would make every second set cost a reopen.
     await expect(panel).toHaveAttribute("data-state", "open");
+
+    // The uncap itself, in the sheet: clearing the search reaches the same
+    // full, unbounded browse-all list the desktop rail does — not a mobile-
+    // specific window. `>=`, longer timeout — see the desktop equivalents
+    // above for why.
+    const res = await request.get("/api/list_sets?q=");
+    const rows = (await res.json()) as Array<{ code: string }>;
+    expect(rows.length).toBeGreaterThan(1000);
+    await sheet.locator("#filter-sheet-set").fill("");
+    await expect
+      .poll(() => sheet.locator("[data-testid=set-option]").count(), {
+        timeout: 10_000,
+      })
+      .toBeGreaterThanOrEqual(rows.length);
   });
 
   test("colorless counts even though it has no checkbox @fast", async ({
