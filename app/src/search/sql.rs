@@ -141,7 +141,11 @@ pub(crate) fn pattern(v: &str) -> String {
 
 /// Escape LIKE/ILIKE wildcards in user input (`%`, `_`, and the default `\`
 /// escape itself) so typed text is always literal.
-fn escape_like(s: &str) -> String {
+///
+/// `pub(crate)` — `list_sets` (hosted.rs, P6-136) binds this directly rather
+/// than going through [`pattern`], since it needs both a `%…%` substring
+/// pattern and a bare `…%` prefix pattern from the same escaped term.
+pub(crate) fn escape_like(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")

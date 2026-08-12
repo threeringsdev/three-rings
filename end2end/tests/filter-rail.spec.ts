@@ -526,6 +526,25 @@ test("a code the picker never lists is still the user's selection @fast", async 
   await expect(chip(page, "mh3")).toBeVisible(); // positive control
 });
 
+test("a typed % is literal, not a LIKE wildcard @fast", async ({ page }) => {
+  // Regression guard (P6-136): `list_sets`' ILIKE bound the typed term
+  // unescaped, so a bare "%" acted as a wildcard and matched every set
+  // instead of none. No set's code or name contains a literal "%".
+  await page.goto("/catalog?q=s%3Amh3");
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+
+  // Positive control: the box genuinely searches and returns rows (mh3 need
+  // not be among the newest-25 default browse, so search for it by name).
+  await rail.locator(SET_SEARCH).fill("modern horizons 3");
+  await expect(option(page, "mh3")).toBeVisible();
+
+  await rail.locator(SET_SEARCH).fill("%");
+  await expect(rail.getByTestId("set-empty")).toBeVisible();
+  await expect(rail.locator("[data-testid=set-option]")).toHaveCount(0);
+  await expect(chip(page, "mh3")).toBeVisible(); // selection survives an empty list
+});
+
 test("a set pick drops the page cursor @fast", async ({ page, request }) => {
   // The picker reaches the URL through its own signal→Effect hop (a row is built
   // inside a `Suspend`, so it cannot capture the non-Send navigate closure), so
