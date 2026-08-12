@@ -1298,9 +1298,13 @@ and `/cards/:id` ownership blocks survive the window too instead of quietly degr
 anonymous view. Full detail, including why the fix lives in `collection_backend()` rather than
 `auth.rs`/`routes.rs`, in `specs/phase-6-probes/P6-010.md` → Resolution.
 
-**The native backend already had an equivalent** (`backend/native.rs:132-144`, a silent
-re-mint + one retry on a hosted `401`), so this brings the hosted web path in line with it
-rather than introducing a new mechanism. `unauthorized: invalid token` is still reachable and
+**The native backend already had an equivalent for collection reads/writes**
+(`backend/native.rs:132-144`, a silent re-mint + one retry on a hosted `401`), so for that
+half this brings the hosted web path in line with it rather than introducing a new
+mechanism. The native *catalog* half has no equivalent — catalog reads degrade to
+anonymous with a `200`, which the 401-keyed re-mint never sees, so the desktop/mobile
+shell still silently loses `/catalog` ownership blocks after the idle window (filed as a
+follow-up task). `unauthorized: invalid token` is still reachable and
 still non-retryable (the pinned unit test at `app/src/my/tree.rs` is unchanged) — it now means
 a session that is genuinely gone, no live `tr_session` either, which really does need a
 sign-in.

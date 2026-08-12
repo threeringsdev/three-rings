@@ -971,9 +971,14 @@ pub async fn reorder_collection(
 /// **Hosted arm carries its own `tr_session` fallback (P6-010)**, deliberately
 /// *not* pushed into the `AuthUser` extractor (`auth.rs:216-226`) or
 /// `backend::routes::catalog_backend`: both are shared with the plain-axum
-/// routes the native client's `NativeBackend` calls over HTTP, which re-mints
-/// for itself (`backend/native.rs:132-144`) and would double-mint if the
-/// terminus also retried. See [`user_id_with_session_fallback`].
+/// routes the native client's `NativeBackend` calls over HTTP, and that client
+/// sends only `Authorization: Bearer` — never a `tr_session` cookie
+/// (`backend/native.rs:101-104`) — so a fallback there would have nothing to
+/// fall back to. (For collection writes the native client also re-mints on 401
+/// for itself, `backend/native.rs:132-144`; catalog reads degrade to anonymous
+/// with a 200 instead, which means the native catalog half still lacks this
+/// fallback entirely — filed as its own task.) See
+/// [`user_id_with_session_fallback`].
 #[cfg(feature = "hosted")]
 async fn collection_backend() -> Result<crate::backend::HostedBackend, ServerFnError<String>> {
     let headers = leptos_axum::extract::<axum::http::HeaderMap>()
@@ -999,12 +1004,14 @@ async fn collection_backend() -> Result<crate::backend::HostedBackend, ServerFnE
 ///
 /// This reuses `fetch_current_user`'s own fallback logic — read `tr_session`,
 /// `upstream::mint_jwt`, `verify_token` — **minus the cookie writes**: this
-/// only has to name a user for *this* request, because `fetch_current_user`
-/// already refreshes `tr_jwt` on the same response. Writing cookies here
-/// would also be wrong on its own terms — `append_set_cookie` needs a Leptos
-/// `ResponseOptions` context that only a Leptos server-fn body carries, and
-/// this logic must stay callable from a plain-axum handler in spirit even
-/// though today only the server-fn path calls it.
+/// only has to name a user for *this* request. On a **document** request
+/// `fetch_current_user` refreshes `tr_jwt` on the same response, so the
+/// window closes there. Post-hydration server-fn calls carry no such refresh
+/// (`CurrentUserResource` never refetches), so a tab idle past the cookie
+/// life pays one mint round trip per server fn until its next full page load
+/// — the same per-call pattern `NativeBackend::send` already lives with.
+/// Persisting the fresh JWT from here via `use_context::<ResponseOptions>()`
+/// would make it genuinely once; filed as a follow-up.
 ///
 /// The I/O is split from the decision on purpose: [`decide_fallback`] is a
 /// pure function of "what did the primary lookup say" and "is there a

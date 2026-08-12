@@ -806,10 +806,12 @@ mod tests {
         // while `user_id_from_headers` (every data read) did not, so the
         // guard passed and the very next read still 401ed. The hosted data
         // path now shares that same `tr_session` fallback
-        // (`lib.rs::user_id_with_session_fallback`), so this string is
-        // reachable only for a session that is *actually* gone — no live
-        // `tr_session` either — which a retry genuinely cannot fix. The
-        // assertion is unchanged; only the reason it is reachable moved.
+        // (`lib.rs::user_id_with_session_fallback`), so the common way here
+        // is a session that is *actually* gone — no live `tr_session` either.
+        // (A transient mint/verify failure or a server-side verifier
+        // misconfiguration also lands on this string; the fallback surfaces
+        // the original 401 rather than its own error.) The assertion is
+        // unchanged; only the reason it is reachable moved.
         assert!(!tree_retryable(&e("unauthorized: invalid token")));
         // And the request-level classes, which will never clear.
         assert!(!tree_retryable(&e("validation: nope")));
