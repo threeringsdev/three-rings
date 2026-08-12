@@ -47,6 +47,19 @@
 //! **The URL is the whole view state** — `?q=` (in-collection quick search)
 //! and `?cursor=` (keyset page), same contract as `/my`.
 //!
+//! **Nothing in [`CollectionPage`]'s setup body may read `view_res`** — not even
+//! from inside an `Effect` (P6-068). A `Resource` read registers the *nearest
+//! `SuspenseContext` in the owner chain*, and this route's nearest one is
+//! `RequireAuth`'s `<Suspense>` (`crate::shell`), an ancestor of every boundary
+//! this page's own view can contain. Every such read therefore made a `?q=`
+//! refresh re-suspend the auth guard, which unmounted and re-inserted the whole
+//! `/my/*` subtree: the caret left the query bar and any showing native popover
+//! was removed without firing `toggle`. The two boundary-crossing consumers —
+//! the quick-add panel (which sits *between* the two `Transition`s on purpose)
+//! and the `here_delta` reset — read plain `RwSignal`s written from inside the
+//! header's `Transition` instead. `RwSignal` reads do no `SuspenseContext`
+//! lookup at all, so a query refresh structurally cannot reach the guard.
+//!
 //! **The header's `⋯` is the tree's menu, aimed at this route** ([`HeaderKebab`]):
 //! one `menu_target`, one `TreeMenu`, one set of dialogs, a second `context_menu`
 //! instance. Two consequences land in *this* file. The page takes
@@ -66,7 +79,8 @@ use std::collections::HashSet;
 use super::tree::{assemble, element_anchor, CollectionTreeResource, TreeNode};
 use super::tree_manage::{MenuTarget, TreeManage, TreeMenu};
 use crate::cards::CardPreview;
-use crate::components::quick_add::QuickAddPanel;
+use crate::catalog::destination::Destination;
+use crate::components::quick_add::{present_matches, PresentMatch, QuickAddPanel};
 use crate::components::states::ErrorNote;
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::breadcrumb::{
@@ -145,6 +159,44 @@ pub struct CollectionViewPayload {
     collection_view: CollectionView,
 }
 
+/// Everything the quick-add panel needs from this page's payload, as a plain
+/// value the page can park in an `RwSignal`.
+///
+/// It exists to keep `view_res` out of [`CollectionPage`]'s setup body (P6-068,
+/// and the module doc on why that matters): the panel is rendered *outside* both
+/// of the page's `Transition`s, so whatever feeds it must be readable without
+/// touching a `Resource`. Built once per payload, inside the header's boundary.
+///
+/// `collection_id` is not a fourth thing the panel needs — it is the **stamp**
+/// that says which collection the other three describe, so a retained value can
+/// be refused the moment the URL names a different one (see [`CollectionPage`]'s
+/// `live_facts`).
+#[derive(Clone, PartialEq)]
+struct QuickAddFacts {
+    collection_id: Id,
+    destination: Destination,
+    kind: QuickAddKind,
+    present: Vec<PresentMatch>,
+}
+
+/// Fold a rendered payload into what the quick-add panel reads. All three come
+/// from the one `collection_view` the header is rendering, so the panel adds
+/// *here*, names this collection in its toast, and lists what is already here —
+/// none of it re-derived or re-fetched, so none of it can disagree with the
+/// header and the table.
+fn quick_add_facts(view: &CollectionView) -> QuickAddFacts {
+    QuickAddFacts {
+        collection_id: view.collection.id,
+        destination: Destination {
+            id: view.collection.id,
+            name: view.collection.name.clone(),
+            is_inbox: view.collection.is_inbox,
+        },
+        kind: add_default(view.collection.kind),
+        present: present_matches(&view.cards),
+    }
+}
+
 #[component]
 pub fn CollectionPage() -> impl IntoView {
     let params = use_params_map();
@@ -205,60 +257,55 @@ pub fn CollectionPage() -> impl IntoView {
     // disagree without a reload (see the module doc on why a commit does not
     // refetch the view).
     let here_delta = RwSignal::new(0);
-    // The delta belongs to a payload, so it is zeroed by a payload — every new
-    // one (a navigation, a re-search, or the teardown's refetch) already
-    // contains everything committed before it. Keying this on the *URL*
-    // instead was wrong twice over: a `view_res.refetch()` at the same URL left
-    // the delta applied on top of fresh totals (teardown emptied a deck to zero
-    // and the header read "1 here"), and a navigation zeroed it while the
-    // `Transition` was still showing the pre-commit totals it belonged to.
+
+    // ---- the two things that must be readable from outside every boundary ----
     //
-    // `is_some()` is the load-bearing half: a resource in flight reads `None`,
-    // and that is exactly the window where the old totals — and so the old
-    // delta — are still what's on screen.
-    Effect::new(move |_| {
-        if view_res.get().is_some() {
-            here_delta.set(0);
-        }
+    // Both are written by the **header's** `Transition` body, from the payload
+    // it is about to render, and read out here as plain signals. Neither may be
+    // derived from `view_res`: this is the page's setup body, whose owner is an
+    // ancestor of every boundary in the view below, so a `Resource` read here
+    // registers on `RequireAuth`'s `<Suspense>` and a `?q=` refresh then
+    // unmounts the whole page (P6-068 — see the module doc).
+    //
+    // **Why the header writes them and not the table.** They are two boundaries
+    // awaiting the same resource, so whichever writes decides the ordering, and
+    // only one ordering is sound for `here_delta`: the delta exists to keep the
+    // header's "N here" agreeing with the HERE cells while a commit is
+    // un-refetched, so it must be zeroed *by the same body that puts the fresh
+    // totals on screen*. The table writing it would leave a window where the
+    // header had already rendered fresh totals with the stale delta still added
+    // on top — the teardown double-count noted below, reintroduced. The reverse
+    // window is harmless: nothing in the table reads `here_delta` to render, only
+    // to update it.
+    let facts = RwSignal::new(None::<QuickAddFacts>);
+
+    // The retained payload facts, refused once the URL names a different
+    // collection. This gate is the whole safety story of retaining them
+    // (P6-068): the panel now keeps the last destination through a re-search
+    // instead of collapsing to `None` — which is the point, since `⏎` mid-search
+    // used to hit quick-add's "Still loading this collection" guard — but a
+    // *navigation to another collection* must never leave a stale destination
+    // reachable, or `⏎` in the window before the new payload lands would add to
+    // the collection you just left. Keyed on the URL rather than cleared by an
+    // `Effect` so there is no such window at all: the read itself is the check.
+    let live_facts = Memo::new(move |_| {
+        let want = Id::parse_str(&url_id.read()).ok();
+        facts.get().filter(|f| Some(f.collection_id) == want)
     });
 
     let paged = Memo::new(move |_| !url_cursor.read().is_empty());
     let teardown_open = RwSignal::new(false);
 
-    // ---- what the quick-add panel needs from this page's payload ----
-    //
-    // All three come from `view_res`, so the panel adds *here*, names this
-    // collection in its toast, and lists what is already here — none of it
-    // re-derived or re-fetched, so none of it can disagree with the header and
-    // the table. Memos, not raw reads: the panel re-renders on every keystroke.
-    let resolved = Memo::new(move |_| {
-        view_res
-            .get()
-            .and_then(|r| r.ok().map(|p| p.collection_view))
-    });
-    let quick_add_destination = Memo::new(move |_| {
-        resolved
-            .get()
-            .map(|v| crate::catalog::destination::Destination {
-                id: v.collection.id,
-                name: v.collection.name.clone(),
-                is_inbox: v.collection.is_inbox,
-            })
-    });
-    // Have until the payload lands. Nothing can be added before then either
-    // (the destination is `None` too), so the footer's hint is the only thing
-    // briefly generic.
-    let quick_add_kind = Memo::new(move |_| {
-        resolved
-            .get()
-            .map(|v| add_default(v.collection.kind))
-            .unwrap_or(QuickAddKind::Have)
-    });
+    // Memos, not raw reads: the panel re-renders on every keystroke.
+    let quick_add_destination =
+        Memo::new(move |_| live_facts.with(|f| f.as_ref().map(|f| f.destination.clone())));
+    // Have until the first payload lands. Nothing can be added before then
+    // either (the destination is `None` too), so the footer's hint is the only
+    // thing briefly generic.
+    let quick_add_kind =
+        Memo::new(move |_| live_facts.with(|f| f.as_ref().map_or(QuickAddKind::Have, |f| f.kind)));
     let quick_add_present = Memo::new(move |_| {
-        resolved
-            .get()
-            .map(|v| crate::components::quick_add::present_matches(&v.cards))
-            .unwrap_or_default()
+        live_facts.with(|f| f.as_ref().map(|f| f.present.clone()).unwrap_or_default())
     });
 
     view! {
@@ -282,8 +329,25 @@ pub fn CollectionPage() -> impl IntoView {
                 view! { <HeaderSkeleton /> }
             }>
                 {move || Suspend::new(async move {
-                    match view_res.await.map(|p| p.collection_view) {
+                    let payload = view_res.await.map(|p| p.collection_view);
+                    // The delta belongs to a payload, so it is zeroed by a
+                    // payload — every new one (a navigation, a re-search, or the
+                    // teardown's refetch) already contains everything committed
+                    // before it. Zeroed *here*, one statement before the header
+                    // below is built from that same payload, so the fresh totals
+                    // and the zero land together. Keying it on the *URL* instead
+                    // was wrong twice over: a `view_res.refetch()` at the same
+                    // URL left the delta applied on top of fresh totals
+                    // (teardown emptied a deck to zero and the header read
+                    // "1 here"), and a navigation zeroed it while the
+                    // `Transition` was still showing the pre-commit totals it
+                    // belonged to. The error arm zeroes it too — that arm
+                    // *replaces* the header, so no totals are left on screen for
+                    // a delta to correct.
+                    here_delta.set(0);
+                    match payload {
                         Ok(view) => {
+                            facts.set(Some(quick_add_facts(&view)));
                             view! {
                                 <CollectionHeader
                                     view
@@ -296,6 +360,11 @@ pub fn CollectionPage() -> impl IntoView {
                                 .into_any()
                         }
                         Err(e) => {
+                            // No destination beats the last good one here: this
+                            // collection did not load, so the panel says "still
+                            // loading" rather than adding into a payload the
+                            // page is showing an error instead of.
+                            facts.set(None);
                             view! { <LoadError e view_res paged url_id url_q /> }.into_any()
                         }
                     }

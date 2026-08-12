@@ -114,6 +114,20 @@ pub fn RootRedirect() -> impl IntoView {
 /// `/my/*` auth guard (specs/app-ui.md Conventions): anonymous callers bounce
 /// to `/login?next=<current>`; `/login` honors `next` after sign-in. This is
 /// UX only — every server fn underneath re-checks auth itself.
+///
+/// **This `<Suspense>` is the nearest `SuspenseContext` for every page under
+/// `/my/*`,** and a `Resource` read that is not inside a boundary of its own
+/// registers on *it* (P6-068). When such a resource re-runs, this boundary goes
+/// pending, and a `SuspenseBoundary<TRANSITION = false>` swaps to its fallback —
+/// `EitherKeepAlive` unmounts the whole `<Outlet/>` subtree and re-inserts the
+/// same nodes when the fetch lands, which blurs the focused field and silently
+/// hides any showing native popover. So: a page under here must read its
+/// resources inside its own `Suspense`/`Transition`, and anything a consumer
+/// outside one needs must come through a plain signal written from inside it.
+/// An `Effect` is **not** a boundary — the registration ignores effect scope.
+/// (`/catalog` reads resources in render scope safely only because `AppShell`
+/// provides no `SuspenseContext` above its `<Outlet/>`; adding one there would
+/// hand that route the same defect.)
 #[component]
 pub fn RequireAuth() -> impl IntoView {
     let user = expect_context::<CurrentUserResource>().0;
@@ -170,10 +184,17 @@ pub fn AppShell() -> impl IntoView {
     // Also shell-level: the desktop rail's tree and the mobile tab badge read
     // one fetch, and quick-add refetches it after a successful add/undo.
     crate::my::tree::provide_collection_tree();
-    // Shell-level for the strongest reason of the three: the tray's selection
-    // must survive a Catalog ⇄ My-cards mode switch, `/my` ⇄ collection
-    // navigation, *and* `/my/collections/:id` detaching its whole DOM subtree
-    // after a `?q=` navigation. A page-owned signal is disposed by all three.
+    // Shell-level so the tray's selection survives a Catalog ⇄ My-cards mode
+    // switch and `/my` ⇄ collection navigation — a page-owned signal is disposed
+    // by both. A third reason used to be listed and is now retired:
+    // `/my/collections/:id` detaching its whole DOM subtree after a `?q=`
+    // navigation. That was never the router re-rendering the route; it was that
+    // page reading its own `Resource` in its **setup body**, where the nearest
+    // `SuspenseContext` is `RequireAuth`'s `<Suspense>` above — so every
+    // re-search re-suspended the auth guard and `EitherKeepAlive` unmounted the
+    // `<Outlet/>` subtree for the length of the fetch. Fixed in P6-068 (the
+    // reads go through plain `RwSignal`s now); the first two reasons are why
+    // this still lives here.
     let selection = provide_selection();
     // Bumped by the tray's batch move (and its undo); every page whose table
     // renders holdings takes it as a resource *source*, so a move refetches

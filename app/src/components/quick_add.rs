@@ -49,12 +49,19 @@
 //!    outside it. Opening on `focusin` therefore showed the panel and the same
 //!    click closed it again (observed: `showPopover` returns `Ok`, then a
 //!    `toggle` back to `closed`).
-//! 2. **A same-page navigation closes it silently.** Leptos's router removes and
-//!    re-inserts this page's whole subtree on every `?q=` change — which is every
-//!    debounced keystroke here — and removing a showing popover from the document
+//! 2. **A same-page navigation closed it silently.** On every `?q=` change —
+//!    which is every debounced keystroke here — this page's whole subtree was
+//!    removed and re-inserted, and removing a showing popover from the document
 //!    hides it *without* firing `toggle` (HTML's popover removing steps pass
 //!    `fireEvents = false`). The Rust `open` signal stayed `true` while the panel
-//!    was gone, so nothing could even notice and re-show it.
+//!    was gone, so nothing could even notice and re-show it. **This was not the
+//!    router**, as this note used to claim: `CollectionPage` read its own
+//!    `Resource` in its setup body, which registers on the nearest
+//!    `SuspenseContext` — the `RequireAuth` `<Suspense>` above the whole `/my/*`
+//!    tree — so a re-search re-suspended the auth guard and unmounted its
+//!    `<Outlet/>`. Fixed in P6-068; the subtree now stays mounted. Reason 1 is
+//!    on its own enough to keep this surface off `popover`, so the choice below
+//!    stands unchanged.
 //!
 //! An absolutely-positioned panel in a `relative` wrapper has neither problem: a
 //! plain element survives being reparented, and nothing dismisses it but us. The
@@ -326,7 +333,6 @@ fn QuickAddSurface(
     on_undo: Option<Callback<()>>,
 ) -> impl IntoView {
     let nav = use_command_nav().expect("QuickAddSurface renders inside a Command");
-    let focus_target = field_id.clone();
     let toast = expect_context::<ToastHandle>();
     // The sidebar badges count what an add changes (the shell-level resource,
     // per specs/app-ui.md Findings).
@@ -399,46 +405,19 @@ fn QuickAddSurface(
         on_cleanup(move || handle.remove());
     }
 
-    // **Hold the caret through the router's subtree churn.** Measured on
-    // `/my/collections/:id`: a beat after each `?q=` navigation the router
-    // detaches this page's whole subtree and re-attaches it (~400 ms out of the
-    // document), which blurs the field and drops focus to `<body>`. Without this
-    // the keystroke loop ends after the *first* card — every later key goes
-    // nowhere — which is the one thing this surface cannot afford.
-    //
-    // The guard is narrow on purpose: only while the panel is open, and only when
-    // focus went *nowhere*. A user who tabs or clicks to a real element keeps it
-    // (and clicking outside closes the panel, which stops this entirely).
-    #[cfg(feature = "hydrate")]
-    {
-        use leptos::wasm_bindgen::JsCast;
-        let handle = set_interval_with_handle(
-            move || {
-                if !open.get_untracked() {
-                    return;
-                }
-                let doc = document();
-                let went_nowhere = match doc.active_element() {
-                    None => true,
-                    Some(el) => el.tag_name().eq_ignore_ascii_case("body"),
-                };
-                if !went_nowhere {
-                    return;
-                }
-                if let Some(el) = doc.get_element_by_id(&focus_target) {
-                    if let Some(input) = el.dyn_ref::<leptos::web_sys::HtmlElement>() {
-                        let _ = input.focus();
-                    }
-                }
-            },
-            std::time::Duration::from_millis(120),
-        );
-        if let Ok(handle) = handle {
-            on_cleanup(move || handle.clear());
-        }
-    }
-    #[cfg(not(feature = "hydrate"))]
-    let _ = focus_target;
+    // **There was a 120 ms focus keeper here, and it is gone (P6-068).** It
+    // re-focused the field whenever `document.activeElement` fell back to
+    // `<body>` while the panel was open, because a `?q=` navigation detached and
+    // re-attached this page's whole subtree and the caret did not survive it.
+    // The detach was never the router's: `CollectionPage` read its own
+    // `Resource` in its setup body, which registers on the *nearest*
+    // `SuspenseContext` — `RequireAuth`'s `<Suspense>`, an ancestor of the page
+    // — so every re-search re-suspended the auth guard and `EitherKeepAlive`
+    // unmounted the `<Outlet/>` subtree for the duration of the fetch. That read
+    // now goes through a plain `RwSignal` (`app/src/my/collection.rs`), nothing
+    // unmounts, and an interval that steals focus back from `<body>` is dead
+    // weight with a real cost of its own — it fights any deliberate blur that is
+    // not a click on a focusable element.
 
     let add = Callback::new(move |card: CardSummary| {
         let Commit { kind, quantity } = pending.get_untracked().unwrap_or(Commit {

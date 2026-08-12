@@ -823,6 +823,88 @@ test("quick search filters this collection and rides the URL @fast", async ({
   }).toPass({ timeout: 30_000, intervals: [500, 1_000, 2_000] });
 });
 
+test("a `?q=` refresh keeps the page mounted, focused and filtered @fast", async ({
+  page,
+  request,
+}) => {
+  // P6-068. `CollectionPage` used to read its own `Resource` in its *setup
+  // body*, which registers on the nearest `SuspenseContext` — `RequireAuth`'s
+  // `<Suspense>`, an ancestor of the page — so every debounced keystroke
+  // re-suspended the auth guard and `EitherKeepAlive` unmounted this whole
+  // subtree for the length of the fetch, blurring the field and silently hiding
+  // any showing native popover.
+  //
+  // **"Is it still the same node" cannot see that defect**: keep-alive
+  // re-inserts the *identical* nodes rather than rebuilding them, so a stamp
+  // survives either way. The observable is that the element leaves the document
+  // at all — watched with a `MutationObserver` on `removedNodes` rather than by
+  // polling `isConnected`, so a detach that is over before the next poll still
+  // counts. The stamp is asserted too, but only for what it does prove: that
+  // nothing rebuilt the subtree either.
+  const bulk = await collectionNamed(request, "Bulk Box");
+  const id = bulk.summary.id;
+  await expect(async () => {
+    const all = await viewOf(request, id);
+    expect(all.cards.length).toBeGreaterThan(1);
+    const needle = all.cards[0].name.slice(0, 6);
+    const expected = await viewOf(request, id, { q: needle });
+    expect(expected.cards.length).toBeGreaterThan(0);
+    expect(expected.cards.length).toBeLessThan(all.cards.length);
+
+    await page.goto(`/my/collections/${id}`);
+    await hydrated(page);
+    const box = page.locator("#collection-query");
+    await box.click();
+    await expect(box).toBeFocused();
+
+    await page.evaluate(() => {
+      const el = document.querySelector('[data-testid="collection-page"]')!;
+      (el as unknown as { __p6068?: string }).__p6068 = "stamped";
+      const state = { detaches: 0 };
+      (window as unknown as { __p6068: typeof state }).__p6068 = state;
+      new MutationObserver((records) => {
+        for (const record of records) {
+          for (const gone of Array.from(record.removedNodes)) {
+            if (gone === el || (gone as Element).contains?.(el)) {
+              state.detaches += 1;
+            }
+          }
+        }
+      }).observe(document.body, { childList: true, subtree: true });
+    });
+
+    // Several characters, slower than the 250 ms query debounce, so this is
+    // several real `?q=` navigations and not one.
+    await box.pressSequentially(needle, { delay: 120 });
+
+    // The rows followed the URL, i.e. the navigations and their fetches really
+    // happened — without this the detach count below would be vacuously zero.
+    await quick(page).toHaveURL(
+      `/my/collections/${id}?q=${encodeURIComponent(needle)}`,
+    );
+    await quick(page.locator('[data-testid="collection-row"]')).toHaveCount(
+      expected.cards.length,
+    );
+
+    const observed = await page.evaluate(() => ({
+      detaches: (window as unknown as { __p6068: { detaches: number } })
+        .__p6068.detaches,
+      stamp: (
+        document.querySelector('[data-testid="collection-page"]') as unknown as {
+          __p6068?: string;
+        } | null
+      )?.__p6068,
+    }));
+    expect(
+      observed.detaches,
+      "the page subtree was removed from the document during a `?q=` refresh",
+    ).toBe(0);
+    expect(observed.stamp, "the page subtree was rebuilt").toBe("stamped");
+    // The caret is still in the field — no interval puts it back now.
+    await expect(box).toBeFocused();
+  }).toPass({ timeout: 30_000, intervals: [500, 1_000, 2_000] });
+});
+
 test("a wildcard typed into the in-collection search is literal @fast", async ({
   page,
   request,
