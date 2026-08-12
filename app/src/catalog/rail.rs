@@ -884,6 +884,16 @@ fn set_year(released_at: Option<&str>) -> String {
         .to_string()
 }
 
+/// Is Enter's target still the *previous* term's rows? (P6-138.) `live` is
+/// what the search box holds right now; `fetched_for` is the term the
+/// currently-registered rows were requested with. The list is re-keyed by a
+/// 250ms-debounced read, so mid-window they disagree — the same question
+/// `catalog::displaced_by` asks about the query bar's pager, asked here about
+/// the picker's keyboard-nav registry instead.
+fn enter_targets_stale_rows(live: &str, fetched_for: &str) -> bool {
+    live != fetched_for
+}
+
 /// The Set facet: a real picker over the catalog's set list
 /// (`CatalogStore::list_sets`), replacing the comma-separated code box.
 ///
@@ -964,13 +974,20 @@ fn SetPicker(#[prop(into)] id: String, codes: Signal<Vec<String>>) -> impl IntoV
     // native backend is the *ordinary* case for an offline phone
     // (`ApiError::Upstream`, kept distinct from an auth error precisely so
     // callers can tell them apart).
+    // The fetcher echoes the term it used back alongside the result — same
+    // idea as `catalog.rs`'s `SearchPayload::q` — so a reader on the far side
+    // of the `await` (the `Suspend` block below, and `rendered_for`) can know
+    // exactly which term a settled fetch answers, independent of whatever
+    // `search` holds *now* (P6-138: it can already be a newer term than the
+    // in-flight fetch this settlement is for).
     let sets = Resource::new(
         move || (engaged.get(), search.get(), attempt.get()),
         |(engaged, q, _)| async move {
             if !engaged {
                 return None;
             }
-            Some(crate::list_sets(q).await)
+            let result = crate::list_sets(q.clone()).await;
+            Some((q, result))
         },
     );
 
@@ -1006,13 +1023,55 @@ fn SetPicker(#[prop(into)] id: String, codes: Signal<Vec<String>>) -> impl IntoV
         });
     };
     on_cleanup(clear_pending);
+    // The live box text, mirrored out of `CommandInput` on every keystroke —
+    // ahead of `search` by up to the debounce window, and ahead of
+    // `rendered_for` (below) by that window *plus* however long the fetch
+    // itself takes. This is the P6-138 race: the rendered rows (and the
+    // keyboard-nav registry Enter reads) answer whatever `rendered_for` says,
+    // so mid-window `live_query` and `rendered_for` disagree about what term
+    // the user means. See `enter_targets_stale_rows` below.
+    let live_query = RwSignal::new(String::new());
+    // The term the *currently-mounted* rows actually answer — set only once a
+    // fetch resolves (in the `Suspend` block below), never when `search`
+    // merely changes. That gap matters: `search` flips the instant the
+    // debounce timer fires, but the rows on screen (kept up by `Transition`)
+    // stay the *previous* fetch's until the new one lands, which can be well
+    // past the 250ms debounce window on a slow connection.
+    let rendered_for = RwSignal::new(String::new());
+    // Set when Enter fires mid-race (below): the term Enter meant, waiting on
+    // the fetch it forced. Consumed exactly once, by the `Suspend` arm that
+    // settles for this term — win or lose — so it never lingers to answer a
+    // later, unrelated fetch.
+    let pending_enter = RwSignal::new(None::<String>);
     let on_search = Callback::new(move |text: String| {
+        live_query.set(text.clone());
         clear_pending();
         let handle = set_timeout_with_handle(
             move || search.set(text),
             std::time::Duration::from_millis(crate::components::query_bar::SEARCH_DEBOUNCE_MS),
         );
         pending.set_value(handle.ok());
+    });
+
+    // P6-138: Enter must not select from the stale list. `stale` is this
+    // widget's `displaced_by` (catalog.rs, P6-130) — same shape, one
+    // disagreement instead of two, because there is only one rendered value
+    // here (`rendered_for`) rather than a URL plus a pending debounce.
+    let stale = Signal::derive(move || {
+        live_query.with(|l| rendered_for.with(|r| enter_targets_stale_rows(l, r)))
+    });
+    let on_stale_enter = Callback::new(move |()| {
+        // Flush the debounce now instead of waiting out the rest of it — the
+        // fetch is async either way, so this only shortens the window (the
+        // task's option (c) degenerates to (b) here, per specs/app-ui.md).
+        // The settlement is handled below, in the `Suspend` match: it selects
+        // the first (best-ranked — P6-136's tiers put an exact match first)
+        // row of whatever answers `target`, but only if the box still reads
+        // the way it did right now.
+        clear_pending();
+        let target = live_query.get_untracked();
+        pending_enter.set(Some(target.clone()));
+        search.set(target);
     });
 
     let chips = move || {
@@ -1069,6 +1128,8 @@ fn SetPicker(#[prop(into)] id: String, codes: Signal<Vec<String>>) -> impl IntoV
                             placeholder="Search sets…"
                             class="h-8"
                             on_search_change=on_search
+                            stale=stale
+                            on_stale_enter=on_stale_enter
                         />
                     </div>
                     <CommandList class="max-h-56 p-1">
@@ -1105,7 +1166,38 @@ fn SetPicker(#[prop(into)] id: String, codes: Signal<Vec<String>>) -> impl IntoV
                             // rather than leaning on this one.
                             <Transition fallback=set_list_loading>
                                 {move || Suspend::new(async move {
-                                match sets.await {
+                                let resolved = sets.await;
+                                // This settlement is the freshest thing known
+                                // about the fetch's own term — record it before
+                                // anything else, whether it succeeded, came back
+                                // empty, or failed (P6-138: `stale`, above,
+                                // reads this signal, and an error or empty
+                                // answer is still an answer to *some* term).
+                                if let Some((rendered_q, _)) = &resolved {
+                                    rendered_for.set(rendered_q.clone());
+                                }
+                                // Does this settlement answer the fetch
+                                // `on_stale_enter` forced early? Consumed here
+                                // exactly once, whether it landed rows, an
+                                // empty list, or an error, so a miss can't
+                                // leave `pending_enter` to misfire against a
+                                // later, unrelated settlement.
+                                if let Some((rendered_q, result)) = &resolved {
+                                    if pending_enter.with_untracked(|p| p.as_deref() == Some(rendered_q.as_str()))
+                                    {
+                                        let box_unchanged = live_query
+                                            .with_untracked(|l| l == rendered_q);
+                                        pending_enter.set(None);
+                                        if box_unchanged {
+                                            if let Ok(rows) = result {
+                                                if let Some(first) = rows.first() {
+                                                    requested.set(Some(first.code.clone()));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                match resolved.map(|(_, result)| result) {
                                     // Only reachable if the resource somehow
                                     // resolves `None` while this `Show` branch
                                     // is mounted — i.e. `engaged` flips back
@@ -1572,6 +1664,20 @@ mod tests {
         assert_eq!(out, "bolt");
         assert!(read(&out).is_ok());
         assert_eq!(read(&out).unwrap().count(Field::Set), 0);
+    }
+
+    #[test]
+    fn enter_is_stale_only_while_the_box_has_outrun_the_debounced_fetch() {
+        // The race (P6-138): typing "lea" fast leaves `search` sitting on
+        // whatever was last fetched ("le", or even ""), while the box already
+        // reads "lea". Enter must not treat the "le" rows as the answer.
+        assert!(enter_targets_stale_rows("lea", "le"));
+        assert!(enter_targets_stale_rows("lea", ""));
+        // Once the debounce catches up (or nothing was ever typed), the
+        // rendered rows are the box's own answer — the ordinary case, and by
+        // far the common one.
+        assert!(!enter_targets_stale_rows("lea", "lea"));
+        assert!(!enter_targets_stale_rows("", ""));
     }
 
     #[test]

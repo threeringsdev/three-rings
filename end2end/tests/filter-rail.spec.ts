@@ -731,6 +731,84 @@ test("browsing with a blank term reaches the whole catalog, not just the newest 
   await expect(option(page, "lea")).toHaveCount(1);
 });
 
+test("Enter in the set picker acts on what you typed, not the stale list @fast", async ({
+  page,
+}) => {
+  // P6-138: `CommandInput` writes the live box text synchronously per
+  // keystroke, but the picker's rows — and the keyboard-nav registry Enter
+  // reads — are re-keyed by a 250ms-debounced server fetch. Mid-window, Enter
+  // used to activate whatever the *stale* list highlighted.
+  //
+  // Limited Edition Alpha ("lea") and Beta ("leb") are a real, adjacent pair
+  // where each is an exact-code-match top hit for its own search term
+  // (P6-136's ranking tiers), so "the stale list's top row" and "what the box
+  // now asks for" are two different, unambiguous sets — not a ranking
+  // coincidence this test would need to hope for.
+  await page.goto("/catalog");
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+  await rail.locator("summary").filter({ hasText: "Set" }).click();
+
+  // Establish the stale list for real: search "leb" and let it land.
+  await rail.locator(SET_SEARCH).fill("leb");
+  await expect(option(page, "leb")).toHaveText("Limited Edition Beta");
+
+  // Hold the *next* fetch open so the race window is deterministic instead of
+  // competing with a real, fast local round trip.
+  let release: (() => void) | null = null;
+  await page.route("**/api/list_sets*", async (route) => {
+    const term = new URL(route.request().url()).searchParams.get("q") ?? "";
+    if (term === "lea") {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    }
+    await route.continue();
+  });
+
+  // Type the new term. The debounce fires (250ms) and re-keys the fetch, but
+  // that fetch is the one being held — the "leb" rows stay mounted.
+  await rail.locator(SET_SEARCH).fill("lea");
+  await page.waitForTimeout(400); // past the 250ms debounce, still inside the hold
+  await expect(option(page, "leb")).toBeVisible(); // still the stale list on screen
+
+  // The race itself: Enter, while the box already reads "lea" but the rows
+  // still answer "leb".
+  await rail.locator(SET_SEARCH).press("Enter");
+  // Kill-verify: unpatched `command.rs` selects the highlighted *stale* row
+  // right here — `chip(page, "leb")` would appear immediately. The fix must
+  // not add a chip at all yet; it has nothing fresh to act on.
+  await expect(chip(page, "leb")).toHaveCount(0);
+  await expect(chip(page, "lea")).toHaveCount(0);
+
+  // Release the held fetch — the deferred Enter now has its answer.
+  expect(release, "the route handler must have captured a releaser").not.toBeNull();
+  release!();
+  await expect(option(page, "lea")).toBeVisible();
+  // The chip that lands matches what was typed, never the stale row.
+  await expect(chip(page, "lea")).toBeVisible();
+  await expect(chip(page, "leb")).toHaveCount(0);
+});
+
+test("Enter in the set picker still activates the highlighted row once the debounce has settled @fast", async ({
+  page,
+}) => {
+  // Positive control for the fix above: when the rows on screen already
+  // answer the box (the ordinary, non-racing case — by far the common one),
+  // Enter must still work exactly as before.
+  await page.goto("/catalog");
+  await hydrated(page);
+  const rail = page.locator(RAIL);
+  await rail.locator("summary").filter({ hasText: "Set" }).click();
+
+  await rail.locator(SET_SEARCH).fill("limited edition alpha");
+  await expect(option(page, "lea")).toBeVisible();
+  await page.waitForTimeout(400); // past the debounce — rows are fresh
+
+  await rail.locator(SET_SEARCH).press("Enter");
+  await expect(chip(page, "lea")).toBeVisible();
+});
+
 test("a set-filtered link auto-opens the section without fetching the row list @fast", async ({
   request,
 }) => {

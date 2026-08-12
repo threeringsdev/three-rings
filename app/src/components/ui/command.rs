@@ -42,6 +42,16 @@
 //!   a handful of rows; ↑↓ across a list taller than `CommandList`'s `max-h`
 //!   was otherwise blind past the first screenful (P6-137 review, once the
 //!   set picker made a 1,047-row list a real case).
+//! - **`CommandInput` takes optional `stale`/`on_stale_enter` props** (P6-138).
+//!   Both default to nothing, so every consumer but the set picker is
+//!   unaffected: Enter still always activates whatever the registry currently
+//!   highlights. A consumer whose rows are re-keyed by something *other* than
+//!   `Command`'s own (synchronous, per-keystroke) query — the set picker's
+//!   rows come from a 250ms-debounced server fetch — can pass `stale` to tell
+//!   `CommandInput` its rows may be answering an older term than what's in the
+//!   box, and `on_stale_enter` to run instead of the built-in activate when
+//!   that's true. See `SetPicker` in `app/src/catalog/rail.rs` and
+//!   specs/app-ui.md's set-picker section, 2026-08-12.
 
 use leptos::prelude::*;
 use tw_merge::tw_merge;
@@ -297,6 +307,20 @@ pub fn CommandInput(
     /// Fired on every keystroke — use for server-side search.
     #[prop(optional)]
     on_search_change: Option<Callback<String>>,
+    /// True when the currently-registered rows may be answering an older
+    /// term than what the box holds right now — P6-138: the set picker's rows
+    /// come from a 250ms-debounced server fetch, so mid-window the registry
+    /// still reflects the *previous* term. `None` (every other consumer) means
+    /// "never stale": Enter always activates the highlighted row, unchanged
+    /// from before this prop existed.
+    #[prop(optional)]
+    stale: Option<Signal<bool>>,
+    /// Runs instead of the built-in "activate the highlighted row" when
+    /// `stale` reads `true` at Enter time. Ignored (Enter is simply swallowed,
+    /// same as always — `prevent_default` still fires) when `stale` is absent
+    /// or false. See the module doc's P6-138 deviation entry.
+    #[prop(optional)]
+    on_stale_enter: Option<Callback<()>>,
 ) -> impl IntoView {
     let ctx = expect_context::<CommandContext>();
     let merged_class = tw_merge!(
@@ -319,7 +343,13 @@ pub fn CommandInput(
             }
             "Enter" => {
                 ev.prevent_default();
-                ctx.activate_highlighted();
+                if stale.map(|s| s.get()).unwrap_or(false) {
+                    if let Some(cb) = on_stale_enter {
+                        cb.run(());
+                    }
+                } else {
+                    ctx.activate_highlighted();
+                }
             }
             _ => {}
         }
