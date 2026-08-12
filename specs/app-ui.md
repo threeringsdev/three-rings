@@ -4084,3 +4084,37 @@ a query refresh now *structurally* cannot reach the guard.
 under `/my/*` must read its resources inside its own `Suspense`/`Transition`, and
 anything a consumer outside one needs must arrive through a plain signal written
 from inside it.
+
+### Tables that name a collection went stale on a sidebar rename (P6-126, 2026-08-12)
+
+`collection.rs`'s own module doc already names the fix (`TreeManage::revision`
+as a resource source) but three other `/my` pages named a collection without
+taking it: `/my`'s WHERE column (`all_cards.rs`), the needs page's "Owned
+elsewhere" Where column and pick-list group names (`needs.rs`), and the
+shopping list's "Wanted by" column (`shopping.rs`). None of their resources
+referenced the tree at all — their sources were `(url_q, url_cursor,
+holdings_revision)` or narrower — so a sidebar rename or delete left them
+naming the old collection until an unrelated write (a search, a page turn, a
+move) happened to bump one of the sources they *did* have. All three now take
+`manage.revision` as an added source, the same trick and the same comment
+shape `collection.rs` established. `recently_deleted.rs` (names only the
+deleted collection's own row, which a live rename cannot reach) and
+`root.rs`'s `MyRootNav` (reads the shell's `CollectionTreeResource` directly,
+which a rename's own `tree.refetch()` already updates) were checked and left
+alone — neither has the gap.
+
+**e2e caught a pre-existing shared-fixture-pool trap while proving this.**
+`collection-tree-manage.spec.ts`'s `unownedCards` helper verifies "owned
+nowhere" against `/api/all-cards?limit=200`, which hard-caps at 200 rows; the
+dev user now owns more than that, so a card past the cap can already be held
+without showing up as "taken" — and every test in that file that relocates
+its scratch collection's holdings on cleanup (the generic `deleteCollection`
+helper's default `ToParent`, not `Discard`) leaves that card permanently
+"owned" for the next run drawing from the same pool front. The new rename
+test routes around it with its own `genuinelyUnownedCard` (re-verifies a
+candidate against the unpaginated per-card holdings read before trusting it)
+and cleans up with `Discard` rather than relocation. The underlying pool-drain
+is pre-existing and out of scope here — it is the same fixture-pool class the
+e2e-suite skill already tracks under `WB-01KZMVA2Y1` — but is worth restating
+because it makes any test drawing from `unownedCards(request, 1)` at a low
+`skip` fragile over time, not just this one.

@@ -165,6 +165,40 @@ async function copiesIn(
     .reduce((n, h) => n + h.quantity, 0);
 }
 
+/// Copies of a card across every collection — the total `unownedCards`'
+/// `/api/all-cards?limit=200` check *means* to guarantee is zero, but cannot:
+/// that route hard-caps at 200 rows, and this dev user's owned-card count has
+/// grown past it, so a card past the cap can already be held without showing
+/// up as "taken". Used to re-verify a candidate directly against the
+/// unpaginated per-card holdings read before trusting it as a clean single-
+/// location fixture.
+async function totalCopies(
+  request: APIRequestContext,
+  oracleId: string,
+): Promise<number> {
+  const res = await request.get(`/api/cards/${oracleId}/holdings`);
+  expect(res.status(), "holdings").toBe(200);
+  const rows = (await res.json()) as Holding[];
+  return rows.reduce((n, h) => n + h.quantity, 0);
+}
+
+/// A card `unownedCards` believes is free, re-checked against the
+/// unpaginated holdings read (see `totalCopies`) and skipped forward past the
+/// pool's already-drained front until one genuinely has zero copies anywhere.
+async function genuinelyUnownedCard(
+  request: APIRequestContext,
+  startSkip = 0,
+): Promise<Card> {
+  for (let skip = startSkip; skip < startSkip + 40; skip += 2) {
+    const [candidate] = await unownedCards(request, 1, skip);
+    if ((await totalCopies(request, candidate.oracle_id)) === 0) return candidate;
+  }
+  throw new Error(
+    "no genuinely unowned card found in the pool — every candidate up to " +
+      `skip ${startSkip + 40} is already held somewhere`,
+  );
+}
+
 // A row's own clickable/draggable head — NOT `li > div`, which for a parent
 // row is the `Collapsible` wrapper enclosing its descendants' heads too.
 function rowHead(page: Page, id: string) {
@@ -477,6 +511,68 @@ test("Rename edits the name in place @fast", async ({ page }) => {
     expect(server?.summary.name).toBe(after);
   } finally {
     await deleteCollection(page, c.id);
+  }
+});
+
+// P6-126: `/my`'s WHERE column names each row's collection(s), and the
+// all-cards resource's own sources used to be `(url_q, url_cursor,
+// holdings_revision)` — never `TreeManage::revision`, the counter a sidebar
+// rename bumps. So a rename left the column naming the old collection until
+// an unrelated search or page turn happened to refetch it. Fixed by taking
+// `TreeManage::revision` as a fourth resource source, same trick
+// `collection.rs` already uses (`app/src/my/all_cards.rs`). This asserts the
+// cell updates on its own — no reload, no re-search — right after the rename
+// commits.
+test("a sidebar rename updates the Where column on /my without navigating @fast", async ({
+  page,
+  request,
+}) => {
+  const before = scratchName("where-before");
+  const after = scratchName("where-after");
+  const c = await createCollection(page, { name: before });
+  try {
+    // `genuinelyUnownedCard`, not `unownedCards` directly: this test needs
+    // the row to render the *single*-location form (`N in <name>`), which
+    // only holds while the card is held nowhere else — see its own doc for
+    // why the plain helper cannot promise that by itself.
+    const card = await genuinelyUnownedCard(request);
+    await addHave(request, c.id, card.printing_id as string, 1);
+
+    // Search by name rather than loading the bare page: the dev seed owns far
+    // more than one keyset page of cards, and the new holding's row can land
+    // anywhere in it. The search narrows to just this card, so the row is
+    // guaranteed on page one regardless of total count — and the query itself
+    // never changes for the rest of the test, so nothing but the rename could
+    // be responsible for the cell updating.
+    await page.goto(`/my?q=${encodeURIComponent(card.name)}`);
+    await hydrated(page);
+
+    const location = page
+      .locator(`[data-testid="all-cards-row"][data-oracle="${card.oracle_id}"]`)
+      .locator('[data-testid="location-summary"]');
+    await expect(location).toHaveText(`1 in ${before}`);
+
+    const menu = await openRowMenu(page, c.id);
+    await menu.locator('[role="menuitem"]', { hasText: "Rename…" }).click();
+    const dialog = page.locator('[role="dialog"]', { hasText: "Rename" });
+    await dialog.locator("#tree-rename-name").fill(after);
+    await dialog.locator("#tree-rename-confirm").click();
+
+    // No reload, no re-search: the cell must pick up the rename from the
+    // tree revision alone, the same read this page has been showing all
+    // along.
+    await expect(location).toHaveText(`1 in ${after}`);
+    await expect(location).not.toContainText(before);
+  } finally {
+    // Discard, not the generic `deleteCollection`'s `ToParent` default: a
+    // relocate-on-delete would land this card in the Inbox and leave it
+    // permanently "owned" for every future run drawing from the same
+    // `unownedCards` pool — the exact drain `genuinelyUnownedCard` exists to
+    // route around. Discard writes nothing (specs/collection-deletion.md),
+    // so the card reads as held nowhere again once the collection is hidden.
+    await page.request.post(`/api/collections/${c.id}/delete`, {
+      data: { haves: { mode: "discard" } },
+    });
   }
 });
 

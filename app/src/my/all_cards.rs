@@ -37,6 +37,7 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_query_map;
 use shared::{AllCardsRow, CardLocation};
 
+use super::tree_manage::TreeManage;
 use crate::cards::CardPreview;
 use crate::components::query_bar::QueryBar;
 use crate::components::states::ErrorNote;
@@ -161,10 +162,23 @@ fn AllCardsBody(base: &'static str, class: &'static str, back: bool) -> impl Int
     // refetch this resource directly, so the revision it bumps is one of the
     // resource's sources.
     let revision = crate::my::move_selection::holdings_revision();
+    // The same trick for the *collection tree's* mutations: the WHERE column
+    // names each row's collection(s) straight out of `all_cards`, which no
+    // `tree.refetch()` can update. A sidebar rename or delete left this
+    // column naming the old collection until an unrelated search or page turn
+    // refetched it. See `TreeManage::revision`.
+    let manage = expect_context::<TreeManage>();
 
     let rows = Resource::new(
-        move || (url_q.get(), url_cursor.get(), revision.get()),
-        |(q, cursor, _revision)| async move {
+        move || {
+            (
+                url_q.get(),
+                url_cursor.get(),
+                revision.get(),
+                manage.revision.get(),
+            )
+        },
+        |(q, cursor, _revision, _tree_revision)| async move {
             let cursor = (!cursor.is_empty()).then_some(cursor);
             AllCardsPayload {
                 all_cards: crate::all_cards(q, cursor).await,

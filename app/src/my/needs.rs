@@ -70,6 +70,7 @@ use std::collections::HashSet;
 use super::collection::{ancestor_path, assembled_roots, message_of, needs_chip};
 use super::move_selection::{movable, MoveSource, Skipped};
 use super::tree::CollectionTreeResource;
+use super::tree_manage::TreeManage;
 use crate::components::states::{ErrorNote, StateBadge, Tone};
 use crate::components::ui::button::{Button, ButtonVariant};
 use crate::components::ui::checkbox::Checkbox;
@@ -360,10 +361,16 @@ pub fn NeedsPage() -> impl IntoView {
     let url_id = Memo::new(move |_| params.read().get("id").unwrap_or_default());
     let tree = expect_context::<CollectionTreeResource>().0;
     let revision = super::move_selection::holdings_revision();
+    // The same trick for the *collection tree's* mutations: the "Owned
+    // elsewhere" table's Where column and the pick list's group names come
+    // straight out of `collection_needs`, which no `tree.refetch()` can
+    // update. A sidebar rename left both naming the old collection until an
+    // unrelated pull bumped the holdings revision. See `TreeManage::revision`.
+    let manage = expect_context::<TreeManage>();
 
     let needs_res = Resource::new(
-        move || (url_id.get(), revision.get()),
-        |(id, _revision)| async move {
+        move || (url_id.get(), revision.get(), manage.revision.get()),
+        |(id, _revision, _tree_revision)| async move {
             let id = Id::parse_str(&id).map_err(|_| {
                 // `validation:` deliberately — the wire vocabulary is what the
                 // UI classifies on, and a malformed id in the URL is a *request*
