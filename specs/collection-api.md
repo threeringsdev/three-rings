@@ -652,3 +652,10 @@ resolves.
   is untouched. Cleanup: deleted both scratch rows as owner; `cards`/
   `printings`/`sets` counts returned to the pre-test 2637/2976/1045 and a
   `jsonb_typeof(faces) <> 'array'` sweep over `printings` returns 0.
+
+- 2026-08-12 — **Ownership decoration degrades instead of 500ing** (P6-135,
+  was P6-038a). `search`/`card_summary`/`card_detail` already have their public
+  rows in hand when the session-scoped ownership read runs; a signed-in reader
+  whose ownership read fails now gets `owned`/`ownership` as `None` (the
+  anonymous shape, logged server-side) instead of a 500 — see `degrade_or` in
+  `hosted.rs`.
