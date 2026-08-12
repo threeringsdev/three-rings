@@ -23,6 +23,7 @@
 use leptos::prelude::*;
 use shared::{ShoppingList, ShoppingRow};
 
+use super::tree_manage::TreeManage;
 use crate::components::states::{ErrorNote, StateBadge, Tone};
 use crate::components::ui::button::{Button, ButtonVariant};
 use crate::components::ui::skeleton::Skeleton;
@@ -73,9 +74,15 @@ pub fn ShoppingPage() -> impl IntoView {
     // changes — pulling copies into a collection does not, but adding or
     // removing copies anywhere does, and this page is downstream of all of it.
     let revision = super::move_selection::holdings_revision();
+    // The same trick for the *collection tree's* mutations: "Wanted by" names
+    // every collection that wants each card straight out of
+    // `shopping_list_view`, which no `tree.refetch()` can update. A sidebar
+    // rename left that column naming the old collection until an unrelated
+    // buy or pull bumped the holdings revision. See `TreeManage::revision`.
+    let manage = expect_context::<TreeManage>();
     let list = Resource::new(
-        move || revision.get(),
-        |_revision| async move { crate::shopping_list_view().await },
+        move || (revision.get(), manage.revision.get()),
+        |(_revision, _tree_revision)| async move { crate::shopping_list_view().await },
     );
 
     view! {
