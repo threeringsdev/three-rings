@@ -2375,8 +2375,9 @@ checkbox.
 `provide_selection()` is called exactly once, in `AppShell`, which is a single
 `ParentRoute` view above `/catalog`, `/cards/:id` and the whole `/my` subtree —
 so no navigation among them re-runs it, including the `/my/collections/:id`
-route's ~800 ms DOM detach/re-attach. `Checkbox` is fully controlled, so a
-re-mounted row re-derives its checked state from the shell signal. Sign-out is a
+route's DOM detach/re-attach (fixed since, P6-068). `Checkbox` is fully
+controlled, so a re-mounted row re-derives its checked state from the shell
+signal. Sign-out is a
 `hard_navigate`, so a selection cannot outlive a session. The selection is
 in-memory only: it survives every SPA navigation and mode switch but not a
 document load, which the spec does not require.
@@ -2428,22 +2429,26 @@ keystroke contract is a pure `decode(key, shift, alt, rows, counting) -> Action`
 names it in the composite. Two measured browser behaviors defeat it for a
 field-anchored surface on a page that navigates as you type: (a) `popover="auto"`
 light-dismisses on the same `pointerup` that focuses the field — `showPopover`
-returns `Ok`, then `toggle → closed`; (b) the router removes and re-inserts this
-page's whole subtree on every `?q=` change, and removing a *showing* popover
-hides it **without** firing `toggle` (the HTML removing steps pass
-`fireEvents=false`), so the Rust `open` signal stayed `true` while the panel was
-gone. An absolutely-positioned panel has neither problem; Escape and
-outside-`pointerdown` are handled in the panel instead. The destination picker
-keeps using `popover` (button trigger, no navigation) — this is not a retreat
-from the primitive.
+returns `Ok`, then `toggle → closed`; (b) this page's whole subtree was removed
+and re-inserted on every `?q=` change, and removing a *showing* popover hides it
+**without** firing `toggle` (the HTML removing steps pass `fireEvents=false`), so
+the Rust `open` signal stayed `true` while the panel was gone. An
+absolutely-positioned panel has neither problem; Escape and outside-`pointerdown`
+are handled in the panel instead. The destination picker keeps using `popover`
+(button trigger, no navigation) — this is not a retreat from the primitive.
+**(b) was fixed in P6-068** and, as recorded there, was never the router; (a)
+alone still rules `popover` out here, so the deviation stands.
 
-**The router churns this route's DOM.** Measured on `/my/collections/:id`:
-~800 ms after each `?q=` navigation the page subtree is detached for ~400 ms and
-re-attached (same nodes), blurring the field — without mitigation the keystroke
-loop dies after the first card. `/catalog` and `/my` do **not** do this. The
-panel holds the caret with a 120 ms interval gated on *panel open* and on focus
-having landed on `<body>` rather than a real element. That is a workaround at one
-call site; the cause is upstream and is filed.
+**This route churned its own DOM — and it was not the router** (corrected
+2026-08-11, P6-068; the original wording is kept below because the *measurement*
+was right and only the attribution was wrong). Measured on
+`/my/collections/:id`: after each `?q=` navigation the page subtree was detached
+for ~400 ms and re-attached (same nodes), blurring the field — without mitigation
+the keystroke loop died after the first card. `/catalog` and `/my` did **not** do
+this. The panel held the caret with a 120 ms interval gated on *panel open* and
+on focus having landed on `<body>` rather than a real element; that interval is
+now deleted, because the cause is gone. See the Findings entry
+"`/my/*` stayed mounted once the page stopped reading its resource in setup".
 
 **`command`'s ordering caveat needed no fix here** — the candidate list is
 rebuilt inside a `Suspend` per query, so every result set is a full remount in
@@ -3988,3 +3993,71 @@ face was unreachable. Landed as projection + DTO + UI, no ingestion work
   tier 265/265**; Android webview dev-attach `android-dfc-check.mjs`
   **12/12 on-device** (Chrome 145) including the strengthened art-pairing
   checks and the adventure negative; merge gate 8/8 green.
+
+### `/my/*` stayed mounted once the page stopped reading its resource in setup (2026-08-11)
+
+**The `/my/collections/:id` detach was the auth guard re-suspending, not the
+router.** P6-068 (`specs/phase-6-probes/P6-068.md`) named the mechanism and this
+task removed it. `CollectionPage` read `view_res` in its **setup body** — the
+`here_delta` zeroing `Effect` and the `resolved` memo that fed the quick-add
+panel — which is above every boundary in its own view. A `Resource` read
+registers the *nearest `SuspenseContext` in the owner chain*, so those two reads
+registered on `RequireAuth`'s `<Suspense>` (`app/src/shell.rs`), and every `?q=`
+re-run of the resource made that boundary pending. With `TRANSITION = false` the
+boundary swaps to its fallback on every re-suspension, and `EitherKeepAlive`
+unmounts the whole `<Outlet/>` subtree and re-inserts the same nodes when the
+fetch lands — hence "same nodes back", the blurred field, and a showing native
+popover removed without a `toggle` (leaving `open` desynced).
+
+**Three things that look like fixes and are not**, all recorded because each
+costs a round to rediscover:
+
+- **Wrapping the read in an `Effect` does nothing.** `in_effect_scope()`
+  suppresses only leptos' debug warning; the suspense registration is
+  unconditional. This is why `/catalog`'s `last_good` idiom does not port —
+  `/catalog` is safe because `AppShell` provides no `SuspenseContext` above its
+  `<Outlet/>`, not because its reads are in `Effect`s. Adding any `Suspense`
+  above that `<Outlet/>` would hand `/catalog` and `/cards/:id` this defect for
+  free.
+- **A nearer boundary cannot be added.** Setup-body statements run under the
+  component's own owner, an ancestor of every boundary its view contains.
+- **Moving the consumers inside a boundary is ruled out by an existing
+  constraint:** the query bar sits between the two `Transition`s deliberately, so
+  a rebuild cannot rebuild the `<input>` under the caret.
+
+**What shipped (Option B).** The header's `Transition` body writes two plain
+signals from the payload it is about to render — `here_delta.set(0)` and a
+`QuickAddFacts` value (destination, default kind, present matches, plus the
+collection id) — and the out-of-boundary consumers read those. `RwSignal`'s
+`try_read_untracked` does no `use_context::<SuspenseContext>()` lookup at all, so
+a query refresh now *structurally* cannot reach the guard.
+
+- **The header writes them, not the table.** The two boundaries await the same
+  resource, so the writer picks the ordering, and `here_delta` admits only one:
+  the delta corrects the header's totals, so it must be zeroed by the body that
+  puts fresh totals on screen. The table writing it would leave a window with
+  fresh totals and a stale delta still added on top — the teardown double-count
+  the original `Effect` comment warns about. The reverse window is inert:
+  nothing in the table *renders* from `here_delta`.
+- **The quick-add destination is now retained across a re-search** instead of
+  collapsing to `None` while the resource is in flight. Intended: `⏎` mid-search
+  adds to the collection you are looking at, rather than hitting the "Still
+  loading this collection" guard on the metric path. **The staleness that would
+  be a real bug is gated by construction** — `live_facts` is a memo that returns
+  the retained facts only while `?id` still parses to the collection they were
+  built from, so a navigation to a *different* collection cannot leave a stale
+  destination reachable in the window before its payload lands. A URL-keyed read
+  rather than an `Effect` that clears, so there is no window at all.
+- **The 120 ms focus keeper in `quick_add.rs` is deleted** — the subtree no
+  longer unmounts, and an interval that steals focus back from `<body>` has a
+  cost of its own (it fights any deliberate blur onto a non-focusable target).
+- Option A (`RequireAuth` using `<Transition>`) was rejected though it is one
+  token: it leaves the mis-wiring in place and only removes the surface it
+  damages, and it becomes a real hazard the moment `CurrentUserResource` is made
+  refetchable, since a Transition would then keep signed-in content on screen
+  through a re-check.
+
+**The rule this leaves behind**, now recorded on `RequireAuth` itself: a page
+under `/my/*` must read its resources inside its own `Suspense`/`Transition`, and
+anything a consumer outside one needs must arrive through a plain signal written
+from inside it.
