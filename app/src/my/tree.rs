@@ -801,9 +801,15 @@ mod tests {
         // An unreachable backend — the case a second attempt is for.
         assert!(tree_retryable(&e("upstream: neon unreachable")));
         // An expired session: the fix is a sign-in, and a retry 401s again.
-        // This is not hypothetical — it is what an idle tab produces, because
-        // `fetch_current_user` refreshes a stale `tr_jwt` from `tr_session`
-        // while `user_id_from_headers` (every data read) does not.
+        // Until P6-010, an idle tab produced this over a fully live session:
+        // `fetch_current_user` refreshed a stale `tr_jwt` from `tr_session`
+        // while `user_id_from_headers` (every data read) did not, so the
+        // guard passed and the very next read still 401ed. The hosted data
+        // path now shares that same `tr_session` fallback
+        // (`lib.rs::user_id_with_session_fallback`), so this string is
+        // reachable only for a session that is *actually* gone — no live
+        // `tr_session` either — which a retry genuinely cannot fix. The
+        // assertion is unchanged; only the reason it is reachable moved.
         assert!(!tree_retryable(&e("unauthorized: invalid token")));
         // And the request-level classes, which will never clear.
         assert!(!tree_retryable(&e("validation: nope")));

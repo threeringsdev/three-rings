@@ -307,7 +307,7 @@ pub async fn search_catalog(
     #[cfg(feature = "hosted")]
     {
         use crate::backend::CatalogStore;
-        crate::backend::routes::catalog_backend(&headers)
+        catalog_backend_with_fallback(&headers)
             .await
             .map_err(api_err)?
             .search(query, page)
@@ -389,11 +389,12 @@ pub async fn list_sets(q: String) -> Result<Vec<shared::SetSummary>, ServerFnErr
 /// and **GET** for the same two reasons: a pure cacheable read, and the Tauri
 /// Android dev proxy strips POST bodies.
 ///
-/// Auth is **opportunistic** — `catalog_backend` hands back a session-scoped
-/// backend when the caller has one and an anonymous backend otherwise, which is
-/// exactly what decides whether `CardDetail::ownership` is `Some`. `/cards/:id`
-/// is a public page; a missing or expired session degrades to the public
-/// projection rather than 401ing.
+/// Auth is **opportunistic** — `catalog_backend_with_fallback` hands back a
+/// session-scoped backend when the caller has one (including via the P6-010
+/// `tr_session` fallback) and an anonymous backend otherwise, which is exactly
+/// what decides whether `CardDetail::ownership` is `Some`. `/cards/:id`
+/// is a public page; a missing or expired session (with no live `tr_session`
+/// either) degrades to the public projection rather than 401ing.
 #[server(
     prefix = "/api",
     endpoint = "card_detail",
@@ -410,7 +411,7 @@ pub async fn card_detail(
     #[cfg(feature = "hosted")]
     {
         use crate::backend::CatalogStore;
-        crate::backend::routes::catalog_backend(&headers)
+        catalog_backend_with_fallback(&headers)
             .await
             .map_err(api_err)?
             .card_detail(oracle_id)
@@ -958,7 +959,7 @@ pub async fn reorder_collection(
 
 /// The session-scoped collection backend for a server fn, one per backend
 /// feature. Collection work — unlike the catalog reads — has no anonymous
-/// degradation, so this 401s rather than falling back.
+/// degradation, so this 401s rather than falling back to an anonymous read.
 ///
 /// Both arms extract the headers themselves and return the *same* shape, so an
 /// adapter body is one line per trait call instead of a duplicated
@@ -966,14 +967,246 @@ pub async fn reorder_collection(
 /// original `list_collections` inline a rule `catalog_backend` had already
 /// centralized for the catalog half; keeping one helper per backend is what
 /// stops the two halves drifting again.
+///
+/// **Hosted arm carries its own `tr_session` fallback (P6-010)**, deliberately
+/// *not* pushed into the `AuthUser` extractor (`auth.rs:216-226`) or
+/// `backend::routes::catalog_backend`: both are shared with the plain-axum
+/// routes the native client's `NativeBackend` calls over HTTP, which re-mints
+/// for itself (`backend/native.rs:132-144`) and would double-mint if the
+/// terminus also retried. See [`user_id_with_session_fallback`].
 #[cfg(feature = "hosted")]
 async fn collection_backend() -> Result<crate::backend::HostedBackend, ServerFnError<String>> {
     let headers = leptos_axum::extract::<axum::http::HeaderMap>()
         .await
         .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
-    crate::backend::routes::session_backend(&headers)
+    let user_id = user_id_with_session_fallback(&headers)
+        .await
+        .map_err(|e| api_err(shared::ApiError::Unauthorized(e.to_string())))?;
+    crate::backend::HostedBackend::for_user(user_id)
         .await
         .map_err(api_err)
+}
+
+/// Resolve the caller's user id from request headers, with the hosted data
+/// path's session fallback (P6-010): `fetch_current_user`
+/// (`account.rs:320-344`, awaited by `RequireAuth`) already falls back from an
+/// expired/absent `tr_jwt` to `tr_session` and refreshes the cookie on the
+/// *response* — but that refresh cannot be seen by data reads in the same SSR
+/// pass, which re-extract the *request* headers fresh and go through
+/// [`crate::auth::user_id_from_headers`], which has no such fallback. The
+/// guard therefore passes while the data read 401s, over a fully live
+/// session.
+///
+/// This reuses `fetch_current_user`'s own fallback logic — read `tr_session`,
+/// `upstream::mint_jwt`, `verify_token` — **minus the cookie writes**: this
+/// only has to name a user for *this* request, because `fetch_current_user`
+/// already refreshes `tr_jwt` on the same response. Writing cookies here
+/// would also be wrong on its own terms — `append_set_cookie` needs a Leptos
+/// `ResponseOptions` context that only a Leptos server-fn body carries, and
+/// this logic must stay callable from a plain-axum handler in spirit even
+/// though today only the server-fn path calls it.
+///
+/// The I/O is split from the decision on purpose: [`decide_fallback`] is a
+/// pure function of "what did the primary lookup say" and "is there a
+/// session cookie", with no `await` in it at all — that is the part a unit
+/// test can pin without a live Better Auth (see the tests below). This
+/// function is the thin async shell around it that actually reads the
+/// cookie and, when the decision says to, performs the one mint + verify.
+///
+/// **Exactly once, structurally**: `upstream::mint_jwt` appears at exactly
+/// one call site, inside a straight-line `match` with no loop and no
+/// recursion back into this function — so a failure of the mint or the
+/// re-verify cannot trigger a second attempt, it just falls through to
+/// `return Err(original)`, the 401 the primary lookup already produced.
+#[cfg(feature = "hosted")]
+async fn user_id_with_session_fallback(
+    headers: &axum::http::HeaderMap,
+) -> Result<uuid::Uuid, crate::auth::AuthError> {
+    use crate::auth::{cookies, upstream, verify_token};
+
+    let primary = crate::auth::user_id_from_headers(headers).await;
+    let session_cookie = cookies::cookie_value(headers, cookies::SESSION_COOKIE);
+    match decide_fallback(primary, session_cookie) {
+        FallbackDecision::Settled(result) => result,
+        FallbackDecision::TryMint { session, original } => {
+            let origin = cookies::request_origin(headers);
+            let Ok(jwt) = upstream::mint_jwt(&origin, &session).await else {
+                return Err(original);
+            };
+            let Ok(claims) = verify_token(&jwt).await else {
+                return Err(original);
+            };
+            uuid::Uuid::parse_str(&claims.sub).map_err(|_| original)
+        }
+    }
+}
+
+/// The opportunistic catalog counterpart of `collection_backend`'s fallback
+/// (P6-010): the same [`user_id_with_session_fallback`], but degrading to an
+/// anonymous backend on failure instead of surfacing `Unauthorized` — the
+/// catalog's existing opportunistic rule (compare
+/// `backend::routes::catalog_backend`, unchanged) with the session fallback
+/// folded into its auth step, so an idle tab's ownership block on `/catalog`
+/// and `/cards/:id` survives the same 15-minute window `collection_backend`
+/// does, instead of quietly degrading to the anonymous view.
+#[cfg(feature = "hosted")]
+async fn catalog_backend_with_fallback(
+    headers: &axum::http::HeaderMap,
+) -> shared::ApiResult<crate::backend::HostedBackend> {
+    match user_id_with_session_fallback(headers).await {
+        Ok(user_id) => crate::backend::HostedBackend::for_user(user_id).await,
+        Err(_) => crate::backend::HostedBackend::anonymous().await,
+    }
+}
+
+/// What [`user_id_with_session_fallback`] does next, decided purely from the
+/// primary lookup's outcome and whether a `tr_session` cookie is present — no
+/// I/O, so this is fully unit-testable without a live Better Auth.
+#[cfg(feature = "hosted")]
+#[derive(Debug)]
+enum FallbackDecision {
+    /// Use `user_id` as-is, or surface the error as-is — no mint attempted.
+    /// Covers: the primary lookup already succeeded (a live `tr_jwt`, most
+    /// requests); it failed with `Configuration`/`Jwks` (our misconfiguration,
+    /// not a stale token — the fallback's own `verify_token` call would hit
+    /// the exact same broken verifier and fail identically, so retrying would
+    /// only spend an upstream round trip for no new answer); or it failed
+    /// with a token-shaped error but there is no `tr_session` cookie to fall
+    /// back to.
+    Settled(Result<uuid::Uuid, crate::auth::AuthError>),
+    /// The primary lookup failed with an absent or stale/expired `tr_jwt`
+    /// (`MissingToken`/`InvalidToken`) and a `tr_session` cookie is present:
+    /// attempt exactly one re-mint against it, falling back to `original` on
+    /// any failure of the mint or the re-verify.
+    TryMint {
+        session: String,
+        original: crate::auth::AuthError,
+    },
+}
+
+#[cfg(feature = "hosted")]
+fn decide_fallback(
+    primary: Result<uuid::Uuid, crate::auth::AuthError>,
+    session_cookie: Option<String>,
+) -> FallbackDecision {
+    use crate::auth::AuthError;
+
+    let original = match primary {
+        Ok(user_id) => return FallbackDecision::Settled(Ok(user_id)),
+        Err(err @ (AuthError::MissingToken | AuthError::InvalidToken)) => err,
+        Err(err) => return FallbackDecision::Settled(Err(err)),
+    };
+    match session_cookie {
+        Some(session) => FallbackDecision::TryMint { session, original },
+        None => FallbackDecision::Settled(Err(original)),
+    }
+}
+
+#[cfg(all(test, feature = "hosted"))]
+mod session_fallback_tests {
+    use super::{decide_fallback, user_id_with_session_fallback, FallbackDecision};
+    use crate::auth::AuthError;
+    use axum::http::HeaderMap;
+    use uuid::Uuid;
+
+    fn some_uuid() -> Uuid {
+        Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap()
+    }
+
+    /// A live `tr_jwt` (the common case): the primary lookup already
+    /// succeeded, so the decision must settle on it directly — no mint
+    /// attempted — *even when* a `tr_session` cookie also happens to be
+    /// present. Success always wins; the fallback is not a "double-check"
+    /// step.
+    #[test]
+    fn primary_success_settles_without_a_mint_even_with_a_session_present() {
+        let id = some_uuid();
+        let decision = decide_fallback(Ok(id), Some("some-session-value".into()));
+        assert!(matches!(decision, FallbackDecision::Settled(Ok(got)) if got == id));
+    }
+
+    /// Missing both cookies: `MissingToken` is fallback-eligible, but with no
+    /// `tr_session` to fall back to, the decision must settle on the
+    /// original error rather than reach for a mint that has nothing to mint
+    /// from.
+    #[test]
+    fn missing_token_with_no_session_settles_on_the_original_error() {
+        let decision = decide_fallback(Err(AuthError::MissingToken), None);
+        assert!(matches!(
+            decision,
+            FallbackDecision::Settled(Err(AuthError::MissingToken))
+        ));
+    }
+
+    /// The P6-010 case itself: an absent/expired `tr_jwt` (`MissingToken` —
+    /// the probe's finding is that the browser usually drops the cookie
+    /// outright at its matching 900s `Max-Age`, not that it survives expired)
+    /// with a live `tr_session` present must attempt exactly one mint.
+    #[test]
+    fn missing_token_with_a_session_present_tries_exactly_one_mint() {
+        let decision = decide_fallback(Err(AuthError::MissingToken), Some("sess".into()));
+        match decision {
+            FallbackDecision::TryMint { session, original } => {
+                assert_eq!(session, "sess");
+                assert!(matches!(original, AuthError::MissingToken));
+            }
+            other => panic!("expected TryMint, got {other:?}"),
+        }
+    }
+
+    /// The imprecise-but-possible sibling case the probe also names: a
+    /// `tr_jwt` that is present but fails verification (`InvalidToken`) is
+    /// just as fallback-eligible as an absent one.
+    #[test]
+    fn invalid_token_with_a_session_present_tries_exactly_one_mint() {
+        let decision = decide_fallback(Err(AuthError::InvalidToken), Some("sess".into()));
+        assert!(matches!(decision, FallbackDecision::TryMint { .. }));
+    }
+
+    /// Server misconfiguration must never be retried through the fallback —
+    /// a session re-mint cannot fix a broken `NEON_AUTH_BASE_URL`, and
+    /// attempting one would just repeat the same failure over the network for
+    /// no new answer.
+    #[test]
+    fn configuration_error_is_not_retried_even_with_a_session_present() {
+        let decision = decide_fallback(
+            Err(AuthError::Configuration(
+                "NEON_AUTH_BASE_URL is not set".into(),
+            )),
+            Some("sess".into()),
+        );
+        assert!(matches!(
+            decision,
+            FallbackDecision::Settled(Err(AuthError::Configuration(_)))
+        ));
+    }
+
+    /// Same reasoning as the configuration case, for a broken/unreachable
+    /// JWKS.
+    #[test]
+    fn jwks_error_is_not_retried_even_with_a_session_present() {
+        let decision = decide_fallback(
+            Err(AuthError::Jwks("jwks fetch failed".into())),
+            Some("sess".into()),
+        );
+        assert!(matches!(
+            decision,
+            FallbackDecision::Settled(Err(AuthError::Jwks(_)))
+        ));
+    }
+
+    /// End-to-end through the real async shell (no mocked Better Auth
+    /// needed): with neither `tr_jwt` nor `tr_session` on the request, the
+    /// primary lookup's `MissingToken` must surface unchanged, and this must
+    /// resolve immediately rather than attempting any network I/O.
+    #[tokio::test]
+    async fn no_cookies_surfaces_the_original_missing_token_error() {
+        let headers = HeaderMap::new();
+        let err = user_id_with_session_fallback(&headers)
+            .await
+            .expect_err("no cookies at all must not resolve a user id");
+        assert!(matches!(err, AuthError::MissingToken));
+    }
 }
 
 #[cfg(all(feature = "native", not(feature = "hosted")))]
