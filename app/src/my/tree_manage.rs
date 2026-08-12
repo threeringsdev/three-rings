@@ -744,7 +744,10 @@ pub fn TreeDialogs() -> impl IntoView {
                     // Decided *after* the await, off the route the user is
                     // standing on *now* — not the one the confirm was answered
                     // on. `pathname` comes from the router's own `Location`
-                    // (app-root context, never disposed by a page swap), so
+                    // (app-root context, which no intra-shell page swap
+                    // disposes; a session-expiry redirect to /login tears down
+                    // the whole shell first, a pre-existing post-await risk
+                    // shared by every `.set()` above), so
                     // this read reflects wherever the round-trip left the
                     // user, including a click away mid-flight. Deciding this
                     // before the await fired a stale navigate on success: a
