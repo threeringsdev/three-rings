@@ -2165,6 +2165,109 @@ directly: `None` → `i64::MAX`, an explicit value clamped to `1..=5_000` both
 directions — the shape the maintainer flagged as worth a test of its own
 rather than relying only on the e2e layer.
 
+**Enter-vs-debounce race, fixed 2026-08-12 (P6-138).** `CommandInput` writes
+the live box text synchronously on every keystroke, but the set picker's rows
+— and the keyboard-nav registry Enter reads to decide what "activate the
+highlighted row" means — are re-keyed by the picker's own 250ms-debounced
+server fetch (the read-side debounce described above, under "The debounce race
+was reduced, not compounded"). Typing toward `s:lea` ("limited edition alpha")
+and pressing Enter inside that window could add `s:leb` instead: the box
+already read "lea", but the mounted rows — and whatever they had highlighted —
+still answered whatever term was fetched before the last keystroke's debounce
+had fired. Wrong action taken on the user's behalf, silently.
+
+**Chosen semantics: defer, not no-op, and not a synchronous flush.** Of the
+three shapes considered — (a) no-op mid-window (simplest, but a keystroke that
+visibly "did nothing" is surprising when the user's whole intent was to
+finish and commit), (b) remember the Enter and act on the first row of the
+*next* settled fetch, (c) flush the debounce synchronously and select from the
+result — (c) is not actually reachable: the fetch is an async server round
+trip, so "flush and select" still has to wait for a response, i.e. it
+degenerates to (b) with a shorter window. The shipped behavior is that
+shortened hybrid: Enter mid-race cancels the pending debounce timer and
+re-keys the fetch *immediately* rather than waiting out the rest of the
+250ms, then selects the first row of whatever comes back — but only if the
+box still reads the way it did the moment Enter was pressed (typing more in
+the meantime abandons that Enter; it is not anyone's business once the box has
+moved on). "First row" needs no special-casing: P6-136's ranking already puts
+an exact code match first, so finishing a code and hitting Enter — the exact
+scenario the race breaks — lands on the right set as soon as the fresh fetch
+answers.
+
+**Where the gate lives: an opt-in pair on `CommandInput`, not a primitive-wide
+behavior change.** `command.rs` is shared by the set picker, ⌘K, quick-add,
+and the destination picker (module doc, "Vendoring" deviations list) — none of
+the other three re-key their rows on an independent timer disjoint from the
+box's own live text (⌘K and the destination picker filter synchronously on
+`ctx.query` itself; quick-add's foreign-input path does not use `CommandInput`
+at all), so none of them have this race, and none needed their behavior
+touched. `CommandInput` gained two new optional props, both defaulting to
+"off, behave exactly as before": `stale: Option<Signal<bool>>` and
+`on_stale_enter: Option<Callback<()>>`. When `stale` reads `true` at Enter
+time, `on_stale_enter` runs instead of the built-in
+`activate_highlighted()` — otherwise Enter is untouched. Only `SetPicker`
+(`app/src/catalog/rail.rs`) passes them.
+
+**Mouse clicks are unaffected on purpose.** A click on a visible row — stale
+or not — *is* the user's intent (they can see exactly what they are clicking),
+so the gate lives entirely in `CommandInput`'s `Enter` branch; `CommandItem`'s
+`on:click` was not touched.
+
+**The freshness check needed a third signal, not just `search`.** The obvious
+first cut compared the live box text against `search` (the debounced value
+fed into the `sets` `Resource`) — but `search` flips the instant the debounce
+timer fires, while the *rendered* rows (kept on screen by `Transition`) stay
+the previous fetch's until the new one actually resolves, which can lag
+`search` by a full network round trip on a slow connection. So the picker adds
+`rendered_for: RwSignal<String>`, written only inside the `Suspend` block once
+a fetch settles — and the resource's fetcher now echoes the term it used back
+alongside its result (`Option<(String, Result<Vec<SetSummary>, _>)>`, the same
+`(q, …)` idiom `catalog.rs`'s `SearchPayload` uses for its own `displaced_by`)
+so the settlement can be matched to the request that produced it without
+trusting `search`'s value to have stayed put across the `await`. `stale`
+compares the live box text against `rendered_for`, not `search` — this is
+what makes the e2e test's `page.route` hold (below) actually exercise the
+gate: `search` re-keys the instant the debounce fires, well before the held
+response ever lands, so a `search`-only comparison would have read "fresh"
+throughout the entire held window and the test would have passed on
+unpatched code too.
+
+The pure comparison is `enter_targets_stale_rows(live: &str, fetched_for:
+&str) -> bool` (`app/src/catalog/rail.rs`, unit-tested) — the same shape as
+`catalog.rs`'s `displaced_by` (P6-130), collapsed to one disagreement instead
+of two because the picker has only one rendered value to compare against
+(`rendered_for`) rather than a URL plus a pending debounce.
+
+**Verified with two real, adjacent sets, not a synthetic fixture.** Limited
+Edition Alpha (`lea`) and Beta (`leb`) are both exact-code-match top hits for
+their own search term (P6-136's ranking tiers), so "the stale list's top row"
+and "what the box now asks for" are genuinely different sets — not a ranking
+coincidence the test would need to hope for. `filter-rail.spec.ts`: establish
+"leb" as the real, settled list; hold the *next* `**/api/list_sets*` request
+open via `page.route` so the race window is deterministic instead of racing a
+fast local round trip; type "lea" and wait past the 250ms debounce (the held
+fetch has been launched but not answered); press Enter; assert no chip landed
+at all (neither `leb` nor `lea` — nothing to act on yet). Release the held
+request; assert `s:lea` — never `s:leb` — lands once the fresh answer
+arrives. A companion positive-control test pins the ordinary, non-racing case:
+once the debounce has settled for real, Enter still activates the highlighted
+row exactly as before. **Kill-verified**: reverting `command.rs`/`rail.rs`
+against the unmodified test reproduces the bug directly — the held-fetch test
+fails with `leb` chip present (`toHaveCount(0)` receives `1`); the
+positive-control test still passes on unpatched code, confirming it is not
+accidentally exercising the fix.
+
+Full `filter-rail.spec.ts` and the primitive's other three
+consumers — `command-palette.spec.ts`, `quick-add.spec.ts`,
+`destination-picker.spec.ts` — chromium, `--workers=1`, 65 run outcomes
+across the four files: **62 passed, 3 failed**, the three failures being
+exactly the pre-existing `command-palette.spec.ts` "Undo last move"
+fixture-pool flakes already on record above (P6-137) and in
+`.claude/skills/e2e-suite/SKILL.md`'s residual-failure enumeration —
+reproduced directly against unmodified `command.rs`/`rail.rs` in this same
+session (2 of the 3 reproduced in a targeted re-run; holdings-count polling
+timeouts against the shared live Neon dev branch, unrelated to the primitive).
+
 ### Catalog paging via `?cursor=` (2026-07-25)
 
 `app/src/catalog.rs` + `app/src/catalog/rail.rs` — the slice deferred from the
