@@ -576,6 +576,101 @@ test("a sidebar rename updates the Where column on /my without navigating @fast"
   }
 });
 
+// P6-127, the other half of P6-126's fix. `/my/collections/:id` took
+// `TreeManage::revision` — the counter EVERY tree mutation bumps — as a source
+// of the resource that carries its **card table**, so a rename refetched the
+// whole payload and rebuilt every row. That re-seeds each `CountStepper` from
+// a new `value` signal and disposes the one the count's own undo toast is
+// still pointing at, so `Undo` returned early and did nothing: the count stuck
+// at the new number and the write never happened. (The same defect
+// `collection.rs`'s module doc already records against awaiting the *tree*,
+// reached from the other side.)
+//
+// Fixed by narrowing the source to `TreeManage::content_revision` — only the
+// tree mutations that can move copies (delete, its undo, reparent) — and
+// getting the rename's own freshness from the tree instead. So this test pins
+// both halves at once: the `<h1>` must still follow the rename, and the undo
+// must still write.
+//
+// The API read is the load-bearing assertion. The stepper showing "3" again
+// could in principle be an optimistic write with no request behind it; the
+// server's own count cannot be.
+test("a rename mid-toast leaves the stepper's Undo working @fast", async ({
+  page,
+  request,
+}) => {
+  const before = scratchName("undo-before");
+  const after = scratchName("undo-after");
+  const c = await createCollection(page, { name: before });
+  try {
+    // A card held nowhere else, so this collection's row is the only holding
+    // of it and `totalCopies` below reads exactly this row's quantity.
+    const card = await genuinelyUnownedCard(request);
+    await addHave(request, c.id, card.printing_id as string, 3);
+
+    await page.goto(`/my/collections/${c.id}`);
+    await hydrated(page);
+
+    const row = page.locator(
+      `[data-testid="collection-row"][data-oracle="${card.oracle_id}"]`,
+    );
+    const count = row.locator('[data-testid="count-stepper-value"]');
+    await expect(count).toHaveText("3");
+
+    // Commit 3 → 5 through the click-to-type path (no hover dependency on the
+    // opacity-revealed ± buttons).
+    await count.click();
+    await row.locator('[data-testid="count-stepper-input"]').waitFor();
+    await page.keyboard.type("5");
+    await page.keyboard.press("Enter");
+    await expect(count).toHaveText("5");
+
+    const toast = page.locator('[data-name="Toast"]', {
+      hasText: `${card.name}: 3 → 5`,
+    });
+    await expect(toast).toBeVisible();
+
+    // …now rename this very collection from its own header kebab, while that
+    // toast is still up. Toasts live 5s (`sonner.rs`), so everything between
+    // here and the Undo click stays on the critical path deliberately — the
+    // `toBeVisible` guard below fails loudly if it ever stops fitting rather
+    // than letting the test pass without exercising the undo.
+    await page.locator('[data-testid="collection-actions"]').click();
+    await page
+      .locator('[role="menuitem"]', { hasText: "Rename…" })
+      .first()
+      .click();
+    const dialog = page.locator('[role="dialog"]', { hasText: "Rename" });
+    await dialog.locator("#tree-rename-name").fill(after);
+    await dialog.locator("#tree-rename-confirm").click();
+
+    // The rename must still reach this page's own title with no navigation —
+    // the requirement `TreeManage::revision` was made a source for. It is also
+    // the synchronisation point: on the pre-fix code this is the moment the
+    // payload refetch has landed and the table has been rebuilt.
+    await expect(page.locator('[data-testid="collection-title"]')).toHaveText(
+      after,
+    );
+
+    await expect(toast).toBeVisible();
+    await toast.getByRole("button", { name: "Undo" }).click();
+
+    await expect(count).toHaveText("3");
+    // The write itself. `expect.poll` because the undo is a fire-and-forget
+    // `spawn_local` — the optimistic UI is ahead of the request.
+    await expect
+      .poll(() => totalCopies(request, card.oracle_id), { timeout: 10_000 })
+      .toBe(3);
+  } finally {
+    // Discard rather than relocate, for the reason the Where-column test
+    // above documents: a relocate would leave this card permanently "owned"
+    // and drain the `unownedCards` pool every future run draws from.
+    await page.request.post(`/api/collections/${c.id}/delete`, {
+      data: { haves: { mode: "discard" } },
+    });
+  }
+});
+
 // Delete relocates rather than destroys (specs/collection-deletion.md): the
 // node is hidden, and its child survives by moving up a level. This test used
 // to assert the opposite — "1 nested collection" and "cannot be undone" in the

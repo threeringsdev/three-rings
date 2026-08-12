@@ -873,11 +873,17 @@ risky part lands under no time pressure.
     (`collection.rs`'s `CollectionHeader`) instead of walking the sidebar's
     *separate* tree resource, which is exactly the read `MenuTarget::for_collection`'s
     own doc already called out as best-effort ("degrades to 'not itself' … on
-    a failed tree read"). Both sources are the **same request** that already
-    produces the honest `cards`/`wants` counts, so the three numbers cannot
-    disagree with each other even when the sidebar's tree is stale or failed
+    a failed tree read"). Both sources were the **same request** that already
+    produces the honest `cards`/`wants` counts, so the three numbers could not
+    disagree with each other even when the sidebar's tree was stale or failed
     — closing `P6-111`'s degraded-state bug structurally rather than by
-    hardening the old code path.
+    hardening the old code path. **Amended by P6-127 (2026-08-12):** the header
+    kebab's `children` count is now tree-derived (`TreeFacts`, payload
+    fallback), so a rename/create lands without a payload refetch. Cost: in the
+    window between a delete/reparent's payload refetch and its tree round trip
+    completing, `children` can transiently disagree with `cards`/`wants` —
+    self-healing when the tree lands, and the failed-tree case still falls back
+    to the payload's copy.
   - **`cards` changed meaning under the same field name.** It used to be
     "rolled-up present copies in the whole subtree" (`tree.rs` passed
     `RowShell` its `rolled_up`; `collection.rs` passed `totals.present_total()`).

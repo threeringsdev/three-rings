@@ -4118,3 +4118,78 @@ is pre-existing and out of scope here — it is the same fixture-pool class the
 e2e-suite skill already tracks under `WB-01KZMVA2Y1` — but is worth restating
 because it makes any test drawing from `unownedCards(request, 1)` at a low
 `skip` fragile over time, not just this one.
+
+### …and on the collection page that fix was too blunt (P6-127, 2026-08-12)
+
+`TreeManage::revision` is bumped by **every** tree mutation, so taking it as a
+whole-resource source means any of them refetches the whole payload. On the
+three pages P6-126 fixed that is correct and cheap — their payloads are read-only
+tables. On `/my/collections/:id` the same payload also carries the **card table**,
+and rebuilding that table re-seeds every `CountStepper` from a fresh `value`
+signal while disposing the one the count's own undo toast still points at. The
+toast's `undo` closure bails on a disposed signal, so:
+
+> commit a count → rename anything before the toast expires → Undo silently does
+> nothing, and the write never happens.
+
+That is the identical defect `collection.rs`'s module doc already records against
+awaiting the *tree* resource in the table's boundary, reached from the other
+direction — and the same whole-table-rebuild jank on an unrelated sidebar rename
+that P6-068 had just removed.
+
+**The narrowing.** `TreeManage` gained `content_revision`, bumped *in addition
+to* `revision` by the subset of mutations that can move copies or move which
+collection they roll up into: a delete (which relocates the node's holdings and
+desires into the chosen destination), its undo, and a reparent (drag or picker).
+Not a create (an empty collection), not a rename (a string), not a pure sibling
+reorder (nothing moves anywhere). `collection.rs`'s `view_res` takes
+`content_revision`; the /my pages keep `revision`.
+
+**What a create or a rename changes there comes from the tree instead** — which
+every tree mutation already refetches, and which this page already reads in
+nested boundaries for the breadcrumb, the folder counts and the teardown
+destinations. One more nested `<Suspense>` publishes a `TreeFacts { id, name,
+children }` into a plain signal (the P6-068 write-inside/read-outside pattern),
+and four consumers read it: the `<h1>`, the folder rows' identity, the quick-add
+destination's name, and the header kebab's `menu_target` snapshot (subject name,
+`parent_id` and child count). Every one falls back to the payload's own copy
+when the tree does not know the node — a collection the cached tree predates, or
+a failed tree read — so a broken tree leaves the page exactly as complete as it
+was before. P6-111's ruling is honoured in its *failed*-tree half (the fallback);
+its *stale*-tree half is deliberately traded away: a tree read in flight after a
+delete/reparent can transiently disagree with the fresher payload (child count,
+folder rows) until the round trip lands. See the amendment in
+specs/collection-deletion.md.
+
+Three consequences worth knowing before editing that file again:
+
+- **The publisher is the *last* child of the page view, deliberately.** The
+  route is `SsrMode::Async`, which renders in document order once every resource
+  has resolved, so a publisher above its consumers would put tree-derived names
+  and rows in the server HTML while the client's first pass — where the signal
+  starts `None` — renders the payload's. Publishing last makes both passes read
+  the payload and lands the correction one tick later, client-side only.
+- **"Is the table empty" became a live question.** Folder rows are tree-derived
+  now, so `New binder inside…` can add the *first* row to a collection whose
+  payload still says it is empty. `CollectionBody` decides between `EmptyState`
+  and the table off a `Memo<bool>`, not a raw read: that closure rebuilds the
+  card table when it re-runs, which is the exact thing this task exists to
+  prevent, and deduping to the boolean means only a genuine empty↔non-empty flip
+  can do it (and in that branch there are no card rows to lose).
+- **`here_delta`'s zero-write did not move** and its ordering argument is
+  unchanged — it still lives in the header's `Transition` body, one statement
+  before the header is built from the same payload. It is now *only* reached by a
+  payload that genuinely changed, which is strictly tighter than before. On a
+  rename the header is not re-rendered at all, so the delta is not zeroed and
+  the committed-but-un-refetched count keeps agreeing with the HERE cells.
+
+**Per-page calls.** `collection.rs` — hazard present (the only `CountStepper`
+call site in the app), narrowed as above. `all_cards.rs`, `needs.rs`,
+`shopping.rs` — no hazard, simple `manage.revision` source kept: none hosts a
+stepper, and the one undo any of them raises (needs's pull toast) addresses the
+server by `move_id` rather than a client-held baseline signal, so a refetch that
+rebuilds the row cannot turn the undo into a no-op.
+
+Pinned by `collection-tree-manage.spec.ts` → "a rename mid-toast leaves the
+stepper's Undo working", kill-verified against the pre-fix code (the count stuck
+at 5 after Undo).

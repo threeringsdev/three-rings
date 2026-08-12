@@ -371,6 +371,32 @@ pub struct TreeManage {
     /// what this page says: a deleted child is one of its folder rows and part of
     /// its rollup.
     pub revision: RwSignal<u32>,
+    /// The subset of those mutations that can change what **cards** a page
+    /// shows — bumped *in addition to* [`Self::revision`], never instead of it.
+    ///
+    /// `revision` is a naming-and-shape signal: every consumer that merely
+    /// *names* a collection out of its own read (`/my`'s Where column, needs's
+    /// "Owned elsewhere", shopping's "Wanted by") takes it and is right to
+    /// refetch on all of it. `/my/collections/:id` cannot, because its payload
+    /// also carries the card table, and rebuilding that table re-seeds every
+    /// [`CountStepper`](crate::components::ui::count_stepper::CountStepper)
+    /// from the fetched count — which disposes the row the count's own undo
+    /// toast is pointing at, so Undo silently does nothing (P6-127; the same
+    /// defect the module doc of [`crate::my::collection`] records against
+    /// awaiting the tree). It takes *this* counter instead and gets its
+    /// naming-and-shape freshness from the collection tree, which every one of
+    /// these mutations already refetches.
+    ///
+    /// So the rule for a new bump site is: does this write move copies, or move
+    /// which collection a copy rolls up into?
+    ///
+    /// - **Yes** — `delete_collection` relocates the node's holdings and
+    ///   desires into a destination (possibly the viewed collection, possibly
+    ///   the Inbox), its Undo puts them back, and a **reparent** moves a whole
+    ///   subtree's copies out of one rollup and into another.
+    /// - **No** — a create makes an empty collection, a rename changes a
+    ///   string, and a pure reorder among siblings moves nothing anywhere.
+    pub content_revision: RwSignal<u32>,
 }
 
 /// Provided by the **app shell**, not by the tree. ⌘K's `New binder…` /
@@ -399,10 +425,26 @@ pub fn provide_tree_manage() {
         busy: RwSignal::new(false),
         error: RwSignal::new(None),
         revision: RwSignal::new(0),
+        content_revision: RwSignal::new(0),
     })
 }
 
 impl TreeManage {
+    /// Record a successful tree mutation that changed **naming or shape only**
+    /// — a create or a rename. See [`Self::revision`].
+    fn bump_revision(&self) {
+        self.revision.update(|r| *r = r.wrapping_add(1));
+    }
+
+    /// Record a successful tree mutation that can also have moved **copies**
+    /// (or moved which collection they roll up into) — a delete, its undo, or
+    /// a reparent. Bumps both counters, because such a write changed the
+    /// naming/shape too. See [`Self::content_revision`].
+    fn bump_content_revision(&self) {
+        self.bump_revision();
+        self.content_revision.update(|r| *r = r.wrapping_add(1));
+    }
+
     pub fn open_create(&self, parent: Option<(Id, String)>, kind: CollectionKind) {
         self.create_req.set(Some(CreateReq { parent, kind }));
         self.create_name.set(String::new());
@@ -631,9 +673,10 @@ pub fn TreeDialogs() -> impl IntoView {
                     manage.busy.set(false);
                     manage.create_open.set(false);
                     tree.refetch();
-                    // The new child is a folder row on its parent's page, which
-                    // is a different read from the tree's — see `revision`.
-                    manage.revision.update(|r| *r = r.wrapping_add(1));
+                    // The new child is a folder row on its parent's page — a
+                    // *shape* change, and an empty collection at that, so it
+                    // moves no copies. See `revision` / `content_revision`.
+                    manage.bump_revision();
                 }
                 Err(e) => {
                     manage.busy.set(false);
@@ -663,9 +706,8 @@ pub fn TreeDialogs() -> impl IntoView {
                     manage.busy.set(false);
                     manage.rename_open.set(false);
                     tree.refetch();
-                    // The collection view's own `<h1>` and breadcrumb fallback
-                    // come from `collection_view`, not from the tree.
-                    manage.revision.update(|r| *r = r.wrapping_add(1));
+                    // A string, and nothing else — no copy is anywhere new.
+                    manage.bump_revision();
                 }
                 Err(e) => {
                     manage.busy.set(false);
@@ -714,8 +756,12 @@ pub fn TreeDialogs() -> impl IntoView {
                         // row here (`view.children`) and its copies are in this
                         // header's rollup, and neither comes from the tree read.
                         // Without the bump the row stayed, linking to an id the
-                        // database no longer had.
-                        None => manage.revision.update(|r| *r = r.wrapping_add(1)),
+                        // database no longer had. The **content** bump on top
+                        // of it is the relocation: the deleted node's holdings
+                        // and desires just landed in the destination the
+                        // confirm picked, which can be the collection being
+                        // viewed (or the Inbox, which is also a page).
+                        None => manage.bump_content_revision(),
                     }
                     // The undo toast — the misclick path, step 5 of
                     // specs/collection-deletion.md. The receipt is held by the
@@ -1013,7 +1059,9 @@ fn commit_undo_delete(
         match crate::undo_delete_collection(receipt).await {
             Ok(()) => {
                 tree.0.refetch();
-                manage.revision.update(|r| *r = r.wrapping_add(1));
+                // Content, not just shape: the collection reappeared with
+                // everything it took with it, so copies moved back.
+                manage.bump_content_revision();
             }
             Err(e) => {
                 // The delete already happened and closed its own dialog; a
@@ -1583,7 +1631,15 @@ pub fn commit_drop(
         // Every tree mutation bumps it, this one included: a drag reparent moves
         // a folder row off one collection's page and onto another's, and neither
         // page learns that from the tree read. See `TreeManage::revision`.
-        manage.revision.update(|r| *r = r.wrapping_add(1));
+        // A **reparent** is also a content change — the dragged subtree's copies
+        // leave one rollup and join another, which is a number in the HERE
+        // column of both pages' card rows. A pure reorder among siblings is not:
+        // nothing moved anywhere, only the order it is listed in.
+        if needs_reparent {
+            manage.bump_content_revision();
+        } else {
+            manage.bump_revision();
+        }
     });
 }
 
@@ -1770,8 +1826,10 @@ pub fn commit_move(
         // A move changes the moved collection's `parent_id`, which is what the
         // header kebab's next `Move to…` snapshots and what the breadcrumb walks
         // — and both a page *on* the moved node and a page on its old or new
-        // parent describe a different set of folder rows now.
-        manage.revision.update(|r| *r = r.wrapping_add(1));
+        // parent describe a different set of folder rows now. This picker always
+        // reparents (unlike a drag, which can be a pure reorder), so it is
+        // always a content change too: the subtree's copies change rollup.
+        manage.bump_content_revision();
     });
 }
 
