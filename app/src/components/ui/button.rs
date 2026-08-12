@@ -68,7 +68,7 @@ impl ButtonSize {
     }
 }
 
-const BUTTON_BASE: &str = "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive w-fit hover:cursor-pointer active:scale-[0.98] active:opacity-100 touch-manipulation [-webkit-tap-highlight-color:transparent] select-none [-webkit-touch-callout:none]";
+const BUTTON_BASE: &str = "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-3 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive w-fit hover:cursor-pointer active:scale-[0.98] active:opacity-100 touch-manipulation [-webkit-tap-highlight-color:transparent] select-none [-webkit-touch-callout:none]";
 
 #[component]
 pub fn Button(
@@ -83,5 +83,31 @@ pub fn Button(
         <button type="button" class=merged data-name="Button">
             {children()}
         </button>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BUTTON_BASE;
+
+    /// Guards the tw_merge collision fixed alongside this test: an arbitrary
+    /// ring-width value like `ring-[3px]` fails tw_merge's `usize` parse for
+    /// `ring`, so it falls through to the `ring-color` bucket and collides
+    /// with `focus-visible:ring-ring/50` in the same `tw_merge!` call — last
+    /// one wins, silently dropping the themed ring color. `ring-3` parses as
+    /// a bare width and lands in `ring-width` instead, so both classes
+    /// survive the merge. This would fail against the old
+    /// `focus-visible:ring-[3px]` string.
+    #[test]
+    fn focus_ring_color_and_width_both_survive_merge() {
+        let merged = tw_merge::tw_merge!(BUTTON_BASE);
+        assert!(
+            merged.contains("focus-visible:ring-ring/50"),
+            "ring color class dropped by tw_merge collision: {merged}"
+        );
+        assert!(
+            merged.contains("focus-visible:ring-3"),
+            "ring width class missing or renamed: {merged}"
+        );
     }
 }
