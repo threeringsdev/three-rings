@@ -1283,8 +1283,31 @@ Observed twice on two routes (`/my/shopping`, `/my/all`), each rendering
 it is not a route the guard fails to cover — it is a route where the guard **succeeds** and
 the data layer doesn't. Pinned in a unit test with the mechanism in the test comment,
 precisely so a future reader does not call it unreachable again. **The underlying auth
-mismatch is filed, not fixed**: it is an auth-request-lifetime change, not a state-arm
-rendering, and it does not belong in a states PR.
+mismatch was filed, not fixed, here**: it was an auth-request-lifetime change, not a
+state-arm rendering, and did not belong in a states PR.
+
+**Fixed 2026-08-12 (P6-010)**, for the hosted (web) backend: `collection_backend()`'s hosted
+arm in `app/src/lib.rs` now resolves the user id through
+`user_id_with_session_fallback` instead of calling `user_id_from_headers` directly. On a
+`MissingToken`/`InvalidToken` failure it reads `tr_session`, mints a fresh JWT
+(`auth::upstream::mint_jwt`) and verifies it — `fetch_current_user`'s own fallback logic
+(`account.rs:320-344`) minus the cookie writes, since `fetch_current_user` already refreshes
+`tr_jwt` on the same response. The same helper was also dropped into the catalog's
+opportunistic backend construction (`catalog_backend_with_fallback`, `lib.rs`), so `/catalog`
+and `/cards/:id` ownership blocks survive the window too instead of quietly degrading to the
+anonymous view. Full detail, including why the fix lives in `collection_backend()` rather than
+`auth.rs`/`routes.rs`, in `specs/phase-6-probes/P6-010.md` → Resolution.
+
+**The native backend already had an equivalent for collection reads/writes**
+(`backend/native.rs:132-144`, a silent re-mint + one retry on a hosted `401`), so for that
+half this brings the hosted web path in line with it rather than introducing a new
+mechanism. The native *catalog* half has no equivalent — catalog reads degrade to
+anonymous with a `200`, which the 401-keyed re-mint never sees, so the desktop/mobile
+shell still silently loses `/catalog` ownership blocks after the idle window (filed as a
+follow-up task). `unauthorized: invalid token` is still reachable and
+still non-retryable (the pinned unit test at `app/src/my/tree.rs` is unchanged) — it now means
+a session that is genuinely gone, no live `tr_session` either, which really does need a
+sign-in.
 
 **Where the previously-unused token variants went** — three tones, three different claims,
 mapped to families and never to hex (the recorded WCAG tuning means the tokens carry four
