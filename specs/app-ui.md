@@ -4221,8 +4221,10 @@ is still not built.)
   `QueryBar::commit`, so the query bar's re-seed effect sees the URL move
   without it and rewrites the box. Both pager links are now **inert while the
   results under them no longer answer the box** — `aria-disabled`, dimmed, and a
-  click that calls `preventDefault` (which `leptos_router`'s document-level
-  handler honors). *Inert, not removed*: the results deliberately stay on screen
+  click that calls `preventDefault` (which `leptos_router`'s window bubble
+  listener honors — load-bearing on `tachys/delegation` being OFF in this
+  build; see `PageLink`'s doc for the `on:click:undelegated` escape hatch if
+  that ever changes). *Inert, not removed*: the results deliberately stay on screen
   during a search, so dropping the control — or its `href`, which is the same
   thing to the tab order — would flicker the pager and lose keyboard focus
   mid-navigation. Staleness is `rendered q ≠ url_q ∨ rendered q ≠ box text`; the

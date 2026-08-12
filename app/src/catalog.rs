@@ -811,7 +811,14 @@ fn displaced_by(
 /// mid-navigation. `aria-disabled` plus a click that does not navigate keeps
 /// the tab stop, tells assistive tech the truth, and is the only combination
 /// that also survives `Enter` (a keyboard activation dispatches a real click,
-/// and `leptos_router`'s document-level handler bails on `defaultPrevented`).
+/// and `leptos_router`'s *window* bubble listener bails on `defaultPrevented`).
+///
+/// **Load-bearing build assumption:** this works because `tachys/delegation`
+/// is OFF in this build, so `on:click` attaches directly to the anchor and
+/// fires (target phase) before the router's window listener. Enabling
+/// `leptos/delegation` would move our handler after the router's and silently
+/// re-arm stale-pager navigation — if that feature is ever turned on, switch
+/// this to `on:click:undelegated`.
 #[component]
 fn PageLink(
     #[prop(into)] href: Signal<String>,
