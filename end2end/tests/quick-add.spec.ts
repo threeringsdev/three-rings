@@ -284,6 +284,68 @@ test("⏎ adds one copy here, and the toast undoes it @fast", async ({
   }
 });
 
+test("adding two cards replaces the URL instead of pushing it — one Back leaves the collection page @fast", async ({
+  page,
+  request,
+}) => {
+  const binder = await createCollection(request, "binder");
+  try {
+    await page.goto("/my");
+    await hydrated(page);
+
+    // Delay the server's response just long enough that a second ⏎ always
+    // reaches the still-mounted candidate before the first add's success
+    // handler can clear the field — deterministic, instead of racing real
+    // network latency, for a real (if rushed) flow: mashing ⏎ twice for two
+    // individual copies of the same card rather than ⇧⏎ + 2 + ⏎.
+    await page.route("**/api/quick_add", async (route) => {
+      await new Promise((r) => setTimeout(r, 250));
+      await route.continue();
+    });
+
+    // Land on the collection page with the query already committed, in one
+    // navigation. `openPanel`'s own goto-then-type would otherwise plant a
+    // bare-URL history entry of its own between `/my` and the search — one a
+    // single Back could never see past regardless of this fix, since it
+    // isn't part of what the fix touches.
+    await page.goto(`/my/collections/${binder}?q=lightning`);
+    await hydrated(page);
+    const box = page.locator("#collection-query");
+    await box.click();
+    await expect(page.getByTestId("quick-add-panel")).toBeAttached();
+    await expect(candidates(page).first()).toBeAttached({ timeout: 15000 });
+
+    const name = await highlightedName(page);
+    expect(name, "something must be highlighted to add").toBeTruthy();
+
+    let addResponses = 0;
+    page.on("response", (r) => {
+      if (r.url().includes("/api/quick_add") && r.status() === 200) {
+        addResponses++;
+      }
+    });
+    await box.press("Enter");
+    await box.press("Enter");
+    await expect.poll(() => addResponses, { timeout: 10000 }).toBe(2);
+    await expect
+      .poll(async () => (await rowNamed(request, binder, name))?.present ?? 0)
+      .toBe(2);
+    // The loop point still holds with two adds in flight, not just one.
+    await expect(box).toHaveValue("");
+
+    // Pre-fix, every add's post-clear `commit("")` computed `replace` from
+    // `q.is_empty()` — always true for this call, so `replace` was always
+    // `false` and every add pushed a fresh entry; Back would walk through one
+    // intermediate cleared-query stop per add before ever leaving the page.
+    // Fixed, the clear replaces the single entry the search itself pushed, so
+    // one Back leaves the collection page entirely.
+    await page.goBack();
+    await expect(page).toHaveURL(/\/my$/);
+  } finally {
+    await deleteCollection(request, binder);
+  }
+});
+
 test("⌥⏎ commits the other kind — Want in a binder @fast", async ({
   page,
   request,
@@ -353,6 +415,62 @@ test("⇧⏎ then digits then ⏎ adds that many copies @fast", async ({
   }
 });
 
+test("a failed add resets the pending count — a later bare ⏎ does not silently reuse it @fast", async ({
+  page,
+  request,
+}) => {
+  const binder = await createCollection(request, "binder");
+  try {
+    // Force the highlighted candidate to look printing-less, deterministically
+    // reproducing the `Have`-with-no-printing early return in `add`
+    // (`app/src/components/quick_add.rs`, P6-148) without depending on the
+    // POC catalog subset happening to contain one.
+    await page.route("**/api/search_catalog**", async (route) => {
+      const res = await route.fetch();
+      const body = (await res.json()) as { cards: { printing_id: string | null }[] };
+      if (body.cards.length > 0) {
+        body.cards[0].printing_id = null;
+      }
+      await route.fulfill({ response: res, json: body });
+    });
+
+    const box = await openPanel(page, binder, "lightning");
+    const name = await highlightedName(page);
+    expect(name, "something must be highlighted").toBeTruthy();
+
+    await box.press("Shift+Enter");
+    await box.press("4");
+    await expect(page.getByTestId("quick-add-count")).toContainText("4");
+    await box.press("Enter");
+    await expect(toastFor(page, name)).toContainText("has no printing");
+
+    // The count must already be gone — not just about to be, on the next
+    // keystroke. Pre-fix this early return left `count` at `Some("4")`, so
+    // the chip kept reading `× 4 ⏎` after a failure the storyboard's ⏎ hint
+    // never advertised for this card.
+    await expect(page.getByTestId("quick-add-count")).toHaveCount(0);
+    await expect(chip(page)).toContainText("Have");
+    await expect(chip(page)).not.toContainText("4");
+
+    // A later bare ⏎ must behave exactly like the first bare failure would
+    // have — quantity 1 implied, no phantom playset — and never reach the
+    // server: the printing guard is client-side, before any `quick_add` call.
+    let addRequests = 0;
+    page.on("request", (r) => {
+      if (r.url().includes("/api/quick_add")) addRequests++;
+    });
+    await box.press("Enter");
+    // `.last()`: the first failure's toast is still on screen too.
+    await expect(toastFor(page, name).last()).toContainText("has no printing");
+    expect(addRequests, "a printing-less card must never reach quick_add").toBe(
+      0,
+    );
+    expect(await rowNamed(request, binder, name)).toBeUndefined();
+  } finally {
+    await deleteCollection(request, binder);
+  }
+});
+
 test("Escape abandons the count first, then the panel @fast", async ({
   page,
   request,
@@ -371,6 +489,37 @@ test("Escape abandons the count first, then the panel @fast", async ({
 
     await box.press("Escape");
     await expect(page.getByTestId("quick-add-panel")).toHaveCount(0);
+  } finally {
+    await deleteCollection(request, binder);
+  }
+});
+
+test("Escape closes an empty panel too, and blurs the field so a refocus reopens it @fast", async ({
+  page,
+  request,
+}) => {
+  const binder = await createCollection(request, "binder");
+  try {
+    // At rest — no query typed — nothing is mounted under the panel:
+    // `candidates` short-circuits on an empty `q` and `PresentSection` gates
+    // on a non-empty query too (see `quick_add.rs`). This is the shape
+    // `decode` used to treat as "closed" — `rows == 0` doubled as "is the
+    // panel open" for *every* key, Escape included, so Escape did nothing and
+    // only an outside click could dismiss it (P6-148).
+    const box = await openPanelAtRest(page, binder);
+    const panel = page.getByTestId("quick-add-panel");
+    await expect(panel).toHaveCount(1);
+    await expect(candidates(page)).toHaveCount(0);
+
+    await box.press("Escape");
+    await expect(panel).toHaveCount(0);
+
+    // Escape's close must also give up focus (P6-148): opening is driven by
+    // `focusin` on the field, so a field left focused after Escape can never
+    // fire that event again — reopening needed a click away and back first.
+    await expect(box).not.toBeFocused();
+    await box.focus();
+    await expect(panel).toHaveCount(1);
   } finally {
     await deleteCollection(request, binder);
   }
