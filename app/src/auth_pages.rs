@@ -10,12 +10,18 @@ use crate::account::{
     AuthOutcome, GoogleSignIn, RequestPasswordReset, ResendVerification, ResetPassword, SignIn,
     SignUp, VerifyEmail,
 };
+use crate::shell::Wordmark;
 
 const CARD: &str =
     "bg-card text-card-foreground rounded-xl shadow-2xl p-8 max-w-md w-full border space-y-6";
 const SCREEN: &str = "min-h-screen bg-background flex items-center justify-center p-4";
 const INPUT: &str = "w-full rounded-lg bg-background border border-input px-4 py-3 \
                      placeholder-muted-foreground focus:outline-none focus:border-ring";
+/// Field labels above the sign-in/sign-up inputs (design frame's "Email
+/// Label" / "Password Label": small, medium-weight, muted — a visible
+/// `<label>`, not a floating-placeholder pattern, so it stays on screen
+/// alongside the input rather than only living in `placeholder`.
+const LABEL: &str = "block text-sm font-medium text-muted-foreground";
 const BUTTON: &str = "w-full rounded-lg bg-primary px-6 py-3 text-primary-foreground font-medium \
                       transition-all duration-200 hover:bg-primary/90 active:scale-[0.98] \
                       disabled:opacity-50 disabled:cursor-not-allowed";
@@ -289,22 +295,34 @@ pub fn LoginPage() -> impl IntoView {
                     fallback=move || view! { <ResetCard set_reset_mode=set_reset_mode /> }
                 >
                     <div class=CARD>
-                        <h1 class="text-2xl font-medium">"Sign in"</h1>
+                        <Wordmark />
+                        <h1 class="text-2xl font-medium">"Sign in to your collection"</h1>
                         <ActionForm action=sign_in attr:class="space-y-4">
-                            <input
-                                class=INPUT
-                                type="email"
-                                name="email"
-                                placeholder="Email"
-                                required
-                            />
-                            <input
-                                class=INPUT
-                                type="password"
-                                name="password"
-                                placeholder="Password"
-                                required
-                            />
+                            <div class="space-y-1">
+                                <label for="login-email" class=LABEL>
+                                    "Email"
+                                </label>
+                                <input
+                                    id="login-email"
+                                    class=INPUT
+                                    type="email"
+                                    name="email"
+                                    placeholder="you@example.com"
+                                    required
+                                />
+                            </div>
+                            <div class="space-y-1">
+                                <label for="login-password" class=LABEL>
+                                    "Password"
+                                </label>
+                                <input
+                                    id="login-password"
+                                    class=INPUT
+                                    type="password"
+                                    name="password"
+                                    required
+                                />
+                            </div>
                             <button
                                 class=BUTTON
                                 type="submit"
@@ -330,8 +348,8 @@ pub fn LoginPage() -> impl IntoView {
                             </button>
                         </p>
                         <p class=MUTED_TEXT>
-                            "No account? "
-                            <a class="underline" href="/signup">"Sign up"</a>
+                            "New here? "
+                            <a class="underline" href="/signup">"Create account"</a>
                         </p>
                         <BackHome />
                     </div>
@@ -375,24 +393,48 @@ pub fn SignupPage() -> impl IntoView {
                 }
             >
                 <div class=CARD>
+                    <Wordmark />
                     <h1 class="text-2xl font-medium">"Create account"</h1>
                     <ActionForm action=sign_up attr:class="space-y-4">
-                        <input class=INPUT type="text" name="name" placeholder="Name" required />
-                        <input
-                            class=INPUT
-                            type="email"
-                            name="email"
-                            placeholder="Email"
-                            required
-                        />
-                        <input
-                            class=INPUT
-                            type="password"
-                            name="password"
-                            placeholder="Password (8+ characters)"
-                            required
-                            minlength="8"
-                        />
+                        <div class="space-y-1">
+                            <label for="signup-name" class=LABEL>
+                                "Name"
+                            </label>
+                            <input
+                                id="signup-name"
+                                class=INPUT
+                                type="text"
+                                name="name"
+                                required
+                            />
+                        </div>
+                        <div class="space-y-1">
+                            <label for="signup-email" class=LABEL>
+                                "Email"
+                            </label>
+                            <input
+                                id="signup-email"
+                                class=INPUT
+                                type="email"
+                                name="email"
+                                placeholder="you@example.com"
+                                required
+                            />
+                        </div>
+                        <div class="space-y-1">
+                            <label for="signup-password" class=LABEL>
+                                "Password"
+                            </label>
+                            <input
+                                id="signup-password"
+                                class=INPUT
+                                type="password"
+                                name="password"
+                                placeholder="8+ characters"
+                                required
+                                minlength="8"
+                            />
+                        </div>
                         <button class=BUTTON type="submit" disabled=move || sign_up.pending().get()>
                             {move || {
                                 if sign_up.pending().get() { "Creating…" } else { "Create account" }
