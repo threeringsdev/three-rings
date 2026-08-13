@@ -2,7 +2,7 @@
 name: workbook
 description: Use when a repository tracks work with the Workbook CLI and the user invokes /workbook, $workbook, supplies a Workbook task ID, or asks an agent to take the next Workbook task.
 ---
-<!-- workbook:begin generator=0.4.0 sha256=fa0d141cdcc6ef6585aed6f757758cd04dfdfb11b2846d7ba356e1e9d37e7810 -->
+<!-- workbook:begin generator=0.4.4 sha256=f65705cb5af41193113df269fb9f26f4a364ff8541bf2e3bc874af5ce4770c9f -->
 # Working a Workbook Task
 
 Use the `workbook` CLI as the task-state boundary. Never edit Workbook Git refs,
@@ -20,6 +20,30 @@ SQLite projections, or configuration directly.
 4. Use the resolved full ID for every later Workbook command.
 5. Read the full title, description, status, dependencies, labels, and
    acceptance context before editing files.
+6. `data.dependencies` carries bare IDs. Before saying anything about a
+   dependency or a blocker, run `workbook show <dependency-id> --json` for each
+   entry and keep its `data.title`; never invent one. Exit code 4 there is not
+   the step 3 stop: this clone cannot resolve that one dependency, so name it
+   by ID, say it is unresolved, and keep working rather than stopping.
+
+## IDs are for commands, titles are for humans
+
+The full task ID is the machine interface; titles are for humans. Keep using
+the resolved full ID for every Workbook CLI invocation, but build prose —
+progress reports, completion summaries, questions, and error reports — around
+the task title.
+
+- Announce a selected task by title: `Taking "Add remote claim and lease
+  workflow".`, not `Taking WB-01KYD730XZ9S88N1GGGSSG2CJ5.`
+- Report lifecycle transitions the same way: `"Add remote claim and lease
+  workflow" is ready for review.`
+- Bad news is not an exception. A blocked task, a failed command, or a task you
+  will not start is still announced by title: `"Add remote claim and lease
+  workflow" is blocked by "Define the lease renewal protocol".`
+- Describe dependencies and blockers by the titles of the tasks involved,
+  resolved through step 6 above.
+- Mention an ID only when it adds something: disambiguating similarly titled
+  tasks, or giving a human a command to run themselves.
 
 ## Follow the lifecycle
 
@@ -69,6 +93,9 @@ asked, or to reconcile after exit code 6.
 
 - Use canonical `in-progress` and `in-review`, not display labels.
 - Keep using the resolved full task ID after selection.
+- Lead with task titles, not raw IDs, when reporting to a human, including when
+  reporting a blocker or a failure.
+- Resolve a dependency ID with `workbook show` before naming the blocker.
 - Check every JSON command result; do not assume a mutation succeeded.
 - Do not claim that Workbook creates branches, pull requests, or merges code.
 <!-- workbook:end -->
