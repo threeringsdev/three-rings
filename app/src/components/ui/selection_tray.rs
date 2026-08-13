@@ -43,6 +43,8 @@
 //!
 //! [`action`]: SelectionTray
 
+use std::collections::HashSet;
+
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use shared::{Board, Id};
@@ -57,6 +59,38 @@ use super::checkbox::Checkbox;
 /// [`shared::MoveItem`] or a stated refusal, so the "which copies did you mean"
 /// question is answered once, against the database, rather than guessed by the
 /// client.
+///
+/// **Staleness policy (P6-122).** The tray is long-lived by design (the
+/// module docs above), so a `Held` key can outlive what it names: a stepper
+/// commit can drive its row to zero, or the collection it names can be deleted
+/// (its holdings relocated elsewhere by the delete's own disposition —
+/// specs/collection-deletion.md). Neither is guessed at or silently dropped
+/// mid-flight; the policy is two layers, cheapest first:
+///
+/// - **Use time, always.** `move_selection`'s server fn re-reads the caller's
+///   holdings fresh (`holdings_of_oracle`) and resolves every entry against
+///   *that*, never against anything the client cached — a key naming a gone
+///   holding or a since-deleted collection resolves to zero candidates and is
+///   refused as [`crate::my::move_selection::SkipReason::NoCopies`], reported
+///   by name, never written. This is the one guarantee that always holds, so
+///   it is also the fallback for staleness the client cannot see cheaply.
+///   (There is one deliberate, documented exception — a microsecond window
+///   between that read and the write can still abort the batch rather than
+///   skip-one — see specs/app-ui.md → Findings, "Batch move (2026-07-25)",
+///   "The residual TOCTOU case is deliberate".)
+/// - **Client-side pruning, only where it is cheap.** After a batch move,
+///   [`SelectionState::remove_tokens`] reconciles against the server's actual
+///   outcome — never a guess. Between moves, [`SelectionState::prune_missing_collections`]
+///   drops a `Held` entry the instant its collection disappears from the
+///   already-loaded collection tree (wired at the shell on every tree
+///   refetch) — free, because that data is fetched for the sidebar anyway. A
+///   row driven to zero by the stepper is deliberately **not** pruned the same
+///   way: `CardTableRow` (`app/src/my/collection.rs`) hides its checkbox but
+///   leaves the tray entry itself alone (P6-118, specs/app-ui.md → Findings,
+///   "Removed rows leave section counts and selection immediately") — the
+///   use-time refusal above is the mechanism already built for that case, and
+///   duplicating it client-side would need a server read to validate a hidden
+///   row honestly, which is the one thing this policy avoids doing for free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SelectionKey {
     /// A `/my/collections/:id` card row: copies of one printing, on one board,
@@ -161,12 +195,33 @@ impl SelectionState {
     pub fn remove_tokens(self, tokens: &[String]) {
         self.items.update(|v| retain_untokened(v, tokens));
     }
+
+    /// Drop every `Held` entry whose collection is not among `live` — the
+    /// tray's other proactive prune, alongside [`Self::remove_tokens`]. See
+    /// the staleness policy documented on [`SelectionKey`].
+    ///
+    /// `Card` entries are never touched: they name an oracle card, not a
+    /// collection, so a collection's deletion cannot make one stale (the
+    /// resolution that follows one still walks the caller's *live* holdings
+    /// wherever they now sit).
+    pub fn prune_missing_collections(self, live: &HashSet<Id>) {
+        self.items.update(|v| retain_live_collections(v, live));
+    }
 }
 
 /// The removal itself, free of the signal so it is testable without a reactive
 /// runtime (the [`toggle_in`] precedent).
 fn retain_untokened(items: &mut Vec<SelectedCard>, tokens: &[String]) {
     items.retain(|c| !tokens.contains(&c.key.token()));
+}
+
+/// [`SelectionState::prune_missing_collections`]'s removal, free of the
+/// signal for the same reason [`retain_untokened`] is.
+fn retain_live_collections(items: &mut Vec<SelectedCard>, live: &HashSet<Id>) {
+    items.retain(|c| match c.key {
+        SelectionKey::Held { collection_id, .. } => live.contains(&collection_id),
+        SelectionKey::Card { .. } => true,
+    });
 }
 
 /// The toggle itself, free of the signal so it is testable without a reactive
@@ -526,5 +581,47 @@ mod tests {
         let mut items = vec![main.clone(), side.clone()];
         retain_untokened(&mut items, &[main.key.token()]);
         assert_eq!(items, vec![side]);
+    }
+
+    #[test]
+    fn a_deleted_collection_drops_only_the_held_entries_naming_it() {
+        // The collection this row named is gone; the tray should not keep
+        // counting it — see the staleness policy on `SelectionKey`.
+        let gone = card(
+            SelectionKey::Held {
+                collection_id: id(1),
+                printing_id: id(2),
+                board: Board::Main,
+            },
+            "Bolt",
+        );
+        // Same printing, a collection that still exists.
+        let live = card(
+            SelectionKey::Held {
+                collection_id: id(9),
+                printing_id: id(2),
+                board: Board::Main,
+            },
+            "Bolt",
+        );
+        // A `/my` row names no collection at all, so it cannot go stale this
+        // way — it must survive untouched.
+        let by_card = card(SelectionKey::Card { oracle_id: id(2) }, "Bolt");
+
+        let mut items = vec![gone.clone(), live.clone(), by_card.clone()];
+        let live_ids: HashSet<Id> = [id(9)].into_iter().collect();
+        retain_live_collections(&mut items, &live_ids);
+        assert_eq!(items, vec![live, by_card]);
+    }
+
+    #[test]
+    fn no_live_collections_still_keeps_every_card_entry() {
+        // An empty tree read (or one still loading and never fed in) must not
+        // read as "every collection is gone" for the grain that never named
+        // one to begin with.
+        let by_card = card(SelectionKey::Card { oracle_id: id(1) }, "Bolt");
+        let mut items = vec![by_card.clone()];
+        retain_live_collections(&mut items, &HashSet::new());
+        assert_eq!(items, vec![by_card]);
     }
 }

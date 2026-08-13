@@ -605,9 +605,11 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
             pending.set(false);
             match result {
                 Ok(outcome) => {
-                    // Drop what moved; leave the refusals checked — they are
-                    // what still needs doing, and the toast names them.
-                    selection.remove_tokens(&outcome.moved);
+                    // Drop what moved, and what the server just proved gone
+                    // (`NoCopies`); leave every other refusal checked — that is
+                    // still work to do, and the toast names it. See
+                    // `tokens_to_drop`'s own doc for the line between the two.
+                    selection.remove_tokens(&tokens_to_drop(&outcome));
                     if !outcome.move_ids.is_empty() {
                         if let Some(t) = tree {
                             t.0.refetch();
@@ -738,6 +740,34 @@ fn undo(
             }
         }
     });
+}
+
+/// Which tray entries a finished batch move should drop (P6-122, staleness
+/// policy on [`SelectionKey`](crate::components::ui::selection_tray::SelectionKey)):
+/// what moved, **plus** what was refused as [`SkipReason::NoCopies`] — the one
+/// refusal that names something *provably gone* rather than a real ambiguity.
+///
+/// Every other refusal (`Grain`, `ManyCollections`, `ManyPrintings`,
+/// `ManyBoards`, `AlreadyThere`) names a question the user can still act on —
+/// open the right page, pick the right grain — so those stay checked exactly as
+/// [`SelectionState::remove_tokens`](crate::components::ui::selection_tray::SelectionState::remove_tokens)'s
+/// own doc says: they are work still to do. `NoCopies` is not a question; the
+/// stack it named no longer exists (a stepper commit, a teardown, a collection
+/// whose holdings relocated out from under it), and the fresh server read that
+/// produced it is the one validation this policy always trusts — see the
+/// staleness policy for why that trust is the load-bearing guarantee here.
+/// Leaving it checked would mean the pill keeps counting something the server
+/// just proved gone until the user notices and clears it by hand.
+pub fn tokens_to_drop(outcome: &MoveOutcome) -> Vec<String> {
+    let mut tokens = outcome.moved.clone();
+    tokens.extend(
+        outcome
+            .skipped
+            .iter()
+            .filter(|s| s.reason == SkipReason::NoCopies)
+            .map(|s| s.token.clone()),
+    );
+    tokens
 }
 
 /// Pair each refusal with the card name the tray showed for it. A token with no
@@ -1128,5 +1158,64 @@ mod tests {
         );
         // An unmatched token is still reported — never dropped.
         assert_eq!(label_skips(&skipped, &[]).len(), 1);
+    }
+
+    #[test]
+    fn tokens_to_drop_takes_the_moved_and_the_provably_gone() {
+        // Three entries: one moved, one refused because its stack is simply
+        // gone (a stepper commit, a teardown — see `SelectionKey`'s staleness
+        // policy), one refused because it is a real, still-actionable
+        // ambiguity. Only the first two should stop being counted.
+        let outcome = MoveOutcome {
+            move_ids: vec![id(1)],
+            moved: vec!["held:a:b:main".to_string()],
+            skipped: vec![
+                Skipped {
+                    token: "held:c:d:main".to_string(),
+                    reason: SkipReason::NoCopies,
+                },
+                Skipped {
+                    token: "card:e".to_string(),
+                    reason: SkipReason::ManyCollections(2),
+                },
+            ],
+        };
+        let mut dropped = tokens_to_drop(&outcome);
+        dropped.sort();
+        assert_eq!(
+            dropped,
+            vec!["held:a:b:main".to_string(), "held:c:d:main".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokens_to_drop_leaves_every_other_refusal_alone() {
+        // `AlreadyThere`, `Grain`, `ManyPrintings`, `ManyBoards` all name a
+        // real question the user can still answer — none of them mean the
+        // stack is gone, so none of them should be swept off the tray with
+        // `NoCopies`.
+        let outcome = MoveOutcome {
+            move_ids: vec![],
+            moved: vec![],
+            skipped: vec![
+                Skipped {
+                    token: "a".to_string(),
+                    reason: SkipReason::AlreadyThere,
+                },
+                Skipped {
+                    token: "b".to_string(),
+                    reason: SkipReason::Grain(2),
+                },
+                Skipped {
+                    token: "c".to_string(),
+                    reason: SkipReason::ManyPrintings(2),
+                },
+                Skipped {
+                    token: "d".to_string(),
+                    reason: SkipReason::ManyBoards(2),
+                },
+            ],
+        };
+        assert_eq!(tokens_to_drop(&outcome), Vec::<String>::new());
     }
 }

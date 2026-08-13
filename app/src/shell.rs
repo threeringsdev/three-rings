@@ -205,6 +205,23 @@ pub fn AppShell() -> impl IntoView {
     // renders holdings takes it as a resource *source*, so a move refetches
     // what it invalidated instead of leaving stale counts on screen.
     crate::my::move_selection::provide_holdings_revision();
+    // The tray's other proactive prune (P6-122, staleness policy on
+    // `SelectionKey`): every time the sidebar's collection tree resolves —
+    // the initial load and every refetch a create/rename/move/delete makes —
+    // drop any `Held` entry whose collection is no longer among the live
+    // ones. Free: the tree is fetched for the sidebar regardless, so this
+    // reads data already in hand rather than issuing a read of its own. The
+    // outer `Option` is "pending or anonymous", the inner is the fetch
+    // result; either not-yet-resolved case is a no-op rather than a prune —
+    // a still-pending tree must never read as "every collection is gone".
+    let tree = expect_context::<crate::my::tree::CollectionTreeResource>().0;
+    Effect::new(move |_| {
+        if let Some(Some(Ok(fresh))) = tree.get() {
+            let live: std::collections::HashSet<shared::Id> =
+                fresh.collections.iter().map(|row| row.summary.id).collect();
+            selection.prune_missing_collections(&live);
+        }
+    });
     // Shell-level so ⌘K's `New binder…` / `New deck…` can open the tree's own
     // create dialog from anywhere — including Catalog mode, where the sidebar
     // tree (which used to provide this) isn't mounted at all. `TreeDialogs`

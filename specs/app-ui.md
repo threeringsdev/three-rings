@@ -228,6 +228,94 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Stale selection-tray entries: pruned, not moved (P6-122, 2026-08-12)
+
+`app/src/components/ui/selection_tray.rs`, `app/src/my/move_selection.rs`,
+`app/src/shell.rs` — the staleness policy for a tray key that outlives what it
+names, now that batch move writes.
+
+**The critical finding: the server already handles a gone reference gracefully
+for the threat model this task describes, and that was not new work.** The
+"Batch move (2026-07-25)" entry above already built the pre-check this task
+was scoped to add: `move_selection`'s server fn re-reads the caller's holdings
+fresh (`holdings_of_oracle`) and resolves every entry against *that*, never
+against anything the client cached, before `move_batch` ever runs. A key
+naming a holding a stepper drove to zero, or a collection since deleted (its
+holdings relocated by the delete's own disposition — the deleted `collection_id`
+no longer appears in `holdings_of_oracle`'s live rows, wherever the copies
+landed), resolves to zero candidates and is refused as `SkipReason::NoCopies`,
+by name, never written. No wrong-write path exists either: every write is
+addressed by the natural key (`collection_id, printing_id, finish, condition,
+language, board`), never by a holding row's id, so nothing about a row being
+deleted and recreated under a new id can misdirect a write. **The one gap that
+genuinely needed closing was client-side reconciliation, not the server.**
+
+**The residual TOCTOU race is deliberate, and re-closing it here was
+rejected.** A microsecond window between the resolution read and `move_batch`'s
+own write transaction can still abort the whole batch on one stale item rather
+than skip it — "Batch move (2026-07-25)" already named this "deliberate"
+(closing it needs a grain-aware batch write) and P6-114 already declined to
+build the general fix. Re-opening either is out of scope for an S-sized task
+revisiting client policy; the mitigations recorded there (a microsecond window,
+an honest "nothing was moved" error, an intact selection the user can retry)
+still stand.
+
+**What actually changed, both client-side:**
+
+1. **`tokens_to_drop`** (`move_selection.rs`) — post-move reconciliation used to
+   drop only what moved (`remove_tokens(&outcome.moved)`), leaving every
+   refusal checked "because it is still work to do." That reasoning holds for
+   `Grain`/`ManyCollections`/`ManyPrintings`/`ManyBoards`/`AlreadyThere` — each
+   names a real, still-actionable question. It does not hold for `NoCopies`:
+   the stack is provably gone, and there is no page to open that fixes it. The
+   tray now drops `NoCopies` refusals alongside moves, so the pill stops
+   counting something the server just proved gone.
+2. **`SelectionState::prune_missing_collections`** (`selection_tray.rs`),
+   wired at the shell — every time the sidebar's collection tree resolves (the
+   initial load and every create/rename/move/delete refetch), any `Held` entry
+   whose `collection_id` is no longer among the live ones is dropped. Free:
+   the tree is fetched for the sidebar regardless, so this reads data already
+   in hand rather than issuing a read of its own. `Card` entries are immune by
+   construction — they name no collection.
+
+**Deliberately not done: pruning a row driven to zero by the stepper.** This
+already has a maintainer decision behind it — "Removed rows leave section
+counts and selection immediately" (2026-08-10, P6-118) hoists `removed` to gate
+only the *checkbox's* visibility, leaving the tray entry itself alone, "because
+the tray already has a name and a toast for a selection that outlived its
+copies... this is that case reaching the mechanism already built for it, not a
+new one." Reversing that now would need a server read to validate a hidden
+row honestly (the mechanism `holdings_revision` bumps for is a refetch
+*trigger*, not a payload the tray itself can diff), which is the one thing this
+policy avoids paying for. Left as documented, not silently re-litigated.
+
+**Evidence.** `cargo test --workspace --exclude frontend --exclude three_rings`
+324 passed, 0 failed (10 new: 2 pure prune tests in `selection_tray.rs`, 2 pure
+`tokens_to_drop` tests in `move_selection.rs`, plus existing coverage). fmt
+clean; clippy clean on all five gate lines (workspace-exclude, wasm frontend,
+`app --features native`, `app --features hosted,component-bench`, `app
+--features hydrate,component-bench` wasm). e2e: one new kill-verified test in
+`batch-move.spec.ts` — selects a live pair plus a row the stepper's own
+`POST /api/holdings/{id}/quantity` endpoint zeroes out *after* selection,
+batch-moves, and asserts the pair moved, the dead entry was named and never
+written, and the tray emptied rather than staying pinned at "1 card." Reverting
+just the `tokens_to_drop` wiring reproduces the failure at the exact assertion
+(`toHaveCount(0)` on the tray receives `1`); restoring it passes again. Full
+serial run of `batch-move.spec.ts` + `selection-tray.spec.ts`: 12/14 passed.
+The 2 failures (`a /my row held in one place resolves to that place and
+moves`, `a /my row whose copies are all sideboarded moves off the sideboard`)
+are pre-existing and unrelated — confirmed via the API that "Akki
+Blizzard-Herder" (the card `unownedCards`' fixed skip offsets pick at those two
+call sites) is already held via the permanent Inbox (5 copies, real dev-seed
+data, not test residue), so the `/api/all-cards?limit=200` + `catalog/
+search?q=z&limit=60` fixture-pool helper misclassifies it as "owned nowhere."
+This is the same fixture-pool class already tracked in the e2e-suite skill's
+baseline (batch-move `:315`/`:435` before this task's insertions shifted line
+numbers to `:344`/`:464`); the dev DB carries dozens of `zz-e2e-*` collections
+left over from unrelated past sessions, confirming a growing shared fixture
+pool rather than anything this task's diff touches. No `zz-e2e-stale*`
+collection from this task's own test was left behind.
+
 ### Catalog search: a facet click inside the query bar's debounce window (P6-086, 2026-08-12)
 
 **The race.** `/catalog` has two writers of one `?q=`, and for ~250 ms after
