@@ -101,17 +101,29 @@ impl Failure {
     }
 
     /// The typed counterpart of [`classify`]'s string-prefix table — same
-    /// grouping (`conflict`/`forbidden`/`validation` are the request's fault,
-    /// `not_found` names the thing, `unauthorized` names the session,
-    /// `upstream` is breakage worth retrying), read off the variant instead of
-    /// its `Display` text.
+    /// grouping (`conflict`/`forbidden`/`validation`/`bad_cursor` are the
+    /// request's fault, `not_found` names the thing, `unauthorized` names the
+    /// session, `upstream` is breakage worth retrying), read off the variant
+    /// instead of its `Display` text.
+    ///
+    /// **`BadCursor` groups with `Request`, not a fourth `Failure` arm**
+    /// (P6-043): a corrupt `?cursor=` shares the affordance contract exactly —
+    /// not retryable (resending the same cursor fails identically) and its fix
+    /// is a way *out*, which `ErrorNote`'s `children` slot already covers on
+    /// every surface that renders one. What `BadCursor` earns over lumping
+    /// straight into `Validation` is not a new arm here, but a distinct wire
+    /// variant a *caller* can match on — `/catalog`'s own error arm
+    /// (`catalog.rs::describe_error`, not this module) does exactly that, so
+    /// it can stop blaming the query for a page reference that is the actual
+    /// problem.
     fn of_api_error(e: &shared::ApiError) -> Self {
         match e {
             shared::ApiError::NotFound(_) => Failure::Missing,
             shared::ApiError::Unauthorized(_) => Failure::Session,
             shared::ApiError::Forbidden(_)
             | shared::ApiError::Conflict(_)
-            | shared::ApiError::Validation(_) => Failure::Request,
+            | shared::ApiError::Validation(_)
+            | shared::ApiError::BadCursor(_) => Failure::Request,
             shared::ApiError::Upstream(_) => Failure::Transport,
         }
     }
@@ -120,15 +132,16 @@ impl Failure {
 /// Classify a wire message by its `ApiError` `Display` prefix, and strip the
 /// prefix off the human half.
 ///
-/// `conflict` / `forbidden` / `validation` are statements about the request,
-/// `not found` about the thing, `unauthorized` about the session. Everything
-/// else — `upstream` included, plus any non-`ServerError` transport variant whose
-/// text carries no prefix at all — is treated as breakage worth retrying.
+/// `conflict` / `forbidden` / `validation` / `bad cursor` are statements about
+/// the request, `not found` about the thing, `unauthorized` about the session.
+/// Everything else — `upstream` included, plus any non-`ServerError` transport
+/// variant whose text carries no prefix at all — is treated as breakage worth
+/// retrying.
 pub fn classify(raw: &str) -> (Failure, &str) {
     if let Some(rest) = raw.strip_prefix("not found: ") {
         return (Failure::Missing, rest);
     }
-    for prefix in ["conflict: ", "forbidden: ", "validation: "] {
+    for prefix in ["conflict: ", "forbidden: ", "validation: ", "bad cursor: "] {
         if let Some(rest) = raw.strip_prefix(prefix) {
             return (Failure::Request, rest);
         }
@@ -328,11 +341,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_stale_cursor_is_the_requests_fault_and_offers_no_retry() {
-        // The concrete case: `?cursor=` from a shared or bookmarked link. The
-        // server calls it a validation error, and retrying re-sends the same
-        // cursor — so the arm must offer a way out instead.
-        let (failure, message) = classify("validation: invalid cursor");
+    fn a_rejected_term_is_the_requests_fault_and_offers_no_retry() {
+        // A half-typed grammar term. The server calls it a validation error,
+        // and retrying re-sends the same text — so the arm must offer a way
+        // out instead.
+        let (failure, message) = classify("validation: unknown term: rareness");
+        assert_eq!(failure, Failure::Request);
+        assert_eq!(message, "unknown term: rareness");
+        assert!(!failure.retryable());
+    }
+
+    #[test]
+    fn a_corrupt_cursor_is_also_the_requests_fault_but_not_the_querys() {
+        // P6-043: `?cursor=` from a shared or bookmarked link, once its own
+        // `ApiError::BadCursor` variant rather than a `Validation` sharing
+        // `?cursor=`'s message with a rejected search term. `classify` still
+        // groups it with `Request` (not retryable, same "way out" contract) —
+        // it is `catalog.rs::describe_error`, not this table, that stops
+        // blaming the query in the banner text itself.
+        let (failure, message) = classify("bad cursor: invalid cursor");
         assert_eq!(failure, Failure::Request);
         assert_eq!(message, "invalid cursor");
         assert!(!failure.retryable());
@@ -442,7 +469,15 @@ mod tests {
                 "the Inbox cannot be moved",
             ),
             (
-                shared::ApiError::Validation("invalid cursor".into()),
+                shared::ApiError::Validation("unknown term: rareness".into()),
+                Failure::Request,
+                "unknown term: rareness",
+            ),
+            (
+                // P6-043: shares `Validation`'s `Failure::Request` grouping
+                // here — the two diverge in `catalog.rs::describe_error`, not
+                // in this table.
+                shared::ApiError::BadCursor("invalid cursor".into()),
                 Failure::Request,
                 "invalid cursor",
             ),

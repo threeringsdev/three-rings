@@ -10,6 +10,7 @@
     "probe:hydration-authed": "node hydration-check-authed.mjs",
     "probe:bench": "node bench-check.mjs",
     "probe:paging": "node all-cards-paging-check.mjs",
+    "probe:catalog-paging": "node catalog-paging-check.mjs",
     "probe:android-collection": "node android-collection-check.mjs",
     "probe:android-quick-add": "node android-quick-add-check.mjs",
     "probe:android-selection-tray": "node android-selection-tray-check.mjs",

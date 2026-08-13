@@ -85,6 +85,17 @@ pub enum ApiError {
     /// Malformed DTO / bad quantity — 422.
     #[error("validation: {0}")]
     Validation(String),
+    /// A keyset `?cursor=` failed to decode (bad base64/JSON, or a foreign
+    /// shape) — 422, same status as [`Self::Validation`] but a distinct
+    /// variant on purpose (P6-043). The query that produced the page is not
+    /// at fault — only the page reference is — and a UI that lumped this into
+    /// `Validation` had no way to say so: `describe_error`
+    /// (`app/src/catalog.rs`) rendered *any* `Validation` in the search box as
+    /// a query-grammar rejection, so a stale `?cursor=` on a perfectly good
+    /// query ("bolt") read as "bolt" itself being wrong. Distinguishing the
+    /// variant is what lets the UI blame the page reference instead.
+    #[error("bad cursor: {0}")]
+    BadCursor(String),
     /// DB or downstream failure — 502/500. Carries a human message; the
     /// original cause is logged server-side, never shipped to the client.
     #[error("upstream: {0}")]
@@ -100,6 +111,7 @@ impl ApiError {
             ApiError::Forbidden(_) => "forbidden",
             ApiError::Conflict(_) => "conflict",
             ApiError::Validation(_) => "validation",
+            ApiError::BadCursor(_) => "bad_cursor",
             ApiError::Upstream(_) => "upstream",
         }
     }
@@ -114,6 +126,7 @@ impl ApiError {
             ApiError::Forbidden(_) => 403,
             ApiError::Conflict(_) => 409,
             ApiError::Validation(_) => 422,
+            ApiError::BadCursor(_) => 422,
             ApiError::Upstream(_) => 502,
         }
     }
@@ -126,6 +139,7 @@ impl ApiError {
             | ApiError::Forbidden(m)
             | ApiError::Conflict(m)
             | ApiError::Validation(m)
+            | ApiError::BadCursor(m)
             | ApiError::Upstream(m) => m,
         }
     }
@@ -147,8 +161,20 @@ impl ApiError {
     /// picks the variant, the wire body supplies the message. Falls back to the
     /// status-implied variant when the body is missing/unparseable, and to
     /// `Upstream` for any status we don't map.
+    ///
+    /// **`bad_cursor` is read off the body's `code`, not the status**, because
+    /// it shares its 422 with [`Self::Validation`] — the status alone cannot
+    /// tell them apart. Every other variant still owns its status exclusively,
+    /// so they stay on the status-only table below; a missing/foreign body (no
+    /// `code` at all) degrades to that table's ordinary `422` reading
+    /// (`Validation`), which is the conservative choice — a decode failure
+    /// must not fabricate the more specific variant.
     pub fn from_wire(status: u16, body: Option<ErrorBody>) -> Self {
+        let is_bad_cursor = body.as_ref().is_some_and(|b| b.code == "bad_cursor");
         let message = body.map(|b| b.message).unwrap_or_default();
+        if is_bad_cursor {
+            return ApiError::BadCursor(message);
+        }
         match status {
             404 => ApiError::NotFound(message),
             401 => ApiError::Unauthorized(message),
@@ -208,6 +234,8 @@ impl std::str::FromStr for ApiError {
             ApiError::Conflict(m.to_string())
         } else if let Some(m) = s.strip_prefix("validation: ") {
             ApiError::Validation(m.to_string())
+        } else if let Some(m) = s.strip_prefix("bad cursor: ") {
+            ApiError::BadCursor(m.to_string())
         } else if let Some(m) = s.strip_prefix("upstream: ") {
             ApiError::Upstream(m.to_string())
         } else {
@@ -225,14 +253,14 @@ pub type Id = Uuid;
 
 #[cfg(test)]
 mod api_error_wire_tests {
-    use super::ApiError;
+    use super::{ApiError, ErrorBody};
 
     /// P6-083's acceptance sketch: every variant survives `Display` →
     /// `FromStr` — the exact round trip `ServerFnError<ApiError>` performs on
     /// the server-fn wire (`ServerFnErrorEncoding`'s `WrappedServerFn|{Display}`
     /// text, decoded back via `CustErr::from_str`). A corrupt cursor's
-    /// `ApiError::Validation` must come back `Validation`, not degrade to a
-    /// generic failure.
+    /// `ApiError::BadCursor` (P6-043) must come back `BadCursor`, not degrade
+    /// to a generic failure or collapse into `Validation`.
     #[test]
     fn every_variant_round_trips_through_display_and_from_str() {
         for original in [
@@ -240,7 +268,8 @@ mod api_error_wire_tests {
             ApiError::Unauthorized("invalid token".into()),
             ApiError::Forbidden("not yours".into()),
             ApiError::Conflict("the Inbox cannot be moved".into()),
-            ApiError::Validation("invalid cursor".into()),
+            ApiError::Validation("unknown term: rareness".into()),
+            ApiError::BadCursor("invalid cursor".into()),
             ApiError::Upstream("neon unreachable".into()),
         ] {
             let wire = original.to_string();
@@ -279,7 +308,8 @@ mod api_error_wire_tests {
             ApiError::Unauthorized("invalid token".into()),
             ApiError::Forbidden("not yours".into()),
             ApiError::Conflict("the Inbox cannot be moved".into()),
-            ApiError::Validation("invalid cursor".into()),
+            ApiError::Validation("unknown term: rareness".into()),
+            ApiError::BadCursor("invalid cursor".into()),
             ApiError::Upstream("neon unreachable".into()),
         ] {
             let json = serde_json::to_string(&original)
@@ -288,5 +318,52 @@ mod api_error_wire_tests {
                 .unwrap_or_else(|e| panic!("deserializing {json:?} must not fail: {e}"));
             assert_eq!(parsed, original, "round trip of {json}");
         }
+    }
+
+    /// `code()`/`http_status()` for the new P6-043 variant: 422, same as
+    /// `Validation`, and its own `bad_cursor` code — the pair the wire and
+    /// `from_wire` both lean on to tell the two 422s apart.
+    #[test]
+    fn bad_cursor_is_422_with_its_own_code() {
+        let e = ApiError::BadCursor("invalid cursor".into());
+        assert_eq!(e.http_status(), 422);
+        assert_eq!(e.code(), "bad_cursor");
+        assert_eq!(e.message(), "invalid cursor");
+    }
+
+    /// `from_wire`'s disambiguation of the shared 422: the wire `code` picks
+    /// `BadCursor` over the status-implied `Validation`, but only when the
+    /// body actually says `bad_cursor` — an ordinary validation 422, or a
+    /// missing/foreign body, must not be promoted to the more specific
+    /// variant it never claimed to be.
+    #[test]
+    fn from_wire_reads_bad_cursor_off_the_code_not_the_status() {
+        let bad_cursor_body = ErrorBody {
+            code: "bad_cursor".to_string(),
+            message: "invalid cursor".to_string(),
+            details: None,
+        };
+        assert_eq!(
+            ApiError::from_wire(422, Some(bad_cursor_body)),
+            ApiError::BadCursor("invalid cursor".into())
+        );
+
+        let validation_body = ErrorBody {
+            code: "validation".to_string(),
+            message: "unknown term: rareness".to_string(),
+            details: None,
+        };
+        assert_eq!(
+            ApiError::from_wire(422, Some(validation_body)),
+            ApiError::Validation("unknown term: rareness".into())
+        );
+
+        // No body at all (unparseable envelope) still degrades to the
+        // status-implied, conservative reading — never `BadCursor`, which
+        // only a `code` can earn.
+        assert_eq!(
+            ApiError::from_wire(422, None),
+            ApiError::Validation(String::new())
+        );
     }
 }

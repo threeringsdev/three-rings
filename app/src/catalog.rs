@@ -129,18 +129,39 @@ pub(crate) fn encode_query_value(s: &str) -> String {
     out
 }
 
-/// Pull the human-facing message out of a server-fn error, and say whether it
-/// was the grammar rejecting a term (422) rather than something going wrong.
+/// How a catalog search error should be blamed, for display.
+///
+/// **P6-043.** Used to be a bare `bool` ("is this a query error"), which is
+/// exactly what conflated a rejected search term with a corrupt `?cursor=` —
+/// both were `ApiError::Validation`, so both got the same treatment. Now that
+/// a bad cursor carries its own `ApiError::BadCursor` variant across the
+/// wire, this can say which of the two it actually is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueryErrorKind {
+    /// The grammar rejected a term in `q` — rendered inline verbatim, no
+    /// "Search failed" prefix; the message names the offending term.
+    Grammar,
+    /// The query parsed fine. The `?cursor=` naming a page in its results is
+    /// stale, corrupt, or foreign — the query is not at fault, only the page
+    /// reference is.
+    Cursor,
+    /// Anything else — genuine breakage, prefixed "Search failed: ".
+    Other,
+}
+
+/// Pull the human-facing message out of a server-fn error, and classify it
+/// ([`QueryErrorKind`]) so the caller can tell a rejected query from a bad
+/// page reference from something actually going wrong.
 ///
 /// **P6-083.** The server-fn wire now carries the typed `ApiError` variant
-/// (`crate::api_err`), so a `WrappedServerError(ApiError::Validation(_))` is
-/// matched directly rather than parsed off a `validation:` prefix. The
-/// prefix parse survives as the fallback for `ServerFnError` variants that
-/// carry no typed `ApiError` at all (a dropped fetch, e.g.) — treating every
-/// one of those as a failure rather than a query error is deliberate, so a
-/// partially-typed term doesn't flash "search failed" for a transport hiccup
-/// it isn't.
-pub(crate) fn describe_error(e: &ServerFnError<shared::ApiError>) -> (bool, String) {
+/// (`crate::api_err`), so a `WrappedServerError(ApiError::Validation(_) |
+/// ApiError::BadCursor(_))` is matched directly rather than parsed off a
+/// `validation:`/`bad cursor:` prefix. The prefix parse survives as the
+/// fallback for `ServerFnError` variants that carry no typed `ApiError` at
+/// all (a dropped fetch, e.g.) — treating every one of those as
+/// [`QueryErrorKind::Other`] is deliberate, so a partially-typed term doesn't
+/// flash "search failed" for a transport hiccup it isn't.
+pub(crate) fn describe_error(e: &ServerFnError<shared::ApiError>) -> (QueryErrorKind, String) {
     // `WrappedServerError` is soft-deprecated (server_fn 0.8.8) in favor of
     // authoring a wholly custom `FromServerFnError` type instead of
     // `ServerFnError<CustErr>` — but the generic remains fully supported
@@ -148,17 +169,24 @@ pub(crate) fn describe_error(e: &ServerFnError<shared::ApiError>) -> (bool, Stri
     // and matching this variant is the only way to read the typed `ApiError`
     // back out of it.
     #[allow(deprecated)]
-    if let ServerFnError::WrappedServerError(shared::ApiError::Validation(msg)) = e {
-        return (true, msg.clone());
+    if let ServerFnError::WrappedServerError(api_err) = e {
+        return match api_err {
+            shared::ApiError::Validation(msg) => (QueryErrorKind::Grammar, msg.clone()),
+            shared::ApiError::BadCursor(msg) => (QueryErrorKind::Cursor, msg.clone()),
+            other => (QueryErrorKind::Other, other.message().to_string()),
+        };
     }
     let raw = match e {
         ServerFnError::ServerError(msg) => msg.clone(),
         other => other.to_string(),
     };
-    match raw.strip_prefix("validation: ") {
-        Some(rest) => (true, rest.to_string()),
-        None => (false, raw),
+    if let Some(rest) = raw.strip_prefix("validation: ") {
+        return (QueryErrorKind::Grammar, rest.to_string());
     }
+    if let Some(rest) = raw.strip_prefix("bad cursor: ") {
+        return (QueryErrorKind::Cursor, rest.to_string());
+    }
+    (QueryErrorKind::Other, raw)
 }
 
 /// The catalog search resource's payload — a **named field**, for exactly the
@@ -590,7 +618,7 @@ fn Results(
                             .into_any()
                     }
                     Err(e) => {
-                        let (is_query_error, message) = describe_error(&e);
+                        let (kind, message) = describe_error(&e);
                         // The kept page has to answer the query this error is
                         // about; see `same_search`.
                         let kept = last_good
@@ -612,19 +640,35 @@ fn Results(
                                 data-testid="search-error"
                                 class="border-destructive/40 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-sm"
                             >
-                                {if is_query_error {
-                                    message
-                                } else {
-                                    format!("Search failed: {message}")
+                                {match kind {
+                                    // The grammar's own words about the term it
+                                    // rejected — no prefix, so it reads as an
+                                    // answer about the box, not the app.
+                                    QueryErrorKind::Grammar => message,
+                                    // P6-043: this used to fall into the branch
+                                    // above and print the raw "invalid cursor"
+                                    // as if `q` were the problem — the one
+                                    // thing it demonstrably is not, since the
+                                    // query underneath is what the "Back to the
+                                    // start" link below re-runs successfully.
+                                    // The page reference is what is wrong, so
+                                    // the banner says that instead of echoing a
+                                    // decode-failure message the reader has no
+                                    // way to act on.
+                                    QueryErrorKind::Cursor => {
+                                        "This page link is no longer valid.".to_string()
+                                    }
+                                    QueryErrorKind::Other => format!("Search failed: {message}"),
                                 }}
                             </p>
                             // Paging is what makes an error reachable with no
                             // way out: a *shared* `?cursor=` link can be stale
-                            // or corrupt ("invalid cursor"), and unlike a
-                            // mid-typing error there is no last-good page under
-                            // it and nothing wrong with the box to fix. `/my`
-                            // leaves that a dead end; here the pager's own
-                            // affordance covers it.
+                            // or corrupt, and unlike a mid-typing error there is
+                            // no last-good page under it and nothing wrong with
+                            // the box to fix. `/my` leaves that a dead end;
+                            // here the pager's own affordance covers it —
+                            // keeping `q` and dropping only the cursor, exactly
+                            // what a `QueryErrorKind::Cursor` banner promises.
                             {paged
                                 .then(|| {
                                     view! {

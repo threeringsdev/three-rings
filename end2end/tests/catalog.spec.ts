@@ -517,11 +517,17 @@ test("a corrupt cursor renders an error with a way back @fast", async ({
 }) => {
   // A shared link can rot. `/my` leaves this a dead end (its error arm has no
   // pager); here the query survives and only the cursor is dropped.
+  //
+  // P6-043: a corrupt `?cursor=` now carries its own `ApiError::BadCursor`
+  // wire variant, so the banner blames the page reference rather than
+  // echoing "invalid cursor" as if `bolt` itself were rejected — the old
+  // assertion here (`toContainText("invalid cursor")`) was pinning exactly
+  // that mislabeling.
   await page.goto("/catalog?q=bolt&cursor=not-a-real-cursor");
   await hydrated(page);
-  await expect(page.getByTestId("search-error")).toContainText(
-    "invalid cursor",
-  );
+  const err = page.getByTestId("search-error");
+  await expect(err).toContainText("page link");
+  await expect(err).not.toContainText("invalid cursor");
   await page.getByTestId("page-first").click();
   await page.waitForURL("/catalog?q=bolt");
   await expect(page.getByTestId("results-grid")).toContainText(
