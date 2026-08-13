@@ -706,9 +706,13 @@ pub fn NeedsPage() -> impl IntoView {
                         }
                         // The way out is already on the page: `NeedsHeader` sits
                         // *outside* this boundary (it awaits the tree, not the
-                        // needs read), so its back link to the collection
-                        // survives this arm — which is why this is the one error
-                        // banner here that needs no `children`.
+                        // needs read), so it survives this arm — and it is a
+                        // *live* way out (P6-142): a malformed `:id` is exactly
+                        // the case that also fails `Id::parse_str` up above, so
+                        // `NeedsHeader` cannot resolve a collection name either
+                        // and sends the reader to `/my` rather than looping back
+                        // to the same broken id. That is why this is the one
+                        // error banner here that needs no `children`.
                         Err(e) => {
                             view! {
                                 <ErrorNote
@@ -757,7 +761,19 @@ fn NeedsHeader(
                             .ok()
                             .and_then(|id| ancestor_path(&nodes, id))
                             .and_then(|path| path.last().map(|c| c.name.clone()));
-                        let href = format!("/my/collections/{id}");
+                        // `name` is `None` exactly when there is no live
+                        // collection to go back to — the id didn't parse, or
+                        // the tree has no such node (deleted, or simply wrong)
+                        // — and a link built from the raw `id` in that case
+                        // would point at `/my/collections/<this-same-id>`,
+                        // landing the reader on another dead page (P6-142).
+                        // Send them to the collections root instead, which is
+                        // always live; only the happy path links to the
+                        // collection itself.
+                        let (href, label) = match name {
+                            Some(name) => (format!("/my/collections/{id}"), name),
+                            None => ("/my".to_string(), "My cards".to_string()),
+                        };
                         view! {
                             <a
                                 href=href
@@ -765,7 +781,7 @@ fn NeedsHeader(
                                 data-testid="needs-back"
                             >
                                 <span aria-hidden="true">"‹"</span>
-                                {name.unwrap_or_else(|| "Back to the collection".to_string())}
+                                {label}
                             </a>
                         }
                     })

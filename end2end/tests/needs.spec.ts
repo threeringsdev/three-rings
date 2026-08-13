@@ -52,7 +52,7 @@ import {
   type APIRequestContext,
   type Page,
 } from "@playwright/test";
-import { AUTH_STATE, hydrated } from "./helpers";
+import { AUTH_STATE, clickUntil, hydrated } from "./helpers";
 
 test.use({ storageState: AUTH_STATE });
 
@@ -934,4 +934,31 @@ test("@fast a pull whose items resolve to nothing is refused out loud, not silen
     await deleteCollection(request, source.id);
     await deleteCollection(request, deck.id);
   }
+});
+
+// ------------------------------------------------- P6-142: the way out ---
+
+test("@fast a malformed collection id renders the error, and the back link leads somewhere alive", async ({
+  page,
+}) => {
+  // The bug: `NeedsHeader`'s back link was built from the raw `:id` in the
+  // URL regardless of whether it resolved to anything, so a malformed id sent
+  // the reader to `/my/collections/<the-same-malformed-id>` — another dead
+  // page, not a way out. `not-a-real-id` fails `Id::parse_str` the same way
+  // both the needs read (this page's error arm) and the tree lookup
+  // (`NeedsHeader`'s own name resolution) do, so this exercises the exact
+  // case the fix routes around: `href="/my"`, a page that actually loads.
+  await page.goto("/my/collections/not-a-real-id/needs");
+  await hydrated(page);
+
+  await expect(page.locator('[data-testid="needs-error"]')).toBeVisible();
+
+  const back = page.locator('[data-testid="needs-back"]');
+  await expect(back).toHaveAttribute("href", "/my");
+
+  // Not just the href: clicking it has to actually land somewhere alive, not
+  // on another error for the same broken id.
+  await clickUntil(back, async () => page.url().endsWith("/my"));
+  await expect(page).toHaveURL(/\/my$/);
+  await expect(page.locator('[data-testid="all-cards-table"]')).toBeVisible();
 });
