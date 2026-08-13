@@ -836,6 +836,35 @@ pub(crate) fn needs_chip(totals: &shared::CollectionTotals) -> Option<String> {
     Some(out)
 }
 
+/// What the header actually renders in the chip's slot, past "nothing to
+/// say" — [`needs_chip`]'s missing-N sentence, or this task's neutral
+/// variant (P6-143). `/my/collections/:id/needs` had a designed empty state
+/// ("All set", `app/src/my/needs.rs`) but no navigation path to it: the chip
+/// was the page's only link and rendered only when something was missing, so
+/// a collection that reached "nothing missing" lost the chip entirely and the
+/// empty state became reachable only by hand-typing the URL.
+///
+/// **Satisfied vs. absent.** `desired > 0 && missing <= 0` — the collection
+/// has wants and every one is met — gets the neutral chip, still linking to
+/// `/needs`. `desired == 0` — no desires at all — renders nothing, same as
+/// before: there is no needs concept in play for a binder nobody has marked
+/// wanted, so there is nothing to check off either, and a chip on every
+/// binder in the tree would be noise the design never asked for
+/// (design/information-architecture.md:41 puts the chip on "a deck or
+/// collection header", not on every header unconditionally).
+#[derive(Debug, PartialEq, Eq)]
+enum ChipState {
+    Missing(String),
+    Satisfied,
+}
+
+fn chip_state(totals: &shared::CollectionTotals) -> Option<ChipState> {
+    if let Some(text) = needs_chip(totals) {
+        return Some(ChipState::Missing(text));
+    }
+    (totals.desired > 0).then_some(ChipState::Satisfied)
+}
+
 #[component]
 fn CollectionHeader(
     view: CollectionView,
@@ -854,7 +883,7 @@ fn CollectionHeader(
     let format = view.collection.format.clone();
     let totals = view.totals;
     let commanders = view.commanders.clone();
-    let chip = needs_chip(&totals);
+    let chip = chip_state(&totals);
 
     // ---- what the header kebab aims the shared tree menu at ----
     //
@@ -994,16 +1023,35 @@ fn CollectionHeader(
             </div>
 
             {chip
-                .map(|text| {
-                    view! {
-                        <a
-                            href=format!("/my/collections/{id}/needs")
-                            class="border-warning/40 bg-warning/10 text-warning-foreground hover:bg-warning/20 inline-flex w-fit items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium"
-                            data-testid="needs-chip"
-                        >
-                            <span aria-hidden="true">"⚠"</span>
-                            {text}
-                        </a>
+                .map(|state| match state {
+                    ChipState::Missing(text) => {
+                        view! {
+                            <a
+                                href=format!("/my/collections/{id}/needs")
+                                class="border-warning/40 bg-warning/10 text-warning-foreground hover:bg-warning/20 inline-flex w-fit items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium"
+                                data-testid="needs-chip"
+                            >
+                                <span aria-hidden="true">"⚠"</span>
+                                {text}
+                            </a>
+                        }
+                            .into_any()
+                    }
+                    // Same shape, `success` tones instead of `warning`: still
+                    // a link to `/needs`, which is what makes that page's
+                    // "All set" empty state reachable at all (P6-143).
+                    ChipState::Satisfied => {
+                        view! {
+                            <a
+                                href=format!("/my/collections/{id}/needs")
+                                class="border-success/40 bg-success/10 text-success-foreground hover:bg-success/20 inline-flex w-fit items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium"
+                                data-testid="needs-chip-satisfied"
+                            >
+                                <span aria-hidden="true">"✓"</span>
+                                "All needs met"
+                            </a>
+                        }
+                            .into_any()
                     }
                 })}
 
@@ -2707,6 +2755,27 @@ mod tests {
             Some("2 missing — 2 to buy")
         );
         assert_eq!(needs_chip(&totals(0, 0, 9, 0, 0)), None);
+    }
+
+    #[test]
+    fn chip_state_goes_neutral_when_satisfied_and_vanishes_with_no_desires() {
+        // Missing wins whenever there is one — `chip_state` restates
+        // `needs_chip` verbatim rather than re-deriving it.
+        assert_eq!(
+            chip_state(&totals(0, 0, 9, 7, 4)),
+            Some(ChipState::Missing(
+                "7 missing — 4 owned elsewhere · 3 to buy".into()
+            ))
+        );
+        // Wants exist and nothing is missing: the neutral chip, not silence —
+        // this is the P6-143 fix, the reachability path to the needs-empty
+        // "All set" state.
+        assert_eq!(
+            chip_state(&totals(0, 0, 9, 0, 0)),
+            Some(ChipState::Satisfied)
+        );
+        // No desires at all: still nothing, exactly as before this task.
+        assert_eq!(chip_state(&totals(0, 0, 0, 0, 0)), None);
     }
 
     fn tree_row(id: u128, parent: Option<u128>, name: &str, present: i64) -> CollectionTreeRow {

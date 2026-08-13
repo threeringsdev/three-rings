@@ -112,7 +112,13 @@ header, not only a deck's — `design/information-architecture.md` line 41, the
 authority this spec distills, puts it on "a deck **or collection** header", and
 `/my/collections/:id/needs` is a route for any collection. (This bullet
 previously listed the chip under the deck variant; corrected 2026-07-25, see
-Findings.) **Deck variant** adds: format + commander(s) rendered as a card in
+Findings.) **The chip also has a neutral state** (2026-08-13, P6-143):
+`✓ All needs met`, `success`-toned, when the collection has desires and none
+are missing — still linking to `/needs`, which is the only navigation path to
+that page's own "All set" empty state. A collection with no desires at all
+still gets no chip, either state — see Findings.
+
+**Deck variant** adds: format + commander(s) rendered as a card in
 the header, cards grouped by type with counts, Want-led add default (binders
 and Inbox are Have-led), and the "Empty deck…" teardown action (single
 destination or "Return to previous locations").
@@ -1524,9 +1530,13 @@ release CSS with resolved colours in both themes, so no badge ships invisible.
   would have offered a retry that re-parses the same broken string forever.
 - **No wireframe frame specifies an empty, error or loading state** — checked across every
   string in `design/wireframes.pen`, so judgement was not overriding a frame anywhere.
-- **The needs-empty arm remains unreachable by navigation** (the needs chip is its only link
-  and is absent when nothing is missing), so its test reaches it by URL — the same trap
-  already recorded for that route.
+- **The needs-empty arm remained unreachable by navigation** (the needs chip was its only link
+  and was absent when nothing is missing), so its test reached it by URL — the same trap
+  already recorded for that route. **Closed 2026-08-13, P6-143:** the chip now renders a
+  neutral `success`-toned state instead of vanishing when a collection's desires are all
+  met, so `/needs`'s "All set" arm has a real link again. Still true and unchanged: a
+  collection with no desires at all still gets no chip either way, so that shape of
+  "nothing" still says nothing.
 - **Fixture limit, stated rather than papered over:** the e2e user's shopping list has 4 rows,
   so `shopping-empty` — the second `Resolved` consumer — has **no** honest e2e; it is covered
   by the bench section and the unit-tested tone mapping only. Emptying it would mean mutating
