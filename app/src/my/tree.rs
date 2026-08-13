@@ -264,12 +264,24 @@ fn TreeBody(t: AssembledTree, pathname: Memo<String>) -> impl IntoView {
             }
         >
             <PinnedRow
-                href="/my"
-                // The same view has a second route — the phone's drill-down
-                // target (`crate::my::root::ALL_CARDS_PATH`) — and the rail is
-                // on screen there too at `md` and up. Without the alias the
-                // sidebar would highlight nothing on it.
-                also=super::root::ALL_CARDS_PATH
+                // The table's own route (`crate::my::root::ALL_CARDS_PATH`),
+                // not `/my`, and everywhere — desktop rail and mobile drawer
+                // alike (P6-154). This one row is shared, unstyled-CSS-only,
+                // between the two surfaces: a `md:hidden` class can swap what
+                // a *screen* shows, but not what an `<a>` points to, so a
+                // single href has to be honest on both. `/my` itself is only
+                // the table at `md` and up — below it the same route is the
+                // drill-down root list (`super::root`), and landing there
+                // from this row reads as the drawer doing nothing (it closes
+                // onto a list that looks just like the drawer). `/my/all`
+                // renders the table at every width, so it is the one target
+                // that is never a step backward.
+                href=super::root::ALL_CARDS_PATH
+                // `/my` is still how the table is reached elsewhere (the
+                // desktop mode switch, the mobile bottom tab, breadcrumbs) —
+                // `also` keeps the row marked current when a caller lands on
+                // it that way instead of through here.
+                also="/my"
                 icon="🗂"
                 label="All cards"
                 count=t.total_present

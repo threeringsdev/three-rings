@@ -4566,6 +4566,76 @@ next task.
   `seed-dev-data.sh`, and deleting shared dev-branch rows on a guess is worse
   than leaving two spare cards in a test user's Inbox.
 
+### Pinned "All cards" row: one honest target for the rail and the drawer (2026-08-13, P6-154)
+
+`app/src/my/tree.rs` (`PinnedRow`'s `href`/`also` on the "All cards" row).
+Size S. The rail and the mobile drawer are **one markup**
+(`SidebarRail`/`CollectionTreeNav`, above) — a `md:hidden`/slide-over CSS
+switch decides which *screen* it reads as, but CSS cannot change what a
+shared `<a href>` points to. The pinned row shipped pointing at `/my`, which
+is only the All-cards table at `md` and up (`AllCardsPage`,
+`app/src/my/all_cards.rs`); below `md` the same route is the drill-down root
+list (`app/src/my/root.rs`, P6-14x). So on a phone, tapping the drawer's "All
+cards" row landed on a screen that looks like the drawer just closed onto
+itself — a second tap into `/my/all` was still needed to reach the table.
+
+**Fix: the row now targets `ALL_CARDS_PATH` (`/my/all`) at every width,
+desktop rail included**, with `also="/my"` so the row still reads
+`aria-current=page` when a caller lands on the table via `/my` some other
+way (the desktop mode switch, the mobile bottom tab, breadcrumbs — none of
+those changed). Chosen over rendering a different `href` per surface (a
+prop/context threaded down to say "this render is the drawer"): nothing on
+desktop actually depends on the row going to bare `/my` rather than
+`/my/all` — both routes mount the identical `AllCardsBody`, and `/my`'s own
+root list stays reachable from the mode switch, the bottom tab and every
+breadcrumb, so pointing the shared row at the table everywhere costs
+desktop nothing and fixes the phone case outright. **Desktop `/my` row
+behavior, before → after:** before, clicking the row went to `/my` (already
+correct there, since `/my` **is** the table at `md`+); after, it goes to
+`/my/all` (the same table, at a route that also works below `md`) — visibly
+identical on desktop, since `AllCardsTablePage`'s `back` link is `md:hidden`.
+
+**e2e, updated deliberately.** Two tests in `responsive.spec.ts`'s "reaching
+a screen by clicking, not by goto" block exist specifically to guard the
+resource-id-collision class of bug from clicking into a page rather than
+`goto`ing it (specs Findings above, `AllCardsPayload`) — both pinned the
+rail's *literal* href, so both needed a call on whether they still cover
+what they claim to after the target moved:
+- `/my carries rows when reached by clicking All cards` → retargeted to
+  `/my/all` (the sidebar row's new destination) and renamed accordingly;
+  still proves a real fetch happens on a client-side landing at the row's
+  target, now for the route that target actually is.
+- `all-cards.spec.ts`'s "reached by a client-side navigation … shows the
+  real rows" is a *different*, narrower guard: its regression was specific
+  to `/my`'s own component order (`MyRootNav`'s `<Suspense>` ahead of
+  `AllCardsBody` shifting the serialized resource id onto slot 12) —
+  `/my/all` mounts no `MyRootNav` ahead of it, so retargeting this one would
+  have stopped exercising the mechanism it documents. Left clicking into
+  `/my`, but through the desktop mode-switch link instead of the sidebar row
+  (the sidebar no longer reaches `/my` by a click at all).
+- `collection-tree.spec.ts`'s pinned-rows test and `my-root.spec.ts`'s
+  "the rail still marks All cards as where you are" both asserted the row's
+  href literally; updated to `/my/all` to match.
+- New: `responsive.spec.ts` → "the mobile drawer's All cards row lands on
+  the table, not the drill-down list" (phone width, opens the real drawer
+  via `rail-toggle`, taps the row, asserts `all-cards-table` visible after
+  landing on `/my/all`; positive control confirms plain `/my` at phone width
+  is still the root list). Kill-verified by hand: reverted the `tree.rs`
+  change alone, confirmed this test fails (times out — no
+  `a[href="/my/all"]` in the drawer), restored the fix, confirmed it passes
+  again.
+
+**Verification:** `responsive.spec.ts` + `collection-tree.spec.ts` full
+(every test in both files carries `@fast`) 24/24 serial (`--workers=1`);
+`my-root.spec.ts` + `all-cards.spec.ts` `@fast` 48/49 — the one failure
+(`the location summary expands to the collections it names`) is a
+pre-existing dev-seed data-shape gap ("dev seed should hold at least one
+card in two collections"), reproduces solo against unmodified `main` too,
+and touches none of this task's code (`all_cards.rs`'s location-summary
+logic is untouched here). Gate: fmt clean; both clippy lines
+(workspace-exclude native, `frontend` wasm) clean; `cargo test -p app
+--features hosted` 360/360.
+
 ### Collection tree, management (2026-07-20)
 
 `app/src/my/tree_manage.rs` (the shared context menu, three confirm dialogs,

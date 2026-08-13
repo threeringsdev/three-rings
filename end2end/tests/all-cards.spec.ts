@@ -537,9 +537,15 @@ test.describe("reached by a client-side navigation", () => {
     await page.goto(`/my/collections/${trade!.id}`);
     await hydrated(page);
 
-    // The sidebar's own `All cards` row — a real in-app navigation, the path a
-    // user takes.
-    await page.locator('#sidebar-rail a[href="/my"]').first().click();
+    // A real in-app navigation to /my specifically — not the sidebar's own
+    // `All cards` row, which now targets /my/all everywhere (P6-154: it is
+    // shared with the mobile drawer, where /my is the drill-down root list,
+    // not the table). The regression this test guards was tied to `/my`'s own
+    // component order (`MyRootNav`'s `<Suspense>` ahead of `AllCardsBody`
+    // shifting the resource's serialized id) and `/my/all` mounts no
+    // `MyRootNav` ahead of it, so only a click that actually lands on `/my`
+    // still exercises that mechanism — the desktop mode switch does.
+    await page.locator('nav[aria-label="Mode"] a[href="/my"]').click();
     await expect(page).toHaveURL(/\/my$/);
 
     // Rows are on screen…
