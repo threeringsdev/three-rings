@@ -6204,3 +6204,9 @@ Gate: `cargo fmt --all --check` clean; all five clippy lines clean
 `-p app --features hosted,component-bench`, `-p app --features
 hydrate,component-bench --target wasm32-unknown-unknown`); `cargo test -p app
 --features hosted` **360 passed**.
+
+**Resilience trade, stated (P6-166 review):** desktop `/my`'s main content now
+requires wasm + `matchMedia` to mount — a hydration failure that previously left
+a readable SSR'd table leaves a permanent skeleton. Accepted for the payload
+win; `/my/all` remains the full-SSR table if resilience is ever needed at a
+bookmarkable address.
