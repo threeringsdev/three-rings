@@ -48,19 +48,29 @@
 }
 
 .dark {
-    --background: oklch(0.18 0 0);
+    /* Contrast pass (2026-08-13, P6-099): the ladder was flat at the low
+       end — background 0.18 vs card 0.205 is a ~1.05:1 luminance ratio
+       (perceptually indistinguishable), and the 10%-alpha border composited
+       to ~2.7:1 against both, under WCAG 1.4.11's 3:1 non-text minimum. Fix
+       lifts background a step, gives card a real jump off it, and keeps the
+       popover/secondary/muted tier one step above card (as before, just
+       raised to match) so surfaces read as layered rather than same-level.
+       Border/input alpha raised so hairlines clear 3:1 against both
+       background and card. See specs/ui-design.md Findings for the full
+       before/after table and rationale. */
+    --background: oklch(0.2 0 0);
     --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
+    --card: oklch(0.26 0 0);
     --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.269 0 0);
+    --popover: oklch(0.3 0 0);
     --popover-foreground: oklch(0.985 0 0);
     --primary: oklch(0.922 0 0);
     --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
+    --secondary: oklch(0.3 0 0);
     --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
+    --muted: oklch(0.3 0 0);
     --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.371 0 0);
+    --accent: oklch(0.4 0 0);
     --accent-foreground: oklch(0.985 0 0);
     --destructive: oklch(0.704 0.191 22.216);
     --destructive-foreground: oklch(0.205 0 0);
@@ -80,8 +90,8 @@
     --info-foreground: oklch(0.205 0 0);
     --info-light: oklch(0.25 0.08 250);
     --info-dark: oklch(0.75 0.18 250);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
+    --border: oklch(1 0 0 / 16%);
+    --input: oklch(1 0 0 / 22%);
     --ring: oklch(0.556 0 0);
 }
 
