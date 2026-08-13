@@ -730,3 +730,78 @@ test("@fast one copy elsewhere cannot cover two boards at once", async ({
     await deleteCollection(request, deck.id);
   }
 });
+
+// ---------------------------------------------- P6-140: per-row pending only ---
+
+test("@fast one row's in-flight Pull does not disable another row's button", async ({
+  page,
+  request,
+}) => {
+  // The bug: `ElsewhereRow` used to receive its `pending` signal from its
+  // parent `OwnedElsewhere`, one signal shared by every row in the table —
+  // so clicking any row's Pull disabled every row's button, not just the one
+  // that was actually in flight. Two independent cards from two independent
+  // sources, so a correct row-B pull is unambiguous and does not lean on the
+  // server's shared-stock reconciliation to make sense of the outcome.
+  //
+  // Holding `pull_needs` open is what lets this test stand *inside* the
+  // in-flight window rather than racing it: A's request is genuinely
+  // unresolved when B's button state is asserted.
+  const [cardA, cardB] = await unownedCards(request, 2);
+  const sourceA = await createCollection(request, "binder", "pendA-src");
+  const sourceB = await createCollection(request, "binder", "pendB-src");
+  const deck = await createCollection(request, "deck", "pend-dst");
+  try {
+    await addHave(request, sourceA.id, cardA.printing_id as string, 1);
+    await addHave(request, sourceB.id, cardB.printing_id as string, 1);
+    await addWant(request, deck.id, cardA.oracle_id, 1);
+    await addWant(request, deck.id, cardB.oracle_id, 1);
+
+    await page.goto(`/my/collections/${deck.id}/needs`);
+    await hydrated(page);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    await page.route("**/api/pull_needs*", async (route) => {
+      await gate;
+      // The handler stays installed after the gate opens — see
+      // `catalog.spec.ts`'s `holdSearches` for why the `.catch` is needed.
+      await route.continue().catch(() => {});
+    });
+
+    const pullA = needRow(page, cardA.oracle_id).locator(
+      '[data-testid="pull-row"]',
+    );
+    const pullB = needRow(page, cardB.oracle_id).locator(
+      '[data-testid="pull-row"]',
+    );
+
+    await pullA.click();
+    // A's own request is in flight, and its own button says so...
+    await expect(pullA).toBeDisabled();
+    // ...but B's does not — the base-bug assertion. A shared `pending` would
+    // leave this `disabled` too.
+    await expect(pullB).toBeEnabled();
+
+    // The proof that matters is that B is actually clickable, not merely
+    // missing the `disabled` attribute by coincidence: Playwright refuses to
+    // click a genuinely disabled element, so this line alone fails against
+    // the shared-signal bug.
+    await pullB.click();
+    await expect(pullB).toBeDisabled();
+
+    // Let both held requests land, and both pulls actually complete — a
+    // second in-flight Pull that never got enabled would be no better than
+    // one that silently no-opped.
+    release();
+    await expect(async () => {
+      expect(await copiesIn(request, cardA.oracle_id, deck.id)).toBe(1);
+      expect(await copiesIn(request, cardB.oracle_id, deck.id)).toBe(1);
+    }).toPass({ timeout: 5000 });
+    expect(await needsOf(request, deck.id)).toEqual([]);
+  } finally {
+    await deleteCollection(request, sourceA.id);
+    await deleteCollection(request, sourceB.id);
+    await deleteCollection(request, deck.id);
+  }
+});
