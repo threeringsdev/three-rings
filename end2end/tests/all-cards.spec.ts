@@ -568,3 +568,123 @@ test.describe("reached by a client-side navigation", () => {
 // that `browser.newContext()` inside a spec is NOT anonymous — Playwright
 // applies the file's `test.use({ storageState })` to it — so an anonymous
 // case belongs in a file that isn't signed in, which smoke.spec.ts is.
+
+test.describe("mobile — a long collection name does not widen the table (P6-020)", () => {
+  // `/my` below `md` is the drill-down list (app/src/my/root.rs); only
+  // `/my/all` (`ALL_CARDS_PATH`) renders this table at phone width, which is
+  // the whole point — the 390px case is exactly where P6-001 measured 0px
+  // for the seeded fixture, a result that says nothing about a name longer
+  // than anything in that fixture.
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test("@fast the WHERE cell truncates a long unbreakable name instead of overflowing", async ({
+    page,
+    request,
+  }) => {
+    // One 60-ish char token, no spaces or hyphens: nothing for the browser's
+    // default line-breaking to grab onto. This is the exact shape the fix
+    // targets — a card name or a fixed vocabulary word always has *some*
+    // break opportunity, but a user-chosen collection name does not, and
+    // `min-content` width under `table-layout: auto` is driven by the
+    // longest unbreakable token in a column, not by any fixed budget.
+    const token = Array.from(
+      { length: 50 },
+      () => "abcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 36)],
+    ).join("");
+    const longName = `zzE2eOverflow${token}W${test.info().workerIndex}`;
+
+    // A card this account holds *nowhere* yet, so adding one `have` makes a
+    // brand-new, single-location row — the `"{n} in {name}"` link shape this
+    // test exists to measure, not the multi-collection disclosure. `q=z`
+    // (not `n`, which other files already draw down to nothing — see
+    // removal.spec.ts): a bulk `/api/all-cards?limit=…` snapshot cannot be
+    // trusted to catch every owned oracle once the fixture exceeds the page
+    // size, so each candidate is checked individually against `/api/all_cards`
+    // (the page's own un-paged read) instead of one bulk pre-filter.
+    const search = await request.get("/api/catalog/search?q=z&limit=100");
+    expect(search.status(), "catalog search").toBe(200);
+    const { cards } = (await search.json()) as {
+      cards: { oracle_id: string; printing_id: string | null; name: string }[];
+    };
+    let card:
+      | { oracle_id: string; printing_id: string | null; name: string }
+      | undefined;
+    for (const c of cards) {
+      if (!c.printing_id) continue;
+      const check = await request.get(`/api/all_cards?q=${encodeURIComponent(c.name)}`);
+      expect(check.status(), `all_cards for ${c.name}`).toBe(200);
+      const { cards: rows } = (await check.json()) as {
+        cards: { card: { oracle_id: string }; locations: unknown[] }[];
+      };
+      const row = rows.find((r) => r.card.oracle_id === c.oracle_id);
+      if (!row || row.locations.length === 0) {
+        card = c;
+        break;
+      }
+    }
+    expect(
+      card,
+      "the fixture should have a catalog card this account owns nowhere",
+    ).toBeTruthy();
+
+    const created = await request.post("/api/collections", {
+      data: { parent_id: null, kind: "binder", name: longName, format: null },
+    });
+    expect(created.status(), "create scratch collection").toBe(200);
+    const collection = (await created.json()) as { id: string; name: string };
+
+    try {
+      const have = await request.post(`/api/collections/${collection.id}/have`, {
+        data: { printing_id: card!.printing_id, quantity: 1 },
+      });
+      expect(have.status(), "add have").toBe(200);
+
+      await page.goto(`/my/all?q=${encodeURIComponent(card!.name)}`);
+      await hydrated(page);
+
+      const row = rowFor(page, card!.oracle_id);
+      await expect(row).toBeVisible();
+      const cell = row.locator('[data-testid="location-summary"]');
+
+      // The invariant this task lands, checked first: no viewport-width
+      // dependence on user data length. Measure the scroll container, not
+      // the document — `TableWrapper` is `overflow-auto`, so a too-wide
+      // table is a wrapper-local scroll the document check alone misses (the
+      // same trap collection-view.spec.ts's mobile no-scroll test
+      // documents).
+      const table = page.locator('[data-testid="all-cards-table"]');
+      await expect(table).toHaveCount(1);
+      const wrapper = await table.evaluate((el) => {
+        const w = el.closest('[data-name="TableWrapper"]');
+        if (!w) throw new Error("the table has no TableWrapper to scroll in");
+        return { overflow: w.scrollWidth - w.clientWidth, client: w.clientWidth };
+      });
+      expect(wrapper.client, "table wrapper has no width").toBeGreaterThan(0);
+      expect(
+        wrapper.overflow,
+        "a long collection name should not widen the table",
+      ).toBeLessThanOrEqual(1);
+
+      const doc = await page.evaluate(
+        () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      );
+      expect(doc, "page overflows the document").toBeLessThanOrEqual(1);
+
+      // Base case: the cell is genuinely clipping content — proof the
+      // truncation CSS is actually engaged here, not merely that a short
+      // name happened to fit inside whatever width the column landed on.
+      const cellOverflow = await cell.evaluate((el) => el.scrollWidth - el.clientWidth);
+      expect(
+        cellOverflow,
+        "the WHERE cell should be clipping the long name (base: overflow > 0)",
+      ).toBeGreaterThan(0);
+
+      await expect(cell).toHaveAttribute("title", `1 in ${longName}`);
+    } finally {
+      // Discard: the default `ToParent` disposition on a top-level scratch
+      // collection relocates its one holding to the Inbox rather than
+      // destroying it, and soft-deletes the collection itself (P6-188).
+      await request.post(`/api/collections/${collection.id}/delete`, { data: {} });
+    }
+  });
+});

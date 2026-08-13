@@ -5506,7 +5506,6 @@ tray centres on the content column, not on the window" — unaffected, since
 `<main>` itself carries no cap and this change is scoped to the grid's own
 class list. Release build (`CARGO_TARGET_DIR=target/gate cargo leptos build
 --release`) succeeded and its minified CSS carries the new rule.
-||||||| parent of 63ecfd3 (fix(ui): card detail follows moves; the tray picker's empty line tells the truth)
 
 ### Batch move's two gaps on `/cards/:id` and the tray picker (P6-152, 2026-08-13)
 
@@ -5607,9 +5606,7 @@ resolution the fixture can no longer promise. Every other test in all four
 files passed, including the two new ones and the pre-existing bench test that
 already asserted the *failed*-read arm never regresses to the retired empty
 string (`selection-tray.spec.ts`'s `"Move to…" opens the destination picker`).
-||||||| parent of 5f5ffda (fix(ui): tables fit the frame widths — no sideways scroll at 320/375/768)
 
-||||||| parent of 6f8ec03 (fix(ui): tables fit the frame widths — no sideways scroll at 320/375/768)
 
 ### Table overflow re-measured and fixed (P6-001, 2026-08-13)
 
@@ -5704,7 +5701,6 @@ container (`min-w-0` + `truncate`), not a table cell directly. A table cell that
 truncation (not just a later breakpoint) would need either `table-layout: fixed` with explicit
 column widths, or the `width: 1px; min-width: 100%` block-in-cell trick — neither attempted
 here since the breakpoint move and header abbreviation closed both overflows without it.
-||||||| parent of 38c4d7b (design(ui): /login and /signup match their frames — labels, heading, brand line)
 
 
 ### `/login` + `/signup` match the "Desktop — Sign in" frame (P6-008, 2026-08-13)
@@ -5790,7 +5786,6 @@ including `auth.setup.ts`'s fixture sign-in (the critical regression: it
 fills the real form and waits for the `/my` redirect) and `smoke.spec.ts`'s
 "login honors next after sign-in", which drives the real login form through
 the new label markup end to end.
-||||||| parent of e0b8632 (fix(ui): DFC swap covers keywords; preview flips reset on reopen)
 
 
 ### Two DFC swap gaps: keywords and preview flip persistence (P6-164, 2026-08-13)
@@ -5886,3 +5881,89 @@ toast-positioning test (`#sonner` never appeared); traced to the dev server
 having been started without `--features component-bench` (that test drives
 `/dev/components`) rather than to this task's diff — restarting the server
 with the flag made it 35/35 with no other change. No base-parity failures.
+
+
+
+**Closed, P6-020 (2026-08-13): the data-dependence caveat above.** Everything measured just
+above used the seeded fixture's own names, so the P6-001 fix was only proven 0px-everywhere for
+*those* names. Any card-holder-chosen collection name (or, less likely given the catalog's
+naming, a card name) longer or less breakable than what the seed happens to carry can still
+reopen the same overflow — `/my/all`'s WHERE cell renders `"{n} in {collection_name}"` with a
+user-chosen name, and `collection.rs`'s folder rows render a user-chosen name directly, neither
+bounded by anything the app controls.
+
+**Root cause, confirmed by measurement:** the `all_cards.rs` WHERE cell rendered plain text —
+no `truncate` at all — so under `table-layout: auto` a long name simply set the column's
+min-content width to the name's full rendered width (as P6-001 already knew: table cells wrap by
+default, so a column's floor is its longest unbreakable *token*, and a user-chosen name has no
+bound on that token's length the way a catalog word does). Adding `truncate` alone would not
+have fixed it either, and this task confirms *why*, closing the open question above with a real
+measurement rather than a guess: `truncate` sets `white-space: nowrap`, which removes every wrap
+opportunity from that text — its min-content width becomes equal to its max-content width (the
+whole string), so a nowrap span *anywhere* inside a table cell forces the column to fit the full
+text regardless of any `overflow`/`text-overflow` also set. This is a different, stronger trap
+than the "forced to `max-w`'s exact value" one P6-001 measured on the Type column — that one
+under-grew short content up to a fixed cap; this one over-grows arbitrarily with content length,
+because nowrap text has no line-break opportunity for the intrinsic-sizing pass to use.
+
+**Fix: the `max-width: 0; width: 100%` block-in-cell trick, applied to the `<TableCell>` (`<td>`)
+itself,** not a nested child — the documented, cross-browser pattern for "one column takes the
+table's leftover width and clips its own content" under auto layout. `max-w-0` caps this cell's
+own contribution to the column's min/max-content computation at zero regardless of what nowrap
+text lives inside it (unlike the Type column's `max-w-[7rem]`, zero cannot force short content
+wider — it can only fail to *widen* the column, never inflate it); `w-full` is the auto-layout
+hint that the column should still claim the table's remaining width once every other column has
+what it needs. The nested content then does the actual visual truncation once the column has a
+real, data-independent width: `all_cards.rs`'s WHERE cell and `collection.rs`'s folder-name cell
+both got `max-w-0 w-full` on the `<TableCell>`, and `truncate` (`overflow-hidden`,
+`text-overflow: ellipsis`, `white-space: nowrap`) plus a `title` attribute carrying the untruncated
+text on the element that actually renders the name. This is the "worth knowing" case the P6-001
+open question named — now attempted, measured working, and folded into a real fix rather than an
+open question.
+
+**Cells hardened:**
+- `all_cards.rs`'s WHERE cell (`LocationSummary`): the single-location `"{n} in {name}"` line is
+  rendered and truncated as *one* string rather than splitting the count from the name — an
+  end-ellipsis on the whole string can only ever cut into the tail (the name), never the count,
+  which is always first, so there was no need for a separate fixed-width prefix span. The
+  multi-location dropdown's per-collection `"{n} · {name}"` list items got the same `truncate` +
+  `title` treatment for visual correctness once expanded (the TD-level `max-w-0 w-full` already
+  contains the *layout* risk regardless of what is nested inside, but an untruncated line inside
+  a narrow column would still visually clip mid-character without the ellipsis).
+- `collection.rs`'s `FolderTableRow` name cell: icon and name were plain text in one `<a>`
+  (`flex items-center gap-2`); the icon got `shrink-0` and the name moved into its own
+  `min-w-0 truncate` span with a `title`. The `max-w-0 w-full` on the TD is what stops the
+  column from growing past the width card rows in the same column already establish (folder rows
+  share the "Card" column with `CardTableRow`, which was left alone — see below); `min-w-0` on
+  the flex item is what lets *that* span actually shrink and ellipsize at real layout time once
+  the column has its real width, the ordinary flex-truncation idiom used everywhere else in this
+  codebase (`tree.rs`, `root.rs`, `move_selection.rs`).
+- **Card-name cells left alone, on purpose:** `all_cards.rs`'s `CardsRow` and `collection.rs`'s
+  `CardTableRow` render the card name plain, no truncation. Checked, not fixed: a card name comes
+  from the Scryfall catalog, not the account holder, and every card name in this catalog contains
+  at least one space (`"Fire // Ice"`, double-faced names, everything) — the existing
+  wrap-by-default behavior already bounds that column's floor to the longest *word*, the same
+  mechanism P6-001 used deliberately for the Type column. "Card-name cells: check whether they
+  already truncate" (this task's brief) is answered here: they don't, and the invariant this task
+  closes — *no viewport-width dependence on **user** data length* — does not reach them, because
+  a card name is not user-chosen data. If the catalog data source ever changes to allow spaceless
+  card names, this reasoning needs revisiting; not expected, not seen.
+
+**Evidence.** `cargo test -p app --features hosted`: 360 passed, 0 failed (same count as
+P6-001 — no Rust unit tests changed). One new, kill-verified e2e test
+(`all-cards.spec.ts`, "mobile — a long collection name does not widen the table"): creates a
+`zz-e2e`-prefixed scratch binder whose name is a single ~65-char token with no spaces or hyphens
+(nothing for default line-breaking to grab), holds one card in it via `/api/collections/:id/have`,
+loads `/my/all?q=…` at 390×844, and asserts the `TableWrapper`'s `scrollWidth − clientWidth` is
+`≤ 1` (the P6-001 "measure the scroll container, not the document" discipline), the document-level
+check too, the WHERE cell's own `title` equals the untruncated `"1 in {name}"`, and the WHERE
+cell's own `scrollWidth − clientWidth` is `> 0` (the "base: overflow > 0" half — proof the
+truncation CSS is actually clipping this text, not merely that a short name happened to fit).
+Kill-verified by reverting the two Rust files' hunks (`git stash`) and rerunning against the
+pre-fix code: the wrapper-overflow assertion failed at **334px** of overflow (not the title
+assertion, which would have failed trivially since `title` is new either way — the wrapper check
+was moved ahead of it specifically so the kill-run exercises the real layout regression); restoring
+the fix and rebuilding turned it green again. Full serial run (`--workers=1`) of
+`all-cards.spec.ts` + `collection-view.spec.ts`: 37 passed / 1 failed — `all-cards.spec.ts:270`
+is the documented fixture-pool baseline failure (e2e-suite skill), unrelated to table layout,
+present before this task's changes too.
