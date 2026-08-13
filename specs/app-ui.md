@@ -289,6 +289,33 @@ items and two copies; the same "the tray counts entries" rule the batch follows.
 A count picker per row was considered and dropped: the tray's pill has never
 counted copies, and a step that quietly could would make it lie.
 
+**But that is exactly where the batch's own toast stops being true, and review
+caught it.** `moved_message`'s unit is the tray entry, where one entry is one
+card is one copy — "Moved 3 cards (1 copy each)". A pick is a *stack*, so
+ticking all three stacks of one Bolt is three copies of **one** card, and
+reusing that sentence made the step's headline flow assert something false about
+the user's collection. The second pass phrases itself instead
+(`picked_message`): both numbers said out loud, neither inferred — "Moved 3
+copies of 1 card → 🗂 Deck", "Moved 5 copies across 2 cards → 🗂 Deck" — and
+counted from what the server reported *moved*, not from what was ticked, so a
+refused pick is never claimed as a copy that landed. `MoveReport::moved_as`
+takes the sentence and the drop-tokens from its caller for the same reason:
+the two passes count in different units, and everything below that line is
+identical. Pass 1's wording is untouched.
+
+**Two more places the same premise leaked**, fixed with it:
+
+- **A row said `Binder · 3 copies` while ticking it moves one.** It now reads
+  `Binder · 1 of 3 copies` — the row is a checkbox, and labelling it with the
+  stack's whole size invites the reading that ticking takes the stack. The
+  dialog's description does say "one copy from each", but it sits above a
+  scrolling list and cannot be the only place that is stated.
+- **A partial submit told the untouched cards nothing.** Submitting with some
+  asked cards unticked sets `answered`, which suppresses the cancel toast — so
+  a user who ticked one of three heard about that one and nothing at all about
+  the other two, while they stayed checked in the tray. `unanswered` is now the
+  one sentence both exits share: cancelling is its no-picks case.
+
 **Tray bookkeeping needed its own translation, and this is the bug that would
 have shipped otherwise.** The second pass reports `held:` tokens; the tray holds
 the `card:` entry those answer. `tokens_to_drop` matches tokens literally, so

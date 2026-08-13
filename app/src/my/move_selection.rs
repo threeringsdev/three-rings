@@ -1,7 +1,7 @@
 //! Batch move — the selection tray's "Move to…" (specs/app-ui.md → Selection
 //! tray; specs/collection-api.md → "Move (batch)").
 //!
-//! Six things are worth knowing before editing this file.
+//! Seven things are worth knowing before editing this file.
 //!
 //! **A `/my` selection cannot be piped into a move, and this is where that is
 //! resolved.** [`SelectionKey::Card`] names an oracle card and nothing else: the
@@ -673,6 +673,23 @@ pub fn answered_tokens(picks: &[StackPick], moved: &[String]) -> Vec<String> {
     tokens
 }
 
+/// The cards the step asked about that the user left untouched.
+///
+/// Two callers, one sentence: **cancelling** is this with no picks at all, and
+/// **submitting a partial answer** is this with the picks that were made. The
+/// second one is the case that would otherwise go silent — `answered` suppresses
+/// the close toast, so a user who ticked one of three cards and hit the button
+/// would get a confirmation for the one and nothing whatsoever about the other
+/// two, which is the "did that land?" state every toast in this file exists to
+/// refuse.
+pub fn unanswered(cards: &[AmbiguousCard], picks: &[StackPick]) -> Vec<(String, SkipReason)> {
+    cards
+        .iter()
+        .filter(|c| !picks.iter().any(|p| p.token == c.token))
+        .map(|c| (c.name.clone(), c.reason))
+        .collect()
+}
+
 /// Put a card's name on a whole-batch failure the server attributed to one item.
 ///
 /// A batch move is one transaction, so one unmovable item rolls the batch back
@@ -769,9 +786,14 @@ pub fn picker_options(
 
 // ----------------------------------------------------------------- wording ---
 
-/// The confirmation toast's message. The count is stated in **copies**, because
-/// the pill counts entries and one copy each is the thing a reader would
-/// otherwise have to infer.
+/// The confirmation toast's message for a **batch** move. The count is stated in
+/// **copies**, because the pill counts entries and one copy each is the thing a
+/// reader would otherwise have to infer.
+///
+/// Its premise — one entry is one card is one copy — is the tray's, and it is
+/// exactly what the which-copies step breaks: there, several ticks can belong to
+/// the same card. That pass phrases itself with [`picked_message`] instead of
+/// stretching this one over a shape it was never true for.
 pub fn moved_message(moved: usize, destination: &str) -> String {
     let copies = if moved == 1 { "1 copy" } else { "1 copy each" };
     let cards = if moved == 1 {
@@ -780,6 +802,39 @@ pub fn moved_message(moved: usize, destination: &str) -> String {
         format!("{moved} cards")
     };
     format!("Moved {cards} ({copies}) → {destination}")
+}
+
+/// The confirmation toast for the **which-copies** pass, counted from the picks
+/// that actually moved.
+///
+/// [`moved_message`] cannot speak here. Its unit is the tray entry, and one
+/// entry is one card; a pick is a *stack*, and ticking all three stacks of one
+/// Bolt moves three copies of **one** card. Phrased through the batch message
+/// that reads "Moved 3 cards (1 copy each)" — a plain false statement about the
+/// user's collection, on the step's headline flow.
+///
+/// So both numbers are said out loud, and neither is inferred: copies is how
+/// many ticks landed (one copy per pick, the same server-fixed quantity the
+/// batch uses), cards is how many distinct tray entries those ticks belonged to.
+/// The one-card case names the card count anyway ("of 1 card") rather than
+/// dropping to bare copies, so the two shapes read as the same sentence.
+pub fn picked_message(picks: &[StackPick], moved: &[String], destination: &str) -> String {
+    let landed: Vec<&StackPick> = picks
+        .iter()
+        .filter(|p| moved.contains(&p.key().token()))
+        .collect();
+    let copies = if landed.len() == 1 {
+        "1 copy".to_string()
+    } else {
+        format!("{} copies", landed.len())
+    };
+    let mut tokens: Vec<&str> = landed.iter().map(|p| p.token.as_str()).collect();
+    tokens.sort();
+    tokens.dedup();
+    match tokens.len() {
+        1 => format!("Moved {copies} of 1 card → {destination}"),
+        n => format!("Moved {copies} across {n} cards → {destination}"),
+    }
 }
 
 /// The refusal toast. Names up to [`NAMED_SKIPS`] cards with their reasons and
@@ -972,12 +1027,17 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
     // server fn. Nothing here can be ambiguous again (a `Held` key names one
     // stack), so its refusals are reported and never re-asked.
     let confirm = Callback::new(move |picks: Vec<StackPick>| {
-        let Some(dest) = step.get_untracked().map(|s| s.dest) else {
+        let Some(WhichCopies { dest, cards }) = step.get_untracked() else {
             return;
         };
         if picks.is_empty() || pending.get_untracked() {
             return;
         }
+        // A partial answer is still a refusal for the rest. Closing on `answered`
+        // suppresses the cancel toast, so without this a user who ticked one of
+        // three asked cards would hear about that one and nothing at all about
+        // the other two — while they stay checked in the tray.
+        report.refused(&unanswered(&cards, &picks));
         let names = picked_names(&picks);
         let items = picked_items(&picks);
         pending.set(true);
@@ -986,10 +1046,15 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
             pending.set(false);
             match result {
                 Ok(outcome) => {
-                    // Tray bookkeeping in the picks' own terms: the batch
-                    // answered `held:` tokens, the tray holds the `card:`
-                    // entries they answer for.
-                    report.moved(&outcome, &dest, &answered_tokens(&picks, &outcome.moved));
+                    // Both halves are said in the picks' own terms: the tray
+                    // holds `card:` entries and this pass answered in `held:`
+                    // tokens, and one card can have contributed several of them
+                    // — which is exactly what `moved_message` cannot say.
+                    report.moved_as(
+                        &outcome,
+                        &answered_tokens(&picks, &outcome.moved),
+                        picked_message(&picks, &outcome.moved, &dest.label()),
+                    );
                     report.refused(&label_skips(&outcome.skipped, &names));
                 }
                 Err(e) => report.failed(&e, &names),
@@ -1006,9 +1071,9 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
         if was_open == Some(true) && !now {
             if !answered.get_untracked() {
                 if let Some(s) = step.get_untracked() {
-                    let refused: Vec<(String, SkipReason)> =
-                        s.cards.iter().map(|c| (c.name.clone(), c.reason)).collect();
-                    report.refused(&refused);
+                    // Cancelling is the no-picks case of the same sentence the
+                    // partial submit above raises.
+                    report.refused(&unanswered(&s.cards, &[]));
                 }
             }
             step.set(None);
@@ -1083,14 +1148,29 @@ struct MoveReport {
 }
 
 impl MoveReport {
+    /// The batch's own reporting: [`moved_message`], whose unit is the tray
+    /// entry.
+    fn moved(self, outcome: &MoveOutcome, dest: &Destination, drop_tokens: &[String]) {
+        self.moved_as(
+            outcome,
+            drop_tokens,
+            moved_message(outcome.moved.len(), &dest.label()),
+        );
+    }
+
     /// Reconcile the tray, invalidate what the write changed, and raise the one
-    /// toast that undoes the whole batch. `drop_tokens` is the caller's, because
-    /// the two paths answer in different token vocabularies — see
-    /// [`tokens_to_drop`] and [`answered_tokens`].
+    /// toast that undoes the whole batch.
+    ///
+    /// **Both the tokens and the sentence are the caller's**, because the two
+    /// submit paths count in different units. The batch answers in tray tokens
+    /// where one entry is one card is one copy; the which-copies pass answers in
+    /// `held:` stack tokens, several of which can belong to one card — so it
+    /// brings [`answered_tokens`] and [`picked_message`]. Everything below this
+    /// line is identical for both, which is the point of the split.
     ///
     /// The tray reconciliation happens whether or not anything moved: a batch
     /// that moved nothing can still have proved an entry gone.
-    fn moved(self, outcome: &MoveOutcome, dest: &Destination, drop_tokens: &[String]) {
+    fn moved_as(self, outcome: &MoveOutcome, drop_tokens: &[String], message: String) {
         self.selection.remove_tokens(drop_tokens);
         if outcome.move_ids.is_empty() {
             return;
@@ -1107,7 +1187,7 @@ impl MoveReport {
         let (toast, tree, revision, last_move) =
             (self.toast, self.tree, self.revision, self.last_move);
         toast.show(
-            ToastOptions::message(moved_message(outcome.moved.len(), &dest.label()))
+            ToastOptions::message(message)
                 .kind(ToastKind::Success)
                 .action(
                     "Undo",
@@ -1382,7 +1462,13 @@ fn CardSection(
 
 /// One stack's sentence: where it is, which printing (only when that
 /// distinguishes anything — see [`CopyStack`]), which board (only inside a deck
-/// where it is not the mainboard), and how many copies.
+/// where it is not the mainboard), and **what a tick does to it**.
+///
+/// That last part is why the count reads `1 of 3 copies` rather than
+/// `3 copies`: a row is a checkbox that moves exactly one copy, and a row
+/// labelled with the stack's whole size invites the reading that ticking it
+/// moves the stack. The dialog's description says "one copy from each", but it
+/// sits above a scrolling list and cannot be the only place that is stated.
 pub fn stack_label(row: &CopyStack) -> String {
     let mut parts = vec![row.collection_name.clone()];
     if let Some(printing) = &row.printing {
@@ -1401,7 +1487,7 @@ pub fn stack_label(row: &CopyStack) -> String {
     parts.push(if row.quantity == 1 {
         "1 copy".to_string()
     } else {
-        format!("{} copies", row.quantity)
+        format!("1 of {} copies", row.quantity)
     });
     parts.join(" · ")
 }
@@ -2093,8 +2179,11 @@ mod tests {
     }
 
     #[test]
-    fn a_row_says_where_it_is_and_how_many() {
-        assert_eq!(stack_label(&stack(1, 100, 3)), "Binder 1 · 3 copies");
+    fn a_row_says_where_it_is_and_what_ticking_it_does() {
+        // Not "3 copies": the row is a checkbox that moves exactly one, and a
+        // label naming the stack's whole size reads as though ticking it takes
+        // the stack.
+        assert_eq!(stack_label(&stack(1, 100, 3)), "Binder 1 · 1 of 3 copies");
         assert_eq!(stack_label(&stack(1, 100, 1)), "Binder 1 · 1 copy");
         // A printing chip only when the read decided it distinguishes
         // something, and a board only when it is not the mainboard.
@@ -2104,8 +2193,63 @@ mod tests {
                 board: Board::Side,
                 ..stack(1, 100, 2)
             }),
-            "Binder 1 · MH3 #123 · sideboard · 2 copies"
+            "Binder 1 · MH3 #123 · sideboard · 1 of 2 copies"
         );
+    }
+
+    #[test]
+    fn the_step_counts_copies_and_cards_separately() {
+        // The headline flow, and the one `moved_message` gets wrong: three ticks
+        // on one card are three copies of ONE card. Phrased through the batch
+        // message this read "Moved 3 cards (1 copy each)".
+        let bolt = asked(1, "Bolt");
+        let picks: Vec<StackPick> = [stack(1, 100, 2), stack(2, 100, 1), stack(3, 100, 5)]
+            .iter()
+            .map(|row| StackPick::of(&bolt, row))
+            .collect();
+        let all: Vec<String> = picks.iter().map(|p| p.key().token()).collect();
+        assert_eq!(
+            picked_message(&picks, &all, "🗂 Deck"),
+            "Moved 3 copies of 1 card → 🗂 Deck"
+        );
+
+        // Two cards, one tick each: the plural form names both numbers rather
+        // than leaving either to be inferred.
+        let brainstorm = asked(2, "Brainstorm");
+        let pair = vec![
+            StackPick::of(&bolt, &stack(1, 100, 2)),
+            StackPick::of(&brainstorm, &stack(1, 200, 4)),
+        ];
+        let both: Vec<String> = pair.iter().map(|p| p.key().token()).collect();
+        assert_eq!(
+            picked_message(&pair, &both, "🗂 Deck"),
+            "Moved 2 copies across 2 cards → 🗂 Deck"
+        );
+
+        // Counted from what *moved*, not from what was ticked: a pick the
+        // server refused must not be claimed as a copy that landed.
+        assert_eq!(
+            picked_message(&picks, &all[..1], "🗂 Deck"),
+            "Moved 1 copy of 1 card → 🗂 Deck"
+        );
+    }
+
+    #[test]
+    fn a_partial_answer_still_refuses_the_rest() {
+        // `answered` suppresses the cancel toast, so without this the untouched
+        // cards would get no sentence at all while staying checked in the tray.
+        let bolt = asked(1, "Bolt");
+        let brainstorm = asked(2, "Brainstorm");
+        let cards = vec![bolt.clone(), brainstorm];
+        let picks = vec![StackPick::of(&bolt, &stack(1, 100, 2))];
+        assert_eq!(
+            unanswered(&cards, &picks),
+            vec![("Brainstorm".to_string(), SkipReason::ManyCollections(2))]
+        );
+        // Cancelling is the same sentence with no picks at all…
+        assert_eq!(unanswered(&cards, &[]).len(), 2);
+        // …and a complete answer refuses nothing.
+        assert!(unanswered(&cards[..1], &picks).is_empty());
     }
 
     #[test]

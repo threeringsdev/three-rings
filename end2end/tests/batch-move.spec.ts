@@ -627,35 +627,43 @@ test("@fast an ambiguous /my row asks which copies, and moves exactly the stack 
     await expect(page.locator(STEP_CARD)).toHaveAttribute("data-card", card.name);
     const rows = page.locator(STEP_ROW);
     await expect(rows).toHaveCount(stacks);
+    // Each row states what *ticking it* does — one copy, out of the stack's own
+    // count — not the size of the stack it would take.
     await expect(rows.filter({ hasText: here.name })).toHaveText(
-      `${here.name} · 2 copies`,
+      `${here.name} · 1 of 2 copies`,
     );
     await expect(rows.filter({ hasText: there.name })).toHaveText(
-      `${there.name} · 3 copies`,
+      `${there.name} · 1 of 3 copies`,
     );
     // The destination is not offered as a place to take copies *from*.
     await expect(rows.filter({ hasText: dest.name })).toHaveCount(0);
 
-    // Pick one stack, and the button says what it will do.
+    // Tick *both* stacks of the same card — the step's headline flow, and the
+    // one the tray's own "N cards, 1 copy each" phrasing cannot describe: this
+    // is one card and two copies, and a toast saying "2 cards" is a false
+    // statement about the user's collection.
     await rows.filter({ hasText: here.name }).click();
     const confirm = page.locator(STEP_CONFIRM);
     await expect(confirm).toHaveText("Move 1 copy");
+    await rows.filter({ hasText: there.name }).click();
+    await expect(confirm).toHaveText("Move 2 copies");
     await confirm.click();
 
-    await expect(page.locator(TOAST, { hasText: "Moved 1 card" })).toContainText(
-      `Moved 1 card (1 copy) → 🗂 ${dest.name}`,
+    await expect(page.locator(TOAST, { hasText: "Moved" })).toContainText(
+      `Moved 2 copies of 1 card → 🗂 ${dest.name}`,
     );
     // The question was answered, so the tray stops asking it — the entry the
     // step was opened for is a `card:` token, and the move that answered it
     // reported `held:` ones.
     await expect(page.locator(TRAY)).toHaveCount(0);
 
-    // The assertion the whole feature stands on: the picked stack gave up a
-    // copy, the other one is untouched, and the destination got exactly one.
+    // The assertion the whole feature stands on: each picked stack gave up
+    // exactly one copy — not one copy total, and not the whole stack — and the
+    // destination got both.
     await expect(async () => {
       expect(await present(request, here.id, [printing])).toEqual([1]);
-      expect(await present(request, there.id, [printing])).toEqual([3]);
-      expect(await present(request, dest.id, [printing])).toEqual([1]);
+      expect(await present(request, there.id, [printing])).toEqual([2]);
+      expect(await present(request, dest.id, [printing])).toEqual([2]);
     }).toPass({ timeout: 5000 });
   } finally {
     await deleteCollection(request, here.id);
