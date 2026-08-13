@@ -5634,3 +5634,89 @@ container (`min-w-0` + `truncate`), not a table cell directly. A table cell that
 truncation (not just a later breakpoint) would need either `table-layout: fixed` with explicit
 column widths, or the `width: 1px; min-width: 100%` block-in-cell trick — neither attempted
 here since the breakpoint move and header abbreviation closed both overflows without it.
+||||||| parent of 38c4d7b (design(ui): /login and /signup match their frames — labels, heading, brand line)
+
+
+### `/login` + `/signup` match the "Desktop — Sign in" frame (P6-008, 2026-08-13)
+
+`specs/phase-6-probes/batch-I-responsive.md`'s P6-008 entry confirmed
+`app/src/auth_pages.rs`'s cards had drifted from `design/wireframes.pen`'s
+"Desktop — Sign in" frame (the pencil MCP is down; read the frame straight out
+of the `.pen` file's JSON instead — it is plain JSON, `grep -n '"name": "Desktop'`
+finds it at line 2830): no brand line, the heading read "Sign in" instead of
+the frame's "Sign in to your collection", every field was a bare `placeholder`
+with no `<label>` anywhere in the file, and the sign-up line read "No account?
+Sign up" instead of the frame's "New here?" / "Create account".
+
+**What the frame actually specifies (read from the `.pen` JSON, not prose).**
+The "Auth Card" is `icon(circle-dashed) + "Three Rings"` (the "Auth Logo"
+group) above a muted, normal-weight `"Sign in to your collection"` heading,
+then an **Email Group** and **Password Group** each pairing a small
+medium-weight **Label** (`"Email"` / `"Password"`) with its own input frame —
+label and input both drawn on screen together, not a floating-placeholder
+pattern where the label text only ever appears inside the input. Below the
+card, `"New here?"` + `"Create account"` (link). No frame for `/signup`
+exists in the file (`grep '"name": "Desktop'` finds only the sign-in frame),
+so the signup card got the structural half of the same treatment — brand
+line, visible labels — without inventing copy the design never specified.
+
+**Applied, `app/src/auth_pages.rs` + `app/src/shell.rs`:**
+- **Brand line.** The shell header's own wordmark (`<a href="/"
+  class="text-sm font-semibold tracking-tight">"Three Rings"</a>`) was
+  factored out of `AppShell` into `pub fn Wordmark()` (`shell.rs`) and reused
+  on both cards — reusing the app's one existing brand element rather than
+  inventing a second, and giving the shell itself the same component instead
+  of duplicating markup. No `circle-dashed` icon: this app already substitutes
+  emoji glyphs for lucide icons where a wireframe specifies one
+  (`app/src/my/root.rs`'s `ICON_*` constants) and has no icon set wired up;
+  adding one for a single decorative mark was out of scope for an S task, so
+  the wordmark ships text-only, same as the shell.
+- **Heading.** `/login`: `"Sign in"` → `"Sign in to your collection"`,
+  verbatim from the frame. `/signup`: left as `"Create account"` — no frame
+  authority for signup copy, and it already matches the sign-in frame's own
+  "Create account" link text.
+- **Labels.** Real, visible `<label for=… >` elements above each input
+  (`LABEL` class: `block text-sm font-medium text-muted-foreground`, sized to
+  the frame's small/medium-weight/muted look), each paired with a matching
+  `id` on its input — the frame draws the label and a filled input
+  side by side, not a floating-placeholder pattern, so this is the "real
+  visible `<label>`" case, not the "keep placeholders, just wire ARIA" one.
+  Placeholders were kept only where they now carry non-redundant content: an
+  example value (`you@example.com`) or a genuine hint (`8+ characters` for the
+  signup password, no longer prefixed with the now-redundant word
+  "Password"). The bare `"Password"` placeholder on `/login` was dropped
+  outright — the label already says it and there's no hint left to add.
+- **Sign-up line.** `/login`: `"No account? "` + `"Sign up"` →
+  `"New here? "` + `"Create account"`, verbatim from the frame (the link
+  still points at `/signup`). `/signup`'s own `"Already have an account? Sign
+  in"` line was left alone — no frame governs it and nothing flagged it as a
+  deviation.
+
+**Deliberately out of scope (still deviations, not touched here — this task's
+brief named only the four items above).** `BackHome`'s `"← Back to home"`
+text vs. the frame's `"Browse the catalog without an account →"` (shared by
+`/login`, `/signup`, the reset and OTP cards — touching it has a wider blast
+radius than this S task's brief covered) and the desktop sidebar rail's `w-60`
+(240px, `shell.rs`) vs. the frame's drawn 280px both remain as filed in the
+P6-008 probe entry; neither was in this task's named list of elements to
+align.
+
+**e2e selector risk, checked before touching markup.** `end2end/tests/
+auth.setup.ts`, `smoke.spec.ts`, `command-palette.spec.ts`, and
+`seed-e2e-user.mjs` all drive the forms via `input[name=email]` /
+`input[name=password]` / `input[name=name]` — untouched by this change.
+`getByRole("heading", { name: "Sign in" })` (three call sites in
+`smoke.spec.ts` / `catalog.spec.ts`) matches by case-insensitive substring by
+default, so it still matches the new `"Sign in to your collection"` heading
+without edits.
+
+**Verified.** Playwright screenshots of `/login` and `/signup`, before
+(`git stash`, forced a rebuild, confirmed the served HTML reverted to the
+plain-placeholder markup) and after — brand line, heading, labels, and the
+sign-up line all visibly changed as described. `cargo test -p app --features
+hosted`: 360 passed, 0 failed. `npx playwright test --project=chromium
+--workers=1 tests/session-fallback.spec.ts tests/smoke.spec.ts`: 11 passed —
+including `auth.setup.ts`'s fixture sign-in (the critical regression: it
+fills the real form and waits for the `/my` redirect) and `smoke.spec.ts`'s
+"login honors next after sign-in", which drives the real login form through
+the new label markup end to end.

@@ -167,6 +167,18 @@ pub fn RequireAuth() -> impl IntoView {
     }
 }
 
+/// The app's brand line — the shell header's wordmark, factored out so
+/// `auth_pages.rs` (which renders outside `AppShell`, per the design frame's
+/// "Auth Logo" element) can show the same mark instead of inventing its own.
+#[component]
+pub fn Wordmark() -> impl IntoView {
+    view! {
+        <a href="/" class="text-sm font-semibold tracking-tight">
+            "Three Rings"
+        </a>
+    }
+}
+
 /// The persistent chrome around every catalog/my-cards page: top bar (brand,
 /// desktop mode switch, theme toggle, user menu), desktop sidebar rail frame,
 /// mobile bottom tabs. Auth pages and the bench stay outside it.
@@ -284,9 +296,7 @@ pub fn AppShell() -> impl IntoView {
                         <span aria-hidden="true">"☰"</span>
                     </button>
                 </Show>
-                <a href="/" class="text-sm font-semibold tracking-tight">
-                    "Three Rings"
-                </a>
+                <Wordmark />
                 <ModeSwitch my_mode />
                 <div class="ml-auto flex items-center gap-2">
                     <ThemeToggle />
