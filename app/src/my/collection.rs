@@ -1780,15 +1780,22 @@ fn FolderTableRow(
             // Padding still tracks the card rows' select cell, or the two row
             // kinds would size the column differently.
             <TableCell class="p-0 md:p-2">""</TableCell>
-            <TableCell class="p-2">
+            // `max-w-0 w-full` (P6-020): a child's `truncate` alone doesn't
+            // cap this column's own auto-layout min-content width — see the
+            // matching comment on `all_cards.rs`'s WHERE cell and
+            // specs/app-ui.md's P6-001 section. Folder names are
+            // user-chosen, same risk as a WHERE-cell collection name.
+            <TableCell class="max-w-0 w-full p-2">
                 <a
                     href=format!("/my/collections/{id}")
                     class="flex items-center gap-2 font-medium hover:underline"
                 >
-                    <span aria-hidden="true">
+                    <span aria-hidden="true" class="shrink-0">
                         {if folder.kind == CollectionKind::Deck { "🃏" } else { "📁" }}
                     </span>
-                    {folder.name}
+                    <span class="min-w-0 truncate" title=folder.name.clone()>
+                        {folder.name.clone()}
+                    </span>
                 </a>
             </TableCell>
             <TableCell class="hidden p-2 lg:table-cell">""</TableCell>
