@@ -577,6 +577,19 @@ fn UserMenu() -> impl IntoView {
 
     Effect::new(move |_| {
         if matches!(sign_out.value().get(), Some(Ok(()))) {
+            // The recent-places ring is per-user (P6-145), but the hard
+            // navigation below is a full document load, not an SPA route
+            // change — `localStorage` is untouched by that, so a browser left
+            // on this machine keeps the ring after sign-out unless it is
+            // cleared here explicitly. `get_untracked` reads whatever
+            // `CurrentUserResource` last resolved to, which is still this
+            // (now signing-out) user: the resource itself is never refetched
+            // (see `lib.rs`), so nothing has invalidated it yet.
+            let current_id = match user.get_untracked() {
+                Some(Ok(Some(current))) => Some(current.id),
+                _ => None,
+            };
+            crate::components::palette::clear_recents(current_id.as_deref());
             // Full-page load, not SPA navigation: the shared current-user
             // resource and every consumer (guard, redirect, this menu) must
             // see the now-anonymous session; a document load of /catalog

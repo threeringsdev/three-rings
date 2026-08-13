@@ -622,6 +622,93 @@ test("@fast `/` is not the palette's key", async ({ page }) => {
   await expect(dialog(page)).toHaveAttribute("data-state", "closed");
 });
 
+// P6-145: the recent-places ring in `localStorage` is scoped per-user, not
+// per-origin, and is cleared at sign-out. In its own describe with an empty
+// `storageState` — like `anonymous` below — for a sharper reason than
+// convenience: sign-out invalidates the session server-side, and the e2e-suite
+// skill's own trap note says a test that signs out must not share
+// `storageState` with later tests, since `AUTH_STATE` is one on-disk session
+// every other `@fast` test in this file (and every other spec) reuses. Signing
+// in fresh here, through the real `/login` form, is a second, independent
+// session for the same e2e user, so invalidating it here cannot touch the
+// shared one.
+//
+// The login fixture makes true multi-*user* testing impossible (one seeded
+// test user — the e2e-suite skill), so this cannot assert that a *different*
+// account gets a different ring. What it can assert, and what a regression to
+// the old unscoped `tr_recent_places` key would fail: the storage key this
+// user's ring lands under is not the bare legacy key, and sign-out actually
+// removes it (a hard `location` navigation does not touch `localStorage` on
+// its own — P6-122).
+test.describe("recent places are per-user and cleared at sign-out", () => {
+  test.use({ storageState: { cookies: [], origins: [] } });
+
+  test("@fast visiting places writes a per-user key, and signing out clears it", async ({
+    page,
+  }) => {
+    const email = process.env.E2E_EMAIL;
+    const password = process.env.E2E_PASSWORD;
+    if (!email || !password) {
+      throw new Error(
+        "E2E_EMAIL / E2E_PASSWORD missing — see auth.setup.ts / " +
+          "end2end/seed-e2e-user.sh",
+      );
+    }
+    // Same sequence as auth.setup.ts, but this test's own session — not the
+    // shared AUTH_STATE one (see the describe comment above).
+    await page.goto("/login");
+    await page.fill("input[name=email]", email);
+    await page.fill("input[name=password]", password);
+    await page.click("button[type=submit]");
+    await page.waitForURL("/my", { timeout: 15000 });
+    await hydrated(page);
+
+    // Walk two places through the palette — the surface under test, and also
+    // what records them (same pattern as "the palette carries the
+    // last-visited places" above).
+    await openPalette(page);
+    await page.keyboard.type("shoebox");
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/my\/collections\//);
+
+    await openPalette(page);
+    await page.keyboard.type("shopping");
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/my\/shopping$/);
+
+    // Kill-verify #1: base (pre-P6-145) writes the bare `tr_recent_places`
+    // key, shared by every account on this browser. This asserts the real key
+    // is scoped — `tr_recent_places:<user id>` — and that the bare key was
+    // never written.
+    const keysAfterVisits = await page.evaluate(() =>
+      Object.keys(localStorage).filter((k) => k.startsWith("tr_recent_places")),
+    );
+    expect(keysAfterVisits).toHaveLength(1);
+    expect(keysAfterVisits[0]).not.toBe("tr_recent_places");
+    expect(keysAfterVisits[0]).toMatch(/^tr_recent_places:.+/);
+
+    // Sign out through the real control — the user menu's popover, not a bare
+    // server-fn call — which is also what proves the shell's sign-out handler
+    // (not this test) is what clears storage.
+    await page.click('button[aria-label="Account menu"]');
+    const signOut = page.getByRole("button", { name: "Sign out" });
+    await expect(signOut).toBeVisible();
+    await signOut.click();
+    // Sign-out is a hard `location` navigation (P6-122), not an SPA route
+    // change — a full document load.
+    await page.waitForURL(/\/catalog$/, { timeout: 15000 });
+    await hydrated(page);
+
+    // Kill-verify #2: base leaves whatever key it wrote standing after
+    // sign-out — a full-page load does not touch `localStorage` on its own,
+    // and nothing else clears it.
+    const keysAfterSignOut = await page.evaluate(() =>
+      Object.keys(localStorage).filter((k) => k.startsWith("tr_recent_places")),
+    );
+    expect(keysAfterSignOut).toHaveLength(0);
+  });
+});
+
 // Signed out, in its own describe so it keeps the project's `baseURL` while
 // dropping the storageState the rest of the file uses.
 test.describe("anonymous", () => {
