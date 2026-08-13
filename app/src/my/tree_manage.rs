@@ -347,6 +347,17 @@ pub struct TreeManage {
     pub move_open: RwSignal<bool>,
     /// An op in flight (disables dialog submits).
     busy: RwSignal<bool>,
+    /// `true` for exactly the span of *this* move dialog's own `commit_move`
+    /// — set alongside `busy` in that function, nowhere else. `busy` is
+    /// shared by all four tree dialogs (see its own doc comment) and the move
+    /// picker reads it to render a foreign-busy warning while another
+    /// dialog's write is in flight; without this, that same read is also
+    /// true for the ordinary case of the move dialog's *own* pick committing,
+    /// which would dim the list and blame "another change" for the write
+    /// this very click just made (caught in review of P6-121, before this
+    /// stayed unshipped: every successful Move briefly claimed itself was
+    /// something else in progress).
+    move_committing: RwSignal<bool>,
     /// Inline dialog error (server message) — cleared on open/submit.
     error: RwSignal<Option<String>>,
     /// Bumped after every successful create / rename / move. A page whose own
@@ -423,6 +434,7 @@ pub fn provide_tree_manage() {
         move_req: RwSignal::new(None),
         move_open: RwSignal::new(false),
         busy: RwSignal::new(false),
+        move_committing: RwSignal::new(false),
         error: RwSignal::new(None),
         revision: RwSignal::new(0),
         content_revision: RwSignal::new(0),
@@ -807,6 +819,31 @@ pub fn TreeDialogs() -> impl IntoView {
         })
     };
 
+    // The move picker's only visible reaction to a shared `busy` held by
+    // *another* dialog (P6-121). The other three dialogs disable their own
+    // submit `Button` on `manage.busy` (`attr:disabled=move || manage.busy.get()`);
+    // this one has no separate submit — picking a row *is* the commit — so
+    // without this the picker looked completely normal while `commit_move`
+    // silently declined every click. `busy` deliberately stays the one shared
+    // signal it already was (P6-121 is a visible-feedback fix, not a redesign
+    // of dialog state): dismissing a slow Delete (ESC closes the overlay, not
+    // its in-flight request — `Dialog`'s ESC never cancels anything) and then
+    // opening Move to… lands here with the list dimmed and inert until that
+    // request settles.
+    //
+    // **`&& !manage.move_committing.get()`, not just `busy`.** `commit_move`
+    // sets `busy` for its own write too (same shared signal every dialog's
+    // submit uses), and without excluding that span here, every ordinary
+    // successful Move dimmed its own list and blamed "another change" for
+    // the write the click itself had just made (caught in review — this is
+    // the fix for it, not a hypothetical). During the move dialog's own
+    // commit this renders exactly as it did before this task added any of
+    // this markup: no dimming, no message — a deliberate choice, not a gap,
+    // since there is no separate submit control here whose disabled state
+    // could stand in for one.
+    let move_busy =
+        move || manage.move_open.get() && manage.busy.get() && !manage.move_committing.get();
+
     // Put the caret in the move picker's field when it opens. Without this the
     // keyboard path dead-ends: the menu item opens a dialog nothing is focused
     // in, so ↑↓/⏎ reach no row. Same shape (and same fallback timeout) as the
@@ -1007,7 +1044,14 @@ pub fn TreeDialogs() -> impl IntoView {
                     // duplicate the `destination-option` seam) behind a closed
                     // overlay on every My-cards page.
                     <Show when=move || manage.move_open.get()>
-                        <div class="overflow-hidden rounded-md border" data-testid="tree-move-list">
+                        <div
+                            class="overflow-hidden rounded-md border"
+                            class:opacity-50=move_busy
+                            class:pointer-events-none=move_busy
+                            aria-busy=move || move_busy().then_some("true")
+                            data-busy=move || move_busy().then_some("true")
+                            data-testid="tree-move-list"
+                        >
                             <DestinationList
                                 placeholder="Search collections…"
                                 empty="No collection to move into."
@@ -1044,6 +1088,17 @@ pub fn TreeDialogs() -> impl IntoView {
                                 </Transition>
                             </DestinationList>
                         </div>
+                        // The `move_busy` dim/`pointer-events-none` above only
+                        // shows *something changed*; this names what (P6-121).
+                        // A stray click still lands on `commit_move`'s own
+                        // `busy` check, which sets `manage.error` — this line
+                        // is the steady-state read, that one the race-window
+                        // backstop.
+                        <Show when=move_busy>
+                            <p class="text-muted-foreground text-sm" data-testid="tree-move-busy">
+                                "Working on another change — try again in a moment."
+                            </p>
+                        </Show>
                     </Show>
                     {error_line}
                     <DialogFooter>
@@ -1731,8 +1786,42 @@ pub fn move_destinations(
     )
 }
 
+/// Why a `Move to…` pick produces no write.
+///
+/// These used to collapse into one `Option::None` that [`commit_move`] read as
+/// a single meaning — "nevermind, nothing to do" — copied from the drag path's
+/// [`plan_drop`], where every `None` genuinely is that. It isn't here: only
+/// [`MoveBlocked::AlreadyThere`] is a no-op the user asked for. The other two
+/// guard `rows`/`req.forbidden` going stale *between* `commit_move` reading the
+/// tree resource live (`tree.0.get_untracked()`) and the DOM the user actually
+/// clicked — a same-reactive-tick race (a pick landing in the flush a
+/// `tree.refetch()` is updating, just before the picker's own rows re-render
+/// off it), not a picker that stops updating: `move_rows`' `Suspend` does
+/// resubscribe to the tree resource, confirmed directly while building this
+/// task's e2e coverage (specs/app-ui.md, "Move dialog — honest exits"), so a
+/// destination that is genuinely gone or forbidden does not sit clickable for
+/// long. Closing silently on either still told the user their pick landed when
+/// nothing was ever sent to the server, for however narrow a window that was
+/// reachable in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MoveBlocked {
+    /// The destination is inside the moved node's own subtree
+    /// (`req.forbidden`, fixed when the dialog opened). The picker filters by
+    /// this exact same snapshot, so it never *offers* this row either — this
+    /// arm is a defensive re-check rather than a reachable one, in case that
+    /// invariant (picker and planner reading the identical set) ever drifts.
+    Forbidden,
+    /// The destination isn't in `rows` at all — deleted (by this session or
+    /// another) after the value `commit_move` is planning against was read,
+    /// but before this pick's own click resolved against it.
+    Gone,
+    /// The collection is already there. The one exit that genuinely is a
+    /// no-op: the picker's own ✓ already marks this row as "no move to make".
+    AlreadyThere,
+}
+
 /// Pure planner behind [`commit_move`]: the writes a `Move to…` pick makes, or
-/// `None` for a no-op.
+/// the [`MoveBlocked`] reason it can't.
 ///
 /// **It covers reparenting, and it lands the collection *last* among its new
 /// siblings** — which is why it uses `reorder_collection` as well as
@@ -1751,19 +1840,21 @@ fn plan_move(
     rows: &[CollectionTreeRow],
     req: &MoveReq,
     target: MoveTarget,
-) -> Option<(Option<Id>, Option<f64>)> {
+) -> Result<(Option<Id>, Option<f64>), MoveBlocked> {
     let new_parent = target.parent();
     if let Some(parent) = new_parent {
         // The picker never offers these; refused again here because the
         // snapshot outlives the list it was built from (a refetch can land
         // while the dialog is open).
         if req.forbidden.contains(&parent) {
-            return None;
+            return Err(MoveBlocked::Forbidden);
         }
-        rows.iter().find(|r| r.summary.id == parent)?;
+        if !rows.iter().any(|r| r.summary.id == parent) {
+            return Err(MoveBlocked::Gone);
+        }
     }
     if new_parent == req.parent_id {
-        return None; // Already there.
+        return Err(MoveBlocked::AlreadyThere);
     }
     // Last among the new siblings — the moved node itself excluded, since a
     // reparent within the same group is not a case that reaches here but a
@@ -1773,7 +1864,7 @@ fn plan_move(
         .filter(|r| r.summary.parent_id == new_parent && r.summary.id != req.id)
         .map(|r| r.summary.position)
         .fold(None::<f64>, |acc, p| Some(acc.map_or(p, |a| a.max(p))));
-    Some((new_parent, Some(last.map_or(1.0, |p| p + 1.0))))
+    Ok((new_parent, Some(last.map_or(1.0, |p| p + 1.0))))
 }
 
 /// Commit a `Move to…` pick through the same two adapters the drop uses.
@@ -1783,7 +1874,10 @@ fn plan_move(
 /// that doesn't must not be reported as "couldn't move" — it *did* move.
 /// Success and that partial case both close the dialog (the collection is where
 /// the user asked); an outright failure keeps it open with the server's message
-/// inline, like the other three dialogs.
+/// inline, like the other three dialogs. The same rule now applies to every
+/// exit that stops short of the server: see the `dto`/[`MoveBlocked`] arms
+/// below, and [`MoveBlocked`]'s own doc comment for why the old blanket
+/// `move_open.set(false)` was wrong for two of its three cases (P6-121).
 pub fn commit_move(
     tree: CollectionTreeResource,
     toast: ToastHandle,
@@ -1793,18 +1887,95 @@ pub fn commit_move(
     let Some(req) = manage.move_req.get_untracked() else {
         return;
     };
-    let Some(Some(Ok(dto))) = tree.0.get_untracked() else {
-        return;
+    // `tree.0.get_untracked()` reads the resource's *current* value at the
+    // moment this click resolved. `move_rows`' own list re-renders off the
+    // same resource (see `MoveBlocked`'s doc comment), so the two agree in
+    // the overwhelming common case — but a read here can still land in the
+    // narrow flush between a `tree.refetch()` resolving a *new* `Some` and
+    // that re-render committing, which is what `MoveBlocked::Gone` below is
+    // for. (Reactive-graph resources hold their previous `Some` across a
+    // refetch until the new fetch resolves — `ArcAsyncDerived` never drops
+    // back to `None` mid-flight — so this read is never genuinely "between
+    // values" the way an earlier draft of this comment claimed.)
+    let dto = match tree.0.get_untracked() {
+        Some(Some(Ok(dto))) => dto,
+        // Defensive fallback, not a transient this dialog realistically
+        // hits: `open_move` only fires off a resolved `Row` in
+        // `menu_target`, which means the tree resource had already produced
+        // at least one `Some` before this dialog could even open — and per
+        // the note above, a refetch never regresses that back to `None`.
+        // Reachable only if the tree has somehow never loaded at all by the
+        // time this fires; honest wording rather than a silent close either
+        // way.
+        None => {
+            manage.error.set(Some("Still loading — try again.".into()));
+            return;
+        }
+        // No tree at all (anonymous shell) or the read failed outright —
+        // `open_move` can't practically be reached in either state either,
+        // for the same reason, but degrade the same honest way rather than
+        // silently closing on a case that shouldn't happen.
+        Some(None) | Some(Some(Err(_))) => {
+            manage
+                .error
+                .set(Some("Couldn't load your collections — try again.".into()));
+            return;
+        }
     };
-    let Some((new_parent, position)) = plan_move(&dto.collections, &req, target) else {
-        // Picking where it already lives is a legitimate "never mind".
-        manage.move_open.set(false);
-        return;
+    let (new_parent, position) = match plan_move(&dto.collections, &req, target) {
+        Ok(plan) => plan,
+        Err(MoveBlocked::AlreadyThere) => {
+            // The one genuine no-op: the picker's own ✓ already marked this
+            // row as where the collection lives, so picking it back is "never
+            // mind", not a mistake to explain. No toast either — nothing was
+            // expected to happen, unlike the two arms below where something
+            // was and silently didn't.
+            manage.move_open.set(false);
+            return;
+        }
+        Err(MoveBlocked::Forbidden) => {
+            manage.error.set(Some(
+                "Can't move a collection into itself or one of its own subfolders.".into(),
+            ));
+            return;
+        }
+        Err(MoveBlocked::Gone) => {
+            // Not "…pick another destination" alone — the stale row can still
+            // be the one visibly on screen for the sub-tick window this arm
+            // guards (see `MoveBlocked`'s own doc comment), so the wording
+            // must hold up whether or not it has already vanished from the
+            // list by the time this reads.
+            manage.error.set(Some(
+                "That collection was just deleted — pick another destination.".into(),
+            ));
+            return;
+        }
     };
     if manage.busy.get_untracked() {
+        if manage.move_committing.get_untracked() {
+            // Not "another change" — *this* dialog's own previous pick is
+            // still finishing (a double click, or a second pick landing
+            // before the first one's dialog-close did). Nothing new to say:
+            // the first pick already owns the honest outcome once it lands.
+            return;
+        }
+        // `busy` is shared across all four tree dialogs (`TreeManage::busy`):
+        // dismissing a slow Delete (ESC closes the overlay, not the in-flight
+        // request) and then opening Move to… lands here. The picker's rows
+        // render visibly disabled while this is true (see `TreeDialogs`'
+        // move-dialog markup) — reaching this branch means a click beat that
+        // rendering onto the wire, so it still gets a message rather than a
+        // silent no-op.
+        manage.error.set(Some(
+            "Still working on another change — try again in a moment.".into(),
+        ));
         return;
     }
     manage.busy.set(true);
+    // Set alongside `busy`, for exactly its span — see the field's own doc
+    // comment for why the move picker's busy-rendering needs to tell "my own
+    // write" apart from "someone else's write, still going".
+    manage.move_committing.set(true);
     manage.error.set(None);
     spawn_local(async move {
         let mut reparented = false;
@@ -1816,6 +1987,7 @@ pub fn commit_move(
             }
         }
         manage.busy.set(false);
+        manage.move_committing.set(false);
         match (result, reparented) {
             (Ok(()), _) => manage.move_open.set(false),
             (Err(e), true) => {
@@ -2054,7 +2226,7 @@ mod tests {
             &req(9, Some(3), &[9, 10]),
             MoveTarget::Into(Id::from_u128(1)),
         );
-        assert_eq!(plan, Some((Some(Id::from_u128(1)), Some(2.0))));
+        assert_eq!(plan, Ok((Some(Id::from_u128(1)), Some(2.0))));
     }
 
     #[test]
@@ -2064,55 +2236,64 @@ mod tests {
             &req(9, Some(3), &[9, 10]),
             MoveTarget::Into(Id::from_u128(2)),
         );
-        assert_eq!(plan, Some((Some(Id::from_u128(2)), Some(1.0))));
+        assert_eq!(plan, Ok((Some(Id::from_u128(2)), Some(1.0))));
     }
 
     #[test]
     fn a_move_to_top_level_lands_after_the_last_root() {
         // Roots are Inbox(0.0), Shoebox(1.0), Trade(2.0) → 3.0.
         let plan = plan_move(&nested(), &req(9, Some(3), &[9, 10]), MoveTarget::TopLevel);
-        assert_eq!(plan, Some((None, Some(3.0))));
+        assert_eq!(plan, Ok((None, Some(3.0))));
     }
 
+    // ---------------------------- the three `MoveBlocked` exits (P6-121) --
+
     #[test]
-    fn picking_the_parent_it_already_has_is_a_no_op() {
+    fn picking_the_parent_it_already_has_is_blocked_as_already_there() {
         // Both directions of "already there" — the ✓ row is pickable, and it
-        // must not fire two writes that change nothing.
+        // must not fire two writes that change nothing. This is the one exit
+        // `commit_move` still closes the dialog on without an error line: the
+        // picker's own ✓ already told the user this is where it lives.
         assert_eq!(
             plan_move(
                 &nested(),
                 &req(9, Some(3), &[9, 10]),
                 MoveTarget::Into(Id::from_u128(3))
             ),
-            None
+            Err(MoveBlocked::AlreadyThere)
         );
         assert_eq!(
             plan_move(&nested(), &req(1, None, &[1, 2]), MoveTarget::TopLevel),
-            None
+            Err(MoveBlocked::AlreadyThere)
         );
     }
 
     #[test]
-    fn a_forbidden_or_unknown_destination_plans_nothing() {
-        // The picker never offers these, but the snapshot outlives the list it
-        // was built from — a refetch can land while the dialog is open.
+    fn a_destination_inside_the_moved_nodes_own_subtree_is_blocked_as_forbidden() {
+        // The picker never offers this row, but the snapshot outlives the
+        // list it was built from — a refetch can land while the dialog is
+        // open. Distinct from `Gone`: the id is real, just off-limits.
         assert_eq!(
             plan_move(
                 &nested(),
                 &req(9, Some(3), &[9, 10]),
                 MoveTarget::Into(Id::from_u128(10))
             ),
-            None,
-            "its own descendant"
+            Err(MoveBlocked::Forbidden)
         );
+    }
+
+    #[test]
+    fn a_destination_no_longer_in_the_rows_is_blocked_as_gone() {
+        // Deleted between the dialog opening and the pick — `commit_move`
+        // must not read this the same as `AlreadyThere` and silently close.
         assert_eq!(
             plan_move(
                 &nested(),
                 &req(9, Some(3), &[9, 10]),
                 MoveTarget::Into(Id::from_u128(404))
             ),
-            None,
-            "a collection that is no longer there"
+            Err(MoveBlocked::Gone)
         );
     }
 

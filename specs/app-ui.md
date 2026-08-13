@@ -1786,6 +1786,129 @@ Catalog's own filter trigger as the positive control. `/my` is unreachable on-de
 dev proxy still strips cookies, so it redirects to `/login?next=/my`), which is why the tap
 path is driven on the bench and why `TapTrigger` was added there.
 
+### Move dialog — honest exits (2026-08-12)
+
+`plan_move`'s three `None` exits collapsed into one meaning at the call site
+(`commit_move`): `manage.move_open.set(false)` with a comment naming only the
+"already there" case. Two of the three are not that — a destination gone
+forbidden or gone entirely between the dialog opening and the pick — and
+closing silently on either told the user their move landed when nothing was
+ever sent to the server (P6-121).
+
+`plan_move` now returns `Result<(Option<Id>, Option<f64>), MoveBlocked>`
+(`Forbidden` / `Gone` / `AlreadyThere`), table-tested per variant.
+`AlreadyThere` still closes the dialog with no toast — the picker's own ✓
+already told the user this is a no-op, the same standing as Cancel.
+`Forbidden` and `Gone` keep the dialog open with `manage.error` set (the same
+`data-tree-dialog-error` line the other three dialogs use), never a silent
+close.
+
+Same pass, two related exits that also went silent, both traced to
+`app/src/my/tree_manage.rs`'s `commit_move`:
+
+- **The tree resource reads `None`.** `commit_move` re-reads
+  `tree.0.get_untracked()` live at commit time, and a `None` there previously
+  hit the same blanket `else { return; }`. **Not** a mid-refetch case — an
+  earlier draft of this note claimed `tree.refetch()` could catch the signal
+  "between values" while this dialog is open, which is wrong per
+  `reactive_graph`'s own semantics: a refetch holds the previous `Some` until
+  the new fetch resolves (`ArcAsyncDerived` never regresses to `None`
+  mid-flight). `None` is only the *never-resolved* state, and `open_move`
+  can't fire until a tree row has already rendered once — so this arm is a
+  defensive fallback for "the tree has somehow never loaded", not a
+  transient this dialog realistically hits. Kept anyway, with honest
+  wording ("Still loading — try again.") rather than a silent close, the
+  same call as the adjacent failed-read arm ("Couldn't load your
+  collections — try again.").
+- **`busy` held by another dialog.** `busy` is one `RwSignal<bool>` shared by
+  all four tree dialogs (`TreeManage::busy`), and `Dialog`'s ESC closes an
+  overlay without cancelling its in-flight request — dismiss a slow Delete,
+  open Move to…, and the picker looked completely idle while every pick
+  silently no-opped. Deliberately **not** made per-dialog (out of scope for
+  this task): the move list now renders `opacity-50 pointer-events-none` plus
+  a "Working on another change — try again in a moment." line
+  (`data-testid="tree-move-busy"`) while `manage.busy` is true, matching the
+  other three dialogs' `attr:disabled=move || manage.busy.get()` on their
+  submit `Button` — this dialog has no separate submit, so the row list
+  itself carries the disabled state. `commit_move`'s own busy check keeps a
+  message (not a silent return) as a backstop for the race between a click and
+  that render landing.
+
+**Finding, corrected mid-task: `move_rows`' picker list is not frozen.** The
+first pass assumed `Suspend::new(async move { tree.await })` resolves once and
+never rebuilds off a later `tree.refetch()`, which would make a deleted
+destination stay stuck on screen for the rest of the dialog's life — the
+obvious way to reach `MoveBlocked::Gone` from real clicking. Built an e2e test
+on that premise (delete an unrelated collection through the UI, capturing its
+undo-toast refetch as the trigger; raw-API-delete the picker's own selected
+destination in between; click Undo to force a second refetch after the
+deletion; click the stale row) and it disproved its own premise: once *any*
+refetch lands, the picker's rendered rows update as fast as the sidebar's
+own — Leptos's `Suspend` does resubscribe to the resource it awaits. The
+`Gone`/`Forbidden` arms guard a real but sub-reactive-tick race (a click
+landing in the same flush as a refetch, before the DOM commits) that this
+suite cannot make deterministic without reaching into the page's internal
+signals, which is out of bounds for an e2e test. `Forbidden` is narrower
+still: the picker filters by the exact same frozen `req.forbidden` snapshot
+`plan_move` checks against, so a row the check would reject is never rendered
+at all — reaching that arm from a real click looks structurally impossible
+given the current implementation, not merely hard to time. Both stay
+worthwhile as defensive classification (correctly typed instead of silently
+merged) and are table-tested directly against the pure function, which is
+where their kill-verified coverage actually lives.
+
+The e2e-reachable version of "destination deleted mid-dialog" is the plainer
+one: delete it before *any* refetch has landed, so the still-rendered row
+sends the pick to the server, which 404s. That path was already correct
+before this task (`(Err(e), false) => manage.error.set(user_msg(&e))`) — the
+new test pins it as a regression net so a future refactor can't silently
+re-merge it into the closed-dialog branch, but it does not kill-verify this
+diff's own new code. What does: a second e2e test for the `busy`-visible-state
+markup, using `page.route` to hold a Delete's request open on cue (the same
+pattern `collection-header-kebab.spec.ts`'s race test uses) — deterministic,
+and confirmed to fail on the pre-fix code and pass on the fix by literally
+running it both ways (`git stash` around `tree_manage.rs`).
+
+**Review caught a major in the `busy`-visible-state addition itself, same day
+(P6-121, second pass):** `move_busy = move_open && busy` reads `busy` without
+asking *whose* write set it. `commit_move` sets `busy` for its own commit too
+— the same shared signal every dialog's submit uses — so every ordinary
+successful Move dimmed the row list and showed "Working on another change —
+try again in a moment." for the span of the write the click had just made.
+Factually wrong (it *was* this change) and actively bad advice (the pick was
+already committing; there was nothing to retry). Fixed with a second signal,
+`TreeManage::move_committing`, set/cleared alongside `busy` in `commit_move`
+and nowhere else; `move_busy` (and the parallel "still working" branch inside
+`commit_move`'s own foreign-busy check) now reads `busy && !move_committing`.
+During the move dialog's own commit this renders exactly as it did before any
+of this task's markup existed: no dimming, no message — there is no separate
+submit control here whose disabled state could stand in for one, so "nothing
+new" is the honest baseline, not a gap. Also reworded the `Gone` message
+(minor, same review) from "…pick another destination" to "That collection was
+just deleted — pick another destination.": the stale row can still be the one
+visibly on screen for the sub-tick window this arm guards, so the wording
+must hold up whether or not it has already vanished from the list.
+
+New e2e coverage for the fix: extended the busy-visible-state test with an
+ordinary-commit case — hold *this* move's own `reparent_collection` open via
+`page.route` and assert the "another change" line never appears while it's in
+flight, alongside the pre-existing foreign-busy case (holding an unrelated
+Delete's request instead) still showing it. Kill-verified against the
+pre-review commit (`8b4b405`, `git stash` around `tree_manage.rs`): the new
+own-commit assertion failed there exactly as expected — the dimmed list and
+the "another change" line for an ordinary Move it is possible to reproduce on
+every single successful pick, not a rare race — and passes on the fix.
+
+Verified: `cargo test -p app --features hosted` (320 passed, incl. the three
+`MoveBlocked` unit tests), gate subset (fmt, workspace clippy, frontend wasm
+clippy) clean, `collection-tree-move.spec.ts` full chromium `--workers=1`
+**12/12**. `collection-tree-manage.spec.ts` in the same run: **26/29** (3
+failures triaged as pre-existing shared-dev-branch data debris unrelated to
+this change — a `genuinelyUnownedCard` pool exhaustion and an Inbox rollup
+count off by the same kind of leftover `zz-e2e` debris the e2e-suite skill
+already names as a known collision source; reproduced solo, no relation to
+move-dialog code).
+
 ### ⌘K command palette (2026-07-26)
 
 `app/src/components/palette.rs` — mounted once in `AppShell`, rendering nothing
