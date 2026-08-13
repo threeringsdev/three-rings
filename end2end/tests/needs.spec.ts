@@ -936,6 +936,58 @@ test("@fast a pull whose items resolve to nothing is refused out loud, not silen
   }
 });
 
+// ------------------------------------------- P6-143: reachable when met ---
+
+test("@fast a collection whose needs are fully met still reaches the needs page, via a neutral chip", async ({
+  page,
+  request,
+}) => {
+  // The bug: this page's designed empty state (`needs-empty`, "All set") had
+  // no navigation path to it. The header's needs chip was the page's only
+  // link, and `needs_chip` returns `None` the instant nothing is missing
+  // (`app/src/my/collection.rs`) — so reaching "nothing missing" made the
+  // chip vanish along with the link, and the empty state below it was only
+  // reachable by hand-typing the URL. The fix: a collection that wants
+  // things and has every one of them gets a neutral chip instead of no chip
+  // at all, still pointed at `/needs`.
+  const [card] = await unownedCards(request, 1);
+  const deck = await createCollection(request, "deck", "satisfied");
+  try {
+    await addWant(request, deck.id, card.oracle_id, 2);
+    await addHave(request, deck.id, card.printing_id as string, 2);
+    expect(
+      await needsOf(request, deck.id),
+      "held == wanted leaves no gap rows",
+    ).toEqual([]);
+
+    await page.goto(`/my/collections/${deck.id}`);
+    await hydrated(page);
+
+    // The base this replaces: the missing-N chip is a *different* element
+    // (`needs-chip`), and it is genuinely absent here, not just unchecked —
+    // inverted, this is `collection-view.spec.ts`'s "no chip at all" case for
+    // a collection with no desires, which must still hold once desires exist
+    // but are satisfied.
+    await expect(page.locator('[data-testid="needs-chip"]')).toHaveCount(0);
+    const chip = page.locator('[data-testid="needs-chip-satisfied"]');
+    await expect(chip).toBeVisible();
+    await expect(chip).toContainText("All needs met");
+    await expect(chip).toHaveAttribute(
+      "href",
+      `/my/collections/${deck.id}/needs`,
+    );
+
+    // Clicking it lands on the page's own empty state — the reachability
+    // this task exists to restore, proven by a real navigation rather than a
+    // hand-typed URL.
+    await clickUntil(chip, async () => page.url().endsWith("/needs"));
+    await hydrated(page);
+    await expect(page.locator('[data-testid="needs-empty"]')).toBeVisible();
+  } finally {
+    await deleteCollection(request, deck.id);
+  }
+});
+
 // ------------------------------------------------- P6-142: the way out ---
 
 test("@fast a malformed collection id renders the error, and the back link leads somewhere alive", async ({
