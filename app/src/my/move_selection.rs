@@ -1103,73 +1103,73 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
     });
 
     view! {
-        <WhichCopiesDialog step open=step_open answered on_confirm=confirm />
-        // Aligned to its own end and opening upward (the popover's default
-        // block-start placement): this control sits at the bottom of the
-        // viewport, where a downward panel would be off screen.
-        <Popover id="tray-destination" open=open align=PopoverAlign::End>
-            <PopoverTrigger
-                class="bg-background text-foreground h-auto shrink-0 rounded-md border-0 px-3 py-1.5 text-[13px] font-medium"
-                attr:data-testid="tray-move"
-            >
-                {move || if pending.get() { "Moving…" } else { "Move to…" }}
-            </PopoverTrigger>
-            <PopoverContent class="w-[280px] p-0">
-<<<<<<< HEAD
-                // No `empty` override: `DestinationList`'s own default ("No
-                // collection matches.") is the true sentence here too.
-                // `empty` can only ever speak about *filtering* (its own doc)
-                // — "No collection to move to." was a claim about having
-                // nowhere to move copies, which typing a search term that
-                // matches nothing does not make true. And the zero-collections
-                // case this used to (over-)cover cannot happen here:
-                // `collection_list()` — the read `collections` above resolves
-                // through — provisions the caller's undeletable Inbox row as a
-                // side effect (`CollectionStore::list_collections` calls
-                // `ensure_inbox` before it returns rows; collection-api.md →
-                // "Inbox provisioning"), so this list is never really empty,
-                // only ever filtered down to nothing.
-                <DestinationList failed=load_failed>
-||||||| parent of 790a92e (fix(ui): the tray picker gets the same one-state-at-a-time treatment)
-                <DestinationList empty="No collection to move to." failed=load_failed>
-=======
-                <DestinationList
-                    empty="No collection to move to."
-                    failed=load_failed
-                    loading=load_loading
+            <WhichCopiesDialog step open=step_open answered on_confirm=confirm />
+            // Aligned to its own end and opening upward (the popover's default
+            // block-start placement): this control sits at the bottom of the
+            // viewport, where a downward panel would be off screen.
+            <Popover id="tray-destination" open=open align=PopoverAlign::End>
+                <PopoverTrigger
+                    class="bg-background text-foreground h-auto shrink-0 rounded-md border-0 px-3 py-1.5 text-[13px] font-medium"
+                    attr:data-testid="tray-move"
                 >
->>>>>>> 790a92e (fix(ui): the tray picker gets the same one-state-at-a-time treatment)
-                    // Same boundary the catalog's picker uses, and for the same
-                    // reason: the rows come from resources, and only a
-                    // suspense boundary keeps a render in step with them. The
-                    // fallback is empty, not a "Loading…" line of its own —
-                    // `load_loading` above already puts that message on
-                    // `DestinationList`'s `CommandEmpty` (P6-163).
-                    <Transition fallback=|| ()>
-                        {move || Suspend::new(async move {
-                            // The tree of collections is what this list *is*, so
-                            // its failure is reported (`load_failed` → the list's
-                            // own failed arm) rather than flattened into zero rows
-                            // that read as "you have nowhere to move these".
-                            let all = collections.await.unwrap_or_default().collections;
-                            // Suggestions are a *ranking* hint — collections whose
-                            // desired exceeds present for these cards. Losing them
-                            // costs the wireframe's ordering, not the ability to
-                            // move, and no arm here would be more honest than the
-                            // plain list: this one degrades on purpose.
-                            let ranked = suggested.await.unwrap_or_default();
-                            picker_options(&ranked, &all)
-                                .into_iter()
-                                .map(|choice| {
-                                    view! { <DestinationOption choice on_choose=choose /> }
-                                })
-                                .collect_view()
-                        })}
-                    </Transition>
-                </DestinationList>
-            </PopoverContent>
-        </Popover>
-    }
+                    {move || if pending.get() { "Moving…" } else { "Move to…" }}
+                </PopoverTrigger>
+                <PopoverContent class="w-[280px] p-0">
+    <<<<<<< HEAD
+                    // No `empty` override: `DestinationList`'s own default ("No
+                    // collection matches.") is the true sentence here too.
+                    // `empty` can only ever speak about *filtering* (its own doc)
+                    // — "No collection to move to." was a claim about having
+                    // nowhere to move copies, which typing a search term that
+                    // matches nothing does not make true. And the zero-collections
+                    // case this used to (over-)cover cannot happen here:
+                    // `collection_list()` — the read `collections` above resolves
+                    // through — provisions the caller's undeletable Inbox row as a
+                    // side effect (`CollectionStore::list_collections` calls
+                    // `ensure_inbox` before it returns rows; collection-api.md →
+                    // "Inbox provisioning"), so this list is never really empty,
+                    // only ever filtered down to nothing.
+                    <DestinationList failed=load_failed>
+    ||||||| parent of 790a92e (fix(ui): the tray picker gets the same one-state-at-a-time treatment)
+                    <DestinationList empty="No collection to move to." failed=load_failed>
+    =======
+                    <DestinationList
+                        empty="No collection to move to."
+                        failed=load_failed
+                        loading=load_loading
+                    >
+    >>>>>>> 790a92e (fix(ui): the tray picker gets the same one-state-at-a-time treatment)
+                        // Same boundary the catalog's picker uses, and for the same
+                        // reason: the rows come from resources, and only a
+                        // suspense boundary keeps a render in step with them. The
+                        // fallback is empty, not a "Loading…" line of its own —
+                        // `load_loading` above already puts that message on
+                        // `DestinationList`'s `CommandEmpty` (P6-163).
+                        <Transition fallback=|| ()>
+                            {move || Suspend::new(async move {
+                                // The tree of collections is what this list *is*, so
+                                // its failure is reported (`load_failed` → the list's
+                                // own failed arm) rather than flattened into zero rows
+                                // that read as "you have nowhere to move these".
+                                let all = collections.await.unwrap_or_default().collections;
+                                // Suggestions are a *ranking* hint — collections whose
+                                // desired exceeds present for these cards. Losing them
+                                // costs the wireframe's ordering, not the ability to
+                                // move, and no arm here would be more honest than the
+                                // plain list: this one degrades on purpose.
+                                let ranked = suggested.await.unwrap_or_default();
+                                picker_options(&ranked, &all)
+                                    .into_iter()
+                                    .map(|choice| {
+                                        view! { <DestinationOption choice on_choose=choose /> }
+                                    })
+                                    .collect_view()
+                            })}
+                        </Transition>
+                    </DestinationList>
+                </PopoverContent>
+            </Popover>
+        }
 }
 
 /// Everything a finished move touches besides the write itself: the tray, the
