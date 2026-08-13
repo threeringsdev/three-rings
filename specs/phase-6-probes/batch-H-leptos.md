@@ -264,8 +264,8 @@ channel, different symptom; `P6-043` gets cheaper once this lands.
 `ServerFnError<shared::ApiError>` (`ServerFnError::from(e)`, a `WrappedServerError`)
 instead of flattening to `ServerError(e.to_string())` — same name and
 signature, so all ~40 `.map_err(api_err)` call sites (the probe's count of 39
-undercounted by one — `undo_selection_move`'s batch-index remap at
-`lib.rs:1526` also routes through it) needed no edits. `shared::ApiError`
+undercounted by one — `move_selection`'s batch-index remap at
+`lib.rs:1552` also routes through it) needed no edits. `shared::ApiError`
 already carried `Serialize`/`Deserialize`; it needed a new `FromStr` impl
 (the left inverse of its existing `Display`) because the server-fn wire
 round-trips a custom error's `CustErr` through `Display`/`FromStr` text
