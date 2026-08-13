@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { AUTH_STATE, hydrated } from "./helpers";
+import { AUTH_STATE, clickUntil, hydrated } from "./helpers";
 
 // Tree "Move to…" — the mouse-free half of the drag layer (specs/app-ui.md
 // "Collection tree"; design/information-architecture.md → "Tree management
@@ -566,6 +566,114 @@ test.describe("honest exits (P6-121)", () => {
       await page.unroute("**/api/reparent_collection*");
       await deleteCollection(page, src.id);
       await deleteCollection(page, dst.id);
+    }
+  });
+});
+
+test.describe("loading state (P6-163)", () => {
+  // The double-state bug: with the tree read pending, the move dialog's own
+  // `Transition` fallback ("Loading collections…") and `DestinationList`'s
+  // registry-inferred `CommandEmpty` ("No collection to move into.") used to
+  // render *at once* — nothing had mounted a single `command` item yet
+  // either way, which a check that only counts registered items cannot tell
+  // apart from "genuinely no destinations". `DestinationList`'s `loading`
+  // prop, wired from the tree resource's own pending state, makes it
+  // exclusive instead: `CommandEmpty` un-mounts the registry-inferred line
+  // while `loading` is true, same as it already did for `failed`.
+  //
+  // **A `page.goto` straight to `/my/collections/:id` cannot hold this
+  // pending**: `AppShell` (which calls `provide_collection_tree()`) wraps
+  // every catalog/my-cards page, and a full navigation resolves that
+  // `Resource` *during SSR* — its value ships already-baked into the initial
+  // HTML/hydration payload, so the browser never issues its own
+  // `/api/collection_tree` request for `page.route` to catch (measured: zero
+  // request events on a fresh full load of `/my`). The one place a genuine
+  // client-side fetch happens is the *first* client-side (SPA) navigation
+  // into an `AppShell`-wrapped route this session — `/dev/components` is
+  // outside that shell entirely, so landing there first and then routing in
+  // client-side is what makes the fetch (and so the hold) real (measured: one
+  // `request` event, on the SPA transition, not the initial load). Since
+  // there is no on-page link to an arbitrary just-created scratch collection,
+  // an anchor pointing at it is injected and clicked instead — a real,
+  // trusted click, which is what the router's global click-delegation (same
+  // mechanism `<A>` relies on) needs to intercept it as an in-app navigation
+  // rather than a full reload.
+  test("the move picker shows exactly one state while the tree read is pending @fast", async ({
+    page,
+  }) => {
+    const target = await createCollection(page, {
+      name: scratchName("load-tgt"),
+    });
+    let releaseTree: (() => void) | undefined;
+    const treeHeld = new Promise<void>((resolve) => {
+      releaseTree = resolve;
+    });
+    await page.route("**/api/collection_tree*", async (route) => {
+      await treeHeld;
+      await route.continue();
+    });
+    try {
+      await page.goto("/dev/components");
+      await hydrated(page);
+
+      await page.evaluate((id) => {
+        const a = document.createElement("a");
+        a.href = `/my/collections/${id}`;
+        a.id = "p6-163-probe-link";
+        // Text content, not an empty tag: an empty inline `<a>` has a
+        // zero-size box, which fails Playwright's actionability check for
+        // `.click()` forever (measured: a 30s hang, not a fast failure).
+        a.textContent = "p6-163 probe link";
+        document.body.appendChild(a);
+      }, target.id);
+      // `clickUntil`, not a bare click: this anchor is injected straight into
+      // the DOM rather than rendered by the app, so it is reachable before
+      // the router's click-delegate has necessarily attached — the exact
+      // hydration-timing race `retryUntil`'s own doc comment names (e2e-suite
+      // skill).
+      await clickUntil(page.locator("#p6-163-probe-link"), async () =>
+        page.url().includes(target.id),
+      );
+      await page.waitForURL(`**/my/collections/${target.id}`);
+
+      await page.locator('[data-testid="collection-actions"]').click();
+      const menu = page.locator("#context-menu-collection-header");
+      await expect
+        .poll(() => menu.evaluate((el) => el.matches(":popover-open")))
+        .toBe(true);
+      await menu
+        .locator('[role="menuitem"]')
+        .filter({ hasText: "Move to…" })
+        .click();
+      await expectMoveState(page, "open");
+
+      const dialog = moveDialog(page);
+      // Base (pre-fix) behavior: both lines below render together. The fix
+      // makes them mutually exclusive — loading shows…
+      await expect(dialog.getByText("Loading collections…")).toBeVisible();
+      // …the registry-inferred empty line does not, at the same time…
+      await expect(
+        dialog.getByText("No collection to move into."),
+      ).toHaveCount(0);
+      // …and nothing has resolved, so no row exists yet either.
+      await expect(dialog.getByTestId("destination-option")).toHaveCount(0);
+
+      // Let the held response land, then the loading line clears and real
+      // rows take over — proving the flag tracks the resource live rather
+      // than being wired to a constant.
+      releaseTree?.();
+      await page.waitForResponse(
+        (r) => r.url().includes("/api/collection_tree") && r.status() === 200,
+      );
+      await expect(dialog.getByText("Loading collections…")).toHaveCount(0);
+      await expect(
+        dialog.locator('[data-testid="destination-option"]', {
+          hasText: "Top level",
+        }),
+      ).toBeVisible();
+    } finally {
+      await page.unroute("**/api/collection_tree*");
+      await deleteCollection(page, target.id);
     }
   });
 });

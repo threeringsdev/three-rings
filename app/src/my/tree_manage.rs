@@ -645,6 +645,20 @@ pub fn TreeDialogs() -> impl IntoView {
     // server's text without rewriting it. Safe here because the dialog is behind
     // `move_open`, a client signal that is false on every server render.
     let load_failed = RwSignal::new(false);
+    // **Whether the tree read hasn't resolved yet** — `DestinationList`'s
+    // `loading` prop (P6-011/P6-163). Before this, the move picker's own
+    // `Transition` fallback ("Loading collections…") and `CommandEmpty`'s
+    // registry-inferred "No collection to move into." rendered *at the same
+    // time* while `tree` was pending: with nothing awaited yet, the registry
+    // had zero items, which is indistinguishable from "genuinely no
+    // destinations" to a check that only counts registered items — the exact
+    // collapse `load_failed` above already exists to end for the failure
+    // case. Starts `true` (a `Resource` genuinely is pending before its
+    // first read), not `false` like `load_failed` above: `load_failed`
+    // defaults to "assume nothing has gone wrong", but "assume already
+    // loaded" would be the wrong default for a value this component reads
+    // before the resource's own Effect has had a chance to run once.
+    let load_loading = RwSignal::new(true);
     // The same tree read's **rows**, snapshotted the same Effect-written way
     // and for the same reason — the delete confirm's two pickers (below) need
     // them for their trigger labels *and* their row lists, and a `Popover`
@@ -655,11 +669,16 @@ pub fn TreeDialogs() -> impl IntoView {
     // list degrades to "no destinations yet" rather than a panic.
     let tree_rows = RwSignal::new(Vec::<CollectionTreeRow>::new());
     Effect::new(move |_| {
-        let failed = matches!(tree.get(), Some(Some(Err(_))));
+        let snapshot = tree.get();
+        let pending = snapshot.is_none();
+        if pending != load_loading.get_untracked() {
+            load_loading.set(pending);
+        }
+        let failed = matches!(snapshot, Some(Some(Err(_))));
         if failed != load_failed.get_untracked() {
             load_failed.set(failed);
         }
-        if let Some(Some(Ok(dto))) = tree.get() {
+        if let Some(Some(Ok(dto))) = snapshot {
             tree_rows.set(dto.collections);
         }
     });
@@ -1056,19 +1075,23 @@ pub fn TreeDialogs() -> impl IntoView {
                                 placeholder="Search collections…"
                                 empty="No collection to move into."
                                 failed=load_failed
+                                loading=load_loading
                                 input_id=Some(MOVE_INPUT_ID.to_string())
                             >
                                 // Same boundary the catalog picker and the tray
                                 // use: the rows come off a resource, and only a
                                 // suspense boundary keeps SSR and hydration in
-                                // step with it.
-                                <Transition fallback=|| {
-                                    view! {
-                                        <p class="text-muted-foreground p-3 text-sm">
-                                            "Loading collections…"
-                                        </p>
-                                    }
-                                }>
+                                // step with it. The fallback is empty, not a
+                                // "Loading…" line of its own — `load_loading`
+                                // above already puts that message on
+                                // `DestinationList`'s `CommandEmpty` (P6-163).
+                                // Before this, this fallback and that
+                                // registry-inferred empty line rendered
+                                // simultaneously while `tree` was pending:
+                                // nothing here had mounted a single `command`
+                                // item yet, which is what "genuinely empty"
+                                // looks like too.
+                                <Transition fallback=|| ()>
                                     {move || {
                                         // Read the snapshot *outside* the async
                                         // block so a second `Move to…` on a

@@ -85,7 +85,16 @@
 //!   (`toHaveCount(0)`) during a failure, which a hidden-but-present `<div>`
 //!   would still satisfy for a visibility check but fails for a presence
 //!   one — caught by that very test against an earlier, `style:display`-based
-//!   version of this prop. Two consumers stay off this on purpose: the rail's
+//!   version of this prop. **`loading` followed the same road (P6-163):**
+//!   the tree's `Move to…` dialog put its own "Loading collections…" line
+//!   inside a `Transition` `fallback` *alongside* `DestinationList`, so while
+//!   the tree read was pending both that line and the registry-inferred "No
+//!   collection to move into." rendered at once — an empty registry looks
+//!   identical to a fetch that just hasn't landed, the same collapse
+//!   `failed` already existed to end for the failure case. `DestinationList`
+//!   now forwards a `loading` signal here too, with its own
+//!   `loading_children` slot carrying the same sentence, so exactly one line
+//!   is ever mounted. Two consumers stay off this on purpose: the rail's
 //!   set picker (`catalog/rail.rs`, `SetPicker`) keeps its own four-arm
 //!   match — it needs a retry affordance and a distinct "not yet engaged"
 //!   state this primitive doesn't model, and its rows are server-filtered
