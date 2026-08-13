@@ -431,10 +431,12 @@ test.describe("empty states say which kind of nothing they are", () => {
     await hydrated(page);
     const empty = page.getByTestId("needs-empty");
     await expect(empty).toBeVisible();
-    // The qualifier is the load-bearing half: this page's arithmetic is
-    // board-blind, so "nothing missing" unqualified would tell a deck owner
-    // their sideboard is filled.
-    await expect(empty).toContainText("board slots");
+    // The qualifier is still the load-bearing half, but it says something
+    // different since P6-074: the arithmetic *is* board-aware now (a sideboard
+    // want the deck cannot fill is a real need), so the caveat is no longer
+    // "board slots aren't counted" — it is that moving a copy you already hold
+    // between boards is a relabel, not an acquisition this page can offer.
+    await expect(empty).toContainText("between boards");
     // `success`, because this nothing is an achievement — the opposite claim
     // from `/my/all`'s "you haven't added any cards yet".
     await expect(empty.locator("[data-tone]")).toHaveAttribute(

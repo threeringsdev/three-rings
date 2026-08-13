@@ -1392,6 +1392,22 @@ const BOARD_ORDER: [(Board, &str); 3] = [
     (Board::Maybe, "Maybeboard"),
 ];
 
+/// The word a board is shown by, or `None` for the mainboard — which is shown
+/// by *not* saying anything, the convention [`group_deck`] sets ("the
+/// mainboard's sections are bare type names; other boards prefix theirs").
+///
+/// Shared with `/my/collections/:id/needs` (`super::needs`), which labels its
+/// rows the same way now that `NeedRow` carries a board (P6-074): one source
+/// for the vocabulary, so the two pages cannot call the same board different
+/// things.
+pub(crate) fn board_label(board: Board) -> Option<&'static str> {
+    BOARD_ORDER
+        .iter()
+        .find(|(b, _)| *b == board)
+        .map(|(_, prefix)| *prefix)
+        .filter(|prefix| !prefix.is_empty())
+}
+
 /// Group a deck's page into `(board, type)` sections, dropping empties.
 ///
 /// The mainboard's sections are bare type names; other boards prefix theirs, so

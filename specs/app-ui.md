@@ -2449,7 +2449,15 @@ same RLS scope, so `sum(allocate(gap, locations)) == owned_elsewhere` is an
 identity rather than a hope. A row appears in **both** buckets when part of its
 gap is fillable and part is not — the split is per copy.
 
-**Needs stays board-blind, deliberately, and the page says so.** `desires`
+**Needs stays board-blind, deliberately, and the page says so.**
+> **Superseded 2026-08-12 by P6-074** — see "Board-aware needs rows" below and
+> the same-dated entry in [collection-api](collection-api.md). The decision
+> below was re-taken, not drifted from: the blocker it names (a pull always
+> landing `to_board = main`) was fixed in the same change, so a board-aware
+> need is now closable. The paragraph is kept because the reasoning is still
+> the reason the two had to move together.
+
+`desires`
 gained a `board` column in migration 0006, so the sideboard-want case is real:
 a deck holding a card on `main` and wanting it on `side` produces no need row.
 Keeping the blindness was chosen over fixing it because **a board-aware need
@@ -4609,3 +4617,35 @@ way to stand inside "old results, new URL, nothing resolved". Two of the six
 tests are meaningless without it. One trap it cost: `page.unroute` while a
 handler is mid-`continue` fulfils the route itself and the `continue` then
 throws "Route is already handled" — the handler stays installed instead.
+
+### Board-aware needs rows (2026-08-12, P6-074)
+
+The needs page's rows are now per `(oracle, board)`, because `NeedRow` is
+(collection-api Findings, same date, carries the query and pull-path reasoning).
+This section records only what the *page* does with the new field.
+
+**The board is shown the way the deck page shows it: by silence for the
+mainboard.** `group_deck` already labels a deck's sections "Instants" vs
+"Sideboard · Instants" — main is the unmarked case. The needs rows follow that
+exactly rather than inventing a second vocabulary: `my::collection::board_label`
+was extracted from the same `BOARD_ORDER` table and is now the one source both
+read, so the two pages cannot call the same board different things. A binder's
+desires are all `main`, so the label never appears outside a deck, and inside one
+it appears only where it distinguishes two rows of the same card. Rows carry
+`data-board` alongside `data-oracle`, matching `collection-row`. The pick-list
+lines carry it too — a card wanted on two boards produces two lines in the same
+group, and without the tag they would read as a duplicate.
+
+**The chip's semantics did not change, only its inputs.** `needs_chip` still
+formats `CollectionTotals`, and `totals_of` still sums per-row gaps; a card
+missing on two boards simply contributes two rows. The header's `totals` CTE and
+`read_needs_rows` were moved to the board grain **together** — a chip disagreeing
+with the page it links to is worse than either being blind, which is why the
+pre-fix code carried a comment refusing to half-fix it.
+
+**Two page texts were false after the change and were rewritten, not left.** The
+empty state's "Unfilled board slots aren't counted here" — added in the
+2026-07-25 review precisely to keep the board-blind claim honest — now says the
+remaining true caveat: moving a copy you *already hold* between boards is a
+relabel, not an acquisition. The subtitle gained "board by board". `states.spec.ts`
+asserted on the old wording and moved with it.

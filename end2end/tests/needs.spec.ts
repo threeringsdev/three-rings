@@ -13,10 +13,11 @@
 // - **Pull all is grouped by where you walk**, and its per-group counts are the
 //   allocation the server then performs — not a hopeful client number;
 // - **the export is pasteable text**, one `N Card Name` line per short card;
-// - **the board case behaves as decided.** `needs()` is board-blind by design
-//   (see below and the `my::needs` module doc). The test pins today's decision
-//   *on purpose*: if someone makes needs board-aware, this test must fail and
-//   the decision must be re-taken, rather than the page quietly changing shape.
+// - **the board case behaves as decided.** `needs()` is board-**aware** since
+//   P6-074 (see below and the `my::needs` module doc): a want on the sideboard
+//   of a card held on the mainboard is a real need, and pulling it lands the
+//   copies on the sideboard. This bullet used to pin the opposite decision;
+//   it was re-taken deliberately, not drifted into.
 // - **a partial pull stays honest (P6-119).** A pick-list line that finds
 //   fewer copies at its source than it asked for — the pick list is a
 //   snapshot, so the source can drain between generating it and ticking the
@@ -25,11 +26,14 @@
 //
 // **On the board case.** A deck holding a card on `main` and wanting it on
 // `side` renders two rows on the collection page — a mainboard row with copies
-// and a sideboard row wanting one — while `/needs` shows nothing and the header
-// carries no chip. That is deliberate: both needs buckets are defined by an
-// operation (pull copies in, or buy them), and neither can fix a mis-boarded
-// copy — the deck already *has* it. The outstanding action is a board relabel,
-// which is card-tagging's quantity-preserving op and not a move.
+// and a sideboard row wanting one — and `/needs` now agrees with them: one need
+// row, `board: "side"`, `present_here: 0`, plus a chip on the header. The deck
+// genuinely wants a second copy; the one it holds is committed to the
+// mainboard. Pulling it lands the copies on `side`, which is what makes the
+// need closable at all (before P6-074 every pull hardcoded `to_board = main`).
+// What is still *not* a need: relabelling a copy the deck already holds from
+// one board to another — card-tagging's quantity-preserving op, which neither
+// bucket here can offer.
 //
 // Isolation: scratch `zz-e2e-…` collections created via the API and deleted in a
 // `finally`; printings come from catalog cards the dev fixture owns nowhere, so
@@ -164,6 +168,7 @@ async function copiesIn(
 
 type NeedRow = {
   oracle_id: string;
+  board: string;
   desired: number;
   present_here: number;
   owned_elsewhere: number;
@@ -548,24 +553,32 @@ test("@fast the shopping list states the shortfall and exports it as text", asyn
 
 // ------------------------------------------------------------ the board case ---
 
-test("@fast a want on the sideboard of a card held on the mainboard is not a need", async ({
+test("@fast a want on the sideboard of a card held on the mainboard is a need, and pulling it lands on the sideboard", async ({
   page,
   request,
 }) => {
-  // **This test pins a decision, not just a behavior** (see the file header).
-  // `needs()` groups desires and holdings by oracle alone, so this deck — one
-  // copy on `main`, one wanted on `side` — has nothing missing: it already owns
-  // the card. The sideboard row on the collection page still shows an unfilled
-  // slot, and that is a *different* statement, fixable only by a board relabel
-  // (card-tagging), which is not a move and not something either needs bucket
-  // can offer. If needs is ever made board-aware, this test must fail loudly.
+  // **This test pins a decision, not just a behavior** (see the file header) —
+  // and P6-074 re-took it. `needs()` groups this deck's desires and holdings by
+  // `(oracle, board)`, so one copy on `main` plus one wanted on `side` is a
+  // genuine gap of one on the sideboard: the copy the deck holds is committed
+  // to the mainboard. The old shape (needs `[]`, no chip, sideboard row still
+  // reading WANTED 1) was the contradiction this task closed.
+  //
+  // The second half is what made the first half shippable: a pull for a
+  // sideboard need has to *land* on the sideboard, or the need survives every
+  // pull aimed at it forever. Read back through `/api/cards/{id}/holdings`,
+  // the one read that does not group the board away.
   const [card] = await unownedCards(request, 1);
   const deck = await createCollection(request, "deck", "board");
+  const binder = await createCollection(request, "binder", "board-src");
   try {
     await addHave(request, deck.id, card.printing_id as string, 1, {
       board: "main",
     });
     await addWant(request, deck.id, card.oracle_id, 1, "side");
+    // The copy the pull will draw from — in another collection, so it shows up
+    // as owned-elsewhere rather than as something the deck already holds.
+    await addHave(request, binder.id, card.printing_id as string, 1);
 
     await page.goto(`/my/collections/${deck.id}`);
     await hydrated(page);
@@ -575,21 +588,54 @@ test("@fast a want on the sideboard of a card held on the mainboard is not a nee
     await expect(sideRow.locator('[data-testid="wanted-count"]')).toHaveText(
       "1",
     );
-    // No chip: the header agrees with the needs page it links to, which is the
-    // whole reason the arithmetic was not half-fixed in one of them.
-    await expect(page.locator('[data-testid="needs-chip"]')).toHaveCount(0);
+    // The chip is the half that used to be absent. Header and needs page are
+    // fed by two different queries at the same grain, which is why they are
+    // asserted together — a half-fix in either one is the failure mode.
+    await expect(page.locator('[data-testid="needs-chip"]')).toContainText(
+      "1 missing",
+    );
+
+    // The wire says which board, not just that something is missing.
+    const rows = await needsOf(request, deck.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].board).toBe("side");
+    expect(rows[0].oracle_id).toBe(card.oracle_id);
+    expect(rows[0].desired).toBe(1);
+    expect(rows[0].present_here).toBe(0);
+    expect(rows[0].owned_elsewhere).toBe(1);
 
     await page.goto(`/my/collections/${deck.id}/needs`);
     await hydrated(page);
-    // The empty state is the *only* thing this user reads, so it must not claim
-    // more than the page can see. "Nothing missing" would tell this deck it is
-    // complete; it has an unfilled sideboard slot the arithmetic never looked
-    // for. The text has to be about copies, and it has to say so.
-    const empty = page.locator('[data-testid="needs-empty"]');
-    await expect(empty).toContainText("holds every copy it wants");
-    await expect(empty).toContainText("Unfilled board slots aren't counted here");
+    const needRow = page.locator(
+      `${NEED_ROW}[data-oracle="${card.oracle_id}"][data-board="side"]`,
+    );
+    await expect(needRow).toHaveCount(1);
+    // The row says which board out loud — the mainboard says nothing, the same
+    // convention the deck page's section headers use.
+    await expect(needRow.locator('[data-testid="need-board"]')).toHaveText(
+      "Sideboard",
+    );
+
+    await needRow.locator('[data-testid="pull-row"]').click();
+    await expect(page.locator(TOAST).first()).toContainText("Pulled 1 copy");
+
+    // Where the copy actually went: the deck's sideboard, not its mainboard.
+    const inDeck = (await holdingsOf(request, card.oracle_id)).filter(
+      (h) => h.collection_id === deck.id,
+    );
+    const onSide = inDeck.filter((h) => h.board === "side");
+    expect(onSide.reduce((n, h) => n + h.quantity, 0)).toBe(1);
+    expect(
+      inDeck
+        .filter((h) => h.board === "main")
+        .reduce((n, h) => n + h.quantity, 0),
+      "the mainboard copy is untouched — the pull added to the sideboard",
+    ).toBe(1);
+    // And the need is closed rather than re-offered forever, which is the whole
+    // point of landing on the board that wanted it.
     expect(await needsOf(request, deck.id)).toEqual([]);
   } finally {
+    await deleteCollection(request, binder.id);
     await deleteCollection(request, deck.id);
   }
 });

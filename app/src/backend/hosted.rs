@@ -1540,16 +1540,18 @@ impl CollectionStore for HostedBackend {
         // `min(gap, held elsewhere)` is pullable — so the chip and the page it
         // links to cannot disagree.
         //
-        // **Known limitation, inherited from `needs()` and deliberately kept
-        // identical to it: this arithmetic is board-blind.** `d`/`ph` group by
-        // oracle alone, while the card rows above group by `(oracle, board)`.
-        // A deck holding a card on `main` and wanting it on `side` therefore
-        // renders a Sideboard row reading WANTED 1 while the chip counts
-        // nothing missing. Fixing it in this query alone would make the chip
-        // disagree with the `/needs` page it links to, which is worse; the
-        // honest fix is a board-aware `needs()` + a `board` on `NeedRow`, which
-        // is collection-api's read model rather than this page's. Filed rather
-        // than half-done here.
+        // **Board grain (P6-074): `d`/`ph` group by `(oracle, board)` and the
+        // gap is taken per board**, the same grain the card rows above use and
+        // the same grain `read_needs_rows` now uses. It used to group by oracle
+        // alone, so a deck holding a card on `main` and wanting it on `side`
+        // rendered a Sideboard row reading WANTED 1 while this chip counted
+        // nothing missing. The two queries are changed together on purpose: a
+        // chip that disagreed with the `/needs` page it links to would be worse
+        // than either one being board-blind. `pe` stays board-blind (grouped by
+        // oracle) for the reason `read_needs_rows`'s doc gives — a copy in
+        // another collection can fill any board's need — which is also why
+        // `owned_elsewhere` here can legitimately count the same elsewhere copy
+        // toward two boards' gaps.
         //
         // Soft delete (specs/collection-deletion.md): `descendants` skips hidden
         // children, and `pe` — "held somewhere else" — skips holdings in hidden
@@ -1564,13 +1566,13 @@ impl CollectionStore for HostedBackend {
                WHERE c.deleted_at IS NULL \
              ), \
              d AS ( \
-               SELECT oracle_id, sum(quantity)::int AS desired \
-               FROM desires WHERE collection_id = $1 GROUP BY oracle_id \
+               SELECT oracle_id, board, sum(quantity)::int AS desired \
+               FROM desires WHERE collection_id = $1 GROUP BY oracle_id, board \
              ), \
              ph AS ( \
-               SELECT p.oracle_id, sum(h.quantity)::int AS present_here \
+               SELECT p.oracle_id, h.board, sum(h.quantity)::int AS present_here \
                FROM holdings h JOIN printings p ON p.id = h.printing_id \
-               WHERE h.collection_id = $1 GROUP BY p.oracle_id \
+               WHERE h.collection_id = $1 GROUP BY p.oracle_id, h.board \
              ), \
              pe AS ( \
                SELECT p.oracle_id, sum(h.quantity)::int AS elsewhere \
@@ -1580,7 +1582,8 @@ impl CollectionStore for HostedBackend {
              gap AS ( \
                SELECT (d.desired - COALESCE(ph.present_here, 0)) AS gap, \
                       COALESCE(pe.elsewhere, 0) AS elsewhere \
-               FROM d LEFT JOIN ph ON ph.oracle_id = d.oracle_id \
+               FROM d \
+               LEFT JOIN ph ON ph.oracle_id = d.oracle_id AND ph.board = d.board \
                LEFT JOIN pe ON pe.oracle_id = d.oracle_id \
                WHERE d.desired > COALESCE(ph.present_here, 0) \
              ) \
@@ -2137,12 +2140,19 @@ impl CollectionStore for HostedBackend {
             )
             .await
             .map_err(|e| at_item(i, e))?;
+            // **The need's board, not `main`** (P6-074). `plan_pull_needs`
+            // carries the `NeedRow`'s board onto every write it emits, so a
+            // sideboard need is closed by landing copies on the sideboard. This
+            // used to be a hardcoded `Board::Main`, which was invisible only
+            // because `needs()` was board-blind and never produced a non-main
+            // need in the first place; making the read board-aware without this
+            // would leave a sideboard need surviving every pull aimed at it.
             holding_add(
                 &mut tx,
                 user_id,
                 to_collection_id,
                 &grain,
-                Board::Main,
+                write.to_board,
                 write.quantity,
             )
             .await
@@ -2154,7 +2164,7 @@ impl CollectionStore for HostedBackend {
                     Some(write.source.from),
                     Some(to_collection_id),
                     &grain,
-                    (write.source.board, Board::Main),
+                    (write.source.board, write.to_board),
                     write.quantity,
                 )
                 .await
@@ -3202,6 +3212,8 @@ struct OracleCursor {
 struct NeedSql {
     oracle_id: Uuid,
     name: String,
+    /// `card_board::text` — parsed through [`board_of`], never defaulted.
+    board: String,
     desired: i32,
     present_here: i32,
     elsewhere: i32,
@@ -3768,32 +3780,50 @@ async fn ensure_inbox(tx: &mut Transaction<'static, Postgres>, user_id: Uuid) ->
 /// pair). `d`/`ph` are scoped to `$1`, which the caller's own
 /// `require_owned_collection` has already proved live; `pe` spans every
 /// *other* collection and so carries the filter.
+///
+/// **Board grain (P6-074).** `d` and `ph` group by `(oracle, board)` and join
+/// on **both**, so the need condition is per board: `desired > present_here`
+/// *on that board*. This is the same grain the collection view's card rows use
+/// (`(oracle, board)`), which is what stops a mainboard copy arithmetically
+/// cancelling a sideboard want — the deck row reading `WANTED 1 / HERE —`
+/// while `/needs` returned `[]` was exactly that cancellation.
+///
+/// **`pe` and the per-location offers stay board-blind, deliberately.** They
+/// group by oracle alone because only copies *inside* this collection are
+/// committed to a board: a copy in another collection can be pulled to fill
+/// **any** board's need. So when one oracle now yields rows on two boards, the
+/// same elsewhere total and the same offers legitimately appear on both — they
+/// are "places you could pull from", not stock partitioned between the rows.
+/// [`pull_plan::plan_pull_needs`] is where that shared stock is reconciled: it
+/// decrements the stacks it has already planned against, so two boards drawing
+/// on one copy yield the honest partial instead of planning it twice.
 async fn read_needs_rows(
     tx: &mut Transaction<'static, Postgres>,
     collection_id: Id,
 ) -> ApiResult<Vec<NeedRow>> {
     let rows: Vec<NeedSql> = sqlx::query_as(&format!(
         "WITH d AS ( \
-           SELECT oracle_id, sum(quantity)::int AS desired \
-           FROM desires WHERE collection_id = $1 GROUP BY oracle_id \
+           SELECT oracle_id, board, sum(quantity)::int AS desired \
+           FROM desires WHERE collection_id = $1 GROUP BY oracle_id, board \
          ), \
          ph AS ( \
-           SELECT p.oracle_id, sum(h.quantity)::int AS present_here \
+           SELECT p.oracle_id, h.board, sum(h.quantity)::int AS present_here \
            FROM holdings h JOIN printings p ON p.id = h.printing_id \
-           WHERE h.collection_id = $1 GROUP BY p.oracle_id \
+           WHERE h.collection_id = $1 GROUP BY p.oracle_id, h.board \
          ), \
          pe AS ( \
            SELECT p.oracle_id, sum(h.quantity)::int AS elsewhere \
            FROM holdings h JOIN printings p ON p.id = h.printing_id \
            WHERE h.collection_id <> $1 AND {live} GROUP BY p.oracle_id \
          ) \
-         SELECT d.oracle_id, c.name, d.desired, COALESCE(ph.present_here, 0) AS present_here, \
+         SELECT d.oracle_id, d.board::text AS board, c.name, d.desired, \
+                COALESCE(ph.present_here, 0) AS present_here, \
                 COALESCE(pe.elsewhere, 0) AS elsewhere \
          FROM d JOIN cards c ON c.oracle_id = d.oracle_id \
-         LEFT JOIN ph ON ph.oracle_id = d.oracle_id \
+         LEFT JOIN ph ON ph.oracle_id = d.oracle_id AND ph.board = d.board \
          LEFT JOIN pe ON pe.oracle_id = d.oracle_id \
          WHERE d.desired > COALESCE(ph.present_here, 0) \
-         ORDER BY c.name",
+         ORDER BY c.name, d.board",
         live = in_live_collection("h.collection_id"),
     ))
     .bind(collection_id)
@@ -3821,12 +3851,11 @@ async fn read_needs_rows(
     .await
     .map_err(upstream)?;
 
-    Ok(rows
-        .into_iter()
+    rows.into_iter()
         .map(|r| {
             let gap = r.desired - r.present_here;
             let owned_elsewhere = r.elsewhere.min(gap);
-            NeedRow {
+            Ok(NeedRow {
                 locations: locs
                     .iter()
                     .filter(|l| l.oracle_id == r.oracle_id)
@@ -3838,13 +3867,14 @@ async fn read_needs_rows(
                     .collect(),
                 oracle_id: r.oracle_id,
                 name: r.name,
+                board: board_of(&r.board)?,
                 desired: r.desired,
                 present_here: r.present_here,
                 owned_elsewhere,
                 short: gap - owned_elsewhere,
-            }
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Reject an operation targeting a collection the caller doesn't own **or that
