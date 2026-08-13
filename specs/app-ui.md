@@ -3084,6 +3084,17 @@ pre-highlights the best *catalog* match with the present row above it
 unhighlighted. They render as links to `/cards/:id`; adding more copies of a card
 you already own goes through the catalog section.
 
+**(2026-08-13, P6-147) `PresentSection` gates on a non-empty (post-trim)
+`?q=`.** It previously rendered whenever `present` was non-empty, with no
+regard to the query — since the collection read behind `present` returns the
+destination's unfiltered first page for an empty `q`, the section filled with
+the whole first page both when the panel first opened and in the instant after
+every add cleared the field (the retained `QuickAddFacts` from P6-068 keep
+`present` populated across that clear rather than going empty). The fix is a
+render gate only (`present_visible` in `quick_add.rs`) — it does not touch
+`QuickAddFacts`, `present_matches`, or the P6-068 retention behavior described
+above.
+
 **time-to-enter-50, recorded:** scripted run into a scratch binder, 60 ms per
 keystroke, 6-character prefixes, `⏎` on the pre-highlighted match — **50 cards /
 50 copies verified in the collection, 350 keystrokes (7.0 per card), 1 pointer
