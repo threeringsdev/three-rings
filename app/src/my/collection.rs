@@ -1653,11 +1653,35 @@ fn CollectionTable(
                             <span class="sr-only">"Select"</span>
                         </TableHead>
                         <TableHead>"Card"</TableHead>
-                        <TableHead class="hidden md:table-cell">"Type"</TableHead>
+                        // `lg`, not `md` (P6-001): Type's own text is
+                        // untruncated (a truncating `max-w` measurably *forced*
+                        // the column to that width under `table-layout: auto`
+                        // instead of merely capping it — tried and reverted,
+                        // see specs/app-ui.md's "Table overflow re-measured
+                        // and fixed"). Its longest word sets the column's
+                        // intrinsic min-width, which on decks with long type
+                        // lines was enough to overflow the wrapper right at
+                        // `md` (768px) — the same width where the select
+                        // column's `w-8` shrink and the HERE/WANTED/OWNED
+                        // `md:px-2` bump both land, so the freed space from
+                        // one and the cost of the other already left no slack
+                        // for a seventh column. `lg` (1024px) measured 0
+                        // overflow with Type back on every seeded collection;
+                        // `md` did not.
+                        <TableHead class="hidden lg:table-cell">"Type"</TableHead>
                         <TableHead class="hidden sm:table-cell">"Mana"</TableHead>
                         <TableHead class="px-1 text-right md:px-2">"Here"</TableHead>
-                        <TableHead class="px-1 text-right md:px-2">"Wanted"</TableHead>
-                        <TableHead class="px-1 text-right md:px-2">"Owned"</TableHead>
+                        // Abbreviated below `sm` — see the matching comment
+                        // on `AllCardsTablePage`'s header in `my/all_cards.rs`
+                        // (P6-001).
+                        <TableHead class="px-1 text-right md:px-2">
+                            <span class="sm:hidden">"Want"</span>
+                            <span class="hidden sm:inline">"Wanted"</span>
+                        </TableHead>
+                        <TableHead class="px-1 text-right md:px-2">
+                            <span class="sm:hidden">"Own"</span>
+                            <span class="hidden sm:inline">"Owned"</span>
+                        </TableHead>
                     </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1767,7 +1791,7 @@ fn FolderTableRow(
                     {folder.name}
                 </a>
             </TableCell>
-            <TableCell class="hidden p-2 md:table-cell">""</TableCell>
+            <TableCell class="hidden p-2 lg:table-cell">""</TableCell>
             <TableCell class="hidden p-2 sm:table-cell">""</TableCell>
             // Italic + dimmed: these copies are *there*, not here.
             <TableCell
@@ -1879,6 +1903,7 @@ fn CardTableRow(
         faces,
     };
     let link_name = name.clone();
+    let type_line_text = type_line.unwrap_or_default();
 
     view! {
         <TableRow
@@ -1938,8 +1963,8 @@ fn CardTableRow(
                     </a>
                 </CardPreview>
             </TableCell>
-            <TableCell class="text-muted-foreground hidden p-2 md:table-cell">
-                {type_line.unwrap_or_default()}
+            <TableCell class="text-muted-foreground hidden p-2 lg:table-cell">
+                {type_line_text}
             </TableCell>
             <TableCell class="text-muted-foreground hidden p-2 sm:table-cell">
                 {mana_cost.unwrap_or_default()}

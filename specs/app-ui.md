@@ -1444,6 +1444,11 @@ this task's: measured by reverting its classes in the live DOM, this branch **re
 tables' intrinsic width by ~20 px at every width below `md`, and at ≥768 px resolves to exactly
 the pre-task values. Both are outside the nine frames' widths.
 
+**Re-measured and fixed, P6-001 (2026-08-13):** both reproduced, numbers essentially unchanged
+from July despite the layout churn between — see "Table overflow re-measured and fixed" below
+for the driver of each, the fix, and post-fix numbers (zero overflow at 320/375/390/768/800 on
+every seeded collection, plus 430/639/640/700/767/1024/1440 spot-checked).
+
 Three review minors were **fixed rather than filed** because all three were this branch's own
 work: the `px-1` compensations now switch at `md` alongside the select column they pay for
 (measured 0 overflow at 320/375/390/430/639/640/700/767/768/1024/1440), the click-through loop
@@ -5532,3 +5537,100 @@ resolution the fixture can no longer promise. Every other test in all four
 files passed, including the two new ones and the pre-existing bench test that
 already asserted the *failed*-read arm never regresses to the retired empty
 string (`selection-tray.spec.ts`'s `"Move to…" opens the destination picker`).
+||||||| parent of 5f5ffda (fix(ui): tables fit the frame widths — no sideways scroll at 320/375/768)
+
+||||||| parent of 6f8ec03 (fix(ui): tables fit the frame widths — no sideways scroll at 320/375/768)
+
+### Table overflow re-measured and fixed (P6-001, 2026-08-13)
+
+The two overflows P6-098's review found and filed in July (line 1439 above) — re-measured
+first, per this task's own instructions, because the loop had touched table columns
+repeatedly since. Live server (this worktree, `.env` × 3 from the main checkout), Playwright
+at 320/375/390/768/800 on `/my/collections/:id` (Depth Box, Commander Deck, Bulk Box — the
+three the mobile no-scroll test already names) and `/my/all`, measuring
+`document.scrollingElement` and the `TableWrapper`'s own `scrollWidth − clientWidth` (the
+wrapper is `overflow-auto`, so a too-wide table is a wrapper-local scroll the document check
+alone misses — the same trap recorded at line 3349).
+
+**Both reproduced, magnitudes essentially unchanged from July:**
+
+| width | collection (worst of 3) | all-cards |
+|---|---|---|
+| 320 | 64px (Bulk Box) | 40px |
+| 375 | 9px (Bulk Box) | 0px |
+| 390 | 0px | 0px |
+| 768 | 30px (Bulk Box) | 6px |
+| 800 | 0px | 0px |
+
+Depth Box and Commander Deck overflowed less at 320/768 (5–20px, 0–10px) — the drivers below
+are content-sized, so the worst case varies by collection.
+
+**768px driver: the Type column returning at `md` has no room, and the amount depends on
+content, not a fixed gap.** Three things land at the same breakpoint: the select column's
+`w-11→w-8` shrink (−12px), HERE/WANTED/OWNED's `px-1→px-2` bump (+24px across three cells),
+and Type itself (0–30px, driven by the longest unbroken word in the row's longest type line —
+table cells wrap by default, so it is the longest *word*, not the longest line). Net, the
+freed 12px does not cover the other two.
+
+Tried and reverted: capping the Type cell with `max-w-[7rem] truncate` plus a `title`
+attribute (the pattern used elsewhere — catalog.rs's card name, for one). This made every
+width *worse* (Depth Box's 0px at 768 became 33px; 800px picked up 6–8px it never had) — under
+`table-layout: auto`, a `max-width` on a table cell is not purely a cap. Browsers appear to
+use it as the cell's preferred-width contribution when computing the column's auto width, so a
+short type line that used to yield a narrow column was now forced to the full 7rem regardless
+of content. Reverted rather than chased further.
+
+**Fix: Type's breakpoint moved from `md` to `lg`** (`collection.rs`'s `CollectionTable` header
+and data cell, the matching folder-row cell, and `all_cards.rs`'s `CardsTable` header and data
+cell — four sites, all `hidden md:table-cell` → `hidden lg:table-cell`). Mana stays at `sm`;
+only Type moves. At `lg` (1024px) there is enough room regardless of content — measured 0px on
+every seeded collection, where `md` was not (see the table above).
+
+**320/375px driver: the HERE count-stepper's ± buttons, and the WANTED/OWNED header words —
+both fixed costs independent of any card's data.**
+`CountStepper`'s reveal buttons (`app/src/components/ui/count_stepper.rs`) were
+`opacity-0` until hover/focus — invisible, but `opacity` does not remove a box from layout, so
+the collection table's HERE cell was paying for two 24px buttons on every row whether or not
+they could ever be revealed. Below `sm` there is no hover at all (touch), so they were dead
+width, not a dead-but-recoverable affordance: `REVEAL` gained `hidden sm:inline-flex`, leaving
+them out of layout entirely below `sm`. Keyboard ± is unaffected (`on_keydown` reads focus on
+the stepper's container div, not button visibility) and tap-to-edit is unaffected (`enter_edit`
+is the number itself, not a button) — no functionality lost, only an unusable-below-`sm`
+control's footprint. This alone took the collection page from 57–64px to 0–20px at 320px.
+
+The remaining gap, all on `/my/all` (which has no stepper — its HERE-equivalent column is
+`LocationSummary`, plain text) and the collection page's residual 5–20px: a `TableHead`'s own
+word sets its column's min-width under `table-layout: auto`, same mechanism as Type above, and
+"Wanted"/"Owned" were doing that on every row regardless of content. Abbreviated to "Want"/"Own"
+below `sm`, full words back at `sm`+ (both `collection.rs` and `all_cards.rs`) — not data loss,
+a header label, and the abbreviation reads fine at a glance. Diagnosed column-by-column
+(`getBoundingClientRect` per `<th>`/`<td>`) rather than guessed: at 320px pre-fix, all-cards'
+"Wanted" header alone was 58.5px wide (padding + the word "Wanted") against a 286px content
+budget, `text: "—"` in the cell contributing nothing. The abbreviation closed the collection
+page to 0px on its own; all-cards needed one more notch — its Card cell's padding
+(`p-2` → `px-1 py-2 sm:p-2`), the last 7px of the original 40px.
+
+**Post-fix: 0px at every measured width (320/375/390/768/800) on every seeded collection, both
+pages.** Spot-checked at the breakpoint transitions too (430/639/640/700/767/1024/1440) — 0px
+throughout. Screenshots before/after at 320 and 768 (collection view, Depth Box) confirm
+visually: before-320 crops the OWNED column off the right edge; after-320 fits HERE/WANT/OWN;
+before-768 and after-768 differ only in Type's presence, no overflow in either (Depth Box was
+already 0px at 768 pre-fix — Bulk Box is the width that shows the mechanism, at 30–40px before
+and 0px after).
+
+**Evidence.** `cargo test -p app --features hosted`: 360 passed, 0 failed. Full serial run
+(`--workers=1`) of `collection-view.spec.ts` + `all-cards.spec.ts` + `responsive.spec.ts`:
+50 passed / 2 failed, both pre-existing and unrelated to this diff — `all-cards.spec.ts:270`
+is the documented fixture-pool baseline failure (e2e-suite skill), and
+`responsive.spec.ts:253` ("a real toast occupies its container's bottom edge") fails only
+because it drives `/dev/components`, and the shared dev server this task measured against was
+started without `--features component-bench` (confirmed: the route 404s regardless of this
+diff). Neither touches table layout or count-stepper code.
+
+**Open question, not blocking:** the Type-column `max-w`+`truncate`-forces-preferred-width
+behavior under `table-layout: auto` is worth knowing the next time a table cell needs
+truncation in this codebase — the working pattern elsewhere (catalog.rs) is inside a *flex*
+container (`min-w-0` + `truncate`), not a table cell directly. A table cell that truly needs
+truncation (not just a later breakpoint) would need either `table-layout: fixed` with explicit
+column widths, or the `width: 1px; min-width: 100%` block-in-cell trick — neither attempted
+here since the breakpoint move and header abbreviation closed both overflows without it.

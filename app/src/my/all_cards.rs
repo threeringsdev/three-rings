@@ -363,11 +363,25 @@ fn CardsTable(rows: Vec<AllCardsRow>) -> impl IntoView {
                             <span class="sr-only">"Select"</span>
                         </TableHead>
                         <TableHead>"Card"</TableHead>
-                        <TableHead class="hidden md:table-cell">"Type"</TableHead>
+                        // `lg`, not `md` — see the matching comment in
+                        // `my/collection.rs`'s `CollectionTable` header (P6-001).
+                        <TableHead class="hidden lg:table-cell">"Type"</TableHead>
                         <TableHead class="hidden sm:table-cell">"Mana"</TableHead>
                         <TableHead class="px-1 md:px-2">"Where"</TableHead>
-                        <TableHead class="px-1 text-right md:px-2">"Wanted"</TableHead>
-                        <TableHead class="px-1 text-right md:px-2">"Owned"</TableHead>
+                        // Abbreviated below `sm` (P6-001): a `TableHead`'s own
+                        // word sets its column's intrinsic min-width under
+                        // `table-layout: auto`, and at 320 px "Wanted" +
+                        // "Owned" alone were most of the 40 px the wrapper
+                        // scrolled by. Full words return at `sm`, where
+                        // there's room.
+                        <TableHead class="px-1 text-right md:px-2">
+                            <span class="sm:hidden">"Want"</span>
+                            <span class="hidden sm:inline">"Wanted"</span>
+                        </TableHead>
+                        <TableHead class="px-1 text-right md:px-2">
+                            <span class="sm:hidden">"Own"</span>
+                            <span class="hidden sm:inline">"Owned"</span>
+                        </TableHead>
                     </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -426,14 +440,17 @@ fn CardsRow(row: AllCardsRow) -> impl IntoView {
             <TableCell class="p-0 md:p-2">
                 {selectable.map(|card| view! { <SelectionCheckbox selection card /> })}
             </TableCell>
-            <TableCell class="p-2">
+            // `px-1` below `sm` (P6-001): the last 7 px of a 40 px overflow
+            // at 320 px, after WHERE/WANTED/OWNED were already at their
+            // floor — this card-name column was the remaining slack.
+            <TableCell class="px-1 py-2 sm:p-2">
                 <CardPreview card=preview>
                     <a href=format!("/cards/{oracle_id}") class="font-medium hover:underline">
                         {link_name}
                     </a>
                 </CardPreview>
             </TableCell>
-            <TableCell class="text-muted-foreground hidden p-2 md:table-cell">{type_line}</TableCell>
+            <TableCell class="text-muted-foreground hidden p-2 lg:table-cell">{type_line}</TableCell>
             <TableCell class="text-muted-foreground hidden p-2 sm:table-cell">{mana_cost}</TableCell>
             <TableCell class="px-1 py-2 md:px-2">
                 <LocationSummary oracle_id owned locations />
