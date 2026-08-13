@@ -63,8 +63,9 @@ use super::checkbox::Checkbox;
 /// **Staleness policy (P6-122).** The tray is long-lived by design (the
 /// module docs above), so a `Held` key can outlive what it names: a stepper
 /// commit can drive its row to zero, or the collection it names can be deleted
-/// (its holdings relocated elsewhere by the delete's own disposition —
-/// specs/collection-deletion.md). Neither is guessed at or silently dropped
+/// (its holdings relocated or hidden with the soft-deleted collection,
+/// per the delete's disposition — specs/collection-deletion.md; either way
+/// they leave the live rows). Neither is guessed at or silently dropped
 /// mid-flight; the policy is two layers, cheapest first:
 ///
 /// - **Use time, always.** `move_selection`'s server fn re-reads the caller's

@@ -241,9 +241,10 @@ was scoped to add: `move_selection`'s server fn re-reads the caller's holdings
 fresh (`holdings_of_oracle`) and resolves every entry against *that*, never
 against anything the client cached, before `move_batch` ever runs. A key
 naming a holding a stepper drove to zero, or a collection since deleted (its
-holdings relocated by the delete's own disposition — the deleted `collection_id`
-no longer appears in `holdings_of_oracle`'s live rows, wherever the copies
-landed), resolves to zero candidates and is refused as `SkipReason::NoCopies`,
+holdings relocated by the delete's disposition, or — under Discard — hidden
+with the soft-deleted collection; either way the deleted `collection_id`
+no longer appears in `holdings_of_oracle`'s live rows), resolves to zero
+candidates and is refused as `SkipReason::NoCopies`,
 by name, never written. No wrong-write path exists either: every write is
 addressed by the natural key (`collection_id, printing_id, finish, condition,
 language, board`), never by a holding row's id, so nothing about a row being
@@ -290,7 +291,7 @@ row honestly (the mechanism `holdings_revision` bumps for is a refetch
 policy avoids paying for. Left as documented, not silently re-litigated.
 
 **Evidence.** `cargo test --workspace --exclude frontend --exclude three_rings`
-324 passed, 0 failed (10 new: 2 pure prune tests in `selection_tray.rs`, 2 pure
+324 passed, 0 failed (4 new: 2 pure prune tests in `selection_tray.rs`, 2 pure
 `tokens_to_drop` tests in `move_selection.rs`, plus existing coverage). fmt
 clean; clippy clean on all five gate lines (workspace-exclude, wasm frontend,
 `app --features native`, `app --features hosted,component-bench`, `app
