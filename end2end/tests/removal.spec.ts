@@ -530,6 +530,13 @@ test("@fast a stack that grows in another tab between render and removal reports
       expect(await grainsIn(request, card.oracle_id, where)).toEqual([]);
     }).toPass({ timeout: 5000 });
 
+    // The header must not disagree with the toast it sits next to: this binder
+    // holds nothing else, so once every copy of this row is gone "0 here" is
+    // the only honest reading.
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "0 here",
+    );
+
     await toast.getByRole("button", { name: "Undo" }).click();
 
     // Undo restores the real count too — 3, the ledger's own number, not the
