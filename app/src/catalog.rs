@@ -935,7 +935,15 @@ fn ResultCards(cards: Vec<CardSummary>, list_view: Memo<bool>, stale: bool) -> i
     }
 }
 
-const GRID_CLASS: &str = "grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6";
+// `max-w-7xl` caps the grid the same way `Table`'s own `max-w-7xl`
+// (`components/ui/table.rs`) already caps the list view: neither is centered
+// (no `mx-auto`), both just stop stretching past 1280px, so a wide monitor
+// gets a left-flush column instead of runaway growth. Before this the grid
+// had no cap at all and `xl:grid-cols-6` was the last breakpoint, so a card
+// tile kept growing with the window past it — comically large at ultrawide
+// (P6-098).
+const GRID_CLASS: &str =
+    "grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 max-w-7xl";
 
 #[component]
 fn ResultsSkeleton() -> impl IntoView {

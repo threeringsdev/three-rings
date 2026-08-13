@@ -84,7 +84,9 @@ rewrite their term, recognized terms reflect into widgets, unrecognized terms
 preserved verbatim (catalog-search contract). Live typing: ~250 ms debounce, one
 in-flight request, stale-response discard, first page SSR when the URL carries
 `q`. Grid/list toggle; tiles lead with the image (lazy-loaded, skeleton
-placeholder). Every result carries `+ Want` / `+ Have` and the sticky
+placeholder). The grid caps at `max-w-7xl`, left-flush (no `mx-auto`) — the
+same cap `Table` already carries for the list view, so neither surface grows
+past it on a wide monitor (P6-098). Every result carries `+ Want` / `+ Have` and the sticky
 destination picker (`Adding to: 📥 Inbox ▾`, persists across searches).
 Logged-out: quick actions prompt sign-in. Mobile: filter rail becomes a
 slide-over sheet with an active-filter badge count.
@@ -5378,3 +5380,54 @@ same assertion, same locator not found), so it predates this task and is not
 this fix's doing. The `palette.rs`/`overlay_stack.rs` diff cannot be
 implicated in either class: neither touches ranking, the empty-state markup,
 or the undo-ledger code the four failures exercise.
+
+### Catalog grid cap at wide viewports (P6-098, 2026-08-13)
+
+`GRID_CLASS` (`app/src/catalog.rs`) topped out at `xl:grid-cols-6` with
+nothing capping the container, so a card tile kept growing with the window
+past `xl`'s 1280px breakpoint — measured comically large (~500×700px cards,
+one row filling the screen) at 3440px wide.
+
+**Investigated whether a content-column cap already exists (it does, and it
+isn't what "tray centres on the content column" means).**
+`responsive.spec.ts`'s "tray centres on the content column, not on the
+window" test (and `shell.rs`'s `SelectionTrayDock` doc comment) uses "content
+column" for the area right of the sidebar rail (`<main>`, `flex-1`,
+`RAIL = 240` px at `md`+) — that area is *not* width-capped, it is simply
+"whatever's left of the viewport after the rail". `<main>` carries no
+`max-w`, and neither does any `/my` page's own outer container
+(`app/src/my/all_cards.rs` et al. — checked directly): those pages don't cap
+their page shell either.
+
+**What actually caps something in this app already: `Table`.**
+`components/ui/table.rs`'s `Table` carries `max-w-7xl` baked into its `clx!`
+definition (`"w-full max-w-7xl text-sm caption-bottom"`), with no `mx-auto` —
+left-flush, not centered. So `/catalog`'s own list view (`ResultsList`, which
+renders through `Table`) and every `/my` table page were already capped and
+don't share this defect at all; only the grid view was unbounded. The fix
+adds the same `max-w-7xl` (no `mx-auto`, matching `Table`'s left-flush
+convention) to `GRID_CLASS`, so the grid caps the identical way the app's one
+existing wide-viewport cap already works, rather than inventing a new
+convention or centering the page. Below the cap (viewport content width <
+1280px, e.g. desktop 1440px minus the rail) nothing changes; above it the
+grid simply stops growing.
+
+**Verified visually.** Playwright screenshots of `/catalog` at 1440, 2560 and
+3440 px, before (`git stash`, forced a rebuild, confirmed the served HTML
+reverted to the old class list) and after: at 1440 the two are pixel-similar
+(cap not yet reached); at 2560 and 3440 the "before" grid keeps growing card
+size with viewport width (one row of six huge cards at 3440), the "after"
+grid holds card size constant between 2560 and 3440 (identical column
+geometry) with the extra width as trailing whitespace. Confirmed the
+`max-w-7xl` rule is actually emitted, not just referenced: `grep` on both the
+dev-server's live `tailwind.css` and the `--minify`d release `app.css`
+(`CARGO_TARGET_DIR=target/gate cargo leptos build --release`) both show
+`.max-w-7xl{max-width:var(--container-7xl)}`.
+
+**Evidence.** `cargo test -p app --features hosted`: 360 passed, 0 failed.
+`npx playwright test --project=chromium --workers=1 --grep @fast
+tests/catalog.spec.ts tests/responsive.spec.ts`: 47 passed, including "the
+tray centres on the content column, not on the window" — unaffected, since
+`<main>` itself carries no cap and this change is scoped to the grid's own
+class list. Release build (`CARGO_TARGET_DIR=target/gate cargo leptos build
+--release`) succeeded and its minified CSS carries the new rule.
