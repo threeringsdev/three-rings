@@ -803,3 +803,12 @@ resolves.
   of it. `states.spec.ts`'s empty-state assertion moved from "board slots" to
   "between boards" for the same reason as the page text: the old caveat
   ("Unfilled board slots aren't counted here") became false.
+
+- **`LineResult::Error` could never serialize before P6-083's retagging
+  (2026-08-13).** `shared::ApiError`'s internally-tagged serde repr panicked at
+  serialize time for any variant with content, so `POST /api/collections/{id}/batch`
+  returned an opaque 500 the moment any per-line outcome was an error — masked
+  because the only caller is `app/src/seed.rs` (no UI path). P6-083's switch to
+  adjacent tagging (`tag = "code", content = "message"`) repairs it as a side
+  effect and changes that route's per-line error JSON shape; native artifacts
+  built before P6-083 never saw the old shape work, so nothing can regress.

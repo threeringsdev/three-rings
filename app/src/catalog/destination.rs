@@ -341,7 +341,8 @@ pub(crate) struct CollectionListPayload {
 
 /// One place both consumers of the collection list call, so the payload shape
 /// cannot drift between the catalog's sticky picker and the tray's move dialog.
-pub(crate) async fn collection_list() -> Result<CollectionListPayload, ServerFnError<String>> {
+pub(crate) async fn collection_list(
+) -> Result<CollectionListPayload, ServerFnError<shared::ApiError>> {
     Ok(CollectionListPayload {
         collections: crate::list_collections().await?,
     })

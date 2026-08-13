@@ -24,7 +24,13 @@ use leptos::server_fn::ServerFnError;
 
 use crate::components::states::{ErrorNote, RetryButton, StateBadge, Tone};
 
-fn err(raw: &str) -> ServerFnError<String> {
+/// A synthetic wire error for the bench columns below. Deliberately the
+/// **string-fallback** shape (`ServerError`, not `WrappedServerError`) so the
+/// bench keeps exercising [`crate::components::states::classify`]'s
+/// `Display`-prefix table over literal text — a real `crate::api_err` read
+/// would arrive typed (P6-083), but this page has no live backend to fetch
+/// one from, only this string standing in for the four wire shapes.
+fn err(raw: &str) -> ServerFnError<shared::ApiError> {
     ServerFnError::ServerError(raw.to_string())
 }
 

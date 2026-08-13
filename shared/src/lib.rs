@@ -49,8 +49,26 @@ pub use tags::{
 /// §Error model). Business-level auth *outcomes* (wrong password, unknown OTP)
 /// are not modeled here — those ride their own result enums; `ApiError` is for
 /// data-access faults that map cleanly onto an HTTP status.
+///
+/// **Adjacently tagged (`tag`+`content`), not internally tagged.** Every
+/// variant here is a newtype around a bare `String`, and serde_json's
+/// internally-tagged representation (`#[serde(tag = "code")]` alone) requires
+/// merging the tag into the variant's own serialized *map* — a bare `String`
+/// serializes to a JSON string, not a map, so there is nothing to merge into.
+/// That combination compiled (the derive doesn't catch it) but panicked at
+/// serialize time — `serde_json::to_string`/`to_value` on any variant hit
+/// `Error("cannot serialize tagged newtype variant ApiError::Validation
+/// containing a string")` — the instant something actually serialized an
+/// `ApiError` value directly rather than going through `to_wire`'s
+/// hand-built `ErrorBody` (P6-083: `ServerFnError<ApiError>` on the
+/// server-fn wire is that something — `leptos_server`'s resource
+/// serialization embeds the whole `Result<T, ServerFnError<ApiError>>` for
+/// SSR→hydration handoff). `tag`+`content` sidesteps this: the content goes
+/// in its own field regardless of what it serializes to, so it works for any
+/// inner type. Wire shape: `{"code":"validation","message":"invalid
+/// cursor"}` — which happens to match [`ErrorBody`]'s own field names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "code", rename_all = "snake_case")]
+#[serde(tag = "code", content = "message", rename_all = "snake_case")]
 pub enum ApiError {
     /// Unknown id — 404.
     #[error("not found: {0}")]
@@ -164,9 +182,111 @@ pub struct ErrorBody {
     pub details: Option<serde_json::Value>,
 }
 
+/// Reconstruct the variant from its own [`Display`](std::fmt::Display) text
+/// (P6-083: the server-fn wire's `ServerFnError<ApiError>` custom-error slot
+/// round-trips a `CustErr` through `Display`/`FromStr`, not serde — see
+/// `server_fn::error::ServerFnErrorEncoding`). Every arm strips the exact
+/// prefix its own `#[error(...)]` attribute writes above, so this is the
+/// left inverse of `Display` for text this crate produced. It is not a
+/// general parser: an upstream-composed message that happens to start with
+/// one of these prefixes would misclassify, which is the same fidelity the
+/// message-prefix convention this replaces already had.
+impl std::str::FromStr for ApiError {
+    /// Infallible: any unrecognized shape becomes `Upstream` rather than
+    /// failing to parse, so a foreign or mangled wire error still reaches
+    /// the client as *an* `ApiError` instead of blowing up decoding.
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(if let Some(m) = s.strip_prefix("not found: ") {
+            ApiError::NotFound(m.to_string())
+        } else if let Some(m) = s.strip_prefix("unauthorized: ") {
+            ApiError::Unauthorized(m.to_string())
+        } else if let Some(m) = s.strip_prefix("forbidden: ") {
+            ApiError::Forbidden(m.to_string())
+        } else if let Some(m) = s.strip_prefix("conflict: ") {
+            ApiError::Conflict(m.to_string())
+        } else if let Some(m) = s.strip_prefix("validation: ") {
+            ApiError::Validation(m.to_string())
+        } else if let Some(m) = s.strip_prefix("upstream: ") {
+            ApiError::Upstream(m.to_string())
+        } else {
+            ApiError::Upstream(s.to_string())
+        })
+    }
+}
+
 /// A convenience alias for fallible data-access results.
 pub type ApiResult<T> = Result<T, ApiError>;
 
 /// Re-exported so downstream crates can name the id type without depending on
 /// `uuid` directly for DTO fields that are ids.
 pub type Id = Uuid;
+
+#[cfg(test)]
+mod api_error_wire_tests {
+    use super::ApiError;
+
+    /// P6-083's acceptance sketch: every variant survives `Display` →
+    /// `FromStr` — the exact round trip `ServerFnError<ApiError>` performs on
+    /// the server-fn wire (`ServerFnErrorEncoding`'s `WrappedServerFn|{Display}`
+    /// text, decoded back via `CustErr::from_str`). A corrupt cursor's
+    /// `ApiError::Validation` must come back `Validation`, not degrade to a
+    /// generic failure.
+    #[test]
+    fn every_variant_round_trips_through_display_and_from_str() {
+        for original in [
+            ApiError::NotFound("collection".into()),
+            ApiError::Unauthorized("invalid token".into()),
+            ApiError::Forbidden("not yours".into()),
+            ApiError::Conflict("the Inbox cannot be moved".into()),
+            ApiError::Validation("invalid cursor".into()),
+            ApiError::Upstream("neon unreachable".into()),
+        ] {
+            let wire = original.to_string();
+            let parsed: ApiError = wire.parse().expect("FromStr is infallible");
+            assert_eq!(parsed, original, "round trip of {wire:?}");
+        }
+    }
+
+    /// Unrecognized text (a foreign error, or `Display` text from a
+    /// non-`ApiError` transport failure) must not fail to decode — it
+    /// degrades to `Upstream` with the text intact, the same "treat as
+    /// breakage worth retrying" rule `components::states::classify` already
+    /// applies to prefix-less text.
+    #[test]
+    fn unrecognized_text_degrades_to_upstream_rather_than_erroring() {
+        let parsed: ApiError = "error reaching server".parse().expect("infallible");
+        assert_eq!(parsed, ApiError::Upstream("error reaching server".into()));
+    }
+
+    /// `serde_json` on the enum **value itself**, not the hand-built
+    /// `ErrorBody` — pinning the regression this task's e2e run caught live:
+    /// `#[serde(tag = "code")]` alone (internally tagged) compiles for a
+    /// newtype-of-`String` variant but panics *at serialize time* the first
+    /// time anything actually calls `serde_json::to_string`/`to_value` on
+    /// one (`leptos_server`'s resource serialization does exactly that for
+    /// `ServerFnError<ApiError>` on the server-fn wire — a corrupt
+    /// `?cursor=` on `/catalog` 500'd the whole response with
+    /// `net::ERR_EMPTY_RESPONSE` rather than rendering the validation
+    /// banner). `to_wire`/`from_wire` never exercised this path — they
+    /// hand-build `ErrorBody` — which is how it went unnoticed until a
+    /// caller serialized `ApiError` directly.
+    #[test]
+    fn every_variant_round_trips_through_serde_json_directly() {
+        for original in [
+            ApiError::NotFound("collection".into()),
+            ApiError::Unauthorized("invalid token".into()),
+            ApiError::Forbidden("not yours".into()),
+            ApiError::Conflict("the Inbox cannot be moved".into()),
+            ApiError::Validation("invalid cursor".into()),
+            ApiError::Upstream("neon unreachable".into()),
+        ] {
+            let json = serde_json::to_string(&original)
+                .unwrap_or_else(|e| panic!("serializing {original:?} must not panic: {e}"));
+            let parsed: ApiError = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("deserializing {json:?} must not fail: {e}"));
+            assert_eq!(parsed, original, "round trip of {json}");
+        }
+    }
+}

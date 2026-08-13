@@ -24,6 +24,16 @@
 //! is a failure of the *session*, whose fix is a sign-in, so it gets that
 //! sentence and that link.
 //!
+//! **P6-083: typed dispatch, string fallback.** [`describe`] used to classify
+//! every failure by parsing the `ApiError` `Display` prefix out of a flattened
+//! `ServerFnError<String>::ServerError` message — the wire carried nothing
+//! richer. The server-fn wire now carries the typed `shared::ApiError` variant
+//! itself (`ServerFnError<shared::ApiError>::WrappedServerError`), so
+//! [`describe`] matches on the variant directly and [`classify`]'s string
+//! parsing is now the fallback for genuinely-untyped transport failures (a
+//! dropped fetch, a deserialization error) that never carried an `ApiError` to
+//! begin with.
+//!
 //! **[`Tone`] exists so a badge cannot say the wrong kind of nothing.** An empty
 //! needs list is *good news* (you hold every copy you want); a `/my` root
 //! standing on [`fallback_rows`](crate::my::root::fallback_rows) is *partial*
@@ -43,13 +53,14 @@ use crate::components::ui::button::{Button, ButtonSize, ButtonVariant};
 /// What a failed read tells us about whether *this page* can do anything about
 /// it — as far as the wire lets us tell.
 ///
-/// The transport collapses every [`shared::ApiError`] onto one `ServerFnError`
-/// variant carrying its `Display` string, so the variant prefix (`validation: `,
-/// `unauthorized: `, …) is the only signal available on the client. Matching on
-/// it is narrow, and the fallback is deliberately [`Failure::Transport`]: an
-/// offline phone on the native backend is the *ordinary* failure, and offering a
-/// retry that turns out to be useless costs a click, while withholding one that
-/// would have worked leaves a dead end.
+/// The server-fn wire now carries the typed [`shared::ApiError`] variant
+/// (P6-083), so [`describe`] matches on it directly; the `Display`-prefix
+/// parsing in [`classify`] survives only as the fallback for `ServerFnError`
+/// variants that never carried an `ApiError` at all (a dropped fetch, a
+/// deserialization failure). The fallback's default is deliberately
+/// [`Failure::Transport`]: an offline phone on the native backend is the
+/// *ordinary* failure, and offering a retry that turns out to be useless costs
+/// a click, while withholding one that would have worked leaves a dead end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
     /// The thing addressed is not there — a link to a deleted collection, an id
@@ -88,6 +99,22 @@ impl Failure {
             Failure::Transport => "transport",
         }
     }
+
+    /// The typed counterpart of [`classify`]'s string-prefix table — same
+    /// grouping (`conflict`/`forbidden`/`validation` are the request's fault,
+    /// `not_found` names the thing, `unauthorized` names the session,
+    /// `upstream` is breakage worth retrying), read off the variant instead of
+    /// its `Display` text.
+    fn of_api_error(e: &shared::ApiError) -> Self {
+        match e {
+            shared::ApiError::NotFound(_) => Failure::Missing,
+            shared::ApiError::Unauthorized(_) => Failure::Session,
+            shared::ApiError::Forbidden(_)
+            | shared::ApiError::Conflict(_)
+            | shared::ApiError::Validation(_) => Failure::Request,
+            shared::ApiError::Upstream(_) => Failure::Transport,
+        }
+    }
 }
 
 /// Classify a wire message by its `ApiError` `Display` prefix, and strip the
@@ -115,8 +142,29 @@ pub fn classify(raw: &str) -> (Failure, &str) {
     }
 }
 
-/// [`classify`] over a server-fn error.
-pub fn describe(e: &ServerFnError<String>) -> (Failure, String) {
+/// Classify a server-fn error, typed variant first.
+///
+/// **P6-083.** A `WrappedServerError(ApiError)` — every read that goes through
+/// `crate::api_err` — is classified by matching the variant directly
+/// ([`Failure::of_api_error`]), no string parsing involved. Anything else
+/// (`ServerError`, `Request`, `Deserialization`, …) is a `ServerFnError`
+/// variant that never carried a typed `ApiError` to begin with — those fall
+/// back to [`classify`]'s `Display`-prefix table, unchanged from before this
+/// task.
+pub fn describe(e: &ServerFnError<shared::ApiError>) -> (Failure, String) {
+    // `WrappedServerError` is soft-deprecated (server_fn 0.8.8) in favor of
+    // authoring a wholly custom `FromServerFnError` type instead of
+    // `ServerFnError<CustErr>` — but the generic remains fully supported
+    // (`server_fn`'s own test suite asserts `ServerFnError: FromServerFnError`),
+    // and matching this variant is the only way to read the typed `ApiError`
+    // back out of it.
+    #[allow(deprecated)]
+    if let ServerFnError::WrappedServerError(api_err) = e {
+        return (
+            Failure::of_api_error(api_err),
+            api_err.message().to_string(),
+        );
+    }
     let raw = match e {
         ServerFnError::ServerError(msg) => msg.clone(),
         other => other.to_string(),
@@ -203,7 +251,7 @@ pub fn RetryButton(on_retry: Callback<()>) -> impl IntoView {
 #[component]
 pub fn ErrorNote(
     #[prop(into)] what: String,
-    e: ServerFnError<String>,
+    e: ServerFnError<shared::ApiError>,
     #[prop(into)] testid: String,
     #[prop(optional)] retry: Option<Callback<()>>,
     #[prop(optional)] children: Option<Children>,
@@ -356,11 +404,62 @@ mod tests {
 
     #[test]
     fn describe_reads_a_server_fn_error() {
-        let e = ServerFnError::<String>::ServerError("upstream: neon said no".into());
+        // A `ServerError(String)` carries no typed `ApiError` — this is the
+        // string-fallback path, unchanged from before P6-083.
+        let e = ServerFnError::<shared::ApiError>::ServerError("upstream: neon said no".into());
         assert_eq!(
             describe(&e),
             (Failure::Transport, "neon said no".to_string())
         );
+    }
+
+    /// The P6-083 path itself: a `WrappedServerError(ApiError)` — what
+    /// `crate::api_err` now produces — is classified by matching the variant,
+    /// with no `Display`-prefix parsing involved. Every variant is checked so
+    /// a future edit to `Failure::of_api_error`'s match can't silently drop
+    /// one into the wrong class.
+    #[test]
+    fn describe_classifies_a_typed_api_error_by_variant_not_by_string() {
+        let cases = [
+            (
+                shared::ApiError::NotFound("collection".into()),
+                Failure::Missing,
+                "collection",
+            ),
+            (
+                shared::ApiError::Unauthorized("invalid token".into()),
+                Failure::Session,
+                "invalid token",
+            ),
+            (
+                shared::ApiError::Forbidden("not yours".into()),
+                Failure::Request,
+                "not yours",
+            ),
+            (
+                shared::ApiError::Conflict("the Inbox cannot be moved".into()),
+                Failure::Request,
+                "the Inbox cannot be moved",
+            ),
+            (
+                shared::ApiError::Validation("invalid cursor".into()),
+                Failure::Request,
+                "invalid cursor",
+            ),
+            (
+                shared::ApiError::Upstream("neon unreachable".into()),
+                Failure::Transport,
+                "neon unreachable",
+            ),
+        ];
+        for (api_err, want_failure, want_message) in cases {
+            let e = ServerFnError::<shared::ApiError>::from(api_err.clone());
+            assert_eq!(
+                describe(&e),
+                (want_failure, want_message.to_string()),
+                "{api_err:?}"
+            );
+        }
     }
 
     #[test]

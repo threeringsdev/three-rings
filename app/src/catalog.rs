@@ -132,11 +132,25 @@ pub(crate) fn encode_query_value(s: &str) -> String {
 /// Pull the human-facing message out of a server-fn error, and say whether it
 /// was the grammar rejecting a term (422) rather than something going wrong.
 ///
-/// The transport only carries `ApiError`'s `Display` string, so the `validation:`
-/// prefix is the wire signal. Matching on the prefix is narrow, but the
-/// alternative — treating every error as a failure — would flash "search failed"
-/// under a user's fingers on every partially-typed term.
-pub(crate) fn describe_error(e: &ServerFnError<String>) -> (bool, String) {
+/// **P6-083.** The server-fn wire now carries the typed `ApiError` variant
+/// (`crate::api_err`), so a `WrappedServerError(ApiError::Validation(_))` is
+/// matched directly rather than parsed off a `validation:` prefix. The
+/// prefix parse survives as the fallback for `ServerFnError` variants that
+/// carry no typed `ApiError` at all (a dropped fetch, e.g.) — treating every
+/// one of those as a failure rather than a query error is deliberate, so a
+/// partially-typed term doesn't flash "search failed" for a transport hiccup
+/// it isn't.
+pub(crate) fn describe_error(e: &ServerFnError<shared::ApiError>) -> (bool, String) {
+    // `WrappedServerError` is soft-deprecated (server_fn 0.8.8) in favor of
+    // authoring a wholly custom `FromServerFnError` type instead of
+    // `ServerFnError<CustErr>` — but the generic remains fully supported
+    // (`server_fn`'s own test suite asserts `ServerFnError: FromServerFnError`),
+    // and matching this variant is the only way to read the typed `ApiError`
+    // back out of it.
+    #[allow(deprecated)]
+    if let ServerFnError::WrappedServerError(shared::ApiError::Validation(msg)) = e {
+        return (true, msg.clone());
+    }
     let raw = match e {
         ServerFnError::ServerError(msg) => msg.clone(),
         other => other.to_string(),
@@ -201,7 +215,7 @@ pub(crate) struct SearchPayload {
     pub(crate) q: String,
     /// The cursor they were fetched with; empty means page one.
     pub(crate) cursor: String,
-    pub(crate) search: Result<shared::SearchResults, ServerFnError<String>>,
+    pub(crate) search: Result<shared::SearchResults, ServerFnError<shared::ApiError>>,
 }
 
 #[component]

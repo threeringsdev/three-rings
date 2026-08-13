@@ -539,7 +539,7 @@ impl TreeManage {
 
 /// Strip the server-fn transport prefix so dialogs and toasts show the
 /// `ApiError` message ("conflict: …"), not the wrapper.
-fn user_msg(e: &ServerFnError<String>) -> String {
+fn user_msg(e: &ServerFnError<shared::ApiError>) -> String {
     match e {
         ServerFnError::ServerError(msg) => msg.clone(),
         other => other.to_string(),
@@ -1671,7 +1671,7 @@ pub fn commit_drop(
     let needs_reparent = new_parent != drag.parent_id;
     spawn_local(async move {
         let mut reparented = false;
-        let mut result: Result<(), ServerFnError<String>> = Ok(());
+        let mut result: Result<(), ServerFnError<shared::ApiError>> = Ok(());
         if needs_reparent {
             result = crate::reparent_collection(drag.id, new_parent).await;
             reparented = result.is_ok();

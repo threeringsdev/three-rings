@@ -458,7 +458,7 @@ enum CardIdOutcome {
     /// The read ran and this is what it said. Boxed because `CardDetail` is far
     /// larger than `NoId` and clippy's `large_enum_variant` is right that every
     /// value would otherwise pay for the biggest one.
-    Fetched(Box<Result<CardDetail, ServerFnError<String>>>),
+    Fetched(Box<Result<CardDetail, ServerFnError<shared::ApiError>>>),
 }
 
 #[component]
@@ -544,7 +544,7 @@ enum Failure {
 /// where every other surface's `Missing` means "your link is dead". Anything not
 /// `not found:` is treated as breakage, which is the safe direction: a missing
 /// card misreported as an outage is recoverable, the reverse is not.
-fn classify(e: &ServerFnError<String>) -> Failure {
+fn classify(e: &ServerFnError<shared::ApiError>) -> Failure {
     match crate::components::states::describe(e) {
         (states::Failure::Missing, _) => {
             Failure::Missing("We don't have that card in the catalog.".into())
