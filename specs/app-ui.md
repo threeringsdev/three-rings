@@ -5790,3 +5790,99 @@ including `auth.setup.ts`'s fixture sign-in (the critical regression: it
 fills the real form and waits for the `/my` redirect) and `smoke.spec.ts`'s
 "login honors next after sign-in", which drives the real login form through
 the new label markup end to end.
+||||||| parent of e0b8632 (fix(ui): DFC swap covers keywords; preview flips reset on reopen)
+
+
+### Two DFC swap gaps: keywords and preview flip persistence (P6-164, 2026-08-13)
+
+Two small, unrelated defects in `/cards/:id`'s flip control, both pre-existing
+since the original DFC back-face flip task ("DFC back-face flip", above).
+
+**A — the keywords row didn't swap with the rest of the face-dependent block.**
+`CardDetail::keywords` is card-level: Scryfall's top-level `keywords` array is
+already the union of both faces' ability words, and there is no per-face
+equivalent anywhere on the wire to swap in instead — confirmed at the source,
+not assumed. `app/src/ingest/extract.rs`'s `ORACLE_FACE_KEYS` (the allowlist
+that decides what goes into `cards.card_faces`) deliberately excludes
+`keywords`, and Scryfall's own Card Face object has no `keywords` key to begin
+with (only the top-level Card object does). So a flipped-to back face was
+showing the *front* face's keywords beside the *back* face's oracle text —
+data that was never wrong on the wire, just paired with the wrong face on
+screen. The honest-minimal fix (data doesn't exist per-face, so don't invent
+it): gate the row on `!flippable || face.get() == 0` — it shows only
+alongside the front face and disappears entirely once flipped, rather than
+being relabeled "card-level" (considered; rejected as more UI for a single-S
+fix to carry, and "gone" is the same information as "not this face's" for a
+reader who can flip back to see it). `data-testid="card-keywords"` added —
+the row had none before, which was awkward for tests that need to assert an
+absence.
+
+**B — a preview's flip state survived closing and reopening it.**
+`PreviewBody`'s own doc comment already said "each starting at the front";
+the *first* open did, but the code let the DFC flip ride along on every
+subsequent reopen. Root cause is the lazy-mount latch just above it
+(`CardPreview`'s `hovered`/`sheet_seen`, "Both bodies mount lazily" doc
+comment): `PreviewBody` mounts once and is never torn down, so its `face`
+`RwSignal` is one long-lived piece of state, not something recreated per
+open — matching "each starting at the front" needed an explicit reset on
+reopen, not the accidental byproduct of a fresh component instance.
+**Decision: reset-on-reopen**, not persistence — no comment, spec passage, or
+commit message anywhere in this codebase gives persistence a rationale, and
+the module doc already stated the opposite intent, so this closes the gap the
+doc always claimed rather than opening a new design question.
+
+The mount latches themselves are unmount-averse on purpose (unmounting empties
+the sheet mid-slide, or thrashes the hover card every `mouseleave` — both
+still true, both left alone). So the fix doesn't touch them: `PreviewBody`
+gained an `open: Signal<bool>` prop — the affordance's *real* visible state,
+distinct from the latch — and an `Effect` that resets `face` to `0` every time
+`open` flips true. The sheet already had a live signal for this
+(`sheet_open`, an `RwSignal<bool>` the `Sheet` component itself writes to on
+close). The hover card did not: its `open` signal lives entirely inside
+`HoverCard`'s own context, invisible to callers. Added `on_open_change:
+Option<Callback<bool>>` to `HoverCard` (mirrors `open` out via an `Effect`,
+defaults to `None`/no-op) rather than exposing the signal itself or
+restructuring the context — the smallest change that gives a caller a way to
+observe a genuine open/close transition without owning the popover state.
+
+**Both gaps are UI-only; no wire or DB change.** `CardDetail`/`CardSummary`
+are unchanged — (A) reads fields the client already had, and (B) is
+client-side signal wiring. `shared`'s tests were not re-run for this reason
+(no source in that crate changed).
+
+**e2e.** Three new tests in `card-detail.spec.ts`, all kill-verified by
+stashing `app/src/cards.rs` + `app/src/components/ui/hover_card.rs` back to
+base and confirming each new test fails for the reason it claims, then
+restoring: (A) `"Kruin Outlaw"` (a transform DFC whose union keywords are
+non-empty — `DFC_QUERY`'s "Agadeem's Awakening" has none, so it can't
+distinguish the fix from "never renders") shows `card-keywords` on the front
+face, hides it entirely after a flip, and shows it again flipped back to
+front. Base fails on the first assertion (`card-keywords` doesn't exist at
+all pre-fix — it had no `data-testid`), which proves the row changed but not
+specifically that the *gating* is what the test pins; a second, narrower
+mutation isolated that — testid kept, `is_front` hardcoded `true` — and the
+*same test* then fails exactly on the post-flip `toHaveCount(0)` assertion
+instead, which is the one that actually exercises the fix. (B), two tests, hover and sheet: flip
+to the back, close (mouse-away past the 150 ms hover-intent timer; `Escape`
+for the sheet), reopen the same trigger, assert the front face again. Base
+fails both — the reopened body still shows the back face's name.
+
+**Evidence.** `cargo fmt --all -- --check` clean. `cargo clippy --workspace
+--exclude frontend --all-targets`, `-p frontend --target
+wasm32-unknown-unknown`, `-p app --features native --all-targets`, `-p app
+--features hosted,component-bench --all-targets`, and `-p app --features
+hydrate,component-bench --target wasm32-unknown-unknown` all clean, `-D
+warnings` (run on this host, which builds `three_rings` directly — needed
+`mkdir -p target/site/pkg` first, the same Tauri build-script requirement the
+verify section already names). `cargo test -p app --features hosted`: 360
+passed, 0 failed, 5 ignored — unchanged from P6-152's count, since neither fix
+added Rust-level logic (both are component wiring, covered by e2e instead).
+e2e: `card-detail.spec.ts` full chromium 20/20 (includes the 3 new tests, all
+kill-verified per above); `responsive.spec.ts` full chromium 34/34 — the one
+DFC/preview-adjacent file besides `card-detail.spec.ts` itself (only these two
+reference `card-preview`/`card-flip`/`card-keywords` test ids). One `--
+workers=1` run of both files together hit a single failure on an unrelated
+toast-positioning test (`#sonner` never appeared); traced to the dev server
+having been started without `--features component-bench` (that test drives
+`/dev/components`) rather than to this task's diff — restarting the server
+with the flag made it 35/35 with no other change. No base-parity failures.
