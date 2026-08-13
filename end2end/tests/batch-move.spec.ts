@@ -49,6 +49,15 @@ const PICKER = "#popover-tray-destination";
 const OPTION = '[data-testid="destination-option"]';
 const HINT = '[data-testid="destination-hint"]';
 const TOAST = '[data-name="Toast"]';
+// The which-copies step (P6-151). The *rows* are the load-bearing seam: a
+// closed dialog keeps its box (and its footer buttons) in the DOM, so a
+// visibility assertion on the panel would pass whether or not the step ever
+// opened — the rows mount only while it is open, so counting them is the
+// assertion that cannot lie.
+const STEP_CARD = '[data-testid="which-copies-card"]';
+const STEP_ROW = '[data-testid="which-copies-row"]';
+const STEP_CONFIRM = '[data-testid="which-copies-confirm"]';
+const STEP_CANCEL = '[data-testid="which-copies-cancel"]';
 
 type Summary = { id: string; name: string };
 type Row = {
@@ -191,6 +200,36 @@ async function unownedCards(
     `the fixture has fewer than ${n + skip} catalog cards the dev user owns nowhere`,
   ).toBe(n);
   return free;
+}
+
+/// How many distinct `(collection, printing, board)` stacks of a card the
+/// caller holds — the same grouping the which-copies step lists as rows, read
+/// from the one endpoint that does not group any of it away.
+///
+/// Derived rather than assumed, because "how many places is this card in" is
+/// exactly what the step renders and exactly what `unownedCards` cannot
+/// promise: its "owned nowhere" is really "not in the first 200 rows of `/my`",
+/// which on a fixture of thousands lets an owned card through (observed — a
+/// seeded 2-stack card rendered 3 rows, correctly).
+async function stackCount(
+  request: APIRequestContext,
+  oracleId: string,
+  exclude: string,
+): Promise<number> {
+  const res = await request.get(`/api/cards/${oracleId}/holdings`);
+  expect(res.status(), "holdings of oracle").toBe(200);
+  const rows = (await res.json()) as {
+    collection_id: string;
+    printing_id: string;
+    board: string;
+    quantity: number;
+  }[];
+  const stacks = new Set(
+    rows
+      .filter((h) => h.quantity > 0 && h.collection_id !== exclude)
+      .map((h) => `${h.collection_id}/${h.printing_id}/${h.board}`),
+  );
+  return stacks.size;
 }
 
 /// A `/my` row whose copies are spread over several collections — the shape the
@@ -504,7 +543,7 @@ test("@fast a /my row whose copies are all sideboarded moves off the sideboard",
   }
 });
 
-test("@fast a /my row scattered over collections is refused by name, and nothing moves", async ({
+test("@fast a /my row scattered over collections asks which copies, and cancelling refuses it by name", async ({
   page,
   request,
 }) => {
@@ -519,7 +558,12 @@ test("@fast a /my row scattered over collections is refused by name, and nothing
 
     await moveTo(page, dest.name);
 
-    // Named and reasoned, not silently dropped from the batch.
+    // P6-151: the batch no longer dead-ends here — it asks. The step lists one
+    // row per place the copies actually sit in, which is the question the
+    // oracle-grained key could not answer on its own.
+    await expect(page.locator(STEP_ROW)).toHaveCount(places);
+    // Declining is still a refusal, named and reasoned — not a silent drop.
+    await page.locator(STEP_CANCEL).click();
     await expect(page.locator(TOAST).first()).toContainText(
       `${scattered.card.name} is in ${places} collections`,
     );
@@ -530,6 +574,92 @@ test("@fast a /my row scattered over collections is refused by name, and nothing
     const landed = await viewOf(request, dest.id);
     expect(landed.cards).toHaveLength(0);
   } finally {
+    await deleteCollection(request, dest.id);
+  }
+});
+
+// ------------------------------------------- which copies? (P6-151) ---
+//
+// The refusal above is only half the contract now. A `/my` row whose copies are
+// spread over several collections opens the **which-copies step**: the concrete
+// stacks behind the card, one row per (collection, printing, board) with its
+// count, and a submit that goes back through the *same* batch move as
+// `SelectionKey::Held` items — which is what makes the picked copies precise
+// without a new write path.
+//
+// The assertion that matters is the last one, and it is API-read: exactly the
+// picked stack moved and the other one is untouched. A step that moved "a copy
+// of that card" from wherever it felt like would satisfy every toast in this
+// test and fail that.
+
+test("@fast an ambiguous /my row asks which copies, and moves exactly the stack picked", async ({
+  page,
+  request,
+}) => {
+  test.slow();
+  const [card] = await unownedCards(request, 1, 25);
+  const printing = card.printing_id as string;
+  const here = await createCollection(request, "binder", "amb-here");
+  const there = await createCollection(request, "binder", "amb-there");
+  const dest = await createCollection(request, "binder", "amb-dest");
+  try {
+    // Two collections, deliberately different counts: the step's rows have to
+    // say *how many* copies are where, and equal counts could not tell a row
+    // that reads its own stack from one that reads the other's.
+    await addHave(request, here.id, printing, 2);
+    await addHave(request, there.id, printing, 3);
+    // What the step should list, read from the database rather than assumed to
+    // be the two seeded here — see `stackCount`.
+    const stacks = await stackCount(request, card.oracle_id, dest.id);
+    expect(stacks, "the seeded card must be in at least two places").toBeGreaterThan(1);
+
+    // The `/my` row aggregates both — it reads OWNED 5 and names neither
+    // place, which is exactly why the batch cannot resolve it alone.
+    await page.goto(`/my?q=${encodeURIComponent(card.name)}`);
+    await hydrated(page);
+    await select(myRow(page, card.oracle_id)).click();
+    await expect(page.locator(COUNT)).toHaveText("1 card");
+
+    await moveTo(page, dest.name);
+
+    // The step, not a dead end: one section for the card, one row per stack,
+    // each naming its collection and its count.
+    await expect(page.locator(STEP_CARD)).toHaveAttribute("data-card", card.name);
+    const rows = page.locator(STEP_ROW);
+    await expect(rows).toHaveCount(stacks);
+    await expect(rows.filter({ hasText: here.name })).toHaveText(
+      `${here.name} · 2 copies`,
+    );
+    await expect(rows.filter({ hasText: there.name })).toHaveText(
+      `${there.name} · 3 copies`,
+    );
+    // The destination is not offered as a place to take copies *from*.
+    await expect(rows.filter({ hasText: dest.name })).toHaveCount(0);
+
+    // Pick one stack, and the button says what it will do.
+    await rows.filter({ hasText: here.name }).click();
+    const confirm = page.locator(STEP_CONFIRM);
+    await expect(confirm).toHaveText("Move 1 copy");
+    await confirm.click();
+
+    await expect(page.locator(TOAST, { hasText: "Moved 1 card" })).toContainText(
+      `Moved 1 card (1 copy) → 🗂 ${dest.name}`,
+    );
+    // The question was answered, so the tray stops asking it — the entry the
+    // step was opened for is a `card:` token, and the move that answered it
+    // reported `held:` ones.
+    await expect(page.locator(TRAY)).toHaveCount(0);
+
+    // The assertion the whole feature stands on: the picked stack gave up a
+    // copy, the other one is untouched, and the destination got exactly one.
+    await expect(async () => {
+      expect(await present(request, here.id, [printing])).toEqual([1]);
+      expect(await present(request, there.id, [printing])).toEqual([3]);
+      expect(await present(request, dest.id, [printing])).toEqual([1]);
+    }).toPass({ timeout: 5000 });
+  } finally {
+    await deleteCollection(request, here.id);
+    await deleteCollection(request, there.id);
     await deleteCollection(request, dest.id);
   }
 });

@@ -234,6 +234,89 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Ambiguous batch-move refusals became a which-copies step (P6-151, 2026-08-13)
+
+`app/src/my/move_selection.rs`, `app/src/lib.rs` — the refusal contract the two
+entries below established, revised where it dead-ended.
+
+**What changed, in one sentence.** A `/my` row whose copies are spread over
+several collections, printings or boards used to end the batch's story for that
+card with a toast telling the user to go open a collection page and select the
+row there; it now opens a **which-copies step** — the concrete stacks behind
+the card, one row per `(collection, printing, board)` with its count — and the
+picked rows complete the move without leaving the page.
+
+**The whole feature is a client step over the write that already existed.** No
+new mutation, no new wire item, no change to `move_batch`, `MoveItem` or
+`holding_take`. The refusals named exactly the dimensions
+`SelectionKey::Held { collection_id, printing_id, board }` already carries, so a
+picked row *is* a `Held` entry, and the second pass is the ordinary
+`move_selection` batch: the server resolves it through `resolve_held` against
+its own fresh `holdings_of_oracle` read, at one copy per item, exactly as a
+collection-page row does. That is also why the step cannot loop — a `Held` key
+has nothing left to be ambiguous about.
+
+**What still refuses, and why each one is not a question with rows behind it:**
+
+| Refusal | Now |
+|---|---|
+| `ManyCollections` / `ManyPrintings` / `ManyBoards` | **the step** (`SkipReason::is_ambiguous`) |
+| `Grain(n)` | still a toast — a stack with several finish/condition/language grains and no default one is **one** row on any list this app can render (the step's rows are `(collection, printing, board)`), so offering it as a choice would show rows the user cannot tell apart |
+| `AlreadyThere` | still a toast — the copies are at the destination; there is nothing to choose between |
+| `NoCopies` / `NoLongerNeeded` | still toasts — the fresh server read just proved the stack (or the gap) gone; no choice fixes that |
+
+**Cancelling is still a refusal.** Every exit from the dialog — Cancel, the ✕,
+the backdrop, Escape — raises the refusal toast the batch would have raised, and
+the entries stay checked. The three ambiguous `phrase()`s were reworded from
+"open one and select the row there" to "pick the copies to move", because the
+sentence is now what a user sees after *declining* the offer, not an errand.
+
+**The stack list is a second read, deliberately.** `crate::selection_stacks`
+composes reads this app already had — `holdings_of_oracle` (the only one that
+does not group board or grain away), `list_collections` for names, `card_detail`
+for the set/number chip — with **no trait method, SQL or route added**. Three
+things decided it against fattening `MoveOutcome` with the stacks the batch's
+own resolution had in hand: the payload would carry display strings for a dialog
+that usually never opens; a read taken when the user is *asked* cannot be older
+than the question; and staleness past that point is already handled, since the
+second pass re-resolves every pick and answers `NoCopies` for a stack that
+emptied in between. The catalog read is skipped whenever a card's copies sit
+under one printing — a set/number chip distinguishes nothing there — so the
+common two-binders case costs no `card_detail` at all.
+
+**One copy per ticked row, matching the pill.** Two ticks on one card are two
+items and two copies; the same "the tray counts entries" rule the batch follows.
+A count picker per row was considered and dropped: the tray's pill has never
+counted copies, and a step that quietly could would make it lie.
+
+**Tray bookkeeping needed its own translation, and this is the bug that would
+have shipped otherwise.** The second pass reports `held:` tokens; the tray holds
+the `card:` entry those answer. `tokens_to_drop` matches tokens literally, so
+without `answered_tokens` mapping picks back to their originating entry, a card
+whose copies had just moved stayed checked in the pill forever. Mutation-verified
+(below).
+
+**Evidence.** `cargo test --workspace --exclude frontend --exclude three_rings`
+358 passed / 0 failed (10 new pure tests: the skip split, the stack rollup, the
+choices join, the pick→wire-item translation, the token translation, the row
+label). Three mutations, three deaths, all in the browser:
+`is_ambiguous → false` (the step never opens — killed both e2e tests),
+`answered_tokens → []` (killed the tray assertion),
+`StackPick::key → SelectionKey::Card` (the pick submits the oracle grain again —
+killed the moved-copies assertions). Full `batch-move.spec.ts` +
+`selection-tray.spec.ts` at `--workers=1`, with the base-parity triage recorded
+in the task report.
+
+**A fixture helper that could not promise what its name said.** `unownedCards`
+asks `/my?limit=200` for "cards the user owns nowhere", which on today's
+fixture is really "not in the first 200 rows" — a card came back free while
+sitting in a third collection, and the new test's "how many places is this card
+in" assertion read 3 where it had seeded 2 (correctly). Fixed in the test rather
+than in the helper: `stackCount` derives the expected row count from
+`GET /api/cards/{id}/holdings`, so the assertion tracks the database instead of
+an assumption. Every other test in that file only counts copies per collection
+and is unaffected.
+
 ### Stale selection-tray entries: pruned, not moved (P6-122, 2026-08-12)
 
 `app/src/components/ui/selection_tray.rs`, `app/src/my/move_selection.rs`,
@@ -2804,7 +2887,9 @@ is gone entirely. One refusal is deliberately kept: `Grain(n)` for a stack with
 several grains and **no default one** (2 foil + 1 etched) — nothing about the
 row says which the checkbox meant. `ManyCollections`/`ManyPrintings`/`ManyBoards`
 remain, each a question the user answers by opening a page where the choice is a
-visible row.
+visible row. (**Superseded on that last point by P6-151, above**: those three are
+now asked in the move itself — the which-copies step — and only the toast the
+user gets for *declining* it remains. `Grain` is unchanged.)
 
 **The batch-path TOCTOU stays open, deliberately, but is now attributable.**
 Grain+board on `MoveItem` is the same addressing as a holding id
