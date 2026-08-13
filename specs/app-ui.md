@@ -5431,3 +5431,104 @@ tray centres on the content column, not on the window" — unaffected, since
 `<main>` itself carries no cap and this change is scoped to the grid's own
 class list. Release build (`CARGO_TARGET_DIR=target/gate cargo leptos build
 --release`) succeeded and its minified CSS carries the new rule.
+||||||| parent of 63ecfd3 (fix(ui): card detail follows moves; the tray picker's empty line tells the truth)
+
+### Batch move's two gaps on `/cards/:id` and the tray picker (P6-152, 2026-08-13)
+
+Two small, unrelated defects sharing one root cause — the batch move's
+client-side propagation was built for `/my` and its collection view and never
+extended to the third holdings-rendering surface, `/cards/:id`.
+
+**A — `/cards/:id`'s "Your copies" block did not hear a move.**
+`HoldingsRevision` (this file, "Other decisions", 2026-08-11) is provided by
+the shell and consumed as a resource *source* by `all_cards.rs` and
+`collection.rs` — that sentence should now read **three** pages, not two.
+`cards::CardDetailPage`'s own `detail_res` never took it, so a batch move
+performed while parked on a card's detail page left "Your copies" naming the
+pre-move collection until an unrelated reload — silent staleness, not a crash,
+which is exactly the class this mechanism exists to close everywhere else.
+Fixed the same way `all_cards.rs`/`collection.rs` already do it:
+`crate::my::move_selection::holdings_revision()` (the public helper, not the
+`HoldingsRevision` context type directly) joins `oracle_id` in the resource's
+source tuple. The helper is what makes the `Option`-context question moot —
+it degrades to a constant `0` signal outside the shell (the bench) rather than
+requiring every caller to `use_context` and branch, so `/cards/:id` stays
+mountable there unchanged.
+
+**B — the tray picker's empty line spoke past what it could see.**
+`MoveSelection`'s `DestinationList` overrode `empty="No collection to move
+to."`, and — per `DestinationList`'s own doc, "`empty` can only ever speak
+about *filtering*" — that string fires for a *filtered* zero too, not only a
+failed or genuinely-empty read. Typing a search term that matched nothing
+therefore claimed the user had nowhere to move copies, which was false: their
+collections were sitting right there, unfiltered. Fixed by dropping the
+override — `DestinationList`'s own default ("No collection matches.", the
+catalog picker's own wording) is simply the true sentence here too, and the
+1-line diff is the whole fix.
+
+**The zero-collections case this override used to (over-)cover cannot happen
+in the tray.** `CollectionStore::list_collections` — the read behind
+`collection_list()`, which is what backs this picker — calls `ensure_inbox`
+before it returns rows (`hosted.rs`; collection-api.md → "Inbox provisioning":
+lazy on first authed load, idempotent via `collections_one_inbox`). So the
+very request that populates this list provisions the caller's undeletable
+Inbox row as a side effect; the registry it renders from is never really
+empty, only ever filtered down to nothing. (The tree's own `Move to…` picker
+in `tree_manage.rs` carries the identical override with the identical
+overreach — flagged, but out of scope: it is a different feature/dialog and
+the task named only the tray.)
+
+Both gaps are one line each in `app/src/cards.rs` / `app/src/my/move_selection.rs`
+respectively (plus updating the one bench doc comment in
+`app/src/bench/selection_tray.rs` that quoted the old wording).
+
+**e2e.** Two new tests in `batch-move.spec.ts`. (A): select a row on `/my`,
+follow its own link into `/cards/:id` — a real SPA navigation, not `page.goto`,
+since the in-memory tray selection has to ride along (P6-122) — move through
+the tray *parked on the detail page*, and assert "Your copies" updates with no
+navigation between the write and the read. Kill-verified: with `cards.rs`
+stashed back to base the same test fails exactly as predicted (`your-copies`
+still names the pre-move and Inbox collections, never the destination);
+restored, it passes. (B): open the tray picker, type a term nothing matches,
+assert "No collection matches." (not "No collection to move to."). Kill-
+verified the same way against `move_selection.rs`.
+
+**A fixture surprise surfaced building (A), reinforcing rather than
+contradicting the existing P6-126 Findings note on this file's own
+`unownedCards` helper.** Today's dev seed's bulk catalog load has grown to the
+point that the Inbox now holds real, nonzero quantities of *nearly the entire
+q=z catalog slice* this suite draws candidates from — not merely "more than
+200 distinct printings" (the original caveat's framing) but close to all of
+it. A first attempt at (A) assumed a `genuinely unowned` card could still be
+found by walking further into the candidate list re-verified against the
+unpaginated per-card holdings read (the same guard
+`collection-tree-manage.spec.ts`'s rename test already uses); at `n=48` past
+`skip=30` **zero** candidates were genuinely free. The test does not depend on
+finding one: it adds a copy to a fresh scratch collection regardless of
+what else the seed already holds, then drives *whichever* path the tray
+actually takes — a direct resolve, or the which-copies step (P6-151) — rather
+than assuming single-place resolution, and answers the step by ticking only
+the scratch collection's own row when it appears. Not filed as a new Workbook
+task (this task's instructions were explicit no-`workbook`, the same
+constraint P6-149's Findings entry above recorded) — a follow-up on the
+fixture-pool class (already tracked under `WB-01KZMVA2Y1`) should fold this
+observation in when picked back up.
+
+**Evidence.** `cargo fmt --all -- --check` clean. `cargo clippy --workspace
+--exclude frontend --all-targets -- -D warnings` and `cargo clippy -p frontend
+--target wasm32-unknown-unknown -- -D warnings` both clean (this host builds
+`three_rings` directly — no container exclusion needed here). `cargo test -p
+app --features hosted`: 360 passed, 0 failed, 5 ignored. e2e, full serial run
+of `batch-move.spec.ts` + `card-detail.spec.ts` + `selection-tray.spec.ts` +
+`destination-picker.spec.ts` (`--workers=1`, both fixes in place): **38/40
+passed.** The 2 residual failures are exactly the base-parity class the task
+brief named in advance ("2 known fixture misclassifications in batch-move") —
+"a /my row held in one place resolves to that place and moves" and "a /my row
+whose copies are all sideboarded moves off the sideboard", both sunk by the
+same Inbox-bulk-load contamination described above (their own `unownedCards`
+candidates are no longer genuinely unowned either) — reproduced on base
+independent of this task's diff, since both assume the same single-place
+resolution the fixture can no longer promise. Every other test in all four
+files passed, including the two new ones and the pre-existing bench test that
+already asserted the *failed*-read arm never regresses to the retired empty
+string (`selection-tray.spec.ts`'s `"Move to…" opens the destination picker`).

@@ -1094,7 +1094,20 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
                 {move || if pending.get() { "Moving…" } else { "Move to…" }}
             </PopoverTrigger>
             <PopoverContent class="w-[280px] p-0">
-                <DestinationList empty="No collection to move to." failed=load_failed>
+                // No `empty` override: `DestinationList`'s own default ("No
+                // collection matches.") is the true sentence here too.
+                // `empty` can only ever speak about *filtering* (its own doc)
+                // — "No collection to move to." was a claim about having
+                // nowhere to move copies, which typing a search term that
+                // matches nothing does not make true. And the zero-collections
+                // case this used to (over-)cover cannot happen here:
+                // `collection_list()` — the read `collections` above resolves
+                // through — provisions the caller's undeletable Inbox row as a
+                // side effect (`CollectionStore::list_collections` calls
+                // `ensure_inbox` before it returns rows; collection-api.md →
+                // "Inbox provisioning"), so this list is never really empty,
+                // only ever filtered down to nothing.
+                <DestinationList failed=load_failed>
                     // Same boundary the catalog's picker uses, and for the same
                     // reason: the rows come from resources, and only a
                     // suspense boundary keeps a render in step with them.
