@@ -705,7 +705,6 @@ fn OwnedElsewhere(
     collection_id: Id,
     picks: RwSignal<Option<Vec<PickGroup>>>,
 ) -> impl IntoView {
-    let pending = RwSignal::new(false);
     let total: i32 = rows.iter().map(|r| r.owned_elsewhere).sum();
     let all = StoredValue::new(rows.clone());
 
@@ -746,7 +745,7 @@ fn OwnedElsewhere(
                     <TableBody>
                         {rows
                             .into_iter()
-                            .map(|row| view! { <ElsewhereRow row collection_id pending /> })
+                            .map(|row| view! { <ElsewhereRow row collection_id /> })
                             .collect_view()}
                     </TableBody>
                 </Table>
@@ -756,7 +755,21 @@ fn OwnedElsewhere(
 }
 
 #[component]
-fn ElsewhereRow(row: NeedRow, collection_id: Id, pending: RwSignal<bool>) -> impl IntoView {
+fn ElsewhereRow(row: NeedRow, collection_id: Id) -> impl IntoView {
+    // Owned per row, not threaded in from `OwnedElsewhere` (P6-140). A pull's
+    // in-flight state used to live on one signal shared across every row in
+    // the table, so any row's request disabled every other row's button too.
+    // Rows are (oracle, board)-keyed since P6-074 — the same grain the pull
+    // token (`oracle@from@board`) already carries — and each `ElsewhereRow`
+    // instance owns exactly one such row, so a signal created here rather
+    // than passed down is scoped to this row for free; no map keyed by token
+    // is needed. Concurrent pulls from two rows drawing on the same oracle's
+    // elsewhere pool (the P6-074 shared-offer case) are left enabled on
+    // purpose: `pull_plan` reconciles shared stock per-stack and refuses
+    // honestly, and `pull_needs` bulk-locks per oracle server-side, so
+    // concurrent requests serialize there — the UI does not need to guess at
+    // a conflict the server already resolves correctly.
+    let pending = RwSignal::new(false);
     let toast = expect_context::<ToastHandle>();
     let tree = expect_context::<CollectionTreeResource>().0;
     let revision = use_context::<super::move_selection::HoldingsRevision>();
