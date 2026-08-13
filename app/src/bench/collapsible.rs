@@ -14,7 +14,7 @@ pub fn demo() -> AnyView {
                     </span>
                     "Default open"
                 </CollapsibleTrigger>
-                <CollapsibleContent class="text-muted-foreground pl-6 text-sm">
+                <CollapsibleContent class="text-muted-foreground pt-1 pl-6 text-sm">
                     <p>"Visible until collapsed — the tree's per-node body."</p>
                 </CollapsibleContent>
             </Collapsible>
@@ -25,7 +25,10 @@ pub fn demo() -> AnyView {
                     </span>
                     "Default closed"
                 </CollapsibleTrigger>
-                <CollapsibleContent class="pl-6 text-sm">
+                // `pt-1` here is deliberate: it demonstrates that vertical
+                // padding on `class` no longer leaves a sliver of height
+                // under the closed section (see collapsible.rs's module doc).
+                <CollapsibleContent class="pt-1 pl-6 text-sm">
                     <a href="#collapsible" class="underline">
                         "A link that must be unreachable (inert) while closed"
                     </a>

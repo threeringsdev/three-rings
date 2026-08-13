@@ -536,13 +536,8 @@ fn LocationSummary(
                             {format!("{owned} across {n} collections")}
                         </span>
                     </CollapsibleTrigger>
-                    // No padding on the content wrapper: `class` lands on the
-                    // *inner* div, whose padding survives the closed state's
-                    // `grid-rows-[0fr]` (`min-h-0` zeroes the content box, not
-                    // the padding box) and leaves a sliver of height under
-                    // every collapsed row. Spacing goes on the list instead.
-                    <CollapsibleContent>
-                        <ul class="space-y-0.5 pt-1" data-testid="location-list">
+                    <CollapsibleContent class="pt-1">
+                        <ul class="space-y-0.5" data-testid="location-list">
                             {locations
                                 .into_iter()
                                 .map(|loc| {

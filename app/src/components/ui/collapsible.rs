@@ -8,6 +8,16 @@
 //!   convention as `dialog`/`popover` — no `use_random_id` anywhere)
 //! - closed content is `inert` (the grid animation keeps it in the DOM, which
 //!   would leave collapsed links tab-reachable; same fix as `dialog`/`sheet`)
+//! - the `class` prop lands on a third, innermost div rather than directly on
+//!   the grid item: the CSS `grid-rows-[0fr]` collapse trick only zeroes a
+//!   box's own content — a box's *own* padding still imposes a visible floor
+//!   on its rendered height (browsers won't shrink a padding box below its
+//!   padding sum), so a caller-supplied `class` carrying vertical padding
+//!   (`pt-1`, `py-2`, …) directly on the shrinking grid item left a sliver of
+//!   height under every closed section. The grid item itself (`min-h-0`, no
+//!   other class) now carries no padding of its own; the caller's `class`
+//!   lives one level further in, where its overflow is clipped by the outer
+//!   grid container instead of imposing a floor.
 
 use leptos::context::Provider;
 use leptos::prelude::*;
@@ -79,7 +89,9 @@ pub fn CollapsibleTrigger(
 }
 
 /// Animated show/hide panel using the CSS grid trick.
-/// - `class` applies to the inner content div (padding, flex, gap, etc.)
+/// - `class` applies to the innermost content div (padding, flex, gap, etc.)
+///   — safe to pass vertical padding here; it no longer leaks height while
+///   closed (see the module doc comment)
 /// - `outer_class` applies to the outer animation div — use for grid item props like `col-span-full`
 #[component]
 pub fn CollapsibleContent(
@@ -102,7 +114,20 @@ pub fn CollapsibleContent(
             inert=move || !open.get()
             class=outer
         >
-            <div class=tw_merge::tw_merge!("min-h-0", class)>{children()}</div>
+            // The grid item that actually shrinks on collapse. It carries no
+            // padding of its own — only `min-h-0`, overriding the grid item's
+            // default auto-minimum-size so it can shrink to zero — and no
+            // caller class, so nothing here imposes a padding floor on the
+            // closed height.
+            <div class="min-h-0">
+                // The caller's `class` (padding, flex, gap, ...) lives here,
+                // one level further from the shrinking box. When closed this
+                // div's own rendered height (content + padding) overflows the
+                // zero-height wrapper above, but that overflow is clipped by
+                // the outer grid container's `overflow-hidden`, not left
+                // showing as a sliver.
+                <div class=class>{children()}</div>
+            </div>
         </div>
     }
 }
