@@ -59,8 +59,11 @@
 //!   different worlds a consumer whose rows come from a server read actually
 //!   has to tell apart — not fetched yet, the fetch failed, genuinely no
 //!   rows — because an empty registry is what *all three* look like. With
-//!   neither prop set, `CommandEmpty` is byte-identical to before this
-//!   existed: pure registry inference, `children` in a `<div>`. Setting
+//!   neither prop set, `CommandEmpty` renders identically to before this
+//!   existed: pure registry inference, `children` in a `<div>` — though the
+//!   element's *lifecycle* changed for every consumer: the `<div>` is now
+//!   fully unmounted while items are visible, where it used to sit in the
+//!   DOM under `display:none`. Setting
 //!   either takes over, with precedence `failed` > `loading` >
 //!   registry-inferred empty. The `*_children` slots render **instead of**
 //!   that `<div>` — a full swap, the `<div>` un-mounted rather than merely
