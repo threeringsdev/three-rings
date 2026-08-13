@@ -970,8 +970,29 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
     // every load, so this surface is never server-rendered and the Effect is the
     // whole story here.
     let load_failed = RwSignal::new(false);
+    // **Whether either read behind the picker's rows hasn't resolved yet** —
+    // `DestinationList`'s `loading` prop (P6-011/P6-163, the same fix the
+    // tree's own `Move to…` dialog got: see `TreeDialogs` in
+    // `tree_manage.rs`). Before this, the `Transition` below put its own
+    // "Loading collections…" line beside `CommandEmpty`'s registry-inferred
+    // "No collection to move to." — with nothing awaited yet, the registry
+    // had zero items either way, so both rendered at once. Starts `true` for
+    // the same reason `tree_manage.rs`'s `load_loading` does: a `Resource`
+    // genuinely is pending before its first read, not "assume already
+    // loaded". `suggested` is included even though it degrades silently on
+    // its own failure (a ranking hint, not a correctness requirement — see
+    // the `Suspend` below): the `Transition` fallback shows until *both*
+    // resources resolve, so `loading` has to track both or it would clear
+    // early and let the registry-inferred line show while rows are still
+    // pending.
+    let load_loading = RwSignal::new(true);
     Effect::new(move |_| {
-        let failed = matches!(collections.get(), Some(Err(_)));
+        let collections_snapshot = collections.get();
+        let pending = collections_snapshot.is_none() || suggested.get().is_none();
+        if pending != load_loading.get_untracked() {
+            load_loading.set(pending);
+        }
+        let failed = matches!(collections_snapshot, Some(Err(_)));
         if failed != load_failed.get_untracked() {
             load_failed.set(failed);
         }
@@ -1094,6 +1115,7 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
                 {move || if pending.get() { "Moving…" } else { "Move to…" }}
             </PopoverTrigger>
             <PopoverContent class="w-[280px] p-0">
+<<<<<<< HEAD
                 // No `empty` override: `DestinationList`'s own default ("No
                 // collection matches.") is the true sentence here too.
                 // `empty` can only ever speak about *filtering* (its own doc)
@@ -1108,14 +1130,22 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
                 // "Inbox provisioning"), so this list is never really empty,
                 // only ever filtered down to nothing.
                 <DestinationList failed=load_failed>
+||||||| parent of 790a92e (fix(ui): the tray picker gets the same one-state-at-a-time treatment)
+                <DestinationList empty="No collection to move to." failed=load_failed>
+=======
+                <DestinationList
+                    empty="No collection to move to."
+                    failed=load_failed
+                    loading=load_loading
+                >
+>>>>>>> 790a92e (fix(ui): the tray picker gets the same one-state-at-a-time treatment)
                     // Same boundary the catalog's picker uses, and for the same
                     // reason: the rows come from resources, and only a
-                    // suspense boundary keeps a render in step with them.
-                    <Transition fallback=|| {
-                        view! {
-                            <p class="text-muted-foreground p-3 text-sm">"Loading collections…"</p>
-                        }
-                    }>
+                    // suspense boundary keeps a render in step with them. The
+                    // fallback is empty, not a "Loading…" line of its own —
+                    // `load_loading` above already puts that message on
+                    // `DestinationList`'s `CommandEmpty` (P6-163).
+                    <Transition fallback=|| ()>
                         {move || Suspend::new(async move {
                             // The tree of collections is what this list *is*, so
                             // its failure is reported (`load_failed` → the list's

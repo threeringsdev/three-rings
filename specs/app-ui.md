@@ -1690,13 +1690,21 @@ collection) is what makes the fetch, and so the hold, real. Pinned in
 against the pre-fix dialog (both lines present, `toHaveCount(0)` on the empty line failing
 with `Received: 1`).
 
-**Open finding, not fixed here (out of this task's stated scope, `tree_manage.rs` only):**
-`app/src/my/move_selection.rs`'s tray "Move to…" picker wires the identical shape —
+**Folded in (2026-08-13, same task, maintainer's couple-line rule):** the finding above was
+flagged as an open follow-up first, then folded into this same task rather than filed
+separately — the fix is the identical two-line change `tree_manage.rs` got.
+`app/src/my/move_selection.rs`'s tray "Move to…" picker had the identical shape:
 `DestinationList` wrapping its own `Transition` with an inline "Loading collections…"
-fallback, `failed` wired but `loading` not — so it almost certainly has the same double-state
-window on its first render. Flagged rather than silently fixed or silently left; a follow-up
-task should wire `loading=load_loading` there too and drop its own duplicate fallback text,
-the same two-line change this task made in `tree_manage.rs`.
+fallback, `failed` wired but `loading` not. `MoveSelection` now tracks both resources behind
+the picker's rows (`collections`, the list itself, and `suggested`, the ranking hint the same
+`Suspend` awaits) into a `load_loading` `RwSignal` — `loading` has to be true until *both*
+resolve, since the `Transition` fallback doesn't clear until they do — and passes it to
+`DestinationList` the same way; the `Transition`'s own fallback is now `|| ()`. No new e2e:
+the mechanism is already pinned by the tree dialog's kill-verified test above, so this is
+regression-covered by `selection-tray.spec.ts` + `batch-move.spec.ts` (13/15 passing,
+`--workers=1`; the 2 failures are pre-existing — reproduced identically against the
+pre-fold-in code, unrelated to this change, and match the e2e-suite skill's documented
+fixture-pool-class baseline noise for `batch-move.spec.ts`).
 
 **No mutation pass was run** (switched off in the loop), so each new test is instead anchored
 on a `data-testid`/attribute the fix introduced — `destination-error`,
