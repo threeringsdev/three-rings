@@ -219,13 +219,20 @@ impl DestinationChoice {
 /// owns the resource. (The sticky picker goes one further and puts *this whole
 /// component* inside its boundary — see [`PickerBody`] for why it has to.)
 ///
-/// **`empty` can only ever speak about *filtering*.** `CommandEmpty` infers
-/// emptiness from the item registry, and zero registered items conflates three
-/// different worlds — not fetched, fetch failed, genuinely no collections — which
-/// is exactly the collapse the set picker's four arms exist to refuse. So a
-/// caller whose rows came from a **failed** read must say so through `failed`
-/// rather than let this line answer for it: "No collection matches." over an
-/// unreachable backend is a false claim about the user's own collections.
+/// **`empty` can only ever speak about *filtering*.** Zero registered items
+/// conflates three different worlds — not fetched, fetch failed, genuinely no
+/// collections — which is exactly the collapse the set picker's four arms exist
+/// to refuse. So a caller whose rows came from a **failed** read must say so
+/// through `failed` rather than let this line answer for it: "No collection
+/// matches." over an unreachable backend is a false claim about the user's own
+/// collections.
+///
+/// `failed` is forwarded straight onto `CommandEmpty`'s own `failed` prop
+/// (P6-011): the primitive now carries this distinction itself, so the error
+/// line below is `CommandEmpty`'s `failed_children` slot rather than a
+/// `Show`/`CommandEmpty` swap this component used to own. Same output either
+/// way — same sentence, same `data-testid`, same `role="alert"` — just no
+/// longer a workaround `DestinationList` has to rebuild.
 #[component]
 pub fn DestinationList(
     /// The option rows — `DestinationOption`s, inside the caller's own
@@ -252,7 +259,9 @@ pub fn DestinationList(
     #[prop(optional_no_strip)]
     input_id: Option<String>,
 ) -> impl IntoView {
-    // `Show`'s fallback is a `Fn`, so the line has to be cloneable out on every
+    // `CommandEmpty`'s `children` is a `ChildrenFn` (P6-011: a branch that
+    // can flip between registry-empty/failed reconstructs whichever it lands
+    // on, not just the first), so the line has to be cloneable out on every
     // call rather than moved once.
     let empty = StoredValue::new(empty);
     view! {
@@ -263,29 +272,29 @@ pub fn DestinationList(
                 None => view! { <CommandInput placeholder=placeholder.clone() /> }.into_any(),
             }}
             <CommandList class="max-h-64 overflow-y-auto p-1">
-                <Show
-                    when=move || failed.get()
-                    fallback=move || {
+                <CommandEmpty
+                    class="text-muted-foreground p-3 text-sm"
+                    failed=failed
+                    failed_children=move || {
+                        // One sentence, here rather than at each call site, so
+                        // two pickers cannot describe the same outage
+                        // differently. No retry: closing the panel loses
+                        // nothing (the selection and the standing destination
+                        // both outlive it), so unlike the sticky picker this
+                        // arm is not a dead end.
                         view! {
-                            <CommandEmpty class="text-muted-foreground p-3 text-sm">
-                                {empty.get_value()}
-                            </CommandEmpty>
+                            <p
+                                role="alert"
+                                class="text-destructive p-3 text-sm"
+                                data-testid="destination-error"
+                            >
+                                "Couldn't load your collections."
+                            </p>
                         }
                     }
                 >
-                    // One sentence, here rather than at each call site, so two
-                    // pickers cannot describe the same outage differently. No
-                    // retry: closing the panel loses nothing (the selection and
-                    // the standing destination both outlive it), so unlike the
-                    // sticky picker this arm is not a dead end.
-                    <p
-                        role="alert"
-                        class="text-destructive p-3 text-sm"
-                        data-testid="destination-error"
-                    >
-                        "Couldn't load your collections."
-                    </p>
-                </Show>
+                    {empty.get_value()}
+                </CommandEmpty>
                 {children()}
             </CommandList>
         </Command>

@@ -31,8 +31,33 @@ fn input_demo() -> AnyView {
         "Commander Deck",
     ];
 
+    // P6-011: `CommandEmpty`'s opt-in `loading`/`failed` props, demoed with
+    // two toggles rather than a real fetch — the primitive doesn't care where
+    // the signal comes from. Precedence (`failed` > `loading` > registry-
+    // inferred "No places found.") is visible by toggling both on at once.
+    let loading = RwSignal::new(false);
+    let failed = RwSignal::new(false);
+
     view! {
         <div class="max-w-sm space-y-2">
+            <div class="flex gap-2 text-xs">
+                <button
+                    type="button"
+                    class="rounded border px-2 py-1"
+                    data-testid="bench-command-toggle-loading"
+                    on:click=move |_| loading.update(|v| *v = !*v)
+                >
+                    "toggle loading"
+                </button>
+                <button
+                    type="button"
+                    class="rounded border px-2 py-1"
+                    data-testid="bench-command-toggle-failed"
+                    on:click=move |_| failed.update(|v| *v = !*v)
+                >
+                    "toggle failed"
+                </button>
+            </div>
             // Command provides the context CommandInput/Item/Empty read.
             <Command class="min-h-0 rounded-md border">
                 <div class="border-b px-2">
@@ -55,7 +80,24 @@ fn input_demo() -> AnyView {
                             })
                             .collect_view()}
                     </CommandGroup>
-                    <CommandEmpty>"No places found."</CommandEmpty>
+                    <CommandEmpty
+                        loading=Signal::from(loading)
+                        loading_children=|| {
+                            view! {
+                                <p data-testid="bench-command-loading">"Searching…"</p>
+                            }
+                        }
+                        failed=Signal::from(failed)
+                        failed_children=|| {
+                            view! {
+                                <p role="alert" data-testid="bench-command-failed">
+                                    "Couldn't reach the server."
+                                </p>
+                            }
+                        }
+                    >
+                        "No places found."
+                    </CommandEmpty>
                 </CommandList>
             </Command>
             <p class="text-muted-foreground text-xs" data-testid="bench-command-picked">
