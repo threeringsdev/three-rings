@@ -4896,3 +4896,121 @@ empty state's "Unfilled board slots aren't counted here" — added in the
 remaining true caveat: moving a copy you *already hold* between boards is a
 relabel, not an acquisition. The subtitle gained "board by board". `states.spec.ts`
 asserted on the old wording and moved with it.
+
+### Pull honesty: a reconciled pick list, a stated empty outcome (2026-08-13, P6-141)
+
+Two silent paths in `/my/collections/:id/needs`'s Pull, both closed without
+touching the deliberate snapshot-outside-`Transition` design (module doc,
+`app/src/my/needs.rs`) that the 2026-07-25 review put there.
+
+**(A) A row-level Pull closing a need left the open pick list holding a dead
+line.** The checklist is generated once, from `Owned elsewhere`'s own rows, and
+deliberately does not refetch as the table above it does — that is the whole
+point of living outside the `Transition`. But the *table* has a second control
+the snapshot cannot see either: `ElsewhereRow`'s one-tap Pull button, which
+closes the same need through a completely different write. Before this task, a
+line whose need closed that way stayed on the walk looking exactly as pullable
+as a live one; ticking it could only ever land
+[`SkipReason::NoLongerNeeded`](../app/src/my/move_selection.rs) — a real toast,
+not a crash, but a dead-end the checklist itself should never have offered.
+
+The fix is client-side pruning at the moment of proof, not a wider snapshot.
+[`drop_closed_need`](../app/src/my/needs.rs) mirrors the selection tray's own
+reconcile-after-write policy (P6-122, `SelectionState::remove_tokens`): once a
+write proves a key is spent, prune it rather than wait for the next tick to
+discover the same thing the hard way. It is safe to call only from
+`ElsewhereRow`'s row button, and only when that call's own outcome is
+[`PullLineOutcome::Full`](../app/src/my/needs.rs) against the row's *whole*
+`owned_elsewhere` — the row button's `items` names every source the row's
+allocation offers in one request, so `Full` there proves the need is closed for
+every source, not just the one this call happened to draw from. A pick-list
+*tick* cannot reuse the same check: it only ever asks for one line's own share,
+and a `Full` tick on one line of a multi-source gap says nothing about the
+sibling lines still open on other sources
+(`the_pick_list_groups_by_the_collection_you_walk_to` pins exactly that split).
+Lines already ticked are left alone by `drop_closed_need` — they are the record
+of what was actually pulled, not a stale offer — and a group emptied by the
+prune is dropped with its lines, so no "walk to this collection" heading
+survives everything it named.
+
+**(B) An outcome with nothing moved and nothing refused raised no toast at
+all.** `report()` had exactly two arms — a success toast when `move_ids` is
+non-empty, a `SkipReason`-phrased toast per entry in `skipped` — and a call
+whose `items` resolved to neither fell through both in silence, which reads as
+an unremarkable success rather than the refusal it is.
+[`PullOutcome::is_empty`](../app/src/my/needs.rs) names the shape explicitly
+and `report()` now states it: "Nothing to pull — *card* had nothing to move".
+
+**Recorded rather than papered over: this path is not reachable from either
+current UI caller today.** `PickRowView`'s tick always sends exactly one item;
+`ElsewhereRow`'s row button always sends `offers_of(&row)`, which cannot be
+empty for a row rendered in the `Owned elsewhere` bucket (`owned_elsewhere > 0`
+guarantees at least one location with positive quantity — the same identity
+`a_pick_list_adds_up_to_the_owned_elsewhere_bucket` pins). `dedupe` never drops
+below its input length, either, so a non-empty `items` always yields a
+non-empty union of `pulled`/`skipped` server-side
+(`a_pull_with_no_items_plans_nothing_and_names_no_refusal`,
+`app/src/backend/pull_plan.rs`, pins the *empty*-items case that motivates the
+guard). The fix is verified two ways instead: a pure unit test on
+`PullOutcome::is_empty` (`app/src/my/needs.rs`) and a Playwright test that
+rewrites the outgoing `pull_needs` request to carry `items: []` before it
+reaches the server (`needs.spec.ts`, same pattern `page.route` already uses for
+the P6-140 in-flight test) — genuine browser-level proof of the toast, on a
+shape the UI cannot construct on its own. A caller that ever *can* produce
+empty `items` — none exists today — inherits the honest toast for free rather
+than needing its own fix.
+
+**Evidence.** `cargo test -p app --features hosted` 333 passed (26 new/changed
+in `my::needs`, 1 new in `backend::pull_plan`), 0 failed. Full chromium
+`needs.spec.ts` at `--workers=1` (this file races itself — see its own header):
+**11/11 on the fix branch minus 6 known-environmental** = 5 passed, 6 failed —
+the same 6 (`the two buckets split the gap…`, `Pull moves the copies it
+names…`, `Pull all groups the walk by source…`, `a line that finds less than
+it asked for…`, `the shopping list states the shortfall…`, `one copy elsewhere
+cannot cover two boards…`) reproduced byte-for-byte on base with the fix
+stashed out, confirmed unrelated to this task (traced live to a stray holding
+of tens of copies on an oracle `unownedCards` believed free — its own doc
+already records the "owned nowhere" check is a first-200-rows read, not a
+complete one). **Both new tests kill-verified**: on base (fix stashed), "a
+row-level Pull that closes a need…" fails on the dropped-line assertion (the
+stale `pick-row` stays, count 1 not 0) and "a pull whose items resolve to
+nothing…" fails on the toast assertion (no `Nothing to pull`, element not
+found — genuinely silent, exactly as filed); with the fix restored both pass
+and the failure set returns to exactly the same known 6.
+
+**Addendum: Undo on a reconciled row-level Pull was itself a silent drop
+(review caught, fixed same task).** The first cut of (A) dropped the stale
+line but never put it back — the row-level Pull's toast carries the same
+Undo every pull's toast does, and Undo's generic `undo_selection_move` +
+`revision.bump()` already makes the *table* row reappear, but nothing
+restored the checklist. An open pick list would silently omit a live need for
+the rest of the session after an Undo — two representations of one need
+disagreeing, the same honesty failure this whole task exists to close, just
+moved one step later.
+
+Fixed by making the drop reversible rather than final.
+[`drop_closed_need`](../app/src/my/needs.rs) now returns what it removed —
+[`DroppedPick`], the line plus enough group identity to reinsert it —
+alongside the pruned groups. [`restore_dropped`] performs the reinsertion
+(recreating a group if the drop took its last row), and
+[`restore_dropped_if_current`] is the actual on-undo gate: it refuses to
+splice into a checklist that has moved on since the drop — closed, reopened,
+or simply regenerated by a second "Pull all…" click — by comparing a
+`picks_generation` counter (`NeedsPage`) bumped only on a fresh
+`pick_list()` call, never on a reconcile-prune. `ElsewhereRow`'s `pull`
+captures the dropped lines and the generation at drop time and wires them as
+`report()`'s `on_undo` — the same slot the pick-list tick's own Undo already
+uses to un-tick, mirrored rather than reinvented. The glue condition
+(`PullLineOutcome::Full` deciding whether to reconcile at all) was pulled out
+as its own named [`row_pull_closed_the_need`] so it has a unit test
+independent of the e2e proof.
+
+Evidence: `cargo test -p app --features hosted` 336 passed (3 more than the
+first cut — the round-trip, the since-regenerated-checklist refusal, and the
+glue condition), 0 failed. `needs.spec.ts` extended with an Undo leg on the
+reconcile test, kill-verified against the *first* fix commit (3e94104, which
+has the drop but not the restore): fails there exactly as predicted — the
+checklist's `pick-row` count stays 0 after Undo instead of returning to 1.
+With the restore-fix applied, full chromium `needs.spec.ts` at `--workers=1`
+returns to the same 5 passed / 6 failed (the identical known-environmental
+six), both P6-141 tests green including the new Undo leg.
