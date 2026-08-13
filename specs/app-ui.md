@@ -2089,6 +2089,19 @@ sharpest new fact about the caveat and it generalizes past this page:
 - **Recents live in `localStorage`, not a cookie.** `tr_dest`/`tr_theme` are
   cookies *because* they must be SSR-readable; this list is read only by a
   surface that does not exist on the server.
+  **(2026-08-13, P6-145)** The key is per-*user*, not per-origin:
+  `tr_recent_places:{user_id}`, read/written only once `CurrentUserResource`
+  resolves a signed-in user (nothing under the bare `tr_recent_places` key
+  again). Before this fix the key was shared by every account on a browser,
+  so a second sign-in inherited the first account's collection ids — `at_rest`'s
+  index reconcile (dropping ids the live tree no longer has) was the only thing
+  keeping a foreign id from rendering, not a real access boundary. Sign-out
+  (`shell::UserMenu`) now also removes the current user's scoped key and the
+  legacy bare key from `localStorage` explicitly, since it is a hard
+  `location` navigation (P6-122) that does not otherwise touch storage; this
+  is defense-in-depth once the key is scoped, and the only cleanup path for
+  the legacy key, which is otherwise left to rot rather than migrated (a
+  migration risked carrying one account's ids into another's ring).
 - **Inbox is not added as a system place** — it is a tree row, so the flatten
   already produced it and adding it again would show two `Inbox` rows. `All cards`
   and `Go to My cards` both target `/my` and both are kept per the design, but

@@ -106,7 +106,7 @@ pub const DESKTOP_MEDIA: &str = "(min-width: 768px) and (pointer: fine)";
 /// list pushes them out of the 300 px `CommandList`.
 pub const RECENT_CAP: usize = 5;
 
-/// `localStorage` key for the recent-places ring.
+/// `localStorage` key stem for the recent-places ring.
 ///
 /// **Not a cookie, unlike `tr_dest` and `tr_theme`** — and for their own stated
 /// reason, applied honestly. Those are cookies because they must be readable
@@ -115,7 +115,28 @@ pub const RECENT_CAP: usize = 5;
 /// a surface that does not exist on the server at all, so a cookie would buy
 /// nothing and cost a few hundred bytes on every request to the origin —
 /// including every asset — for data the server never looks at.
+///
+/// **Bare, this constant is a legacy shape and is never read or written
+/// anymore (P6-145).** It used to be the literal storage key, which made the
+/// ring per-*origin* rather than per-*user*: a second account signing in on
+/// the same browser inherited the first account's history, and the ids
+/// survived until `at_rest`'s index reconcile (below) happened to drop them —
+/// the only guard, and one that only hides rows, never the storage entry. The
+/// real key is now [`recent_storage_key`], scoped to the signed-in user's
+/// stable id; this constant survives only to name the old unscoped key so it
+/// can be found and removed (`clear_recents`, called at sign-out). Nothing
+/// writes under the bare key again, and nothing reads it — a pre-existing
+/// value under it simply rots in `localStorage` until a sign-out clears it,
+/// which is cheaper and safer than migrating its contents into the first
+/// scoped key: a migration would risk carrying one account's place ids into
+/// another's ring if the id resolved from stale/cached state.
 pub const RECENT_STORAGE_KEY: &str = "tr_recent_places";
+
+/// The real, per-user storage key: the legacy stem plus the signed-in user's
+/// stable id. Pure so the scoping rule is unit-testable without a DOM.
+pub fn recent_storage_key(user_id: &str) -> String {
+    format!("{RECENT_STORAGE_KEY}:{user_id}")
+}
 
 // --------------------------------------------------------------- last move --
 
@@ -721,8 +742,36 @@ fn PaletteBody() -> impl IntoView {
     let pathname = use_location().pathname;
     let navigate = use_navigate();
 
-    let recents = RwSignal::new(load_recents());
+    // The recent ring is scoped to the signed-in user's stable id (P6-145), so
+    // it cannot be read or written before that id is known. `PaletteBody` only
+    // ever mounts once `CommandPalette`'s own gate has already seen
+    // `CurrentUserResource` resolve to a signed-in user (module doc, "one
+    // client-only gate"), but that resource is read here too — independently,
+    // through an `Effect` rather than a plain `.get()` in the body — for the
+    // same hydration-mismatch reason `CommandPalette` mirrors it into
+    // `signed_in` instead of reading it directly.
+    let user = expect_context::<crate::shell::CurrentUserResource>().0;
+    let user_id = RwSignal::new(None::<String>);
+    Effect::new(move |_| {
+        user_id.set(match user.get() {
+            Some(Ok(Some(u))) => Some(u.id),
+            _ => None,
+        });
+    });
+
+    let recents = RwSignal::new(Vec::<PlaceKey>::new());
     let current = RwSignal::new(None::<PlaceKey>);
+
+    // Load this user's ring once the id resolves. `CurrentUserResource` is
+    // fetched once and never refetched (see `lib.rs`), so this fires once per
+    // mount — but it is an `Effect` tracking `user_id`, not a one-shot read at
+    // creation, because creation time is exactly when `user_id` is still
+    // `None`.
+    Effect::new(move |_| {
+        if let Some(id) = user_id.get() {
+            recents.set(load_recents(&id));
+        }
+    });
 
     // The place index, projected off the shared tree read **in an `Effect`**.
     //
@@ -750,12 +799,22 @@ fn PaletteBody() -> impl IntoView {
     // Every navigation is a visit. Recording the *current* place too (and
     // excluding it in `at_rest`) is what makes the first RECENT row the place
     // you came from.
+    //
+    // Tracks `user_id.get()` (not `get_untracked()`) alongside `pathname`: on
+    // mount the id may still be `None` for this effect's first run, and
+    // without tracking it the write for whatever place the user landed on
+    // *before* the id resolved would never happen. Tracking it means this
+    // effect also reruns the instant the id resolves, capturing the
+    // then-current pathname — and a rerun before that point is harmless,
+    // since `current.set(key)` is idempotent and the storage write below is
+    // skipped until `id` is `Some`.
     Effect::new(move |_| {
         let key = place_key_for_path(&pathname.get());
         current.set(key);
+        let Some(id) = user_id.get() else { return };
         if let Some(key) = key {
             let next = push_recent(&recents.read_untracked(), key, RECENT_CAP);
-            store_recents(&next);
+            store_recents(&id, &next);
             recents.set(next);
         }
     });
@@ -1233,27 +1292,52 @@ fn local_storage() -> Option<web_sys::Storage> {
     window().local_storage().ok().flatten()
 }
 
-fn load_recents() -> Vec<PlaceKey> {
+fn load_recents(user_id: &str) -> Vec<PlaceKey> {
     #[cfg(feature = "hydrate")]
     {
         if let Some(raw) =
-            local_storage().and_then(|s| s.get_item(RECENT_STORAGE_KEY).ok().flatten())
+            local_storage().and_then(|s| s.get_item(&recent_storage_key(user_id)).ok().flatten())
         {
             return parse_recents(&raw);
         }
     }
+    #[cfg(not(feature = "hydrate"))]
+    let _ = user_id;
     Vec::new()
 }
 
-fn store_recents(ring: &[PlaceKey]) {
+fn store_recents(user_id: &str, ring: &[PlaceKey]) {
     #[cfg(feature = "hydrate")]
     if let Some(storage) = local_storage() {
         // Ignored on purpose: a browser with storage denied (private mode,
         // quota) keeps a session-only ring rather than losing the palette.
-        let _ = storage.set_item(RECENT_STORAGE_KEY, &serialize_recents(ring));
+        let _ = storage.set_item(&recent_storage_key(user_id), &serialize_recents(ring));
     }
     #[cfg(not(feature = "hydrate"))]
-    let _ = ring;
+    let _ = (user_id, ring);
+}
+
+/// Remove the recent-places ring from `localStorage` for `user_id` (when
+/// known), and the pre-P6-145 legacy unscoped key alongside it — called at
+/// sign-out (`shell::UserMenu`).
+///
+/// With a per-user key, clearing here is defense-in-depth rather than the
+/// only guard: a different account signing in on the same browser already
+/// reads a different key, so nothing this removes could otherwise leak
+/// across accounts. It is kept anyway because sign-out is a hard
+/// `location` navigation (P6-122) and a full-page load does not touch
+/// `localStorage` on its own — and because it is the one remaining path
+/// that ever cleans up the legacy key (see [`RECENT_STORAGE_KEY`]).
+pub fn clear_recents(user_id: Option<&str>) {
+    #[cfg(feature = "hydrate")]
+    if let Some(storage) = local_storage() {
+        if let Some(id) = user_id {
+            let _ = storage.remove_item(&recent_storage_key(id));
+        }
+        let _ = storage.remove_item(RECENT_STORAGE_KEY);
+    }
+    #[cfg(not(feature = "hydrate"))]
+    let _ = user_id;
 }
 
 #[cfg(test)]
@@ -1741,6 +1825,27 @@ mod tests {
             parse_recents("all,,not-a-uuid, shopping "),
             vec![PlaceKey::AllCards, PlaceKey::Shopping],
             "unparseable tokens drop; the rest survive"
+        );
+    }
+
+    // P6-145: the ring must be per-user, not per-origin — see
+    // `RECENT_STORAGE_KEY`'s doc for why a shared key let a second account on
+    // the same browser inherit the first account's history.
+    #[test]
+    fn the_storage_key_is_scoped_to_the_user_and_never_bare() {
+        let a = recent_storage_key("user-a");
+        let b = recent_storage_key("user-b");
+        assert_eq!(a, "tr_recent_places:user-a");
+        assert_ne!(a, b, "two different users must not share a key");
+        assert_ne!(
+            a, RECENT_STORAGE_KEY,
+            "a scoped key is never the bare legacy key, even by coincidence \
+             of formatting"
+        );
+        assert!(
+            a.starts_with(RECENT_STORAGE_KEY),
+            "the scoped key is built from the legacy stem plus the user id, \
+             not an unrelated shape"
         );
     }
 
