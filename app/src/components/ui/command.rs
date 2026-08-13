@@ -52,6 +52,53 @@
 //!   box, and `on_stale_enter` to run instead of the built-in activate when
 //!   that's true. See `SetPicker` in `app/src/catalog/rail.rs` and
 //!   specs/app-ui.md's set-picker section, 2026-08-12.
+//! - **`CommandEmpty` takes optional `loading`/`failed` props, each paired
+//!   with a `ViewFn` slot (`loading_children`/`failed_children`)** (P6-011).
+//!   Upstream — and every consumer before this — has exactly one signal for
+//!   "show the empty line": zero registered items. That conflates three
+//!   different worlds a consumer whose rows come from a server read actually
+//!   has to tell apart — not fetched yet, the fetch failed, genuinely no
+//!   rows — because an empty registry is what *all three* look like. With
+//!   neither prop set, `CommandEmpty` is byte-identical to before this
+//!   existed: pure registry inference, `children` in a `<div>`. Setting
+//!   either takes over, with precedence `failed` > `loading` >
+//!   registry-inferred empty. The `*_children` slots render **instead of**
+//!   that `<div>` — a full swap, the `<div>` un-mounted rather than merely
+//!   hidden — so a caller can put its own `role`/`data-testid`/class directly
+//!   on the node that lands in the DOM, and "the registry-inferred line is
+//!   gone" is actually true rather than "hidden but still findable"
+//!   (`ViewFn` is `Show`'s own `fallback` convention; defaults to rendering
+//!   nothing — an honest blank beats a false "nothing here" claim when a
+//!   caller sets the signal without a slot). This is also why `children`
+//!   itself became `ChildrenFn` (`Fn`, not the usual `FnOnce`): a branch that
+//!   can be un/re-mounted has to be able to reconstruct all three branches,
+//!   registry-inferred included, not just call it once at setup.
+//!   [`crate::catalog::destination::DestinationList`]'s `failed` arm is the
+//!   first migration: its `role="alert"` error line moved onto
+//!   `failed_children` verbatim (same sentence, same `data-testid`, same
+//!   `role`) — and the un-mount (not hide) semantics are exactly what its
+//!   e2e coverage needed: `states.spec.ts`'s tree-move-dialog test asserts
+//!   the registry-inferred "No collection to move into." is *absent*
+//!   (`toHaveCount(0)`) during a failure, which a hidden-but-present `<div>`
+//!   would still satisfy for a visibility check but fails for a presence
+//!   one — caught by that very test against an earlier, `style:display`-based
+//!   version of this prop. Two consumers stay off this on purpose: the rail's
+//!   set picker (`catalog/rail.rs`, `SetPicker`) keeps its own four-arm
+//!   match — it needs a retry affordance and a distinct "not yet engaged"
+//!   state this primitive doesn't model, and its rows are server-filtered
+//!   (`should_filter=false`), so `CommandEmpty` was never in its render path
+//!   to begin with, only a comment referencing it. The ⌘K palette
+//!   (`palette.rs`) is untouched too — pure filter semantics are the correct
+//!   contract there, not a workaround to retire.
+//! - **`CommandEmpty`'s "any item visible?" check reads the shared
+//!   [`CommandContext::visible`] memo** instead of rescanning `items` itself
+//!   (`ctx.items.get().iter().any(...)`, upstream's shape). The rescan was
+//!   the one per-consumer O(n) pass the P6-137 review flagged as left open
+//!   when the rest of the component moved onto the shared memo; harmless
+//!   until it isn't, same story as the rest of that finding (see
+//!   [`CommandContext::visible`]'s doc). `visible.with(|v| !v.is_empty())`
+//!   is the same verdict, read off the already-computed list instead of
+//!   walking `items` again.
 
 use leptos::prelude::*;
 use tw_merge::tw_merge;
@@ -383,21 +430,82 @@ pub fn CommandInput(
 }
 
 #[component]
-pub fn CommandEmpty(children: Children, #[prop(optional, into)] class: String) -> impl IntoView {
+pub fn CommandEmpty(
+    /// `Fn`, not `FnOnce` — unlike every other `children` in this file.
+    /// `failed`/`loading` mean this component's rendered branch can flip
+    /// (registry-empty ⇄ failed ⇄ loading) more than once over its lifetime,
+    /// and each flip has to reconstruct whichever branch it lands on,
+    /// `children` included — see the body's `move ||`.
+    children: ChildrenFn,
+    #[prop(optional, into)] class: String,
+    /// True while the caller's rows haven't resolved yet — no fetch has
+    /// settled either way, so the registry-inferred verdict below would be
+    /// answering a question nobody asked yet. `None` (every consumer so far)
+    /// is byte-identical to before this prop existed. See the module doc's
+    /// `CommandEmpty` deviation entry for the full three-state contract.
+    #[prop(optional)]
+    loading: Option<Signal<bool>>,
+    /// Rendered **instead of** the registry-inferred `<div>` — not nested
+    /// inside it, and the `<div>` is not mounted at all while this is —
+    /// while `loading` reads `true` and `failed` does not. Defaults to
+    /// nothing (`ViewFn`'s own default, `Show`'s `fallback` convention): a
+    /// caller that sets `loading` without this still gets an honest blank
+    /// instead of a false "nothing here" claim.
+    #[prop(optional, into)]
+    loading_children: ViewFn,
+    /// True when the read behind the caller's rows failed outright — a third
+    /// world registry inference cannot tell apart from "nothing fetched yet"
+    /// or "genuinely nothing matched", because zero registered items is what
+    /// all three look like. Takes precedence over `loading`. `None` (every
+    /// consumer so far) is byte-identical to before this prop existed.
+    #[prop(optional)]
+    failed: Option<Signal<bool>>,
+    /// Rendered **instead of** the registry-inferred `<div>` — not nested
+    /// inside it, and the `<div>` is not mounted at all while this is —
+    /// while `failed` reads `true`, so a caller such as
+    /// [`crate::catalog::destination::DestinationList`] can put its own
+    /// `role`/`data-testid`/class directly on the element that ends up in the
+    /// DOM, and an assertion that the registry-inferred line is *absent*
+    /// (not just hidden) during a failure stays true. Defaults to nothing,
+    /// same reasoning as `loading_children`.
+    #[prop(optional, into)]
+    failed_children: ViewFn,
+) -> impl IntoView {
     let ctx = expect_context::<CommandContext>();
-    let merged_class = tw_merge!("py-6 text-sm text-center", class);
-    // Shown only when no item is visible (reactive — upstream did this with a
-    // `:has()` CSS rule against inline display styles).
-    let any_visible = Memo::new(move |_| ctx.items.get().iter().any(|i| i.visible.get()));
+    let merged_class = StoredValue::new(tw_merge!("py-6 text-sm text-center", class));
+    // Reads the shared `visible` memo rather than rescanning `ctx.items` —
+    // see the module doc's `CommandEmpty` deviation entry and
+    // [`CommandContext::visible`].
+    let any_visible = Memo::new(move |_| ctx.visible.with(|v| !v.is_empty()));
 
-    view! {
-        <div
-            data-name="CommandEmpty"
-            class=merged_class
-            style:display=move || if any_visible.get() { "none" } else { "block" }
-        >
-            {children()}
-        </div>
+    // A single reactive branch, not an always-mounted `<div>` toggled by
+    // `style:display` (upstream's shape, and this component's own shape
+    // before `failed`/`loading` existed). That div-plus-display approach
+    // leaves the registry-inferred line **in the DOM, merely hidden**
+    // whenever a caller's `failed`/`loading` branch is active instead — which
+    // makes a `getByText("…")` / `toHaveCount(0)` assertion for the line a
+    // caller's `failed` arm is supposed to have replaced find it anyway
+    // (`display:none` is still present to the DOM, just not the paint tree).
+    // Measured on `DestinationList`'s failed arm (`states.spec.ts`, the tree
+    // move dialog): the hidden line was there and `toHaveCount(0)` saw it.
+    // Full mount/unmount per branch — which is why `children` has to be `Fn`
+    // — is what makes "replaced", not just "hidden", true.
+    move || {
+        if failed.map(|f| f.get()).unwrap_or(false) {
+            return failed_children.run();
+        }
+        if loading.map(|l| l.get()).unwrap_or(false) {
+            return loading_children.run();
+        }
+        if any_visible.get() {
+            return ().into_any();
+        }
+        view! {
+            <div data-name="CommandEmpty" class=merged_class.get_value()>
+                {children()}
+            </div>
+        }
+        .into_any()
     }
 }
 

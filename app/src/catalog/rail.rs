@@ -1324,6 +1324,15 @@ fn SetPicker(#[prop(into)] id: String, codes: Signal<Vec<String>>) -> impl IntoV
                                     // `CommandEmpty` (which infers emptiness from
                                     // the item registry) has nothing to infer
                                     // from; the row count is known right here.
+                                    // Not migrated onto `CommandEmpty`'s P6-011
+                                    // `loading`/`failed` props like
+                                    // `DestinationList`'s error arm was: this
+                                    // match needs a retry affordance and a
+                                    // distinct "not yet engaged" state (the
+                                    // `Show` above this one) neither prop
+                                    // models, and in fact never renders a
+                                    // `CommandEmpty` at all — every arm here is
+                                    // its own element, not the primitive's.
                                     Some(Ok(rows)) if rows.is_empty() => {
                                         EitherOf4::C(
                                             view! {
