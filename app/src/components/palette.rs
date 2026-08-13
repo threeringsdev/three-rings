@@ -823,6 +823,12 @@ fn PaletteBody() -> impl IntoView {
                     match result {
                         Ok(()) => {
                             tree.refetch();
+                            // This command has no reach into any page's own
+                            // state — it is shell-level and outlives every
+                            // page (module doc) — so it cannot un-tick a
+                            // pick-list line the reversed move undid. The
+                            // bump is what a page reconciles *off of*
+                            // instead: see `my::needs::reopen_done` (P6-144).
                             if let Some(r) = revision {
                                 r.bump();
                             }

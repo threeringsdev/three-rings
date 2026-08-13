@@ -236,6 +236,30 @@ const needRow = (page: Page, oracleId: string) =>
 const shortRow = (page: Page, oracleId: string) =>
   page.locator(`${SHORT_ROW}[data-oracle="${oracleId}"]`);
 
+/// A card with **zero** real holdings anywhere, not just the first-200-rows
+/// guarantee `unownedCards` itself documents as incomplete. Most tests here
+/// tolerate that gap (a stray holding just adds an extra `locations` entry
+/// they don't assert on), but a single-source test needs its own created
+/// collection to be the *only* place the card lives — a stray stack
+/// elsewhere would out-rank it in `allocate`'s quantity-desc order
+/// (`app/src/my/needs.rs`) and the pick list's one line would draw from
+/// there instead, which is a real (if pre-existing) surprise reading as this
+/// test's own failure. Traced live once already (specs/app-ui.md, P6-141
+/// Findings addendum) to exactly this: an oracle `unownedCards` believed
+/// free carrying a stray Inbox stack outside its 200-row window. Verified
+/// directly against the holdings read rather than trusted from the pool.
+async function trulyUnownedCard(request: APIRequestContext): Promise<Card> {
+  for (let skip = 0; skip < 40; skip++) {
+    const [card] = await unownedCards(request, 1, skip);
+    if ((await holdingsOf(request, card.oracle_id)).length === 0) {
+      return card;
+    }
+  }
+  throw new Error(
+    "could not find a card with zero holdings anywhere in the first 40 candidates",
+  );
+}
+
 // ------------------------------------------------------------- the split ---
 
 test("@fast the two buckets split the gap by what you already own", async ({
@@ -884,6 +908,105 @@ test("@fast a row-level Pull that closes a need drops the stale line from an ope
       expect(await copiesIn(request, card.oracle_id, deck.id)).toBe(0);
     }).toPass({ timeout: 5000 });
     expect(await needsOf(request, deck.id)).toHaveLength(1);
+  } finally {
+    await deleteCollection(request, source.id);
+    await deleteCollection(request, deck.id);
+  }
+});
+
+test("@fast ⌘K's Undo last move un-sticks the pick list's own ticked line", async ({
+  page,
+  request,
+}) => {
+  // P6-144: ⌘K's "Undo last move" (`app/src/components/palette.rs`) reverses
+  // a pull server-side through a completely different control than the pick
+  // list's own toast-Undo, and it has no way to reach this page's
+  // `picks`/`done` state at all — the palette is shell-level and only ever
+  // replays move ids, refetches the tree and bumps the holdings revision.
+  // Before the fix the ticked line stayed struck-through after its copies
+  // went back, and `toggle` refused to re-tick it (checked, deliberately: a
+  // tick is one-way). The fix reconciles `done` against a fresh needs read
+  // whenever one lands (`reopen_done`) — `needs_res` already refetches on
+  // that same revision bump, so this piggybacks on a fetch that was already
+  // going to happen.
+  const card = await trulyUnownedCard(request);
+  const source = await createCollection(request, "binder", "cmdk-src");
+  const deck = await createCollection(request, "deck", "cmdk-dst");
+  try {
+    await addHave(request, source.id, card.printing_id as string, 1);
+    await addWant(request, deck.id, card.oracle_id, 1);
+
+    await page.goto(`/my/collections/${deck.id}/needs`);
+    await hydrated(page);
+    await page.locator('[data-testid="pull-all"]').click();
+
+    const list = page.locator(PICK_LIST);
+    const row = list.locator(PICK_ROW);
+    await expect(row).toHaveCount(1);
+    await expect(row.locator('[data-testid="pick-label"]')).toHaveText(
+      `1 × ${card.name}`,
+    );
+
+    // Tick it: the line strikes through, and the copy really moves.
+    await row.locator('[data-name="Checkbox"]').click();
+    await expect(
+      page.locator(TOAST, { hasText: `Pulled 1 copy of ${card.name}` }),
+    ).toBeVisible();
+    await expect(row).toHaveAttribute("data-state", "pulled");
+    await expect(row.locator('[data-name="Checkbox"]')).toHaveAttribute(
+      "data-state",
+      "checked",
+    );
+    await expect(async () => {
+      expect(await copiesIn(request, card.oracle_id, deck.id)).toBe(1);
+      expect(await copiesIn(request, card.oracle_id, source.id)).toBe(0);
+    }).toPass({ timeout: 5000 });
+
+    // Reverse it from ⌘K, not from the toast — a control the pick list's own
+    // on-undo wiring (`report`'s `on_undo`) never sees at all.
+    await page.keyboard.press("ControlOrMeta+k");
+    await expect(page.locator("#command-palette[role=dialog]")).toHaveAttribute(
+      "data-state",
+      "open",
+    );
+    await page.keyboard.type("undo");
+    await expect(
+      page.locator("#command-palette [data-name=CommandItem]").first(),
+    ).toContainText("Undo last move");
+    await page.keyboard.press("Enter");
+    await expect(page.getByText("Undid the last move")).toBeVisible();
+
+    // The copies are back...
+    await expect(async () => {
+      expect(await copiesIn(request, card.oracle_id, source.id)).toBe(1);
+      expect(await copiesIn(request, card.oracle_id, deck.id)).toBe(0);
+    }).toPass({ timeout: 5000 });
+
+    // ...and the checklist line — never told about this directly — notices on
+    // its own once the fresh needs read lands: open again, not struck,
+    // unchecked.
+    await expect(row).toHaveAttribute("data-state", "todo");
+    await expect(row.locator('[data-name="Checkbox"]')).toHaveAttribute(
+      "data-state",
+      "unchecked",
+    );
+    await expect(row.locator('[data-testid="pick-label"]')).toHaveText(
+      `1 × ${card.name}`,
+    );
+
+    // The base-bug proof, not just a rendering check: `toggle` refuses a
+    // checked box outright, so re-ticking here — and it actually moving a
+    // copy a second time — is the only way to prove the line is genuinely
+    // un-stuck rather than merely drawn unstruck.
+    await row.locator('[data-name="Checkbox"]').click();
+    await expect(
+      page.locator(TOAST, { hasText: `Pulled 1 copy of ${card.name}` }).last(),
+    ).toBeVisible();
+    await expect(row).toHaveAttribute("data-state", "pulled");
+    await expect(async () => {
+      expect(await copiesIn(request, card.oracle_id, deck.id)).toBe(1);
+      expect(await copiesIn(request, card.oracle_id, source.id)).toBe(0);
+    }).toPass({ timeout: 5000 });
   } finally {
     await deleteCollection(request, source.id);
     await deleteCollection(request, deck.id);
