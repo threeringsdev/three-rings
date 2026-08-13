@@ -642,6 +642,56 @@ pub fn restore_dropped_if_current(
     current.map(|groups| restore_dropped(groups, dropped))
 }
 
+/// Undo reconciliation for the pick list's own `done` set — the sibling gap
+/// P6-141 named but did not close (P6-144). ⌘K's "Undo last move"
+/// (`crate::components::palette::PaletteBody`'s `UndoLastMove` arm) reverses
+/// a pull server-side through a completely different control than the pick
+/// list's own toast-Undo, and it has no way to reach this page's
+/// `picks`/`done` in the first place — the palette is shell-level (its own
+/// module doc: "the palette outlives every page, so the page that made the
+/// move cannot own the memory of it") and only ever replays move ids,
+/// refetches the tree and bumps [`super::move_selection::HoldingsRevision`].
+/// Before this fix a line ticked through the checklist stayed
+/// struck-through after its copies went back, and `PickRowView`'s own
+/// `toggle` refuses to re-tick it — checked, deliberately: a tick is
+/// one-way, since unticking would have to reverse a move and that reversal
+/// already has a name (the toast's Undo).
+///
+/// **What makes a fresh read the right oracle rather than a guess.** `done`
+/// only ever names a *token* — `(oracle, from_collection, board)` — and
+/// [`pick_list`] is the one function that decides, from a `NeedRow` slice,
+/// which tokens the current elsewhere pool can still offer. Re-running it
+/// over a fresh read and checking whether a `done` token is a member again
+/// is therefore not a new rule invented for this case: it is the *same*
+/// construction that put the token there to begin with, just re-run after
+/// whatever last wrote to `HoldingsRevision`.
+///
+/// **Why a normal tick's own just-closed line survives this unscathed.** A
+/// revision bump follows *every* pull and *every* undo alike — the tick that
+/// closed a need, the row button that closed one, ⌘K's reversal of either —
+/// so this cannot (and does not try to) tell those apart by cause. What
+/// tells them apart is what each leaves behind: a tick that actually moved
+/// the copies leaves that token's source spent in the very next read, so
+/// [`pick_list`] over `fresh` no longer offers it (the server's own
+/// `needs()` — module doc — filters a closed need out entirely, it does not
+/// hand back a zero-gap row) and this function correctly leaves the token in
+/// `done`. Only a reversal — of a tick, or of anything else that puts copies
+/// back on that exact source — makes the token reappear in a fresh read,
+/// which is exactly the condition that un-sticks it here. Pinned by
+/// `a_normal_ticks_own_line_survives_reconcile` and
+/// `an_undone_ticks_line_is_reopened` rather than argued in prose alone.
+pub fn reopen_done(done: &HashSet<String>, fresh: &[NeedRow]) -> HashSet<String> {
+    let offered: HashSet<String> = pick_list(fresh)
+        .iter()
+        .flat_map(|g| g.rows.iter())
+        .map(|r| r.item.token())
+        .collect();
+    done.iter()
+        .filter(|token| !offered.contains(*token))
+        .cloned()
+        .collect()
+}
+
 // -------------------------------------------------------------- the page ---
 
 #[component]
@@ -1184,6 +1234,32 @@ fn PickListPanel(
         url_id.track();
         picks.set(None);
         done.set(HashSet::new());
+    });
+
+    // ⌘K's "Undo last move" bumps the holdings revision the same way every
+    // pull and every toast-Undo does, but it is a shell-level command with no
+    // way to reach `done` directly — see [`reopen_done`]'s doc (P6-144).
+    // `needs_res` already refetches on that same bump (`revision` is one of
+    // its own `Resource::new` sources, `NeedsPage`), so this reconciles off
+    // the resource's *result* rather than the revision signal itself: one
+    // fewer thing to track, and no race against reading `needs_res` before
+    // its own refetch has landed. A no-op whenever `done` is already empty or
+    // the panel is closed (`close` already clears both together).
+    Effect::new(move |_| {
+        let Some(Ok(view)) = needs_res.get() else {
+            return;
+        };
+        if picks.get_untracked().is_none() {
+            return;
+        }
+        let current = done.get_untracked();
+        if current.is_empty() {
+            return;
+        }
+        let next = reopen_done(&current, &view.rows);
+        if next != current {
+            done.set(next);
+        }
     });
 
     view! {
@@ -2287,6 +2363,85 @@ mod tests {
             ]),
             "same generation — the drop is spliced back in"
         );
+    }
+
+    #[test]
+    fn an_undone_ticks_line_is_reopened() {
+        // P6-144: ⌘K's "Undo last move" reverses the pull server-side but
+        // never touches `done` itself — this is the reconcile that has to
+        // notice for it. `fresh` models the state right after the reversal:
+        // the exact shape the row had *before* the tick, since an undo is an
+        // exact reversal of it.
+        let a = Uuid::from_u128(10);
+        let pre_tick = need(2, 0, vec![loc(a, "Trade Binder", 2)]);
+        let token = pick_list(std::slice::from_ref(&pre_tick))[0].rows[0]
+            .item
+            .token();
+        let done: HashSet<String> = [token].into_iter().collect();
+
+        let reconciled = reopen_done(&done, &[pre_tick]);
+        assert!(
+            reconciled.is_empty(),
+            "the need is open again, so its ticked line un-sticks"
+        );
+    }
+
+    #[test]
+    fn a_normal_ticks_own_line_survives_reconcile() {
+        // The other half of the same coin: a *normal* tick (or a row-level
+        // Pull) also bumps the holdings revision, and must not un-tick the
+        // very line that bump just recorded as done. `fresh` is empty here
+        // because that is what a real fresh read looks like once the need is
+        // genuinely closed — `needs()` filters a row out entirely once
+        // `desired <= present_here` (module doc), it does not hand back a
+        // zero-gap row for this function to reason about.
+        let a = Uuid::from_u128(10);
+        let pre_tick = need(2, 0, vec![loc(a, "Trade Binder", 2)]);
+        let token = pick_list(&[pre_tick])[0].rows[0].item.token();
+        let done: HashSet<String> = [token].into_iter().collect();
+
+        let reconciled = reopen_done(&done, &[]);
+        assert_eq!(
+            reconciled, done,
+            "the need really is closed, so the just-done line stays struck through"
+        );
+    }
+
+    #[test]
+    fn reopen_done_leaves_other_ticked_lines_alone() {
+        // Two lines ticked in the same session; only the one whose need
+        // actually reopened should un-stick. The other's need stayed closed
+        // (a real pull, not an undo) and its row is simply absent from a
+        // fresh read, same as the spare case above.
+        let a = Uuid::from_u128(10);
+        let b = Uuid::from_u128(11);
+        let mut bolt = need(2, 0, vec![loc(a, "Trade Binder", 2)]);
+        bolt.oracle_id = Uuid::from_u128(1);
+        let mut swan = need(1, 0, vec![loc(b, "Shoebox", 1)]);
+        swan.oracle_id = Uuid::from_u128(2);
+        swan.name = "Snapcaster Mage".to_string();
+
+        let bolt_token = pick_list(std::slice::from_ref(&bolt))[0].rows[0]
+            .item
+            .token();
+        let swan_token = pick_list(&[swan])[0].rows[0].item.token();
+        let done: HashSet<String> = [bolt_token.clone(), swan_token.clone()]
+            .into_iter()
+            .collect();
+
+        // Only Bolt's need survives into the fresh read — Bolt's pull was
+        // undone (still open), Snapcaster's really happened (closed, and so
+        // absent).
+        let reconciled = reopen_done(&done, &[bolt]);
+        assert!(
+            !reconciled.contains(&bolt_token),
+            "Bolt's line reopened and un-sticks"
+        );
+        assert!(
+            reconciled.contains(&swan_token),
+            "Snapcaster's line is genuinely done and stays"
+        );
+        assert_eq!(reconciled.len(), 1);
     }
 
     #[test]

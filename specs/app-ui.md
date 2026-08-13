@@ -5024,3 +5024,104 @@ checklist's `pick-row` count stays 0 after Undo instead of returning to 1.
 With the restore-fix applied, full chromium `needs.spec.ts` at `--workers=1`
 returns to the same 5 passed / 6 failed (the identical known-environmental
 six), both P6-141 tests green including the new Undo leg.
+
+**Addendum: the sibling gap this task named but did not close — ⌘K's own
+Undo (2026-08-13, P6-144).** (A)/(B) above closed the `Owned elsewhere`
+table's row-level Pull as a reconcile source. There was a second one: ⌘K's
+`Undo last move` (`app/src/components/palette.rs`) reverses a pull
+server-side through `undo_selection_move` + `revision.bump()` — the exact
+same primitives the toast's own Undo uses — but it is wired at the *shell*,
+not the page, and never touches `picks`/`done` at all. A line ticked through
+the checklist stayed struck-through after ⌘K put its copies back, and
+`toggle` refused to re-tick it (deliberately: a tick is one-way, unticking
+would have to reverse a move and that reversal already has a name). The
+toast's own Undo button already worked, because `PickRowView`'s `toggle`
+wires it directly to a per-line `on_undo` closure that removes the token
+from `done`; ⌘K has no such closure to call — it does not know this page, or
+any page, exists.
+
+**Mechanism: revalidate `done` against a fresh needs read, not a second event
+channel.** `reopen_done` (`app/src/my/needs.rs`) re-runs [`pick_list`] — the
+*same* function that built the checklist in the first place — over a fresh
+`NeedRow` slice, and drops from `done` any token that function offers again.
+`PickListPanel` wires it to `needs_res.get()` in an `Effect`: `needs_res`
+already refetches whenever the holdings revision bumps (one of its own
+`Resource::new` sources), so this piggybacks on a fetch that was already
+happening rather than opening a second one or teaching the palette about
+page state it has no business owning. An event channel carrying move ids
+from ⌘K to the needs page was the alternative on the table and was not
+needed — the fresh-read comparison turned out sound on its own (next
+paragraph), and a channel would have had to be re-derived for every future
+undo path this page does not yet know about (a second command, a keyboard
+shortcut, anything), where the revision-based reconcile covers all of them
+for free by construction.
+
+**Why a normal tick's own just-closed line survives unscathed — the thing
+that had to be proven, not assumed.** A revision bump follows a tick that
+*actually* closed a need just as much as it follows ⌘K reversing one — the
+reconcile cannot (and does not try to) tell those two apart by cause. What
+it reads instead is what each leaves behind: a tick that really moved the
+copies leaves that token's source spent in the very next read, so
+`pick_list` over the fresh rows no longer offers it, and `reopen_done`
+correctly leaves it in `done`. The server's own `needs()` filters a closed
+need out of the read entirely (`desired > present_here`) rather than handing
+back a zero-gap row, so there is no row left to accidentally re-offer from
+either. Only an actual reversal — of a tick, or of anything else that puts
+copies back on that exact `(oracle, from_collection, board)` — makes the
+token reappear, which is exactly the condition that un-sticks it. Pinned by
+two unit tests rather than argued in prose alone:
+`a_normal_ticks_own_line_survives_reconcile` (fresh read empty — closed and
+absent, as a real server read would show) and
+`an_undone_ticks_line_is_reopened` (fresh read is the pre-tick shape again).
+A third, `reopen_done_leaves_other_ticked_lines_alone`, pins that two ticked
+lines in one session are judged independently — only the one whose need
+actually reopened un-sticks.
+
+**Evidence.** `cargo test -p app --features hosted`: 340 passed (4 new —
+`an_undone_ticks_line_is_reopened`, `a_normal_ticks_own_line_survives_reconcile`,
+`reopen_done_leaves_other_ticked_lines_alone`, plus one from the surrounding
+diff), 0 failed. `fmt --check` clean; every clippy gate line (workspace
+excl. `frontend`/`three_rings`, wasm `frontend`, `app --features native`,
+`app --features hosted,component-bench`, `app --features
+hydrate,component-bench` on wasm) clean.
+
+New e2e test in `needs.spec.ts`: "⌘K's Undo last move un-sticks the pick
+list's own ticked line" — ticks a pick-list line (asserts `data-state`
+struck to `"pulled"`, checkbox `"checked"`, holdings moved), opens the
+palette and runs `Undo last move` (not the toast's own button — a control
+the pick list's on-undo wiring never sees), asserts the line returns to
+`data-state="todo"`/unchecked, and — the base-bug proof, not just a
+rendering check — re-ticks it and asserts a *second* real pull succeeds
+(since `toggle` refuses a checked box outright, this is the only way to
+prove the line is genuinely un-stuck rather than merely drawn unstruck).
+**Kill-verified** against base (the two Rust files stashed, `needs.spec.ts`
+kept): fails exactly as predicted, on the un-tick assertion — `data-state`
+stays `"pulled"` where `"todo"` was expected. With the fix restored, the
+same test passes standalone.
+
+**Full-file base-parity, and an honest note on live conditions.** A serial
+`needs.spec.ts` run at `--workers=1` against the fix returned **7 failed / 7
+passed** — one more failure than the file's own documented "6
+known-environmental" baseline, the extra one being this task's own new test.
+Run again immediately against base (Rust files stashed, same test file, same
+running server) under the same conditions: **byte-identical 7 failed / 7
+passed**, same seven test names including the new one — proof the extra
+failure is not this fix's doing. Root-caused live: the shared `q=n` catalog
+pool `unownedCards` (and this task's own `trulyUnownedCard`, added because
+this test needs a card with provably zero holdings anywhere — see its own
+doc comment on why a stray holding elsewhere would draw the pick list's
+allocation off the collection this test built, reading as this test's bug
+instead of the pre-existing, already-filed
+`unownedCards`-is-a-first-200-rows-check-not-a-complete-one gap this same
+Findings section named above) was down to single digits at run time — most
+likely concurrent draw-down from other sessions against the same shared Neon
+dev branch, not a regression. `command-palette.spec.ts` full serial run: 3
+failed (the file's own known fixture-pool class), 16 passed; the palette.rs
+diff for this task is a comment only, so no base-parity run was needed there
+— it cannot change runtime behavior by construction.
+
+**Open question, recorded rather than guessed at:** whether the `q=n`/`q=z`
+per-file pool convention needs a real systemic fix (a shared, much larger
+term, or a pool that gets minted rather than searched for) is still the
+follow-up this Findings section already flagged in the first P6-141 entry —
+this task hit the same wall harder than usual, not a new one.
