@@ -5,3 +5,4 @@ pub mod query_bar;
 pub mod quick_add;
 pub mod states;
 pub mod ui;
+pub mod viewport;

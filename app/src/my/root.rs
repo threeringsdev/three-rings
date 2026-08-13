@@ -20,12 +20,19 @@
 //! reached by drilling in — the collection view renders its children as folder
 //! rows — which is exactly what "drill-down" means.
 //!
-//! **The breakpoint switch is pure CSS, and it has to be.** SSR cannot know the
-//! viewport width, so `/my` renders *both* this list (`md:hidden`) and the
-//! All-cards table (`hidden md:flex`) and lets CSS pick — the same one-markup-
-//! at-every-width rule the rail drawer and the collection view's
-//! breadcrumb/back-link pair already follow. Nothing here resolves a media
-//! query in Rust, so the markup the server sends is the markup that hydrates.
+//! **The breakpoint switch is still pure CSS here.** This list is `md:hidden`
+//! and the All-cards table beside it is `hidden md:flex`, exactly as before —
+//! the same one-markup-at-every-width rule the rail drawer and the collection
+//! view's breadcrumb/back-link pair follow. Nothing in *this* file resolves a
+//! media query, so the markup the server sends is the markup that hydrates.
+//!
+//! What changed under it (P6-166) is on the table's side, not this one: `/my`
+//! no longer *SSRs* the table's rows, because a phone paid the aggregate read
+//! and downloaded fifty `<tr>`s it never displayed. The table's subtree is
+//! mounted after hydration, gated on the same 768 px line its CSS uses — see
+//! `super::all_cards::AllCardsPage`. This list is unaffected: it is SSR'd at
+//! every width off the shell's own tree resource, which the rail fetches
+//! anyway.
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_query_map;

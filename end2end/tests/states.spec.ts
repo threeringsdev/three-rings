@@ -89,7 +89,15 @@ test.describe("a stale cursor", () => {
 
     // And it works with no JS at all, which is what makes it a real escape for a
     // shared link: the way out is in the SSR'd HTML, not added by hydration.
-    const raw = await (await request.get(`/my?cursor=${JUNK_CURSOR}`)).text();
+    //
+    // Asserted on `/my/all`, the route that renders this table at every width
+    // and therefore SSRs its error arm (P6-166 — bare `/my` mounts the table
+    // after hydration, so it has no SSR'd arm to check and a shared `?cursor=`
+    // link that has to survive a dead JS bundle is `/my/all`'s to carry). The
+    // page half above still exercises `/my`.
+    const raw = await (
+      await request.get(`/my/all?cursor=${JUNK_CURSOR}`)
+    ).text();
     expect(raw).toContain('data-failure="request"');
     expect(raw).toContain('data-testid="page-first"');
     expect(raw).not.toContain('data-testid="state-retry"');
