@@ -35,6 +35,12 @@
 // one board to another — card-tagging's quantity-preserving op, which neither
 // bucket here can offer.
 //
+// **And one copy elsewhere still only covers one board.** The elsewhere pool is
+// per *card* (a binder copy fills any board's need), so both board rows see the
+// same offer — but it is apportioned between them, mainboard first, not handed
+// whole to each. The second test below pins that across all four surfaces that
+// state it: the wire rows, the chip, the pick list, and `/my/shopping`.
+//
 // Isolation: scratch `zz-e2e-…` collections created via the API and deleted in a
 // `finally`; printings come from catalog cards the dev fixture owns nowhere, so
 // every count read back is this test's own writes. `/my/shopping` is global and
@@ -171,6 +177,8 @@ type NeedRow = {
   board: string;
   desired: number;
   present_here: number;
+  /// Per-row, and **apportioned**: a card's elsewhere copies are shared between
+  /// its board rows, so these do not each get the whole pool (P6-074 review).
   owned_elsewhere: number;
   short: number;
 };
@@ -634,6 +642,89 @@ test("@fast a want on the sideboard of a card held on the mainboard is a need, a
     // And the need is closed rather than re-offered forever, which is the whole
     // point of landing on the board that wanted it.
     expect(await needsOf(request, deck.id)).toEqual([]);
+  } finally {
+    await deleteCollection(request, binder.id);
+    await deleteCollection(request, deck.id);
+  }
+});
+
+test("@fast one copy elsewhere cannot cover two boards at once", async ({
+  page,
+  request,
+}) => {
+  // The P6-074 review's major, end to end. The elsewhere pool is per *card* —
+  // a binder copy can fill any board's need — so a deck wanting one copy on
+  // `main` and one on `side` sees the same single binder copy offered to both
+  // rows. Applying that pool whole to each row let one physical copy "satisfy"
+  // two gaps: both rows read `owned_elsewhere: 1 / short: 0`, the chip said
+  // "2 missing — 2 owned elsewhere" with no to-buy clause and no Short bucket,
+  // and the pick list offered two pullable lines against one copy — while
+  // `/my/shopping`, which is per-oracle and was always right, said one to buy.
+  // Two surfaces contradicting each other about one card.
+  //
+  // The pool is now apportioned in the read's own order (mainboard first), and
+  // this test asserts every surface tells the same story.
+  const [card] = await unownedCards(request, 1);
+  const deck = await createCollection(request, "deck", "share");
+  const binder = await createCollection(request, "binder", "share-src");
+  try {
+    await addWant(request, deck.id, card.oracle_id, 1, "main");
+    await addWant(request, deck.id, card.oracle_id, 1, "side");
+    await addHave(request, binder.id, card.printing_id as string, 1);
+
+    // The wire: two rows, and the one copy is promised to exactly one of them.
+    const rows = await needsOf(request, deck.id);
+    expect(rows).toHaveLength(2);
+    const main = rows.find((r) => r.board === "main");
+    const side = rows.find((r) => r.board === "side");
+    expect(main, "a mainboard row").toBeTruthy();
+    expect(side, "a sideboard row").toBeTruthy();
+    expect(main?.owned_elsewhere).toBe(1);
+    expect(main?.short).toBe(0);
+    expect(side?.owned_elsewhere, "the copy is already spoken for").toBe(0);
+    expect(side?.short, "so the sideboard copy has to be bought").toBe(1);
+    // The invariant, restated on live data: the two rows together cannot claim
+    // more than the one copy that exists.
+    expect(
+      rows.reduce((n, r) => n + r.owned_elsewhere, 0),
+    ).toBeLessThanOrEqual(1);
+
+    await page.goto(`/my/collections/${deck.id}`);
+    await hydrated(page);
+    // The chip's to-buy clause is the half that vanished under the bug.
+    await expect(page.locator('[data-testid="needs-chip"]')).toContainText(
+      "2 missing — 1 owned elsewhere · 1 to buy",
+    );
+
+    await page.goto(`/my/collections/${deck.id}/needs`);
+    await hydrated(page);
+    // One pullable row, one Short row — not two of either.
+    await expect(page.locator(NEED_ROW)).toHaveCount(1);
+    await expect(
+      page.locator(`${NEED_ROW}[data-board="main"]`),
+    ).toHaveCount(1);
+    await expect(
+      page.locator(`${SHORT_ROW}[data-board="side"]`),
+    ).toHaveCount(1);
+
+    // And the pick list offers one line, not two — a walk that told you to
+    // fetch the same copy twice is the user-facing form of the same bug.
+    await page.locator('[data-testid="pull-all"]').click();
+    await expect(page.locator(PICK_LIST)).toBeVisible();
+    await expect(page.locator(PICK_ROW)).toHaveCount(1);
+    await expect(page.locator('[data-testid="pick-label"]')).toHaveText(
+      `1 × ${card.name}`,
+    );
+
+    // `/my/shopping` is the surface that was right all along; it must now agree
+    // rather than contradict. Containment only — the list is global.
+    await page.goto("/my/shopping");
+    await hydrated(page);
+    await expect(
+      page
+        .locator(`[data-testid="shopping-row"][data-oracle="${card.oracle_id}"]`)
+        .locator('[data-testid="shortfall"]'),
+    ).toHaveText("1");
   } finally {
     await deleteCollection(request, binder.id);
     await deleteCollection(request, deck.id);
