@@ -1582,6 +1582,129 @@ const SELECTION_MOVE_QUANTITY: i32 = 1;
 /// caller from making the server walk an unbounded list of per-card queries.
 pub const SELECTION_MOVE_MAX: usize = 100;
 
+/// The which-copies step's read: for each card, the concrete stacks its copies
+/// sit in (specs/app-ui.md → Selection tray; `my::move_selection`).
+///
+/// **Why this exists at all.** A batch move refuses a `/my` row whose copies are
+/// spread over several collections, printings or boards, because
+/// `SelectionKey::Card` names an oracle and the write is addressed at a stack.
+/// The disambiguation step puts that question to the user, and this is the list
+/// it renders: one row per `(collection, printing, board)` — exactly the grain
+/// `SelectionKey::Held` addresses, so a picked row goes back through
+/// [`move_selection`] unchanged and no new write path exists for any of it.
+///
+/// **Composed, not built.** Every read here is one this app already had:
+/// `holdings_of_oracle` (the same ungrouped read resolution uses — the only one
+/// that does not group away board and grain), `list_collections` for the names,
+/// and [`card_detail`] for the set/number chip. No trait method, no SQL, no
+/// route was added for the step.
+///
+/// **The catalog read is skipped whenever it would say nothing.** A printing
+/// chip only distinguishes rows on a card held under *several* printings, which
+/// is the rarest of the three ambiguities; a card scattered over two binders at
+/// one printing therefore costs no card-detail read at all.
+///
+/// Deliberately a **second request** rather than a fatter `MoveOutcome`: it is
+/// taken when the user is actually asked, so it cannot be older than the
+/// question, and a batch whose refusals nobody opens pays nothing for it.
+#[server(
+    prefix = "/api",
+    endpoint = "selection_stacks",
+    input = leptos::server_fn::codec::Json
+)]
+pub async fn selection_stacks(
+    oracle_ids: Vec<shared::Id>,
+) -> Result<crate::my::move_selection::StacksPayload, ServerFnError<shared::ApiError>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        use crate::my::move_selection::{
+            printing_label, stacks_of, CardStacks, CopyStack, StacksPayload,
+        };
+        use std::collections::HashMap;
+
+        // The same cap the move itself carries, and for the same reason: this
+        // walks one holdings read per distinct card.
+        if oracle_ids.len() > SELECTION_MOVE_MAX {
+            return Err(ServerFnError::ServerError(format!(
+                "a move can carry at most {SELECTION_MOVE_MAX} cards"
+            )));
+        }
+        let mut ids = oracle_ids;
+        ids.sort();
+        ids.dedup();
+        if ids.is_empty() {
+            return Ok(StacksPayload::default());
+        }
+
+        let backend = collection_backend().await?;
+        // One list read for every card's names, not one per stack: the rows are
+        // resolved against the live list, so a collection renamed since the
+        // selection was made shows its current name (the picker's own rule).
+        let names: HashMap<shared::Id, String> = backend
+            .list_collections()
+            .await
+            .map_err(api_err)?
+            .into_iter()
+            .map(|c| (c.id, c.name))
+            .collect();
+
+        let mut cards = Vec::new();
+        for oracle_id in ids {
+            let holdings = backend
+                .holdings_of_oracle(oracle_id)
+                .await
+                .map_err(api_err)?;
+            let tallies = stacks_of(&holdings);
+            let one_printing = tallies
+                .iter()
+                .all(|t| t.printing_id == tallies[0].printing_id);
+            let labels: HashMap<shared::Id, String> = if tallies.is_empty() || one_printing {
+                HashMap::new()
+            } else {
+                card_detail(oracle_id)
+                    .await?
+                    .printings
+                    .into_iter()
+                    .map(|p| {
+                        (
+                            p.id,
+                            printing_label(p.set_code.as_deref(), &p.collector_number),
+                        )
+                    })
+                    .collect()
+            };
+            cards.push(CardStacks {
+                oracle_id,
+                stacks: tallies
+                    .into_iter()
+                    .map(|t| CopyStack {
+                        collection_id: t.collection_id,
+                        // Unreachable in practice — `holdings_of_oracle` and
+                        // `list_collections` both answer over the caller's live
+                        // collections — and named rather than silently blanked,
+                        // because a row with no place on it is unpickable.
+                        collection_name: names
+                            .get(&t.collection_id)
+                            .cloned()
+                            .unwrap_or_else(|| "Somewhere else".to_string()),
+                        printing_id: t.printing_id,
+                        printing: labels.get(&t.printing_id).cloned(),
+                        board: t.board,
+                        quantity: t.quantity,
+                    })
+                    .collect(),
+            });
+        }
+        Ok(StacksPayload { cards })
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = oracle_ids;
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
 /// Undo a whole batch move from its toast — one call, **one transaction**
 /// (`CollectionStore::undo_moves`).
 ///
