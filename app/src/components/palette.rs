@@ -1071,18 +1071,30 @@ pub struct RowSet {
 
 impl RowSet {
     /// An identity that changes whenever the rendered list changes — its
-    /// contents, their names, or their order. `For` keyed on this is what makes
-    /// a query change a real remount rather than an in-place diff; see the call
-    /// site for the measurement that forced it.
+    /// contents (including each place's `meta`, the parent-path line — a
+    /// reparent while the palette is open must not leave a row showing a
+    /// stale ancestor), their names, or their order. `For` keyed on this is
+    /// what makes a query change a real remount rather than an in-place diff;
+    /// see the call site for the measurement that forced it.
+    ///
+    /// The places section and the commands section are separated by
+    /// `\u{1e}` (distinct from the `\u{1f}` used *within* each place/command),
+    /// so the two token spaces can never collide — no collection literally
+    /// named e.g. `new-binder` can serialize to the same key as the command
+    /// of that slug.
     pub fn key(&self) -> String {
         let mut key = String::from(self.places_label);
         key.push(if self.commands_first { '^' } else { 'v' });
+        key.push('\u{1e}');
         for p in &self.places {
             key.push('\u{1f}');
             key.push_str(&p.key.token());
             key.push('\u{1f}');
             key.push_str(&p.name);
+            key.push('\u{1f}');
+            key.push_str(&p.meta);
         }
+        key.push('\u{1e}');
         for c in &self.commands {
             key.push('\u{1f}');
             key.push_str(c.slug());
@@ -1595,12 +1607,56 @@ mod tests {
 
     #[test]
     fn the_row_set_key_is_stable_for_an_identical_list() {
-        let places = vec![place("Shoebox")];
+        let mut nested = place("Rares");
+        nested.meta = "Shoebox".into();
+        let places = vec![place("Shoebox"), nested];
         let commands = vec![PaletteCommand::NewDeck];
         assert_eq!(
             set("Recent", places.clone(), commands.clone()).key(),
             set("Recent", places, commands).key(),
-            "an unchanged list must not churn the DOM every read"
+            "an unchanged list — meta included — must not churn the DOM every read"
+        );
+    }
+
+    #[test]
+    fn the_row_set_key_changes_when_a_places_meta_changes() {
+        // P6-146: a collection reparented while the palette is open keeps the
+        // same id and name, only its ancestor path (`meta`) changes. Before
+        // this fix `key()` never read `meta`, so the row's key was unchanged
+        // and `For` left the stale "Rares — Shoebox" text mounted.
+        let mut before = place("Rares");
+        before.meta = "Shoebox".into();
+        let mut after = before.clone();
+        after.meta = "Trade Binder".into();
+        assert_ne!(before.meta, after.meta, "test setup: metas must differ");
+        assert_eq!(before.name, after.name, "test setup: only meta moved");
+        assert_ne!(
+            set("Recent", vec![before], vec![]).key(),
+            set("Recent", vec![after], vec![]).key(),
+            "a reparent must remount the row so the new ancestor path renders"
+        );
+    }
+
+    #[test]
+    fn the_row_set_key_separates_places_from_commands_with_a_section_marker() {
+        // Every place contributes three free-form fields (token, name, meta)
+        // joined by `\u{1f}`; without an explicit boundary before the commands
+        // section, a `meta` value that happened to contain an embedded
+        // `\u{1f}` could make a places entry's tail read exactly like a
+        // separate commands entry, merging the two spaces. The `\u{1e}`
+        // section marker rules that out regardless of what `meta` contains.
+        let mut spillover = place("Rares");
+        spillover.meta = format!("\u{1f}{}", PaletteCommand::NewBinder.slug());
+        let with_spillover_meta = set("Recent", vec![spillover], vec![]);
+
+        let mut plain = place("Rares");
+        plain.meta = String::new();
+        let with_real_command = set("Recent", vec![plain], vec![PaletteCommand::NewBinder]);
+
+        assert_ne!(
+            with_spillover_meta.key(),
+            with_real_command.key(),
+            "a place's meta must never be able to fabricate a commands-section entry"
         );
     }
 
