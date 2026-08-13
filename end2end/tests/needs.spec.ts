@@ -805,3 +805,111 @@ test("@fast one row's in-flight Pull does not disable another row's button", asy
     await deleteCollection(request, deck.id);
   }
 });
+
+// ------------------------------------------------- P6-141: pull honesty ---
+
+test("@fast a row-level Pull that closes a need drops the stale line from an open pick list", async ({
+  page,
+  request,
+}) => {
+  // The base bug: the pick list is a snapshot generated when "Pull all…" is
+  // clicked (module doc in `app/src/my/needs.rs`), and it deliberately does
+  // not refetch as the table above it does — so a row-level Pull, a *second*
+  // control on the same page, can close the very need a checklist line still
+  // names. Before the reconcile the line stayed on the walk looking exactly
+  // as pullable as a live one; ticking it could only ever land the
+  // `NoLongerNeeded` refusal. The fix drops it the moment the row-level Pull
+  // proves the need is gone, not on the next tick.
+  const [card] = await unownedCards(request, 1);
+  const source = await createCollection(request, "binder", "reconcile-src");
+  const deck = await createCollection(request, "deck", "reconcile-dst");
+  try {
+    await addHave(request, source.id, card.printing_id as string, 2);
+    await addWant(request, deck.id, card.oracle_id, 2);
+
+    await page.goto(`/my/collections/${deck.id}/needs`);
+    await hydrated(page);
+
+    // Open the pick list first — its snapshot now names this exact line.
+    await page.locator('[data-testid="pull-all"]').click();
+    const list = page.locator(PICK_LIST);
+    await expect(list.locator(PICK_ROW)).toHaveCount(1);
+    await expect(list.locator('[data-testid="pick-label"]')).toHaveText(
+      `2 × ${card.name}`,
+    );
+
+    // Close the need through the *other* control — the row-level Pull in the
+    // "Owned elsewhere" table — while the checklist stays open and untouched.
+    await needRow(page, card.oracle_id)
+      .locator('[data-testid="pull-row"]')
+      .click();
+    await expect(page.locator(TOAST)).toContainText("Pulled 2 copies");
+
+    // The need is gone from the table it was pulled from...
+    await expect(page.locator('[data-testid="needs-empty"]')).toBeVisible();
+    // ...and the checklist's own line for the same need goes with it, rather
+    // than lingering as a dead offer only a tick (and an error toast) away
+    // from proving itself stale.
+    await expect(list.locator(PICK_ROW)).toHaveCount(0);
+    await expect(list.locator(PICK_GROUP)).toHaveCount(0);
+
+    // Read back through the API: the deck really did receive the copies —
+    // this is a real write, not just a UI state that happens to look closed.
+    // (Not asserting the source is drained: `unownedCards`'s own doc records
+    // that its "owned nowhere" guarantee is a first-200-rows check, not a
+    // complete one, so another collection with more of this card can win the
+    // allocation's quantity-desc order; which collection supplied the copies
+    // is not what this test is about.)
+    expect(await copiesIn(request, card.oracle_id, deck.id)).toBe(2);
+    expect(await needsOf(request, deck.id)).toEqual([]);
+  } finally {
+    await deleteCollection(request, source.id);
+    await deleteCollection(request, deck.id);
+  }
+});
+
+test("@fast a pull whose items resolve to nothing is refused out loud, not silently ignored", async ({
+  page,
+  request,
+}) => {
+  // Both current callers always send at least one item — the row button
+  // sends every source a need's elsewhere allocation names, the pick-list
+  // tick sends its own single line — so `items: []` cannot be produced by
+  // clicking anything today. The outgoing request is rewritten to prove the
+  // client states this shape honestly regardless of whether the UI can reach
+  // it yet, rather than leaving `report()`'s two branches to cover every case
+  // by accident (`PullOutcome::is_empty`'s own doc, `app/src/my/needs.rs`;
+  // pinned server-side by `plan_pull_needs`'s own empty-items test in
+  // `app/src/backend/pull_plan.rs`).
+  const [card] = await unownedCards(request, 1);
+  const source = await createCollection(request, "binder", "empty-src");
+  const deck = await createCollection(request, "deck", "empty-dst");
+  try {
+    await addHave(request, source.id, card.printing_id as string, 2);
+    await addWant(request, deck.id, card.oracle_id, 2);
+
+    await page.goto(`/my/collections/${deck.id}/needs`);
+    await hydrated(page);
+
+    await page.route("**/api/pull_needs*", async (route) => {
+      const body = JSON.parse(route.request().postData() ?? "{}");
+      await route.continue({
+        postData: JSON.stringify({ ...body, items: [] }),
+      });
+    });
+
+    await needRow(page, card.oracle_id)
+      .locator('[data-testid="pull-row"]')
+      .click();
+
+    await expect(page.locator(TOAST)).toContainText("Nothing to pull");
+
+    // Nothing actually moved — the rewritten request truthfully reported
+    // nothing, and the toast must not claim otherwise.
+    expect(await copiesIn(request, card.oracle_id, deck.id)).toBe(0);
+    expect(await copiesIn(request, card.oracle_id, source.id)).toBe(2);
+  } finally {
+    await deleteCollection(request, source.id);
+    await deleteCollection(request, deck.id);
+  }
+});

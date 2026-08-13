@@ -342,6 +342,25 @@ mod tests {
     }
 
     #[test]
+    fn a_pull_with_no_items_plans_nothing_and_names_no_refusal() {
+        // Every real caller sends at least one item (`my::needs`'s own doc on
+        // `drop_closed_need`), so this is not reachable from either UI call
+        // site today — but it is the shape the client's `PullOutcome::is_empty`
+        // fix (P6-141) exists to catch honestly rather than assume can't
+        // happen: no item means nothing to classify, so `writes`/`pulled`/
+        // `skipped` all come back empty, and `report()` names that shape
+        // explicitly instead of falling through both its branches in silence.
+        let snapshot = PullSnapshot {
+            needs: vec![need(id(ORACLE), 2, 0, vec![loc(id(SRC_A), "A", 2)])],
+            holdings: HashMap::from([(id(ORACLE), vec![holding(id(SRC_A), 2)])]),
+        };
+        let plan = plan_pull_needs(id(DEST), &snapshot, vec![]);
+        assert!(plan.writes.is_empty());
+        assert!(plan.pulled.is_empty());
+        assert!(plan.skipped.is_empty());
+    }
+
+    #[test]
     fn a_line_naming_the_destination_as_its_own_source_is_already_there() {
         let snapshot = PullSnapshot {
             needs: vec![need(id(ORACLE), 2, 0, vec![loc(id(DEST), "Dest", 2)])],

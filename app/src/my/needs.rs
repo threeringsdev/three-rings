@@ -71,6 +71,20 @@
 //! whole section unmounted, and the checklist plus its "Done" button vanished
 //! mid-walk. It is therefore a page-level signal rendered outside the
 //! `Transition`, cleared on close and on navigation.
+//!
+//! **Being outside the Transition means the snapshot can go stale in one more
+//! way, and it is reconciled rather than left to lie (P6-141).** A row-level
+//! Pull in the table above closes a need through a control the checklist never
+//! sees — the same "elsewhere" table the snapshot was generated from, mutated
+//! by a different button. Before the reconcile, the dead line stayed on the
+//! checklist looking exactly as pullable as a live one; ticking it could only
+//! ever land [`SkipReason::NoLongerNeeded`](super::move_selection::SkipReason::NoLongerNeeded).
+//! [`ElsewhereRow`]'s one-tap Pull now calls [`drop_closed_need`] whenever its
+//! own outcome is [`PullLineOutcome::Full`] — proof the row's *entire* elsewhere
+//! allocation is spent, not just the copies this call happened to draw from —
+//! dropping every open (unticked) pick-list line that named the same closed
+//! need. Lines already ticked stay, as the record of what was actually pulled;
+//! the snapshot is still never regenerated mid-walk, only pruned.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -154,6 +168,22 @@ impl PullOutcome {
     /// Copies moved across every line — the number the toast states.
     pub fn copies(&self) -> i32 {
         self.pulled.iter().map(|p| p.copies).sum()
+    }
+
+    /// Whether this outcome states nothing at all: no copies moved and no
+    /// line refused by name.
+    ///
+    /// Every other shape already speaks for itself — a move earns the success
+    /// toast, a refusal earns [`SkipReason::phrase()`](super::move_selection::SkipReason::phrase)
+    /// off `skipped` — but a call whose `items` resolved to neither (P6-141,
+    /// unreachable from either current caller today since both always send at
+    /// least one item, and `plan_pull_needs` classifies every item it is
+    /// handed into one vector or the other — see `pull_plan.rs`'s own test —
+    /// but real regardless the moment a caller ever sends none, and worth
+    /// naming rather than leaving `report()` to fall through silently) gets no
+    /// stated outcome from either branch. Silence there would read as success.
+    pub fn is_empty(&self) -> bool {
+        self.move_ids.is_empty() && self.skipped.is_empty()
     }
 }
 
@@ -463,6 +493,51 @@ pub fn pick_list(rows: &[NeedRow]) -> Vec<PickGroup> {
     groups
 }
 
+/// Drop pick-list lines whose need a pull just closed **elsewhere on the
+/// page** — a row-level Pull in the "Owned elsewhere" table, which the
+/// snapshot (module doc) cannot see refetch past it.
+///
+/// **Why this is safe to call only on a `Full` row-level pull, and only
+/// there.** `ElsewhereRow`'s one-tap Pull asks for a row's *entire*
+/// `owned_elsewhere` across every source [`offers_of`] named for it in one
+/// request; a [`PullLineOutcome::Full`] result therefore proves the need's
+/// whole elsewhere allocation is spent, for every source, not just the one
+/// this call happened to draw from — the same (oracle, board) key can carry
+/// no other valid pick-list line once that is true. A pick-list *tick*
+/// cannot use this the same way: it asks for one line's own share, and a
+/// `Full` tick there only proves that one source is spent, not the row's
+/// (`the_pick_list_groups_by_the_collection_you_walk_to` pins a case where a
+/// gap splits across two sources — ticking one Full and reconciling the
+/// other off the same key would delete a still-valid line).
+///
+/// Mirrors the selection tray's own reconcile-after-write policy (P6-122,
+/// `SelectionState::remove_tokens`): once a write proves a key is spent,
+/// prune it client-side rather than leave it to trip
+/// [`SkipReason::NoLongerNeeded`](super::move_selection::SkipReason::NoLongerNeeded)
+/// on a tick that can only ever refuse now. Lines already in `done` are left
+/// alone — they are the record of what already moved, not a stale offer, and
+/// dropping a struck-through line would erase a completed step off the walk
+/// mid-way through it. A group left with no lines is dropped too, so its
+/// "walk to this collection" heading does not outlive everything it named.
+pub fn drop_closed_need(
+    groups: Vec<PickGroup>,
+    done: &HashSet<String>,
+    oracle_id: Id,
+    board: shared::Board,
+) -> Vec<PickGroup> {
+    groups
+        .into_iter()
+        .filter_map(|mut group| {
+            group.rows.retain(|row| {
+                row.item.oracle_id != oracle_id
+                    || row.item.board != board
+                    || done.contains(&row.item.token())
+            });
+            (!group.rows.is_empty()).then_some(group)
+        })
+        .collect()
+}
+
 // -------------------------------------------------------------- the page ---
 
 #[component]
@@ -514,7 +589,7 @@ pub fn NeedsPage() -> impl IntoView {
                 {move || Suspend::new(async move {
                     match needs_res.await {
                         Ok(view) => {
-                            view! { <NeedsBody view picks /> }
+                            view! { <NeedsBody view picks done /> }
                                 .into_any()
                         }
                         // The way out is already on the page: `NeedsHeader` sits
@@ -610,7 +685,11 @@ fn RowsSkeleton() -> impl IntoView {
 }
 
 #[component]
-fn NeedsBody(view: NeedsView, picks: RwSignal<Option<Vec<PickGroup>>>) -> impl IntoView {
+fn NeedsBody(
+    view: NeedsView,
+    picks: RwSignal<Option<Vec<PickGroup>>>,
+    done: RwSignal<HashSet<String>>,
+) -> impl IntoView {
     let collection_id = view.collection_id;
     let rows = view.rows;
     let summary = needs_chip(&totals_of(&rows));
@@ -672,7 +751,7 @@ fn NeedsBody(view: NeedsView, picks: RwSignal<Option<Vec<PickGroup>>>) -> impl I
                 }
             })}
         {(!elsewhere.is_empty())
-            .then(|| view! { <OwnedElsewhere rows=elsewhere collection_id picks /> })}
+            .then(|| view! { <OwnedElsewhere rows=elsewhere collection_id picks done /> })}
         {(!short.is_empty()).then(|| view! { <ShortBucket rows=short /> })}
     }
     .into_any()
@@ -704,6 +783,7 @@ fn OwnedElsewhere(
     rows: Vec<NeedRow>,
     collection_id: Id,
     picks: RwSignal<Option<Vec<PickGroup>>>,
+    done: RwSignal<HashSet<String>>,
 ) -> impl IntoView {
     let total: i32 = rows.iter().map(|r| r.owned_elsewhere).sum();
     let all = StoredValue::new(rows.clone());
@@ -745,7 +825,7 @@ fn OwnedElsewhere(
                     <TableBody>
                         {rows
                             .into_iter()
-                            .map(|row| view! { <ElsewhereRow row collection_id /> })
+                            .map(|row| view! { <ElsewhereRow row collection_id picks done /> })
                             .collect_view()}
                     </TableBody>
                 </Table>
@@ -755,7 +835,12 @@ fn OwnedElsewhere(
 }
 
 #[component]
-fn ElsewhereRow(row: NeedRow, collection_id: Id) -> impl IntoView {
+fn ElsewhereRow(
+    row: NeedRow,
+    collection_id: Id,
+    picks: RwSignal<Option<Vec<PickGroup>>>,
+    done: RwSignal<HashSet<String>>,
+) -> impl IntoView {
     // Owned per row, not threaded in from `OwnedElsewhere` (P6-140). A pull's
     // in-flight state used to live on one signal shared across every row in
     // the table, so any row's request disabled every other row's button too.
@@ -812,22 +897,44 @@ fn ElsewhereRow(row: NeedRow, collection_id: Id) -> impl IntoView {
                 // database is structural rather than a call someone has to
                 // remember to add (the rule `/my` and the collection view
                 // already follow).
-                Ok(outcome) => report(
-                    &outcome,
-                    &label.get_value(),
-                    toast,
-                    ReportContext {
-                        tree,
-                        revision,
-                        last_move,
-                    },
-                    None,
+                Ok(outcome) => {
                     // `fillable` is this row's own asked total across every
-                    // source its allocation named — the honest baseline the
-                    // toast checks a shortfall against, same as the pick
-                    // list's per-line ask (see `PickRowView`).
-                    Some(fillable),
-                ),
+                    // source `items` named — a `Full` outcome against it proves
+                    // the row's whole elsewhere allocation is spent, which is
+                    // exactly the condition `drop_closed_need`'s own doc pins
+                    // as safe to reconcile on (module doc, P6-141). Checked
+                    // before `report`, but order does not matter to either —
+                    // there is no shared state between them.
+                    if matches!(
+                        pull_line_outcome(fillable, outcome.copies()),
+                        PullLineOutcome::Full
+                    ) {
+                        if let Some(groups) = picks.get_untracked() {
+                            picks.set(Some(drop_closed_need(
+                                groups,
+                                &done.get_untracked(),
+                                oracle_id,
+                                board,
+                            )));
+                        }
+                    }
+                    report(
+                        &outcome,
+                        &label.get_value(),
+                        toast,
+                        ReportContext {
+                            tree,
+                            revision,
+                            last_move,
+                        },
+                        None,
+                        // `fillable` is this row's own asked total across every
+                        // source its allocation named — the honest baseline the
+                        // toast checks a shortfall against, same as the pick
+                        // list's per-line ask (see `PickRowView`).
+                        Some(fillable),
+                    )
+                }
                 Err(e) => {
                     toast.show(
                         ToastOptions::message(format!("Couldn't pull: {}", message_of(&e)))
@@ -1139,6 +1246,13 @@ struct ReportContext {
 /// per-line snapshot count, the row button's `owned_elsewhere`) so a source
 /// that had less than it looked like — the residual, not just "it moved
 /// something" — gets said out loud instead of read as an unqualified success.
+///
+/// A fifth shape (P6-141) gets its own arm rather than falling through both:
+/// [`PullOutcome::is_empty`] — nothing moved and nothing named a refusal. That
+/// used to no-op this whole function, a silent press with no visible reaction
+/// standing in for a refusal that had no wording. It reads "Nothing to pull",
+/// the same register as [`SkipReason`](super::move_selection::SkipReason)'s
+/// own phrases, just with no single line left to blame.
 fn report(
     outcome: &PullOutcome,
     label: &str,
@@ -1222,6 +1336,16 @@ fn report(
                         });
                     }),
                 ),
+        );
+    } else if outcome.is_empty() {
+        // Neither the move branch above nor the skip loop below has anything
+        // to say for this shape — no copies, no named refusal — and leaving
+        // both silent would read as an unremarkable success. State it as
+        // plainly as `SkipReason`'s own refusals do, just without a single
+        // line to pin it on.
+        toast.show(
+            ToastOptions::message(format!("Nothing to pull — {label} had nothing to move"))
+                .kind(ToastKind::Error),
         );
     }
     for skip in &outcome.skipped {
@@ -1310,6 +1434,7 @@ fn ShortBucket(rows: Vec<NeedRow>) -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
+    use super::super::move_selection::SkipReason;
     use super::*;
     use shared::{Board, Condition, Finish};
     use uuid::Uuid;
@@ -1799,5 +1924,105 @@ mod tests {
         // "nothing to strike through or shrink" rather than a bogus larger
         // residual than was ever asked.
         assert_eq!(pull_line_outcome(4, -1), PullLineOutcome::Zero);
+    }
+
+    // ------------------------------------------------- P6-141: reconcile ---
+
+    #[test]
+    fn a_closed_needs_open_line_is_dropped_and_its_group_with_it() {
+        // The base bug: a row-level Pull closes the need through a control
+        // the checklist snapshot never sees, and the stale line used to sit
+        // on the walk looking exactly as pullable as a live one.
+        let a = Uuid::from_u128(10);
+        let side = need_on(Board::Side, 2, 0, vec![loc(a, "Trade Binder", 3)]);
+        let groups = pick_list(&[side]);
+        assert_eq!(groups.len(), 1, "one group, one line, before reconcile");
+
+        let closed = drop_closed_need(
+            groups,
+            &HashSet::new(),
+            Uuid::from_u128(1), // `need`'s fixed oracle id
+            Board::Side,
+        );
+        assert!(
+            closed.is_empty(),
+            "the only group named the closed need, so it goes with the line"
+        );
+    }
+
+    #[test]
+    fn a_ticked_line_survives_reconcile_as_the_record_of_what_moved() {
+        // A line already in `done` is not a stale offer, it is history — the
+        // walk should not lose the proof of what was actually pulled.
+        let a = Uuid::from_u128(10);
+        let side = need_on(Board::Side, 2, 0, vec![loc(a, "Trade Binder", 3)]);
+        let groups = pick_list(&[side]);
+        let token = groups[0].rows[0].item.token();
+        let done: HashSet<String> = [token].into_iter().collect();
+
+        let closed = drop_closed_need(groups, &done, Uuid::from_u128(1), Board::Side);
+        assert_eq!(closed.len(), 1, "the ticked line stays");
+        assert_eq!(closed[0].rows.len(), 1);
+    }
+
+    #[test]
+    fn reconcile_only_touches_the_named_oracle_and_board() {
+        // Two cards, two boards: closing one (oracle, board) must not touch a
+        // group holding a line for a different card or a different board of
+        // the same card — `the_pick_list_groups_by_the_collection_you_walk_to`
+        // already pins that a gap can split across sources within one group,
+        // so this also proves reconcile does not over-match within a group.
+        let a = Uuid::from_u128(10);
+        let mut bolt_main = need(1, 0, vec![loc(a, "Trade Binder", 5)]);
+        bolt_main.oracle_id = Uuid::from_u128(1);
+        let mut bolt_side = need_on(Board::Side, 1, 0, vec![loc(a, "Trade Binder", 5)]);
+        bolt_side.oracle_id = Uuid::from_u128(1);
+        let mut swan = need(1, 0, vec![loc(a, "Trade Binder", 5)]);
+        swan.oracle_id = Uuid::from_u128(2);
+        swan.name = "Snapcaster Mage".to_string();
+
+        let groups = pick_list(&[bolt_main, bolt_side, swan]);
+        assert_eq!(
+            groups[0].rows.len(),
+            3,
+            "one group — same source for all three"
+        );
+
+        let closed = drop_closed_need(groups, &HashSet::new(), Uuid::from_u128(1), Board::Main);
+        assert_eq!(closed.len(), 1, "the group survives — two lines remain");
+        assert_eq!(closed[0].rows.len(), 2);
+        assert!(
+            closed[0]
+                .rows
+                .iter()
+                .all(|r| r.item.oracle_id != Uuid::from_u128(1) || r.item.board != Board::Main),
+            "only the closed (oracle, board) line was dropped"
+        );
+    }
+
+    #[test]
+    fn an_outcome_with_nothing_moved_and_nothing_refused_is_empty() {
+        assert!(PullOutcome::default().is_empty());
+    }
+
+    #[test]
+    fn a_named_refusal_alone_is_not_an_empty_outcome() {
+        let outcome = PullOutcome {
+            skipped: vec![Skipped {
+                token: "x".to_string(),
+                reason: SkipReason::NoLongerNeeded,
+            }],
+            ..Default::default()
+        };
+        assert!(!outcome.is_empty());
+    }
+
+    #[test]
+    fn a_move_alone_is_not_an_empty_outcome() {
+        let outcome = PullOutcome {
+            move_ids: vec![Uuid::new_v4()],
+            ..Default::default()
+        };
+        assert!(!outcome.is_empty());
     }
 }
