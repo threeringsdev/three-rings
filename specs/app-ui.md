@@ -228,6 +228,83 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Catalog search: a facet click inside the query bar's debounce window (P6-086, 2026-08-12)
+
+**The race.** `/catalog` has two writers of one `?q=`, and for ~250 ms after
+every keystroke they disagree about what the query is. A keystroke arms the
+query bar's debounce holding the box text *captured at that moment*; the URL
+still holds the pre-typing query. The filter rail commits synchronously on
+click, reading the URL — so a facet clicked inside that window navigated with
+the pre-typing text, and then the timer fired and navigated again with the
+pre-click text, silently undoing the facet edit a quarter-second later. The
+box was left worse than the URL: the rail's navigation re-seeded it (rule 3 —
+"the URL moved without us") to the facet-bearing query, and the timer's
+navigation then set `self_pushed` to the typed text without re-seeding, so the
+box read `bolt c:r` over a URL saying `bolt mv<=2`. Reset had the same shape
+and was louder: it cleared the rail's terms and the debounce put every one of
+them back.
+
+Note the asymmetry that makes this one-directional. Rail commits *re-read* the
+current query when they fire (before this fix directly off the URL; now via
+`QueryBase::read`, which prefers the bar's pending text over the URL), so a
+rail text field's own debounce rebases onto whatever landed while
+it was armed — including a facet click. The query bar cannot do the same,
+because its box text is the *whole* query string: re-reading it late would not
+pick up a facet edit, it would overwrite one.
+
+**Chosen semantics: reconcile, not cancel** (the task's option (b), done by
+value rather than by a second navigation). A rail edit rewrites the query
+bar's *pending* text when there is one, so the single navigation it already
+performs carries both intents — what you typed plus what you clicked — and
+then cancels the timer whose text it has absorbed. Cancelling alone (option
+(a)) would have thrown away keystrokes the user had already made; option (c)
+(merge at fire time) needs the same information one hop later and more
+machinery to use it. Nothing flushes through a separate `navigate()`, so there
+is no ordering hazard between two navigations and no extra history entry.
+
+**Shape.** `PendingQuery` (`app/src/components/query_bar.rs`) — a `Copy`
+newtype over `StoredValue<Option<{TimeoutHandle, String}>>`, provided by
+`AppShell`. Shell-level is forced: context flows down the owner tree and the
+two surfaces are on opposite sides of it (the bar is inside the `<Outlet/>`,
+the rail inside `SidebarRail`). Only the *handle and text* cross the seam, never
+the committer: `use_navigate`'s closure is neither `Send` nor `Sync`, but a
+`TimeoutHandle` is a plain `i32` and a `String` is `Send + Sync`, so the shared
+slot stays an ordinary `StoredValue` and no widget is pushed into local
+storage. A `QueryBar` with no such context (a bench or test render) falls back
+to a private slot and behaves exactly as before.
+
+The rail reads it through `QueryBase` (`app/src/catalog/rail.rs`): `read()`
+peeks without disarming, `consumed()` cancels. Two calls, not one, deliberately
+— a rewrite over the pending text can *fail* (a half-typed `c:` in the box is
+an ordinary mid-typing state), and a rail edit that refuses must leave the
+user's keystrokes on their way to the URL rather than deleting them.
+
+**Invariants preserved.** The box after a mid-window facet click shows the
+merged query (`bolt mv<=2 c:r`) — via the existing re-seed rule, not a second
+writer: the rail's navigation moved the URL without the bar, which is rule 3's
+own case, the same one an ordinary (non-racing) facet click already relies on.
+`text` still has exactly one writer, `QueryBar`; the caret rule (P6-068) is
+untouched because no new write to `text` was added. History granularity is
+unchanged (the rail's single navigation still decides push-vs-replace by
+`was_searching`).
+
+**Scope: catalog-only, verified.** `/my`, `/my/all` and `/my/collections/:id`
+each pair a `QueryBar` with revision-driven writes, but nothing there is a
+second writer of `?q=`: tray moves and tree mutations bump `holdings_revision`
+/ `TreeManage::revision` and navigate to *paths*, never to a query. The only
+other producers of a `?q=` URL on those pages are pager links, which carry the
+payload's `q` forward unchanged. (Their own interaction with the debounce is
+the P6-130 `displaced_by` family, which `/my`'s pager does not yet implement —
+filed on the pager-extraction task `WB-01KZVHYHMG`, not folded in here.)
+
+**e2e.** `filter-rail.spec.ts` — "a facet click survives the query bar's
+debounce window @fast" and "Reset mid-debounce clears the filters instead of
+restoring them @fast". Both assert they are genuinely inside the window (the
+URL has not moved yet) before acting, which is what stops them passing
+vacuously on a build where the debounce had already fired. Kill-verified on
+base: the first ends at `?q=bolt mv<=2` with the facet gone, the second reverts
+to the full pre-Reset query.
+
 ### The vendored Dialog traps Tab focus (P6-125, 2026-08-11)
 
 `DialogContent` (`app/src/components/ui/dialog.rs`) gained a second `window`

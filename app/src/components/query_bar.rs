@@ -19,6 +19,13 @@
 //!    starting or ending a search pushes. Replacing everything walks Back
 //!    straight off the site; pushing everything buries the previous page under
 //!    one entry per character.
+//! 5. **The armed debounce is public to the page's other writer of `?q=`.**
+//!    While a timer is armed, the newest query the user has expressed is *in
+//!    that timer*, not in the URL — so any other surface that rewrites the same
+//!    string (the catalog's filter rail) must build its edit on the pending text
+//!    and cancel the timer, or its edit gets overwritten ~250 ms later by the
+//!    pre-click text. [`PendingQuery`] is that seam; see its docs for the
+//!    semantics (P6-086).
 //!
 //! What differs per page is only the URL to navigate to, which is the
 //! `to_url` prop.
@@ -58,6 +65,93 @@ use super::ui::input_group::{
 /// work for responsiveness rather than trading away correctness.
 pub const SEARCH_DEBOUNCE_MS: u64 = 250;
 
+/// The query bar's armed debounce, shared with the page's *other* writer of the
+/// same `?q=` — today only the catalog's filter rail (P6-086).
+///
+/// **Why this has to be shared at all.** A keystroke arms a timer holding the
+/// box text *captured at that moment*. For the next ~250 ms the URL is stale by
+/// construction, and the two surfaces disagree about what the query is. The rail
+/// commits synchronously on click, so a facet clicked inside that window
+/// navigated with the URL's (pre-typing) text, and then the bar's timer fired
+/// and navigated again with the box's (pre-click) text — silently undoing the
+/// facet edit. The rail's own commits do not have the mirror problem: they
+/// re-read the URL when they fire rather than capturing it, so they rebase.
+///
+/// **The semantics: reconcile, don't cancel.** A rail edit reads [`peek`] and
+/// rewrites *that* string, so the single navigation it already performs carries
+/// both intents — what you typed plus what you clicked — and then [`cancel`]s
+/// the timer whose text it has just absorbed. Cancelling alone would have
+/// thrown the typed text away; letting the timer fire would have thrown the
+/// click away.
+///
+/// [`peek`]: PendingQuery::peek
+/// [`cancel`]: PendingQuery::cancel
+///
+/// **One bar at a time.** The slot is a single value provided by the shell
+/// ([`provide_pending_query`]), and exactly one [`QueryBar`] is mounted on any
+/// route (`/catalog`, `/my`, `/my/all`, and the quick-add panel's on
+/// `/my/collections/:id`). A `QueryBar` rendered with no such context in scope
+/// falls back to a private slot and behaves exactly as it did before.
+#[derive(Clone, Copy)]
+pub struct PendingQuery(StoredValue<Option<ArmedCommit>>);
+
+#[derive(Clone)]
+struct ArmedCommit {
+    handle: leptos::leptos_dom::helpers::TimeoutHandle,
+    /// The box text captured when the timer was armed — what it will put in the
+    /// URL when it fires.
+    text: String,
+}
+
+impl PendingQuery {
+    fn new() -> Self {
+        Self(StoredValue::new(None))
+    }
+
+    /// The query the armed debounce is about to commit, if one is armed. Does
+    /// not disarm it: a caller that reads this and then declines to act (an
+    /// unparseable base, say) must leave the user's keystrokes on their way to
+    /// the URL.
+    pub fn peek(&self) -> Option<String> {
+        self.0.with_value(|a| a.as_ref().map(|a| a.text.clone()))
+    }
+
+    /// Cancel the armed debounce. Call this **only** once a commit that already
+    /// folds in [`peek`](Self::peek)'s text is certain to happen — cancelling
+    /// without absorbing it deletes what the user typed.
+    pub fn cancel(&self) {
+        self.0.update_value(|armed| {
+            if let Some(armed) = armed.take() {
+                armed.handle.clear();
+            }
+        });
+    }
+
+    /// Arm (replacing any previous timer, which is cancelled).
+    fn arm(&self, handle: Option<leptos::leptos_dom::helpers::TimeoutHandle>, text: String) {
+        self.cancel();
+        self.0
+            .set_value(handle.map(|handle| ArmedCommit { handle, text }));
+    }
+
+    /// The timer fired: empty the slot without clearing an already-elapsed
+    /// handle, so a rail edit arriving after it reads the URL rather than a
+    /// pending text that is no longer pending.
+    fn fired(&self) {
+        self.0.set_value(None);
+    }
+}
+
+/// Provide the shared pending-debounce slot. Called once by the shell, above
+/// both the `<Outlet/>` (where the bar lives) and the sidebar rail (where the
+/// facets live) — context flows down the owner tree, so nothing the page
+/// provides could reach the rail.
+pub fn provide_pending_query() -> PendingQuery {
+    let pending = PendingQuery::new();
+    provide_context(pending);
+    pending
+}
+
 #[component]
 pub fn QueryBar(
     /// The text in the box. Owned by the caller so the page can read it (the
@@ -87,7 +181,10 @@ pub fn QueryBar(
     reset: Option<RwSignal<u32>>,
 ) -> impl IntoView {
     let navigate = use_navigate();
-    let pending = StoredValue::new(None::<leptos::leptos_dom::helpers::TimeoutHandle>);
+    // The armed debounce lives in the shell's shared slot when there is one, so
+    // the other writer of this `?q=` can see it (behavior 5 in the module doc);
+    // a private slot otherwise, which is the pre-P6-086 behavior exactly.
+    let pending = use_context::<PendingQuery>().unwrap_or_else(PendingQuery::new);
 
     // The last query *we* put in the URL — see behavior 3 in the module doc.
     let self_pushed = StoredValue::new(url_q.get_untracked());
@@ -119,25 +216,25 @@ pub fn QueryBar(
         }
     });
 
-    let clear_pending = move || {
-        pending.update_value(|h| {
-            if let Some(h) = h.take() {
-                h.clear();
-            }
-        });
-    };
+    let clear_pending = move || pending.cancel();
 
     let schedule = {
         let commit = commit.clone();
         move |q: String| {
-            // Collapse the burst: only the last keystroke of a run searches.
-            clear_pending();
             let commit = commit.clone();
+            let captured = q.clone();
             let handle = set_timeout_with_handle(
-                move || commit(q.clone()),
+                move || {
+                    // Empty the slot first: from here the URL, not the timer,
+                    // holds the newest query (see `PendingQuery::fired`).
+                    pending.fired();
+                    commit(q.clone());
+                },
                 std::time::Duration::from_millis(SEARCH_DEBOUNCE_MS),
             );
-            pending.set_value(handle.ok());
+            // Arming collapses the burst: it cancels the previous timer, so only
+            // the last keystroke of a run searches.
+            pending.arm(handle.ok(), captured);
         }
     };
 

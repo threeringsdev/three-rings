@@ -8,7 +8,11 @@
 //!   string*, never a second source of truth. It holds no state of its own: it
 //!   reads the URL's `q` and every edit rewrites that string and navigates.
 //!   So a rail edit and a typed edit are the same operation, and Back works
-//!   across both.
+//!   across both. One refinement of "the URL's `q`": for the ~250 ms a query-bar
+//!   keystroke has a debounce armed, the newest query text is in *that timer*,
+//!   and a rail edit rewrites it rather than the address bar — see [`QueryBase`]
+//!   (P6-086). Still one canonical string; the rail just doesn't rewrite a copy
+//!   it can already see is out of date.
 //! - **Rail edits rewrite their own term and nothing else.** Terms the rail
 //!   has no widget for — negations, `id:`, a second `c:` — survive byte for
 //!   byte, because rewriting re-emits their original token text rather than
@@ -375,22 +379,85 @@ fn use_rail_state() -> Memo<Result<RailState, ParseError>> {
     Memo::new(move |_| read(&url_q.get()))
 }
 
+/// The query text a rail edit rewrites — **not always the URL's** (P6-086).
+///
+/// The query bar captures its box text when a keystroke arms its 250 ms
+/// debounce, so for that window the newest query the user has expressed lives in
+/// that timer and the URL is stale by construction. A facet clicked inside the
+/// window used to rewrite the URL's copy, commit, and then be silently
+/// overwritten when the timer fired with the pre-click text. Reading the pending
+/// text here instead makes the rail's single navigation carry both intents —
+/// what you typed plus what you clicked — and [`consumed`](Self::consumed) then
+/// cancels the timer whose text that navigation has absorbed.
+///
+/// Deliberately two calls rather than one: `read` must not disarm, because a
+/// rewrite over the pending text can *fail* (a half-typed `c:` in the box is an
+/// ordinary mid-typing state), and a rail edit that refuses must leave the
+/// user's keystrokes on their way to the URL.
+#[derive(Clone, Copy)]
+struct QueryBase {
+    query_map: leptos::prelude::Memo<leptos_router::params::ParamsMap>,
+    /// `None` outside the shell (the bench, a test render) — then the URL is
+    /// the only source, exactly as before.
+    pending: Option<crate::components::query_bar::PendingQuery>,
+}
+
+fn use_query_base() -> QueryBase {
+    QueryBase {
+        query_map: use_query_map(),
+        pending: use_context::<crate::components::query_bar::PendingQuery>(),
+    }
+}
+
+impl QueryBase {
+    /// The string to rewrite: the query bar's pending text if it has one, else
+    /// the URL's `q`.
+    fn read(&self) -> String {
+        base_query(
+            self.pending.and_then(|p| p.peek()),
+            self.query_map.read_untracked().get("q").unwrap_or_default(),
+        )
+    }
+
+    /// The edit is going through and it was built on [`read`](Self::read)'s
+    /// answer, so the timer that would re-commit the pre-click text must not
+    /// fire. A no-op when nothing was armed.
+    fn consumed(&self) {
+        if let Some(pending) = self.pending {
+            pending.cancel();
+        }
+    }
+}
+
+/// Which text a rail edit rewrites, as a pure function of the two candidates.
+///
+/// The pending text wins whenever there is one: it is strictly newer than the
+/// URL's (it is what the URL is *about to* become), and it is the only copy that
+/// carries keystrokes the user has already made.
+fn base_query(pending: Option<String>, url_q: String) -> String {
+    pending.unwrap_or(url_q)
+}
+
 /// The committer. Called in each widget's own body rather than passed down as
 /// a prop: `use_navigate` hands back a closure that is neither `Send` nor
 /// `Sync`, so threading it through component props would force every rail
 /// widget into local storage for no gain. The hooks it reads are plain context
 /// lookups — calling them per widget costs nothing.
 fn use_commit() -> impl Fn(Field, Option<String>) + Clone + 'static {
-    let query_map = use_query_map();
+    let base = use_query_base();
     let go = use_navigate_query();
     move |field: Field, replacement: Option<String>| {
-        let q = query_map.read_untracked().get("q").unwrap_or_default();
+        let q = base.read();
         let Ok(next) = rewrite(&q, field, replacement) else {
             // Unreachable through the UI (an unparseable query renders the
-            // notice instead of widgets), but rewriting on a guess is exactly
-            // how a user's text gets eaten — so refuse instead.
+            // notice instead of widgets) *unless* the pending text is the
+            // half-typed one, which is an ordinary state. Either way: rewriting
+            // on a guess is exactly how a user's text gets eaten — so refuse
+            // instead, and leave the debounce armed so what was typed still
+            // lands.
             return;
         };
+        base.consumed();
         go(next);
     }
 }
@@ -403,6 +470,9 @@ fn use_commit() -> impl Fn(Field, Option<String>) + Clone + 'static {
 /// text field, the mana-value row, and Reset — which makes this the rail's half
 /// of the "a query edit starts at page one" rule (`super::catalog_url`). The
 /// query bar's `to_url` is the other half.
+///
+/// It takes an already-built string because *what* to rewrite is the caller's
+/// question, and the answer is not always the URL: see [`QueryBase`].
 fn use_navigate_query() -> impl Fn(String) + Clone + 'static {
     let query_map = use_query_map();
     let navigate = use_navigate();
@@ -492,14 +562,18 @@ pub fn FilterSheet(
 fn RailBody(heading_id: &'static str) -> impl IntoView {
     let state = use_rail_state();
     let go = use_navigate_query();
-    let query_map = use_query_map();
+    // Reset is a rail edit like any other, so it clears the *pending* query too
+    // — otherwise the debounce would put the filters it just dropped straight
+    // back (P6-086).
+    let base = use_query_base();
     // `ok` is the "query parses" projection every widget reads; `None` is the
     // inert state, not an empty rail.
     let ok = Signal::derive(move || state.get().ok());
 
     let reset_all = move |_| {
-        let q = query_map.read_untracked().get("q").unwrap_or_default();
+        let q = base.read();
         if let Ok(next) = reset(&q) {
+            base.consumed();
             go(next);
         }
     };
@@ -1018,9 +1092,14 @@ fn SetPicker(#[prop(into)] id: String, codes: Signal<Vec<String>>) -> impl IntoV
 
     // Typing filters the list *server-side*, so the keystrokes are debounced —
     // but note what this timer does and does not do: it re-keys a read, and
-    // never writes the URL. The rail's known race (a facet click swallowed by
-    // the query bar's pending debounce, filed separately) is between *writers*;
-    // this adds none, and the picker's own commits are synchronous on click.
+    // never writes the URL. The rail's race between *writers* (a facet click
+    // swallowed by the query bar's pending debounce) is fixed in `QueryBase`:
+    // every rail edit rewrites the bar's pending text when there is one and then
+    // cancels its timer, so the two writers produce one navigation carrying both
+    // intents (P6-086). This timer adds no writer at all, and the picker's own
+    // commits — which go through `use_commit`, so they get that same treatment —
+    // land one microtask after the click (via the `requested` signal's Effect),
+    // still ahead of any 250 ms timer.
     let pending = StoredValue::new(None::<leptos::leptos_dom::helpers::TimeoutHandle>);
     let clear_pending = move || {
         pending.update_value(|h| {
@@ -1681,6 +1760,35 @@ mod tests {
         assert_eq!(out, "bolt");
         assert!(read(&out).is_ok());
         assert_eq!(read(&out).unwrap().count(Field::Set), 0);
+    }
+
+    #[test]
+    fn a_facet_click_mid_debounce_rewrites_what_was_typed_not_what_the_url_says() {
+        // P6-086. The user has "bolt" in the URL, types " mv<=2" and clicks the
+        // Red checkbox inside the 250 ms window. The URL still says "bolt"; the
+        // query bar's armed timer holds "bolt mv<=2".
+        let url_q = "bolt".to_string();
+        let pending = Some("bolt mv<=2".to_string());
+
+        // Rewriting the URL's copy is the bug: the click's own commit is fine,
+        // but it has already dropped the keystrokes, and the timer then fires
+        // with "bolt mv<=2" and drops `c:r` in turn.
+        let clobbered = rewrite(&url_q, Field::Color, color_term(&["r".into()])).unwrap();
+        assert_eq!(clobbered, "bolt c:r");
+        assert!(!clobbered.contains("mv<=2"));
+
+        // Rewriting the pending copy carries both intents in one navigation.
+        let base = base_query(pending, url_q.clone());
+        let merged = rewrite(&base, Field::Color, color_term(&["r".into()])).unwrap();
+        assert_eq!(merged, "bolt mv<=2 c:r");
+        let st = read(&merged).unwrap();
+        assert_eq!(st.colors, vec!['R']);
+        assert_eq!(st.mana_value, Some((Cmp::Le, 2.0)));
+        assert_eq!(st.name, "bolt");
+
+        // With no timer armed — the overwhelmingly common case — the URL is the
+        // base, byte for byte.
+        assert_eq!(base_query(None, url_q.clone()), url_q);
     }
 
     #[test]
