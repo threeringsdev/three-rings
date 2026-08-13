@@ -270,6 +270,46 @@ pair — and **a cursored page is never retained as "previous results"** under a
 later parse error, since it names a position in a search nobody is editing any
 more.
 
+### A corrupt `?cursor=` is not a claim about the query (2026-08-13, P6-043)
+
+Before this task, `HostedBackend::search`'s `decode_cursor` failed a bad
+base64/JSON `?cursor=` as `ApiError::Validation("invalid cursor")` — the exact
+variant a rejected grammar term also produces. `/catalog`'s error arm rendered
+any `Validation` as the grammar's own words, no "Search failed" prefix (see
+"Parse errors are results, not failures" above), so a syntactically fine query
+sitting behind a stale or hand-edited cursor read as if the *query* — "bolt",
+in the concrete e2e case — had been rejected. It had not; only the page
+reference had.
+
+Fix: `ApiError` gained a distinct `BadCursor` variant (shared/src/lib.rs),
+mapped to the same 422 as `Validation` — the two 422s are told apart on the
+wire by the error envelope's `code` (`"bad_cursor"` vs `"validation"`), which
+`ApiError::from_wire` now reads before falling back to the status-implied
+table. `decode_cursor` returns `BadCursor` instead of `Validation`.
+`/catalog`'s error arm (`app/src/catalog.rs::describe_error` /
+`QueryErrorKind`) now renders it as its own case — "This page link is no
+longer valid." — rather than echoing "invalid cursor" as a verdict on the
+box, while keeping the escape hatch this same batch already built: the
+"← Back to the start" link drops only the cursor, re-running the query that
+was never at fault. `components::states::Failure::of_api_error` groups
+`BadCursor` with `Validation` under `Failure::Request` (not retryable, same
+"way out" affordance contract) — the query-vs-cursor distinction is a
+wording decision `/catalog`'s own error arm makes, not a fourth `Failure`
+class.
+
+Also from this task: `probe:catalog-paging` (`end2end/catalog-paging-check.mjs`)
+is the catalog's counterpart to `probe:paging` — the only prior coverage of
+the catalog's own keyset walk was an `#[ignore]`d live-DB test
+(`hosted.rs::search_live`), never run by default. It walks browse-all
+end to end via `GET /api/catalog/search`, cross-checked against the
+independent `GET /api/catalog/count`, and walks one filtered query
+(`t:creature`) asserting no-dup-ids + monotonic `(name, oracle_id)` order —
+the filtered walk has no independent count to check against, since the
+endpoint runs no `COUNT` for a search (previous section). Against the dev
+catalog (38,623 rows) at `limit=500`: browse-all walked 194 pages / 38,623
+rows exactly matching the count, zero duplicates; the filtered walk covered
+101 pages / 20,087 rows, zero duplicates, order held throughout both.
+
 ## Open questions
 
 - ~~Which Scryfall syntax subset ships in v1?~~ **Proposed above** (the

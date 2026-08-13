@@ -17,6 +17,7 @@ rather than folklore:
 | `npm run probe:hydration-authed -- <url…>` | same, signed in (needs `--project=setup` first) |
 | `npm run probe:bench` | `/dev/components` SSR + hydration + tokens |
 | `npm run probe:paging [limit]` | `/my` keyset paging walked at a small page size |
+| `npm run probe:catalog-paging [limit]` | `/catalog`'s keyset paging walked end to end via `GET /api/catalog/search` — browse-all cross-checked against `GET /api/catalog/count`, plus one filtered query (`t:creature`) asserting no-dup-ids and monotonic `(name, oracle_id)` order (no independent count exists for an arbitrary query) |
 | `npm run probe:android-collection` | `/my/collections/:id` on the real Android webview (needs the android-smoke attach) |
 | `npm run probe:android-quick-add` | quick-add's ↑↓/⏎/⌥⏎ registry navigation on the real Android webview, via the bench (the panel itself is authed, so unreachable through the dev proxy) |
 | `npm run probe:android-selection-tray` | selection tray + row checkbox on the real Android webview, via the bench (both hosting pages are authed) |

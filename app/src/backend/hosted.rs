@@ -3721,12 +3721,16 @@ fn encode_cursor<T: serde::Serialize>(c: &T) -> String {
         .encode(serde_json::to_vec(c).expect("cursor serialization cannot fail"))
 }
 
+/// Decode a keyset cursor, or fail `BadCursor` (P6-043) — its own variant, not
+/// `Validation`: a bad base64/JSON `?cursor=` says nothing about whether the
+/// query it rode in on is any good, so it must not surface as a query-grammar
+/// error the way `Validation` does in every caller's UI.
 fn decode_cursor<T: serde::de::DeserializeOwned>(s: &str) -> ApiResult<T> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(s)
-        .map_err(|_| ApiError::Validation("invalid cursor".into()))?;
-    serde_json::from_slice(&bytes).map_err(|_| ApiError::Validation("invalid cursor".into()))
+        .map_err(|_| ApiError::BadCursor("invalid cursor".into()))?;
+    serde_json::from_slice(&bytes).map_err(|_| ApiError::BadCursor("invalid cursor".into()))
 }
 
 /// Lazily provision the caller's one Inbox (idempotent via the
