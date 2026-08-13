@@ -14,6 +14,9 @@
 //!   synthetic `mouseenter` on tap, so a caller offering a different
 //!   affordance on coarse pointers (a bottom sheet) would otherwise get both
 //!   at once. Disabling suppresses opens and closes any open card.
+//! - **`on_open_change`** (added by the preview-flip-reset task): mirrors the
+//!   internal `open` signal out to the caller, so a body that stays mounted
+//!   across closes can still tell a genuine reopen from "still open".
 
 use leptos::prelude::*;
 use tw_merge::tw_merge;
@@ -50,6 +53,16 @@ pub fn HoverCard(
     /// Defaults to always-false, i.e. a plain hover card.
     #[prop(optional, into)]
     disabled: Signal<bool>,
+    /// Notified with the live open/closed state on every change (added for
+    /// the preview-flip-reset task, specs/app-ui.md `/cards/:id`). The
+    /// card's `open` signal lives only in this component's own context, so a
+    /// caller that mounts its content once and keeps it mounted across
+    /// closes (`cards::CardPreview`'s lazy-mount latch) has no other way to
+    /// tell a genuine reopen from "still open" — which is exactly what that
+    /// caller needs to reset per-instance state (a DFC flip) back to its
+    /// starting face.
+    #[prop(optional, into)]
+    on_open_change: Option<Callback<bool>>,
     children: Children,
 ) -> impl IntoView {
     let anchor_name = format!("--hc-anchor-{id}");
@@ -95,6 +108,10 @@ pub fn HoverCard(
         timer,
         disabled,
     };
+
+    if let Some(cb) = on_open_change {
+        Effect::new(move |_| cb.run(open.get()));
+    }
 
     view! {
         <leptos::context::Provider value=ctx>

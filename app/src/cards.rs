@@ -159,9 +159,15 @@ fn FlipButton(
 /// decision is the projection's) gets the flip control here too, swapping
 /// name / mana / type / art per face. Face state is per-affordance: the hover
 /// card and the sheet are separate `PreviewBody` instances, each starting at
-/// the front.
+/// the front — and each **stays** at the front across a close/reopen, even
+/// though the instance itself is mounted once and never torn down (the
+/// lazy-mount latch above `CardPreview`'s callers). `open` is what makes that
+/// true: it is the affordance's real visible state (the hover card's own
+/// open signal, or the sheet's), not the mount latch, and every time it
+/// flips back to visible the face resets — matching this doc comment rather
+/// than the flip silently surviving in the still-mounted body.
 #[component]
-fn PreviewBody(card: CardSummary) -> impl IntoView {
+fn PreviewBody(card: CardSummary, #[prop(into)] open: Signal<bool>) -> impl IntoView {
     let CardSummary {
         name,
         image_uri,
@@ -175,6 +181,17 @@ fn PreviewBody(card: CardSummary) -> impl IntoView {
     let flippable = faces.len() >= 2;
     let n_faces = faces.len();
     let face = RwSignal::new(0usize);
+
+    // Leading edge of a genuine reopen, not "every render": this only fires
+    // when `open` itself changes value, so flipping the face while already
+    // open doesn't touch it (nothing here reads `face`), and closing doesn't
+    // either (the guard is `if open`). Harmless to run on first mount too —
+    // `face` is already 0 then.
+    Effect::new(move |_| {
+        if open.get() {
+            face.set(0);
+        }
+    });
 
     let panel: Signal<FacePanel> = if flippable {
         let front_img = image_uri;
@@ -280,6 +297,11 @@ pub fn CardPreview(
     // need an owned copy rather than sharing one.
     let hover_card_body = card.clone();
     let sheet_open = RwSignal::new(false);
+    // Mirrors the hover card's own open/closed state (via `on_open_change`),
+    // so the hover `PreviewBody` — mounted once and kept mounted, unlike
+    // `sheet_open` there is no other live signal for "is this actually
+    // showing right now" to reset its flip state on.
+    let hover_open = RwSignal::new(false);
 
     // `web-sys` is only a dependency of the wasm half, and Effects only ever
     // run on the client anyway, so the body is `hydrate`-gated rather than the
@@ -351,11 +373,15 @@ pub fn CardPreview(
             // Disabled on the same signal that routes clicks to the sheet, so a
             // hybrid device's touch tap suppresses the hover card too rather
             // than raising one behind the sheet.
-            <HoverCard id=format!("card-preview-{oracle_id}") disabled=wants_sheet>
+            <HoverCard
+                id=format!("card-preview-{oracle_id}")
+                disabled=wants_sheet
+                on_open_change=Callback::new(move |v| hover_open.set(v))
+            >
                 <HoverCardTrigger class="block w-full">{trigger}</HoverCardTrigger>
                 <HoverCardContent class="w-72" {..} data-testid="card-preview-hover">
                     <Show when=move || hovered.get()>
-                        <PreviewBody card=hover_card_body.clone() />
+                        <PreviewBody card=hover_card_body.clone() open=hover_open />
                     </Show>
                 </HoverCardContent>
             </HoverCard>
@@ -385,9 +411,12 @@ pub fn CardPreview(
                 // Keyed on the latch, not on `sheet_open`: gating on the live
                 // signal unmounts the body on the same tick the close
                 // animation starts, so the sheet slides away as an empty box.
+                // `sheet_open` still does useful work below — passed as
+                // `PreviewBody`'s `open` prop, it is what resets the flip
+                // state on a reopen without needing to unmount anything.
                 <Show when=move || sheet_seen.get()>
                     <div class="space-y-4 p-4">
-                        <PreviewBody card=card.clone() />
+                        <PreviewBody card=card.clone() open=sheet_open />
                         <a
                             href=href.clone()
                             class="text-primary inline-block text-sm font-medium hover:underline"
@@ -773,23 +802,40 @@ fn CardDetailBody(card: CardDetail) -> impl IntoView {
                             .with(|p| p.stats.clone())
                             .map(|s| view! { <p class="text-sm font-medium">{s}</p> })
                     }}
-                    {(!keywords.is_empty())
-                        .then(|| {
-                            view! {
-                                <div class="flex flex-wrap gap-1">
-                                    {keywords
-                                        .into_iter()
-                                        .map(|k| {
-                                            view! {
-                                                <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm>
-                                                    {k}
-                                                </Badge>
-                                            }
-                                        })
-                                        .collect_view()}
-                                </div>
-                            }
-                        })}
+                    {move || {
+                        // `keywords` is card-level, not per-face: Scryfall's
+                        // top-level `keywords` array is already the union of
+                        // both faces' ability words, and there is no per-face
+                        // equivalent to swap in instead — the raw `card_faces`
+                        // jsonb this page's flip control reads never carried
+                        // one (`ORACLE_FACE_KEYS`, app/src/ingest/extract.rs,
+                        // deliberately excludes `keywords`; Scryfall's own
+                        // Card Face schema has no such key to begin with). So
+                        // the honest-minimal fix is to stop pairing the
+                        // unioned row with a flipped-to back face — showing it
+                        // made a back face display front-face keywords beside
+                        // back-face oracle text — rather than fabricate
+                        // per-face data the wire has never carried.
+                        let is_front = !flippable || face.get() == 0;
+                        (is_front && !keywords.is_empty())
+                            .then(|| {
+                                view! {
+                                    <div class="flex flex-wrap gap-1" data-testid="card-keywords">
+                                        {keywords
+                                            .clone()
+                                            .into_iter()
+                                            .map(|k| {
+                                                view! {
+                                                    <Badge variant=BadgeVariant::Outline size=BadgeSize::Sm>
+                                                        {k}
+                                                    </Badge>
+                                                }
+                                            })
+                                            .collect_view()}
+                                    </div>
+                                }
+                            })
+                    }}
                 </div>
 
                 {move || {

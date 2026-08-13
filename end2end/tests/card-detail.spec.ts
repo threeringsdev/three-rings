@@ -24,6 +24,13 @@ import { AUTH_STATE, hydrated } from "./helpers";
 /// without the projection fallback.
 const DFC_QUERY = "Agadeem's Awakening";
 const SINGLE_FACE_QUERY = "Lightning Bolt";
+/// A transform DFC whose card-level `keywords` (Scryfall's union across both
+/// faces) is non-empty — `Agadeem's Awakening` has none, so it can't tell the
+/// keywords row's own face-gating apart from "never renders". Front face
+/// (`Kruin Outlaw`) prints no keyworded abilities of its own; the back
+/// (`Terror of Kruin Pass`) has First strike + Double strike, and both sit
+/// beside `Transform` in the unioned list every face shares.
+const DFC_KEYWORDS_QUERY = "Kruin Outlaw";
 /// An adventure: two oracle faces, ONE image — the layout class that must NOT
 /// get a flip control. Flippability is keyed off `layout`, not face count
 /// (shared::has_back_face), and this is the card that tells the two apart.
@@ -266,6 +273,37 @@ test.describe("DFC flip", () => {
     await expect(art).toHaveAttribute("src", frontSrc!);
   });
 
+  test("the keywords row follows the swap instead of showing the front's union beside the back's text @fast", async ({
+    page,
+    request,
+  }) => {
+    // `keywords` is card-level (Scryfall's union of both faces' ability
+    // words) and the raw `card_faces` jsonb this page's flip control reads
+    // never carried a per-face equivalent (app/src/ingest/extract.rs,
+    // `ORACLE_FACE_KEYS` excludes it) — so pairing the unioned row with a
+    // flipped-to back face used to show the front's keywords beside the
+    // back's oracle text. The honest-minimal fix pairs the row with the
+    // front face only, and hides it once flipped.
+    const card = await firstCard(request, DFC_KEYWORDS_QUERY);
+    await page.goto(`/cards/${card.oracle_id}`);
+    await hydrated(page);
+
+    const keywords = page.getByTestId("card-keywords");
+    await expect(keywords).toBeVisible();
+    await expect(keywords).toContainText("Transform");
+    await expect(keywords).toContainText("First strike");
+
+    await page.getByTestId("card-flip").click();
+    await expect(page.getByTestId("card-name")).not.toHaveText(card.faces[0].name);
+    // The row is gone entirely on the back face — not relabeled, not still
+    // showing the front's list. Absence, not a stale copy.
+    await expect(keywords).toHaveCount(0);
+
+    // ...and it's back once flipped to the front again.
+    await page.getByTestId("card-flip").click();
+    await expect(page.getByTestId("card-keywords")).toBeVisible();
+  });
+
   test("an adventure gets no flip control — one image, keyed off layout @fast", async ({
     page,
     request,
@@ -317,6 +355,41 @@ test.describe("DFC flip", () => {
     // The click stayed inside the preview: still open, still on the catalog.
     await expect(hover).toBeVisible();
     expect(new URL(page.url()).pathname).toBe("/catalog");
+  });
+
+  test("the hover preview resets to the front on a close and reopen @fast", async ({
+    page,
+    request,
+  }) => {
+    // `PreviewBody` mounts once and stays mounted (the lazy-mount latch, see
+    // its own doc comment) behind `hovered` — so its `face` signal is a
+    // single long-lived piece of state, not one created fresh per open. The
+    // module doc for `PreviewBody` says "each starting at the front"; before
+    // this task's fix the mounted-once instance carried a flip across a
+    // close/reopen instead, contradicting it.
+    const card = await firstCard(request, DFC_QUERY);
+    await page.goto(`/catalog?q=${encodeURIComponent(DFC_QUERY)}&view=list`);
+    await hydrated(page);
+
+    const trigger = page.getByTestId("card-preview-trigger").first();
+    await trigger.hover();
+    const hover = page.locator("[data-testid=card-preview-hover]").first();
+    await expect(hover).toBeVisible();
+    await expect(hover).toContainText(card.faces[0].name);
+
+    await hover.getByTestId("card-flip").click();
+    await expect(hover).toContainText(card.faces[1].name);
+
+    // Close: move well away from both the trigger and the popover, and
+    // outlast the 150 ms close-intent timer.
+    await page.mouse.move(0, 0);
+    await expect(hover).toBeHidden();
+
+    // Reopen the same trigger. The body never unmounted (it never does), but
+    // the face must not have carried the flip through the close.
+    await trigger.hover();
+    await expect(hover).toBeVisible();
+    await expect(hover).toContainText(card.faces[0].name);
   });
 });
 
@@ -461,6 +534,37 @@ test.describe("touch", () => {
     // The flip tap must neither close the sheet nor follow the tile link.
     await expect(sheet).toHaveAttribute("data-state", "open");
     expect(new URL(page.url()).pathname).toBe("/catalog");
+  });
+
+  test("the sheet resets to the front on a close and reopen @fast", async ({
+    page,
+    request,
+  }) => {
+    // Same defect, the sheet's own affordance: `PreviewBody` stays mounted
+    // across a close (the sheet slides out over 300 ms rather than unmount),
+    // so without an explicit reset the flip state would ride along to the
+    // next open too.
+    const card = await firstCard(request, DFC_QUERY);
+    await page.goto(`/catalog?q=${encodeURIComponent(DFC_QUERY)}`);
+    await hydrated(page);
+
+    const trigger = page.getByTestId("card-preview-trigger").first();
+    await trigger.click();
+    const sheet = page.locator("[data-testid=card-preview-sheet][role=dialog]");
+    await expect(sheet).toHaveAttribute("data-state", "open");
+    await expect(sheet).toContainText(card.faces[0].name);
+
+    await sheet.getByTestId("card-flip").click();
+    await expect(sheet).toContainText(card.faces[1].name);
+
+    // Close via Escape (the sheet's own dismissal, same signal a backdrop tap
+    // or the close button would flip) and reopen the same trigger.
+    await page.keyboard.press("Escape");
+    await expect(sheet).toHaveAttribute("data-state", "closed");
+
+    await trigger.click();
+    await expect(sheet).toHaveAttribute("data-state", "open");
+    await expect(sheet).toContainText(card.faces[0].name);
   });
 
   test("a coarse pointer over a row never raises a hover card @fast", async ({
