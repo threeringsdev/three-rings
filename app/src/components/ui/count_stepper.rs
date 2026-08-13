@@ -61,7 +61,17 @@ pub struct StepperCommit {
 /// Reveal classes for the ± buttons: invisible until the stepper itself — or
 /// a `group/row` ancestor (the future collection-view table row) — is hovered
 /// or holds focus.
-const REVEAL: &str = "opacity-0 transition-opacity group-hover/stepper:opacity-100 group-focus-within/stepper:opacity-100 group-hover/row:opacity-100 group-focus-within/row:opacity-100";
+///
+/// `hidden sm:inline-flex` (P6-001): `opacity-0` keeps the box in layout even
+/// while invisible, so the collection table's HERE cell was paying for two
+/// 24 px buttons on every row whether or not they could ever be revealed —
+/// below `sm` there is no hover at all (touch), so they were dead width, not
+/// a dead-but-recoverable affordance. Below `sm` they now leave the layout
+/// entirely; the number itself stays tap-to-edit (`enter_edit`) and the
+/// keyboard ± path is unaffected (`on_keydown` reads focus on the container
+/// div, not button visibility). No functionality lost, only an unusable-below-
+/// `sm` control's footprint.
+const REVEAL: &str = "hidden sm:inline-flex opacity-0 transition-opacity group-hover/stepper:opacity-100 group-focus-within/stepper:opacity-100 group-hover/row:opacity-100 group-focus-within/row:opacity-100";
 
 #[component]
 pub fn CountStepper(
