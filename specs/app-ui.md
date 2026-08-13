@@ -3137,6 +3137,44 @@ with a server-side panel count of 0; full chromium tier **131/131** (8 new, 0
 regressions); Android CDP probe PASS and `android-quick-add-check` CLEAN on the
 live webview.
 
+**(2026-08-13, P6-148) Both minors above are fixed, plus two more in the same
+keystroke loop.** The two the previous review re-checked and left as minors
+turned out to compound with two others once the loop was walked end to end:
+
+- **Escape-with-zero-rows** — `decode`'s `rows == 0` early return covered
+  *every* key including Escape, so a panel open with nothing mounted (an
+  empty query, or a query the catalog has no match for) could only be
+  dismissed by an outside click. Escape is now checked first and
+  unconditionally, before the row-count gate.
+- **Stale count after a failed add** — `add`'s two synchronous early returns
+  (no destination yet; a `Have` on a card with no printing) left `count` set
+  after showing the failure toast, so the chip kept reading `× 4 ⏎` and a
+  later bare ⏎ silently reused the abandoned quantity instead of implying 1.
+  Both paths now reset `count` before returning, mirroring what the success
+  path already did.
+- **History spam** — the post-add `reset` prop's `clear()` commits `q = ""`
+  through the same `commit()` every other `QueryBar` write uses, and
+  `commit`'s `replace = was_searching && !q.is_empty()` is unconditionally
+  `false` once `q` is empty — so *every* add pushed a fresh history entry, and
+  Back walked through one intermediate cleared-query stop per add ever made in
+  the session. `query_bar.rs` did not touch the general rule (still rule 4:
+  refining replaces, starting or ending a search pushes) — the `reset` prop is
+  quick-add's own field (only consumer), so it now bypasses `commit` for a
+  dedicated always-`replace` navigation instead of changing what "ending a
+  search" means generally.
+- **Focus stuck open after Escape** — opening is `focusin`-driven (see the
+  wrapper's `on:focusin` above), so a field Escape left focused could never
+  re-fire that event; reopening needed a click away and back. Escape's close
+  now blurs the field too, client-only (same shape as `catalog::
+  focus_switch_item`).
+
+Unit-extended (`decode` gets an explicit Escape-with-zero-rows case) and
+kill-verified in `quick-add.spec.ts`: each of the four fixes was confirmed red
+against the pre-fix code (`git stash` on the two touched files, one at a time,
+server rebuilt between) before being confirmed green again. Full chromium
+tier run for base-parity triage; no regression outside the suite's known
+baseline.
+
 ### `/my/collections/:id` binder/deck view (2026-07-25)
 
 `app/src/my/collection.rs` — the binder and its deck variant on one page, over a

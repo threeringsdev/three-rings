@@ -176,7 +176,9 @@ pub fn QueryBar(
     on_key: Option<Callback<leptos::ev::KeyboardEvent, bool>>,
     /// Bump this to clear the box *and* commit the empty query, cancelling any
     /// armed debounce. Only the change matters, not the value — see the module
-    /// doc for why writing `text` directly is not enough.
+    /// doc for why writing `text` directly is not enough. Always **replaces**
+    /// the history entry rather than pushing, unlike a manual clear — see
+    /// where this is wired up, below.
     #[prop(optional)]
     reset: Option<RwSignal<u32>>,
 ) -> impl IntoView {
@@ -189,11 +191,12 @@ pub fn QueryBar(
     // The last query *we* put in the URL — see behavior 3 in the module doc.
     let self_pushed = StoredValue::new(url_q.get_untracked());
 
-    let commit = {
+    // Navigate to `q` with an explicit `replace`. `commit` (below) derives
+    // `replace` from the URL; the `reset` effect (further below) pins it to
+    // `true` instead — see that effect's comment and P6-148.
+    let navigate_to = {
         let navigate = navigate.clone();
-        move |q: String| {
-            let was_searching = !url_q.get_untracked().is_empty();
-            let replace = was_searching && !q.is_empty();
+        move |q: String, replace: bool| {
             self_pushed.set_value(q.clone());
             navigate(
                 &to_url.run(q),
@@ -202,6 +205,15 @@ pub fn QueryBar(
                     ..Default::default()
                 },
             );
+        }
+    };
+
+    let commit = {
+        let navigate_to = navigate_to.clone();
+        move |q: String| {
+            let was_searching = !url_q.get_untracked().is_empty();
+            let replace = was_searching && !q.is_empty();
+            navigate_to(q, replace);
         }
     };
 
@@ -269,14 +281,22 @@ pub fn QueryBar(
             commit(String::new());
         }
     };
-    // The caller's imperative reset. `prev.is_some()` skips the mount run, so
+    // The caller's imperative reset — quick-add's own field, after every add.
+    // This is *not* routed through `clear`/`commit`: `commit` prices going
+    // empty as "ending a search" and pushes (P6-086's rule 4), which is right
+    // for the ✕ button but wrong here — an add's clear-and-refetch is
+    // housekeeping, not the user ending anything, and pushing on every add
+    // turned Back into a walk through every add ever made (P6-148). So this
+    // path always replaces instead. `prev.is_some()` skips the mount run, so
     // rendering the box never clears the query a deep link put in the URL.
     if let Some(reset) = reset {
-        let clear = clear.clone();
+        let navigate_to = navigate_to.clone();
         Effect::new(move |prev: Option<u32>| {
             let now = reset.get();
             if prev.is_some_and(|p| p != now) {
-                clear();
+                clear_pending();
+                text.set(String::new());
+                navigate_to(String::new(), true);
             }
             now
         });

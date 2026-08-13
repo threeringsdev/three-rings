@@ -97,8 +97,8 @@ const MAX_COUNT_DIGITS: usize = 2;
 // ------------------------------------------------------- keystroke contract --
 
 /// What one keydown means to the panel. `Pass` hands the key back to the search
-/// box (typing, its own Enter-commits-now shortcut, Escape → the native
-/// popover's close request); everything else the panel owns and swallows.
+/// box (typing, its own Enter-commits-now shortcut); everything else the panel
+/// owns and swallows. Escape is never `Pass` — see [`decode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Action {
     Pass,
@@ -120,19 +120,26 @@ pub(crate) enum Action {
 /// Decode one keystroke.
 ///
 /// `rows` is how many candidates are mounted, which doubles as "is the panel
-/// open" — its items only exist while it is — so a closed panel passes every
-/// key through and the field behaves exactly as it does on `/catalog`.
+/// open" for every key *except* Escape — its items only exist while it is, so
+/// a closed panel passes the rest of the contract through and the field
+/// behaves exactly as it does on `/catalog`. Escape is checked first and
+/// unconditionally, because the panel can be open with zero rows (an empty
+/// query, or a query nothing in the catalog matches) and Escape has to close
+/// it there too — outside-click already does, and there is no reason `esc`
+/// should need candidates on screen when a pointer doesn't (P6-148).
 ///
 /// `⇧⏎` starts count entry; a second `⏎` (with or without shift) commits it, so
 /// the detour is `⇧⏎ + digits + ⏎` as the storyboard's accounting assumes.
 pub(crate) fn decode(key: &str, shift: bool, alt: bool, rows: usize, counting: bool) -> Action {
+    if key == "Escape" {
+        return Action::Cancel;
+    }
     if rows == 0 {
         return Action::Pass;
     }
     match key {
         "ArrowDown" => Action::Next,
         "ArrowUp" => Action::Prev,
-        "Escape" => Action::Cancel,
         "Enter" if shift && !counting => Action::BeginCount,
         "Enter" => Action::Commit { flip: alt },
         "Backspace" if counting => Action::Backspace,
@@ -141,6 +148,25 @@ pub(crate) fn decode(key: &str, shift: bool, alt: bool, rows: usize, counting: b
             _ => Action::Pass,
         },
         _ => Action::Pass,
+    }
+}
+
+/// Blur the field so Escape's close is symmetric with a click outside: opening
+/// is driven by `focusin` (see `QuickAddSurface`'s wrapper), and a field that
+/// keeps focus after Escape can never fire that event again — reopening then
+/// needed a click away and back. Client-only, same shape as
+/// `catalog::focus_switch_item` (P6-148).
+#[allow(unused_variables)]
+fn blur_field(ev: &KeyboardEvent) {
+    #[cfg(feature = "hydrate")]
+    {
+        use leptos::wasm_bindgen::JsCast;
+        if let Some(el) = ev
+            .target()
+            .and_then(|t| t.dyn_into::<leptos::web_sys::HtmlElement>().ok())
+        {
+            let _ = el.blur();
+        }
     }
 }
 
@@ -444,6 +470,9 @@ fn QuickAddSurface(
                 ToastOptions::message("Still loading this collection — try that again.")
                     .kind(ToastKind::Error),
             );
+            // Mirror the success path: a stale count must not survive a failed
+            // add, or a later bare ⏎ silently reuses it (P6-148).
+            count.set(None);
             return;
         };
         // Holdings are per printing, so a card whose oracle row resolved no
@@ -458,6 +487,7 @@ fn QuickAddSurface(
                 ))
                 .kind(ToastKind::Error),
             );
+            count.set(None);
             return;
         }
         let name = card.name.clone();
@@ -534,6 +564,9 @@ fn QuickAddSurface(
                     count.set(None);
                 } else {
                     open.set(false);
+                    // Symmetric with how it opened (`focusin`) — see
+                    // `blur_field`.
+                    blur_field(&ev);
                 }
             }
             Action::Commit { flip } => {
@@ -868,7 +901,9 @@ mod tests {
     fn a_closed_panel_passes_every_key_to_the_search_box() {
         // No mounted candidates *is* "closed" — the items only exist while the
         // panel is open, which is what keeps the field behaving like /catalog's.
-        for key in ["ArrowDown", "ArrowUp", "Enter", "Escape", "a"] {
+        // Escape is not in this list: it closes regardless of row count, so it
+        // is never `Pass` — see the dedicated tests below (P6-148).
+        for key in ["ArrowDown", "ArrowUp", "Enter", "a"] {
             assert_eq!(
                 decode(key, false, false, 0, false),
                 Action::Pass,
@@ -883,6 +918,16 @@ mod tests {
         // the panel second, so `esc esc` gets you out of a half-typed playset.
         assert_eq!(decode("Escape", false, false, 3, false), Action::Cancel);
         assert_eq!(decode("Escape", false, false, 3, true), Action::Cancel);
+    }
+
+    #[test]
+    fn escape_cancels_even_with_zero_candidate_rows() {
+        // The panel can be open with nothing mounted — an empty query, or a
+        // query the catalog has no match for — and Escape has to close it
+        // there too: outside-click already does, and rows == 0 must not make
+        // `esc` the odd one out (P6-148, formerly a known minor).
+        assert_eq!(decode("Escape", false, false, 0, false), Action::Cancel);
+        assert_eq!(decode("Escape", false, false, 0, true), Action::Cancel);
     }
 
     #[test]
