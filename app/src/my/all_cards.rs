@@ -116,7 +116,7 @@ pub(crate) fn my_url(base: &str, q: &str, cursor: Option<&str>) -> String {
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AllCardsPayload {
-    all_cards: Result<shared::AllCardsView, ServerFnError<String>>,
+    all_cards: Result<shared::AllCardsView, ServerFnError<shared::ApiError>>,
 }
 
 /// `/my` — the My-cards landing. Below `md` the drill-down root list the

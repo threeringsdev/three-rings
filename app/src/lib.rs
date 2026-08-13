@@ -233,11 +233,34 @@ pub mod search;
 #[cfg(all(feature = "hosted", debug_assertions))]
 pub mod seed;
 
-/// Map a data-access [`shared::ApiError`] onto a server-fn error. The transport
-/// channel carries the message; richer status semantics are collection-api's.
+/// Map a data-access [`shared::ApiError`] onto a server-fn error.
+///
+/// **P6-083.** This used to flatten every variant onto `ServerError(String)` —
+/// the transport carried only the `Display` message, so a 422 validation
+/// failure and a 500 DB outage arrived on the wire as the same shape, and
+/// every consumer had to re-derive the variant by parsing the message's
+/// `validation:`/`unauthorized:`/… prefix. `ServerFnError<shared::ApiError>`
+/// carries the typed variant itself: `ServerFnError::from` wraps it as
+/// `WrappedServerError`, which the server-fn wire round-trips through
+/// `ApiError`'s `Display`/`FromStr` (`ServerFnErrorEncoding`, text-format,
+/// not serde) — so a consumer can now match on `ApiError::Validation` instead
+/// of a string prefix. See `shared::ApiError`'s `FromStr` impl for the wire
+/// mechanics, and `components::states::describe` for the typed consumer.
+///
+/// **HTTP status is unchanged: still a flat 500.** `server_fn` 0.8.8's
+/// generic HTTP `Res::error_response` hardcodes
+/// `StatusCode::INTERNAL_SERVER_ERROR` for every server-fn error regardless
+/// of variant (`FromServerFnError` has no status hook in this version) — so
+/// mapping `ApiError::http_status` onto the response would need surgery this
+/// task's minimal-churn scope doesn't cover. The typed variant crossing the
+/// wire is this task's win regardless: every consumer here already derives
+/// its own affordances (retryable vs not, sign-in vs banner) from the
+/// variant, not from the transport status code, so a flat 500 was already
+/// meaningless to them. The hosted JSON route (`backend/routes.rs`) is the
+/// channel that carries the real status, unchanged by this task.
 #[cfg(feature = "ssr")]
-fn api_err(e: shared::ApiError) -> ServerFnError<String> {
-    ServerFnError::ServerError(e.to_string())
+fn api_err(e: shared::ApiError) -> ServerFnError<shared::ApiError> {
+    ServerFnError::from(e)
 }
 
 /// Anonymous catalog size — the seam-proving catalog read
@@ -245,7 +268,7 @@ fn api_err(e: shared::ApiError) -> ServerFnError<String> {
 /// the hosted API. Both go through the `CatalogStore` trait, never the DB/HTTP
 /// directly.
 #[server(prefix = "/api", endpoint = "catalog_count")]
-pub async fn catalog_count() -> Result<shared::CatalogCount, ServerFnError<String>> {
+pub async fn catalog_count() -> Result<shared::CatalogCount, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "hosted")]
     {
         use crate::backend::{CatalogStore, HostedBackend};
@@ -290,7 +313,7 @@ pub async fn catalog_count() -> Result<shared::CatalogCount, ServerFnError<Strin
 pub async fn search_catalog(
     q: String,
     cursor: Option<String>,
-) -> Result<shared::SearchResults, ServerFnError<String>> {
+) -> Result<shared::SearchResults, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     let headers = leptos_axum::extract::<axum::http::HeaderMap>()
         .await
@@ -353,7 +376,9 @@ pub async fn search_catalog(
     endpoint = "list_sets",
     input = leptos::server_fn::codec::GetUrl
 )]
-pub async fn list_sets(q: String) -> Result<Vec<shared::SetSummary>, ServerFnError<String>> {
+pub async fn list_sets(
+    q: String,
+) -> Result<Vec<shared::SetSummary>, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     let query = shared::SetQuery {
         q: Some(q),
@@ -403,7 +428,7 @@ pub async fn list_sets(q: String) -> Result<Vec<shared::SetSummary>, ServerFnErr
 )]
 pub async fn card_detail(
     oracle_id: shared::Id,
-) -> Result<shared::CardDetail, ServerFnError<String>> {
+) -> Result<shared::CardDetail, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     let headers = leptos_axum::extract::<axum::http::HeaderMap>()
         .await
@@ -444,7 +469,8 @@ pub async fn card_detail(
 /// `tr_jwt` cookie as `Authorization: Bearer` to the hosted API, which is the
 /// authorization terminus. collection-api builds the UI that consumes this.
 #[server(prefix = "/api", endpoint = "list_collections")]
-pub async fn list_collections() -> Result<Vec<shared::CollectionSummary>, ServerFnError<String>> {
+pub async fn list_collections(
+) -> Result<Vec<shared::CollectionSummary>, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -470,7 +496,7 @@ pub async fn list_collections() -> Result<Vec<shared::CollectionSummary>, Server
     endpoint = "collection_tree",
     input = leptos::server_fn::codec::GetUrl
 )]
-pub async fn collection_tree() -> Result<shared::CollectionTree, ServerFnError<String>> {
+pub async fn collection_tree() -> Result<shared::CollectionTree, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -505,7 +531,7 @@ pub async fn collection_tree() -> Result<shared::CollectionTree, ServerFnError<S
 pub async fn all_cards(
     q: String,
     cursor: Option<String>,
-) -> Result<shared::AllCardsView, ServerFnError<String>> {
+) -> Result<shared::AllCardsView, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -545,7 +571,7 @@ pub async fn collection_view(
     id: shared::Id,
     q: String,
     cursor: Option<String>,
-) -> Result<shared::CollectionView, ServerFnError<String>> {
+) -> Result<shared::CollectionView, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -582,7 +608,7 @@ pub async fn collection_view(
 pub async fn set_holding_quantity(
     holding_id: shared::Id,
     quantity: i32,
-) -> Result<(), ServerFnError<String>> {
+) -> Result<(), ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -630,7 +656,7 @@ pub async fn set_holding_quantity(
 #[server(prefix = "/api", endpoint = "remove_holding")]
 pub async fn remove_holding(
     holding_id: shared::Id,
-) -> Result<shared::MoveReceipt, ServerFnError<String>> {
+) -> Result<shared::MoveReceipt, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -665,7 +691,9 @@ pub async fn remove_holding(
 /// **new** id rather than reviving the dead one — the caller rewires itself
 /// from `restored_holding_id` rather than waiting on an unrelated refetch.
 #[server(prefix = "/api", endpoint = "undo_move")]
-pub async fn undo_move(move_id: shared::Id) -> Result<shared::UndoReceipt, ServerFnError<String>> {
+pub async fn undo_move(
+    move_id: shared::Id,
+) -> Result<shared::UndoReceipt, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -694,7 +722,7 @@ pub async fn undo_move(move_id: shared::Id) -> Result<shared::UndoReceipt, Serve
 pub async fn teardown_collection(
     collection_id: shared::Id,
     to_collection_id: Option<shared::Id>,
-) -> Result<shared::TeardownReceipt, ServerFnError<String>> {
+) -> Result<shared::TeardownReceipt, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -725,7 +753,7 @@ pub async fn create_collection(
     parent_id: Option<shared::Id>,
     kind: shared::CollectionKind,
     name: String,
-) -> Result<shared::CollectionSummary, ServerFnError<String>> {
+) -> Result<shared::CollectionSummary, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -753,7 +781,7 @@ pub async fn create_collection(
 pub async fn rename_collection(
     id: shared::Id,
     name: String,
-) -> Result<shared::CollectionSummary, ServerFnError<String>> {
+) -> Result<shared::CollectionSummary, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -804,7 +832,7 @@ pub async fn delete_collection(
     haves_to: Option<shared::Id>,
     haves_discard: bool,
     wants_to: Option<shared::Id>,
-) -> Result<shared::DeleteCollectionReceipt, ServerFnError<String>> {
+) -> Result<shared::DeleteCollectionReceipt, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -852,7 +880,7 @@ pub async fn delete_collection(
 )]
 pub async fn undo_delete_collection(
     receipt: shared::DeleteCollectionReceipt,
-) -> Result<(), ServerFnError<String>> {
+) -> Result<(), ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -874,7 +902,7 @@ pub async fn undo_delete_collection(
 /// Scalar id in, matching the rest of this adapter's convention; unlike
 /// [`undo_delete_collection`] there is no receipt to carry.
 #[server(prefix = "/api", endpoint = "restore_collection")]
-pub async fn restore_collection(id: shared::Id) -> Result<(), ServerFnError<String>> {
+pub async fn restore_collection(id: shared::Id) -> Result<(), ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -899,8 +927,8 @@ pub async fn restore_collection(id: shared::Id) -> Result<(), ServerFnError<Stri
     endpoint = "recently_deleted",
     input = leptos::server_fn::codec::GetUrl
 )]
-pub async fn recently_deleted() -> Result<Vec<shared::DeletedCollectionRow>, ServerFnError<String>>
-{
+pub async fn recently_deleted(
+) -> Result<Vec<shared::DeletedCollectionRow>, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -924,7 +952,7 @@ pub async fn recently_deleted() -> Result<Vec<shared::DeletedCollectionRow>, Ser
 pub async fn reparent_collection(
     id: shared::Id,
     new_parent_id: Option<shared::Id>,
-) -> Result<(), ServerFnError<String>> {
+) -> Result<(), ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -947,7 +975,7 @@ pub async fn reparent_collection(
 pub async fn reorder_collection(
     id: shared::Id,
     position: f64,
-) -> Result<(), ServerFnError<String>> {
+) -> Result<(), ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -987,7 +1015,8 @@ pub async fn reorder_collection(
 /// fallback entirely — filed as its own task.) See
 /// [`user_id_with_session_fallback`].
 #[cfg(feature = "hosted")]
-async fn collection_backend() -> Result<crate::backend::HostedBackend, ServerFnError<String>> {
+async fn collection_backend(
+) -> Result<crate::backend::HostedBackend, ServerFnError<shared::ApiError>> {
     let headers = leptos_axum::extract::<axum::http::HeaderMap>()
         .await
         .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
@@ -1224,7 +1253,8 @@ mod session_fallback_tests {
 }
 
 #[cfg(all(feature = "native", not(feature = "hosted")))]
-async fn collection_backend() -> Result<crate::backend::NativeBackend, ServerFnError<String>> {
+async fn collection_backend(
+) -> Result<crate::backend::NativeBackend, ServerFnError<shared::ApiError>> {
     use crate::auth::cookies;
     let headers = leptos_axum::extract::<axum::http::HeaderMap>()
         .await
@@ -1285,7 +1315,7 @@ pub async fn quick_add(
     /// mistyped or hostile count can't write an absurd holding through a
     /// one-keystroke surface.
     quantity: u32,
-) -> Result<shared::QuickAddReceipt, ServerFnError<String>> {
+) -> Result<shared::QuickAddReceipt, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -1363,7 +1393,7 @@ pub fn clamp_quick_add_quantity(quantity: u32) -> u32 {
 /// carries a restored holding to rewire anything to — discarded rather than
 /// widening this adapter's own return type for a value no caller here needs.
 #[server(prefix = "/api", endpoint = "undo_quick_add")]
-pub async fn undo_quick_add(move_id: shared::Id) -> Result<(), ServerFnError<String>> {
+pub async fn undo_quick_add(move_id: shared::Id) -> Result<(), ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -1420,7 +1450,7 @@ pub async fn undo_quick_add(move_id: shared::Id) -> Result<(), ServerFnError<Str
 pub async fn move_selection(
     to_collection_id: shared::Id,
     items: Vec<crate::my::move_selection::SelectionItem>,
-) -> Result<crate::my::move_selection::MoveOutcome, ServerFnError<String>> {
+) -> Result<crate::my::move_selection::MoveOutcome, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -1566,7 +1596,9 @@ pub const SELECTION_MOVE_MAX: usize = 100;
     endpoint = "undo_selection_move",
     input = leptos::server_fn::codec::Json
 )]
-pub async fn undo_selection_move(move_ids: Vec<shared::Id>) -> Result<(), ServerFnError<String>> {
+pub async fn undo_selection_move(
+    move_ids: Vec<shared::Id>,
+) -> Result<(), ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -1597,7 +1629,7 @@ pub async fn undo_selection_move(move_ids: Vec<shared::Id>) -> Result<(), Server
 )]
 pub async fn selection_destinations(
     oracle_ids: Vec<shared::Id>,
-) -> Result<Vec<shared::SuggestedDestination>, ServerFnError<String>> {
+) -> Result<Vec<shared::SuggestedDestination>, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -1636,7 +1668,7 @@ pub async fn selection_destinations(
 )]
 pub async fn collection_needs(
     collection_id: shared::Id,
-) -> Result<shared::NeedsView, ServerFnError<String>> {
+) -> Result<shared::NeedsView, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -1663,7 +1695,7 @@ pub async fn collection_needs(
     endpoint = "shopping_list_view",
     input = leptos::server_fn::codec::GetUrl
 )]
-pub async fn shopping_list_view() -> Result<shared::ShoppingList, ServerFnError<String>> {
+pub async fn shopping_list_view() -> Result<shared::ShoppingList, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -1709,7 +1741,7 @@ pub async fn shopping_list_view() -> Result<shared::ShoppingList, ServerFnError<
 pub async fn pull_needs(
     to_collection_id: shared::Id,
     items: Vec<crate::my::needs::PullItem>,
-) -> Result<crate::my::needs::PullOutcome, ServerFnError<String>> {
+) -> Result<crate::my::needs::PullOutcome, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;

@@ -1390,6 +1390,22 @@ carries no known prefix — so the `Transport` default is right for them. `Failu
 split from `Request` because `ApiError::NotFound` carries a bare noun across ~21 call sites,
 so appending the detail produced *"Couldn't load this collection: collection"*.
 
+**Amendment (2026-08-12, P6-083): typed dispatch, prefixes now the fallback.**
+The server-fn wire used to carry only `ApiError`'s flattened `Display` string
+(`ServerFnError<String>`), so the six `Display` prefixes below were the *only*
+signal a consumer had — `describe`/`classify` had to parse them out of the
+message. The wire now carries the typed `shared::ApiError` variant itself
+(`ServerFnError<shared::ApiError>`, via `crate::api_err`), and
+`components::states::describe` matches the variant directly
+(`Failure::of_api_error`) before ever touching a string. The `classify(&str)`
+prefix table described in this section is retired to a **fallback** — it
+still fires, unchanged, for the `ServerFnError` variants that never carried a
+typed `ApiError` (a dropped fetch, a deserialization failure), which is
+exactly the case its `Transport` default already covered. No banner's message
+or affordances changed; only what decides them did. See
+`specs/phase-6-probes/batch-H-leptos.md`'s P6-083 Resolution note for the wire
+mechanics and the serde landmine the e2e run caught along the way.
+
 **The dishonest states found, which were the point of the task:**
 
 - **`unwrap_or_default()` on the collection list in *two* shipped pickers** — a failed fetch
@@ -3532,6 +3548,14 @@ destination picker, and mobile filter sheet are their own queued tasks.
     consumes; the Leptos server-fn channel is UI-internal and reads the
     message. Making it status-accurate means a custom error type across every
     server fn — filed as a follow-up task, not smuggled into this one.
+    **Update (2026-08-12, P6-083):** the follow-up landed — `api_err` now
+    returns `ServerFnError<shared::ApiError>` so the typed variant crosses
+    this channel, and every consumer here classifies on the variant instead
+    of the message prefix. The HTTP status itself is still a flat 500
+    (`server_fn` 0.8.8 has no per-variant status hook without deeper
+    surgery, confirmed while implementing) — this dispute's literal question
+    stands unchanged, but the status was never what any consumer here read
+    on this channel, so it stopped mattering.
 - **E2E mutation pass — 11/11 kills**, and it found two tests that passed
   vacuously before it: the lazy-image assertion was wrapped in
   `if (await img.count())` (a page rendering no images at all would have

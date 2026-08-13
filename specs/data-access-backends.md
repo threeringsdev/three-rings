@@ -223,3 +223,33 @@ Selected at compile time via the cargo feature split, so the native binary conta
     case is a no-round-trip `Unauthorized`). The re-mint/retry network path can't
     run in the web-dev container (it needs a live hosted + auth deployment); it is
     exercised on-device with the native shells.
+
+- 2026-08-12 — **The server-fn channel stopped flattening `ApiError` to a
+  string (P6-083).** `app::api_err` mapped every `shared::ApiError` variant
+  onto `ServerFnError::ServerError(e.to_string())` — one arm, no match — so
+  the Leptos server-fn wire carried only the `Display` message, and every UI
+  consumer had to re-derive the variant by parsing its `validation:`/
+  `unauthorized:`/… prefix back out. `api_err` now returns
+  `ServerFnError<shared::ApiError>` (`ServerFnError::from(e)`), so the typed
+  variant crosses this channel too; `components::states::describe` (the
+  shared `ErrorNote` classifier) matches it directly, with the old prefix
+  table kept only as the fallback for `ServerFnError` variants that never
+  carried a typed `ApiError` (a dropped fetch, a deserialization failure).
+  Full writeup, the ~30-signature scope, and the serde landmine the e2e run
+  caught: `specs/phase-6-probes/batch-H-leptos.md`'s P6-083 Resolution note;
+  UI-facing amendment: `specs/app-ui.md`'s "Empty / error / loading arms"
+  section.
+  - **This channel's HTTP status is still flat 500, confirmed structural.**
+    `server_fn` 0.8.8's generic `Res::error_response` hardcodes `500` for
+    every server-fn error regardless of variant — `FromServerFnError` has no
+    status hook in this version, so mapping `ApiError::http_status` onto it
+    needs surgery this task didn't do. Unchanged from the design above: the
+    JSON channel (`backend/routes.rs`, native's actual transport) is still
+    the one that carries the real status; this section's "the Leptos
+    server-fn channel is UI-internal" framing holds, now typed rather than
+    stringly.
+  - **Native (`backend/native.rs`) needed no change.** `ApiError::from_wire`
+    already reconstructs the exact variant from the hosted JSON route's
+    status + body — it was already lossless. This task's change means that
+    already-correct value now survives one hop further (through `api_err`
+    into the server-fn response) rather than being flattened there.

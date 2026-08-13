@@ -309,14 +309,18 @@ pub fn CollectionPage() -> impl IntoView {
         },
         |(id, q, cursor, _revision, _tree_content_revision)| async move {
             let id = Id::parse_str(&id).map_err(|_| {
-                // `validation:` deliberately — the wire vocabulary is what the
-                // UI classifies on, and a malformed id in the URL is a *request*
-                // failure that will never resolve. Unprefixed it read as a
-                // transport failure and the error arm offered a "Try again" that
-                // re-parsed the same broken string forever.
-                ServerFnError::<String>::ServerError(
-                    "validation: that is not a collection id".into(),
-                )
+                // `ApiError::Validation`, typed (P6-083) — a malformed id in the
+                // URL is a *request* failure that will never resolve. Read as a
+                // transport failure it used to offer a "Try again" that
+                // re-parsed the same broken string forever; `ServerFnError::from`
+                // (not `crate::api_err`, which is `ssr`-only and this fetcher
+                // also runs client-side) puts it on the same typed wire every
+                // `collection_view` failure already carries, instead of
+                // hand-rolling a `validation:` prefix no consumer has to parse
+                // anymore.
+                ServerFnError::from(shared::ApiError::Validation(
+                    "that is not a collection id".into(),
+                ))
             })?;
             let cursor = (!cursor.is_empty()).then_some(cursor);
             Ok(CollectionViewPayload {
@@ -577,7 +581,7 @@ pub fn CollectionPage() -> impl IntoView {
 /// (anonymous, or the read failed). Every consumer here degrades to "no
 /// breadcrumb / no folder counts" rather than failing the page.
 pub(crate) fn assembled_roots(
-    dto: Option<Result<shared::CollectionTree, ServerFnError<String>>>,
+    dto: Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>,
 ) -> Vec<TreeNode> {
     match dto {
         Some(Ok(t)) => assemble(t).roots,
@@ -587,7 +591,7 @@ pub(crate) fn assembled_roots(
 
 /// The human-facing half of a server-fn error (the transport only carries
 /// `ApiError`'s `Display` string).
-pub(crate) fn message_of(e: &ServerFnError<String>) -> String {
+pub(crate) fn message_of(e: &ServerFnError<shared::ApiError>) -> String {
     match e {
         ServerFnError::ServerError(msg) => msg.clone(),
         other => other.to_string(),
@@ -607,8 +611,8 @@ pub(crate) fn message_of(e: &ServerFnError<String>) -> String {
 /// is offered on top of it when there is a cursor to drop.
 #[component]
 fn LoadError(
-    e: ServerFnError<String>,
-    view_res: Resource<Result<CollectionViewPayload, ServerFnError<String>>>,
+    e: ServerFnError<shared::ApiError>,
+    view_res: Resource<Result<CollectionViewPayload, ServerFnError<shared::ApiError>>>,
     paged: Memo<bool>,
     url_id: Memo<String>,
     url_q: Memo<String>,
@@ -837,8 +841,8 @@ fn CollectionHeader(
     view: CollectionView,
     here_delta: RwSignal<i32>,
     teardown_open: RwSignal<bool>,
-    view_res: Resource<Result<CollectionViewPayload, ServerFnError<String>>>,
-    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
+    view_res: Resource<Result<CollectionViewPayload, ServerFnError<shared::ApiError>>>,
+    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
     /// The tree's naming and shape for this collection, published by the page
     /// (see [`TreeFacts`]). The `<h1>` and the kebab's snapshot read it because
     /// a rename no longer refetches `view`.
@@ -1160,7 +1164,7 @@ pub(crate) fn HeaderKebab(
 fn CollectionPath(
     id: Id,
     name: String,
-    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
+    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
 ) -> impl IntoView {
     let name = StoredValue::new(name);
     view! {
@@ -1524,7 +1528,7 @@ fn CollectionBody(
     searching: bool,
     paged: Memo<bool>,
     here_delta: RwSignal<i32>,
-    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
+    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
     tree_facts: RwSignal<Option<TreeFacts>>,
 ) -> impl IntoView {
     let cards_empty = view.cards.is_empty();
@@ -1574,7 +1578,7 @@ fn CollectionTable(
     view: CollectionView,
     folders: Memo<Vec<shared::CollectionSummary>>,
     here_delta: RwSignal<i32>,
-    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
+    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
 ) -> impl IntoView {
     let is_deck = view.collection.kind == CollectionKind::Deck;
     let collection_id = view.collection.id;
@@ -1695,7 +1699,7 @@ fn CollectionTable(
 #[component]
 fn FolderTableRow(
     folder: shared::CollectionSummary,
-    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
+    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
 ) -> impl IntoView {
     let id = folder.id;
     view! {
@@ -2247,8 +2251,8 @@ fn Pager(next: Option<String>, paged: Memo<bool>, q: String, id: String) -> impl
 fn TeardownDialog(
     open: RwSignal<bool>,
     collection_id: Id,
-    view_res: Resource<Result<CollectionViewPayload, ServerFnError<String>>>,
-    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
+    view_res: Resource<Result<CollectionViewPayload, ServerFnError<shared::ApiError>>>,
+    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
 ) -> impl IntoView {
     let toast = expect_context::<ToastHandle>();
     // A teardown is N ledger rows and nothing else records them, so without this

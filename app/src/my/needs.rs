@@ -482,14 +482,18 @@ pub fn NeedsPage() -> impl IntoView {
         move || (url_id.get(), revision.get(), manage.revision.get()),
         |(id, _revision, _tree_revision)| async move {
             let id = Id::parse_str(&id).map_err(|_| {
-                // `validation:` deliberately — the wire vocabulary is what the
-                // UI classifies on, and a malformed id in the URL is a *request*
-                // failure that will never resolve. Unprefixed it read as a
-                // transport failure and the error arm offered a "Try again" that
-                // re-parsed the same broken string forever.
-                ServerFnError::<String>::ServerError(
-                    "validation: that is not a collection id".into(),
-                )
+                // `ApiError::Validation`, typed (P6-083) — a malformed id in the
+                // URL is a *request* failure that will never resolve. Read as a
+                // transport failure it used to offer a "Try again" that
+                // re-parsed the same broken string forever; `ServerFnError::from`
+                // (not `crate::api_err`, which is `ssr`-only and this fetcher
+                // also runs client-side) puts it on the same typed wire every
+                // `collection_needs` failure already carries, instead of
+                // hand-rolling a `validation:` prefix no consumer has to parse
+                // anymore.
+                ServerFnError::from(shared::ApiError::Validation(
+                    "that is not a collection id".into(),
+                ))
             })?;
             crate::collection_needs(id).await
         },
@@ -551,7 +555,7 @@ pub fn NeedsPage() -> impl IntoView {
 #[component]
 fn NeedsHeader(
     url_id: Memo<String>,
-    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
+    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
 ) -> impl IntoView {
     view! {
         <div class="flex flex-col gap-1">
@@ -880,8 +884,8 @@ fn ElsewhereRow(row: NeedRow, collection_id: Id, pending: RwSignal<bool>) -> imp
 #[component]
 fn PickListPanel(
     url_id: Memo<String>,
-    needs_res: Resource<Result<NeedsView, ServerFnError<String>>>,
-    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
+    needs_res: Resource<Result<NeedsView, ServerFnError<shared::ApiError>>>,
+    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
     picks: RwSignal<Option<Vec<PickGroup>>>,
     done: RwSignal<HashSet<String>>,
 ) -> impl IntoView {
@@ -941,7 +945,7 @@ fn PickListPanel(
 fn PickGroupView(
     group: PickGroup,
     collection_id: Id,
-    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
+    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
     done: RwSignal<HashSet<String>>,
 ) -> impl IntoView {
     let name = group.collection_name.clone();
@@ -970,7 +974,7 @@ fn PickGroupView(
 fn PickRowView(
     row: PickRow,
     collection_id: Id,
-    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
+    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
     done: RwSignal<HashSet<String>>,
 ) -> impl IntoView {
     let toast = expect_context::<ToastHandle>();
@@ -1107,7 +1111,7 @@ fn PickRowView(
 /// otherwise have tipped it over.
 #[derive(Clone, Copy)]
 struct ReportContext {
-    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
+    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
     revision: Option<super::move_selection::HoldingsRevision>,
     last_move: Option<crate::components::palette::LastMoveState>,
 }

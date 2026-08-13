@@ -624,7 +624,7 @@ fn PresentSection(present: Signal<Vec<PresentMatch>>) -> impl IntoView {
 
 #[component]
 fn CandidateSection(
-    candidates: Resource<Result<QuickAddPayload, ServerFnError<String>>>,
+    candidates: Resource<Result<QuickAddPayload, ServerFnError<shared::ApiError>>>,
     present: Signal<Vec<PresentMatch>>,
     url_q: Memo<String>,
     default_kind: Signal<QuickAddKind>,

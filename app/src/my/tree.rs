@@ -34,7 +34,7 @@ use crate::components::ui::sonner::ToastHandle;
 /// every public page view.
 #[derive(Clone, Copy)]
 pub struct CollectionTreeResource(
-    pub Resource<Option<Result<shared::CollectionTree, ServerFnError<String>>>>,
+    pub Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
 );
 
 pub fn provide_collection_tree() {
@@ -213,7 +213,7 @@ pub fn CollectionTreeNav() -> impl IntoView {
 /// the ones that will never clear, and the root list offered none for any failure
 /// including the ones a second attempt fixes. Two consumers of one resource
 /// cannot honestly hold different beliefs about whether it can be retried.
-pub fn tree_retryable(e: &ServerFnError<String>) -> bool {
+pub fn tree_retryable(e: &ServerFnError<shared::ApiError>) -> bool {
     crate::components::states::describe(e).0.retryable()
 }
 
@@ -797,7 +797,12 @@ mod tests {
     /// is what the root list shipped with).
     #[test]
     fn tree_retryable_follows_the_shared_classifier() {
-        let e = |raw: &str| ServerFnError::<String>::ServerError(raw.into());
+        // The string-fallback shape (see `states::describe`'s P6-083 doc): a
+        // literal `ServerFnError::ServerError`, not the typed
+        // `WrappedServerError(ApiError)` a real `crate::api_err` read
+        // produces, but `classify`'s prefix table is exercised identically
+        // either way.
+        let e = |raw: &str| ServerFnError::<shared::ApiError>::ServerError(raw.into());
         // An unreachable backend — the case a second attempt is for.
         assert!(tree_retryable(&e("upstream: neon unreachable")));
         // An expired session: the fix is a sign-in, and a retry 401s again.

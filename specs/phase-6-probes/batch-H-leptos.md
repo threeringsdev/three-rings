@@ -259,3 +259,82 @@ itself is trivial and the cost is the type plumbing.
 surfaces as `Validation`, and this channel then presents it as a 500) — same
 channel, different symptom; `P6-043` gets cheaper once this lands.
 **blocked-by:** none.
+
+**Resolution (2026-08-12).** `api_err` now returns
+`ServerFnError<shared::ApiError>` (`ServerFnError::from(e)`, a `WrappedServerError`)
+instead of flattening to `ServerError(e.to_string())` — same name and
+signature, so all ~40 `.map_err(api_err)` call sites (the probe's count of 39
+undercounted by one — `undo_selection_move`'s batch-index remap at
+`lib.rs:1526` also routes through it) needed no edits. `shared::ApiError`
+already carried `Serialize`/`Deserialize`; it needed a new `FromStr` impl
+(the left inverse of its existing `Display`) because the server-fn wire
+round-trips a custom error's `CustErr` through `Display`/`FromStr` text
+(`server_fn::error::ServerFnErrorEncoding`), not serde. The ~30 server-fn
+signatures in `lib.rs` (plus the two `collection_backend` helpers) changed
+their return type from `ServerFnError<String>` to
+`ServerFnError<shared::ApiError>`; every downstream `Resource`/struct-field
+type mirroring one of those signatures (catalog, cards, my/collection,
+my/needs, my/all_cards, my/tree, my/tree_manage, components/quick_add,
+catalog/destination, components/states, bench/states) changed the same way.
+`account.rs`/`shell.rs` (the Better-Auth session flow, never `ApiError`-typed)
+were untouched.
+
+**HTTP status is still a flat 500 on this channel — confirmed unfixable
+without surgery, exactly as sized.** `server_fn` 0.8.8's generic
+`Res::error_response` (used by the axum `Response<Body>` impl) hardcodes
+`StatusCode::INTERNAL_SERVER_ERROR` for every server-fn error; `FromServerFnError`
+has no status hook in this version. The typed variant crossing the wire is
+the win regardless — every consumer here derives its affordances from the
+`ApiError` variant, not the transport status, so the flat 500 was already
+inert to them. `backend/routes.rs`'s JSON channel (still the one with real
+status) is unchanged.
+
+**Consumers: typed dispatch first, string fallback second** —
+`components/states.rs::describe` (the shared `ErrorNote`/`Failure` classifier
+every write surface renders through) now matches `WrappedServerError(ApiError)`
+directly via a new `Failure::of_api_error`, falling back to the existing
+`classify(&str)` prefix table only for `ServerFnError` variants that never
+carried a typed `ApiError` (a dropped fetch, a deserialization failure).
+`catalog.rs::describe_error`, `my/tree.rs::tree_retryable`, `cards.rs::classify`
+all delegate into it unchanged in shape. Two hand-rolled `validation:`-prefix
+constructions (`my/collection.rs`, `my/needs.rs` — a malformed collection id
+parsed out of the URL) now build `ServerFnError::from(shared::ApiError::Validation(…))`
+instead of a string prefix — the corrupt-cursor-shaped case the probe's
+acceptance sketch names, done as typed dispatch rather than a string a
+consumer has to parse.
+
+**One real landmine found and fixed, not by inspection but by the e2e
+regression run:** `ApiError`'s `#[serde(tag = "code")]` (internally tagged)
+had never actually been exercised by `serde_json` before this task —
+`to_wire()`/`from_wire()` hand-build/parse `ErrorBody` and never serialize the
+enum itself. The moment `ServerFnError<ApiError>` made `leptos_server`'s
+resource serialization embed an `ApiError` value directly (for the
+SSR→hydration `__RESOLVED_RESOURCES` handoff), it panicked server-side —
+`serde_json` cannot merge an internal tag into a newtype variant that
+serializes to a bare JSON string (`ApiError::Validation(String)`), so any
+`/catalog` request producing a validation error 500'd the whole HTTP
+response (`net::ERR_EMPTY_RESPONSE`) instead of rendering the banner. Fixed by
+switching to adjacent tagging (`#[serde(tag = "code", content = "message")]`),
+which sidesteps the merge requirement entirely; pinned by a new
+`serde_json` round-trip test in `shared/src/lib.rs` alongside the
+`Display`/`FromStr` one. Caught by `end2end/tests/catalog.spec.ts`'s existing
+"a grammar error renders inline" and "a corrupt cursor renders an error with
+a way back" tests — both green before this task (the old channel never
+serialized `ApiError` directly) and both the exact reproduction once it did.
+
+**Native channel: already lossless, unify not needed.** `backend/native.rs`
+already reconstructs a full `ApiError` via `ApiError::from_wire(status, body)`
+off the hosted JSON route's real status + body — the native backend was
+already as accurate as the wire allows. This task's change means that
+already-correct `ApiError` now survives one hop further (through `api_err`
+into the server-fn response) instead of being flattened there; no edit to
+`native.rs` was needed or made.
+
+**Verification:** `cargo test -p shared` (round-trip both wire shapes — a new
+`Display`/`FromStr` test and a new `serde_json` test, one per `ApiError`
+variant) and `cargo test -p app --features hosted` (a new typed-vs-string
+`describe` test in `components/states.rs`) both green; fmt/clippy (workspace,
+wasm, native-backend, both component-bench lines) green; `cargo build -p
+three_rings` green. `end2end/tests/catalog.spec.ts` `@fast` (32/32) and
+`end2end/tests/states.spec.ts` `@fast` (11/11) green post-fix — including the
+two tests that caught the serde landmine above.
