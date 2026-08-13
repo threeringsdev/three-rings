@@ -240,6 +240,43 @@ pub fn is_palette_chord(key: &str, meta: bool, ctrl: bool, mac: bool) -> bool {
     }
 }
 
+/// What the chord should do to `open`, given the palette's own state and the
+/// shared [`super::ui::overlay_stack`] — `None` means "swallow the chord,
+/// change nothing" (P6-149).
+///
+/// Before this gate the handler toggled unconditionally, so ⌘K while a tree
+/// dialog (create/rename/delete/move) was open stacked the palette on top of
+/// it instead of respecting the overlay already there. `CommandDialog` wraps
+/// the vendored `Dialog`, so the palette itself pushes/pops [`PALETTE_ID`] on
+/// that same stack — the gate only has to read it, not track a second copy.
+///
+/// - Already open: close, but only while the palette is still the *topmost*
+///   overlay. If something else somehow opened above it, ⌘K leaves that
+///   overlay alone rather than yanking the palette out from under it — the
+///   same "topmost only" rule Escape and Tab already follow in `dialog.rs`.
+/// - Closed: open only when the stack is empty. A non-empty stack means some
+///   other overlay (a tree dialog, a `Sheet`, a `Popover`) is showing, and
+///   this is exactly the stacking bug — opening on top of it is what this
+///   fix forbids. **Known gap, recorded rather than silently worked around:**
+///   the quick-add panel (`quick_add.rs`) is deliberately *not* built on
+///   `Dialog`/`Popover` (its own module doc explains why — light-dismiss and
+///   same-page-navigation bugs in the native Popover API) and its `open`
+///   signal is private to `QuickAddPanel`, mounted per collection page with
+///   no context provider reaching the shell-level palette. It is therefore
+///   invisible to this stack and to this gate; ⌘K over an open quick-add
+///   panel still stacks the palette on top of it.
+pub fn palette_chord_target(
+    currently_open: bool,
+    palette_is_top: bool,
+    stack_is_empty: bool,
+) -> Option<bool> {
+    if currently_open {
+        palette_is_top.then_some(false)
+    } else {
+        stack_is_empty.then_some(true)
+    }
+}
+
 // ---------------------------------------------------------------- the index --
 
 /// A place the palette can jump to. The key is what persists in the recent
@@ -821,13 +858,26 @@ fn PaletteBody() -> impl IntoView {
 
     // The chord. `prevent_default` matters on Windows/Linux, where Ctrl+K is
     // the browser's own address-bar search.
+    //
+    // The open/close decision is gated through `palette_chord_target` (P6-149)
+    // rather than an unconditional toggle: ⌘K over an already-open tree
+    // dialog, sheet or popover must leave it alone instead of stacking the
+    // palette on top. See that function's doc for the rule and its known gap
+    // (the quick-add panel is not overlay-stack-tracked).
     #[cfg(feature = "hydrate")]
     {
         let mac = is_mac();
         let handle = window_event_listener(leptos::ev::keydown, move |ev| {
             if is_palette_chord(&ev.key(), ev.meta_key(), ev.ctrl_key(), mac) {
                 ev.prevent_default();
-                open.update(|o| *o = !*o);
+                let target = palette_chord_target(
+                    open.get_untracked(),
+                    super::ui::overlay_stack::is_top(PALETTE_ID),
+                    super::ui::overlay_stack::is_empty(),
+                );
+                if let Some(next) = target {
+                    open.set(next);
+                }
             }
         });
         on_cleanup(move || handle.remove());
@@ -1389,6 +1439,27 @@ mod tests {
         ] {
             assert!(!is_palette_chord("/", meta, ctrl, mac));
         }
+    }
+
+    // -------------------------------------------------- chord vs overlays --
+
+    #[test]
+    fn a_closed_palette_opens_only_onto_an_empty_stack() {
+        // Nothing else open: ⌘K opens it.
+        assert_eq!(palette_chord_target(false, false, true), Some(true));
+        // Some other overlay (a tree dialog, a sheet, a popover) is open:
+        // the base bug this task fixes — ⌘K must not stack on top of it.
+        assert_eq!(palette_chord_target(false, false, false), None);
+    }
+
+    #[test]
+    fn an_open_palette_closes_only_while_it_is_still_topmost() {
+        // The ordinary toggle-to-close case.
+        assert_eq!(palette_chord_target(true, true, false), Some(false));
+        // Something else opened above it (edge case, not reachable through
+        // any UI today): leave the palette alone rather than closing out
+        // from under whatever is actually on top.
+        assert_eq!(palette_chord_target(true, false, false), None);
     }
 
     // ---------------------------------------------------------- last move --

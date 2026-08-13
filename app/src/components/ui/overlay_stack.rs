@@ -32,6 +32,13 @@ mod imp {
     pub fn is_top(id: &str) -> bool {
         STACK.with(|s| s.borrow().last().map(|x| x == id).unwrap_or(false))
     }
+
+    /// Is nothing on the stack at all? (⌘K gate — P6-149: distinct from
+    /// `is_top`, which a *closed* palette can never satisfy since it has
+    /// already removed its own id.)
+    pub fn is_empty() -> bool {
+        STACK.with(|s| s.borrow().is_empty())
+    }
 }
 
 #[cfg(not(feature = "hydrate"))]
@@ -41,6 +48,9 @@ mod imp {
     pub fn is_top(_id: &str) -> bool {
         false
     }
+    pub fn is_empty() -> bool {
+        true
+    }
 }
 
-pub use imp::{is_top, push, remove};
+pub use imp::{is_empty, is_top, push, remove};
