@@ -1610,7 +1610,10 @@ impl CollectionStore for HostedBackend {
         )
         .await?;
         tx.commit().await.map_err(upstream)?;
-        Ok(MoveReceipt { move_id })
+        Ok(MoveReceipt {
+            move_id,
+            quantity: req.quantity,
+        })
     }
 
     async fn move_batch(&self, req: BatchMove) -> ApiResult<Vec<MoveReceipt>> {
@@ -1641,7 +1644,10 @@ impl CollectionStore for HostedBackend {
             )
             .await
             .map_err(|e| at_item(i, e))?;
-            receipts.push(MoveReceipt { move_id });
+            receipts.push(MoveReceipt {
+                move_id,
+                quantity: item.quantity,
+            });
         }
         tx.commit().await.map_err(upstream)?;
         Ok(receipts)
@@ -1699,7 +1705,7 @@ impl CollectionStore for HostedBackend {
         )
         .await?;
         tx.commit().await.map_err(upstream)?;
-        Ok(MoveReceipt { move_id })
+        Ok(MoveReceipt { move_id, quantity })
     }
 
     async fn undo_move(&self, move_id: Id) -> ApiResult<UndoReceipt> {
@@ -1730,16 +1736,17 @@ impl CollectionStore for HostedBackend {
     async fn undo_last_move(&self) -> ApiResult<Option<MoveReceipt>> {
         let user_id = self.session_id()?;
         let mut tx = self.scoped_tx().await?;
-        let last: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM moves WHERE undone_at IS NULL ORDER BY created_at DESC LIMIT 1",
+        let last: Option<(Uuid, i32)> = sqlx::query_as(
+            "SELECT id, quantity FROM moves WHERE undone_at IS NULL \
+             ORDER BY created_at DESC LIMIT 1",
         )
         .fetch_optional(&mut *tx)
         .await
         .map_err(upstream)?;
         let receipt = match last {
-            Some((move_id,)) => {
+            Some((move_id, quantity)) => {
                 undo_one(&mut tx, user_id, move_id).await?;
-                Some(MoveReceipt { move_id })
+                Some(MoveReceipt { move_id, quantity })
             }
             None => None,
         };

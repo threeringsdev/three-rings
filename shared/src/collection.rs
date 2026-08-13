@@ -443,10 +443,21 @@ pub struct HoldingMove {
     pub quantity: Option<i32>,
 }
 
-/// The id of a created move — returned so the toast can offer Undo.
+/// A created move — returned so the toast can offer Undo and report what
+/// actually happened.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MoveReceipt {
     pub move_id: Id,
+    /// Copies the move actually carried — the ledger row's own quantity, not
+    /// whatever the caller asked to move. For most callers (`move_cards`,
+    /// `move_batch`) the two are the same number, since the request quantity
+    /// there is validated before the write. `move_holding`'s removal path is
+    /// the exception this field exists for: `HoldingMove.quantity = None`
+    /// resolves to the *whole stack*, read from the row inside the write
+    /// transaction, and a caller building a toast from a rendered count would
+    /// otherwise report a stale number if the stack changed between the page
+    /// render and the click.
+    pub quantity: i32,
 }
 
 /// What undoing a move restores — the id of the holding row the reversed

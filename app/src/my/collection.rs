@@ -2071,16 +2071,28 @@ fn HereCount(
                 return;
             };
             match crate::remove_holding(id).await {
-                Ok(move_id) => {
+                Ok(receipt) => {
                     // The view is deliberately *not* refetched here: it would
                     // unmount this row and take the Undo below with it. The
                     // sidebar badges are a different read, so they refresh.
                     tree.refetch();
-                    crate::components::palette::note_last_move(last_move, vec![move_id]);
-                    let copies_label = if copies == 1 {
+                    crate::components::palette::note_last_move(last_move, vec![receipt.move_id]);
+                    // From the receipt, not the rendered `copies` this
+                    // callback was passed: the removal takes the *whole
+                    // stack*, and if it grew in another tab since this row
+                    // last rendered, `copies` (the stepper's pre-commit
+                    // value) undercounts what the server actually removed.
+                    // The receipt's quantity is read off the holding inside
+                    // the write transaction, so it is the toast's only
+                    // trustworthy source for a destructive action. Named
+                    // `removed_qty`, not `removed`, so it cannot be confused
+                    // with the `removed: RwSignal<bool>` prop this closure
+                    // already closes over.
+                    let removed_qty = receipt.quantity;
+                    let copies_label = if removed_qty == 1 {
                         "1 copy".to_string()
                     } else {
-                        format!("{copies} copies")
+                        format!("{removed_qty} copies")
                     };
                     toast.show(
                         ToastOptions::message(format!(
@@ -2090,7 +2102,7 @@ fn HereCount(
                         .kind(ToastKind::Success)
                         .action(
                             "Undo",
-                            Callback::new(move |()| undo_removal(move_id, copies)),
+                            Callback::new(move |()| undo_removal(receipt.move_id, removed_qty)),
                         ),
                     );
                 }

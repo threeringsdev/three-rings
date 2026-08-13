@@ -388,9 +388,23 @@ test("@fast a stale count-change toast's Undo does nothing once the row has been
     // Change the count first. Its own commit toast carries an Undo that would
     // normally re-commit `3 → 1`'s reversal — and it is still on screen (its
     // 5s auto-dismiss has not fired) when the row is removed a moment later.
+    //
+    // Waited out explicitly (P6-116): the stepper's own "3 → 1" toast is
+    // optimistic and appears before `set_holding_quantity` round-trips, so
+    // without this wait the removal below could race it to the server —
+    // `remove_holding` reading the *pre-edit* quantity (3) if its write lands
+    // first. That race used to be invisible here because the old toast text
+    // came from the rendered count, not the server's receipt; now that the
+    // removal toast reports what the server actually removed (below), this
+    // test needs the edit to have actually landed before it fires the
+    // removal, or it is asserting against an outcome it cannot control.
+    const edited = page.waitForResponse(
+      (r) => r.url().includes("/api/set_holding_quantity") && r.status() === 200,
+    );
     await row.locator(STEPPER_VALUE).click();
     await row.locator(STEPPER_INPUT).fill("1");
     await row.locator(STEPPER_INPUT).press("Enter");
+    await edited;
     const staleToast = page.locator(TOAST, { hasText: `${card.name}: 3 → 1` });
     await expect(staleToast).toBeVisible();
 
@@ -469,6 +483,73 @@ test("@fast a stale count-change toast's Undo does nothing once the row has been
 // the database rather than waiting for a reload" assertions above (the
 // *eventual* consistency of the rewired id) and by the unit-level type
 // threading in `shared::UndoReceipt` / `hosted::undo_one`.
+
+// ------------------------------ P6-116: the toast reports what was removed ---
+//
+// `remove_holding` deliberately takes the *whole stack* (`HoldingMove.quantity
+// = None`, see the module the server fn lives in) rather than a
+// client-supplied count, because a rendered row can be stale by the time the
+// click lands. Until this task the toast built its text from that same stale
+// rendered count (the stepper's pre-commit value) instead of from the
+// server's receipt — so a stack that grew in another tab between page load
+// and the click was removed *in full*, but the toast, the user's only record
+// of a destructive action, still named the old, smaller number. Undo was
+// never affected (the ledger always recorded the real quantity), only the
+// message text — this test pins the receipt-sourced fix on both.
+test("@fast a stack that grows in another tab between render and removal reports and undoes its real count", async ({
+  page,
+  request,
+}) => {
+  const [card] = await unownedCards(request, 1, 13);
+  const binder = await createCollection(request, "binder", "grown");
+  try {
+    await addHave(request, binder.id, card.printing_id as string, 2);
+    const where = { [binder.id]: "binder" };
+
+    await page.goto(`/my/collections/${binder.id}`);
+    await hydrated(page);
+    const row = rowFor(page, card.printing_id as string);
+    await expect(row.locator(STEPPER_VALUE)).toHaveText("2");
+
+    // The "other tab": one more copy lands on the same holding, entirely
+    // through the API, with no reload — the row keeps rendering "2".
+    await addHave(request, binder.id, card.printing_id as string, 1);
+    expect(
+      await grainsIn(request, card.oracle_id, where),
+      "the fixture must actually hold 3 before the removal fires",
+    ).toEqual(["binder: nonfoil/nm/en/main x3"]);
+    await expect(row.locator(STEPPER_VALUE)).toHaveText("2");
+
+    await commitZero(row);
+
+    // The whole stack goes — 3, not the 2 the row was still showing — and the
+    // toast has to say so: it is the only record of how many copies just left.
+    const toast = page.locator(TOAST, { hasText: "Removed" });
+    await expect(toast).toContainText(`Removed ${card.name} (3 copies)`);
+    await expect(async () => {
+      expect(await grainsIn(request, card.oracle_id, where)).toEqual([]);
+    }).toPass({ timeout: 5000 });
+
+    // The header must not disagree with the toast it sits next to: this binder
+    // holds nothing else, so once every copy of this row is gone "0 here" is
+    // the only honest reading.
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "0 here",
+    );
+
+    await toast.getByRole("button", { name: "Undo" }).click();
+
+    // Undo restores the real count too — 3, the ledger's own number, not the
+    // stale 2 the row displayed when the click happened.
+    await expect(async () => {
+      expect(await grainsIn(request, card.oracle_id, where)).toEqual([
+        "binder: nonfoil/nm/en/main x3",
+      ]);
+    }).toPass({ timeout: 5000 });
+  } finally {
+    await deleteCollection(request, binder.id);
+  }
+});
 
 // --------------------------- P6-118: section header + selection track it ---
 //
