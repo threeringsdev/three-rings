@@ -543,13 +543,18 @@ test.describe("reaching a screen by clicking, not by goto", () => {
     }
   });
 
-  test("@fast /my carries rows when reached by clicking All cards from each collection", async ({
+  test("@fast /my/all carries rows when reached by clicking All cards from each collection", async ({
     page,
     request,
   }) => {
     await page.setViewportSize(DESKTOP);
     const held = await holders(request);
-    const allCards = 'aside[aria-label="Sidebar"] a[href="/my"]';
+    // The row's own href, updated for P6-154: the sidebar's pinned "All
+    // cards" row targets /my/all everywhere now (it is shared, unstyled by
+    // CSS alone, with the mobile drawer, where /my is the drill-down root
+    // list rather than the table), so this is what "clicking All cards" now
+    // means on desktop too.
+    const allCards = 'aside[aria-label="Sidebar"] a[href="/my/all"]';
 
     for (const c of held.slice(0, 4)) {
       await page.goto(`/my/collections/${c.summary.id}`);
@@ -559,11 +564,11 @@ test.describe("reaching a screen by clicking, not by goto", () => {
       );
 
       await page.locator(allCards).first().click();
-      await page.waitForURL(/\/my$/);
+      await page.waitForURL(/\/my\/all$/);
       // Content, not the URL. The bug changed nothing about the URL.
       await expect(
         page.locator('[data-testid="all-cards-row"]').first(),
-        `/my via a click from ${c.summary.name} rendered no rows`,
+        `/my/all via a click from ${c.summary.name} rendered no rows`,
       ).toBeVisible();
       await expect(page.locator("main")).not.toContainText(
         "haven't added any cards",
@@ -595,5 +600,39 @@ test.describe("reaching a screen by clicking, not by goto", () => {
         `/my/all via a tap after ${c.summary.name} rendered no rows`,
       ).toBeVisible();
     }
+  });
+
+  test("@fast the mobile drawer's All cards row lands on the table, not the drill-down list", async ({
+    page,
+  }) => {
+    // P6-154: `SidebarRail` (app/src/shell.rs) mounts one `CollectionTreeNav`
+    // at every width — a `md:hidden`/slide-over CSS switch decides whether it
+    // reads as the desktop rail or this phone drawer, but CSS cannot change
+    // what the pinned "All cards" row's `<a>` points to. The row used to link
+    // to `/my`, which below `md` is the drill-down root list rather than the
+    // table (`app/src/my/root.rs`) — so tapping it here closed the drawer onto
+    // a screen that looks just like the drawer, and reaching the table still
+    // took a second tap into `/my/all`. Fixed by pointing the shared row at
+    // `/my/all` everywhere.
+    await page.setViewportSize(PHONE);
+    await page.goto("/my");
+    await hydrated(page);
+
+    // Positive control: `/my` at this width really is the root list — the
+    // base landing the drawer's row must not repeat.
+    await expect(page.locator('[data-testid="my-root"]')).toBeVisible();
+    await expect(page.locator('[data-testid="all-cards-table"]')).toBeHidden();
+
+    await page.locator('[data-testid="rail-toggle"]').click();
+    const rail = page.locator('aside[aria-label="Sidebar"]');
+    await expect
+      .poll(() => rail.evaluate((el) => getComputedStyle(el).visibility))
+      .toBe("visible");
+
+    await rail.locator('a[href="/my/all"]').first().click();
+    await page.waitForURL(/\/my\/all$/);
+    await hydrated(page);
+
+    await expect(page.locator('[data-testid="all-cards-table"]')).toBeVisible();
   });
 });

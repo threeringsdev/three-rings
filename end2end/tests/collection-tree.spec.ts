@@ -78,10 +78,12 @@ test.describe("signed in", () => {
     // uses for this exact class of race (retryUntil's read-side counterpart;
     // helpers.ts).
     await expect(async () => {
-      // All cards: pinned link to /my carrying the everything-total.
+      // All cards: pinned link to the table carrying the everything-total.
+      // /my/all, not /my (P6-154) — the row is shared with the mobile
+      // drawer, where /my is the drill-down root list, not the table.
       const total = dto.collections.reduce((s, r) => s + r.present, 0);
       const allCards = nav.locator("a", { hasText: "All cards" });
-      await expect(allCards).toHaveAttribute("href", "/my");
+      await expect(allCards).toHaveAttribute("href", "/my/all");
       await expect(allCards.locator('[data-name="Badge"]')).toHaveText(
         String(total),
       );

@@ -477,9 +477,12 @@ test.describe("desktop", () => {
     // The up-link exists but is a phone affordance only.
     await expect(page.locator('[data-testid="all-cards-back"]')).toBeHidden();
     // …and the rail still marks All cards as where you are: the table has two
-    // routes now, and the sidebar is on screen at both.
+    // routes now, and the sidebar is on screen at both. The row's own href is
+    // /my/all (P6-154 — it targets the table on both the desktop rail and the
+    // mobile drawer, which share this one markup), so this is a direct match
+    // here rather than the `also="/my"` alias `/my` itself relies on.
     await expect(
-      page.locator('nav[aria-label="Collections"] a[href="/my"]'),
+      page.locator('nav[aria-label="Collections"] a[href="/my/all"]'),
     ).toHaveAttribute("aria-current", "page");
   });
 });
