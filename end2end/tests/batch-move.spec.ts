@@ -14,7 +14,12 @@
 // - a `/my` row whose copies sit in several places is **refused by name** and
 //   stays checked — the one thing this task must never do is guess a source
 //   (`MoveItem { from_collection_id: None }` means copies from *outside* the
-//   system, so a guess would conjure them).
+//   system, so a guess would conjure them);
+// - a stale tray entry (P6-122: the stepper drove its row to zero after it was
+//   selected, before the move ran) does not fail the batch and does not write
+//   wrong — the live rows still move, the dead one is refused by name, and
+//   *unlike* the still-actionable refusals above, it does not stay checked:
+//   the server just proved it gone, so the tray drops it too.
 //
 // Every database assertion is read back through the API, never off the toast: a
 // toast is evidence that a message was raised, not that rows moved.
@@ -204,6 +209,30 @@ async function scatteredCard(
     "dev seed must hold one card in more than one collection (build_depth)",
   ).toBeTruthy();
   return row as AllCardsRow;
+}
+
+/// The holding row `(collectionId, printingId)` resolves to — the id
+/// `POST /api/holdings/{id}/quantity` takes, i.e. what the count stepper's own
+/// commit addresses. Used to simulate exactly that commit from outside the
+/// page, driving a *selected* row's stack to zero between selection and move.
+async function holdingId(
+  request: APIRequestContext,
+  oracleId: string,
+  collectionId: string,
+  printingId: string,
+): Promise<string> {
+  const res = await request.get(`/api/cards/${oracleId}/holdings`);
+  expect(res.status(), "holdings of oracle").toBe(200);
+  const rows = (await res.json()) as {
+    id: string;
+    collection_id: string;
+    printing_id: string;
+  }[];
+  const row = rows.find(
+    (h) => h.collection_id === collectionId && h.printing_id === printingId,
+  );
+  expect(row, "the seeded holding must still be there to find").toBeTruthy();
+  return (row as { id: string }).id;
 }
 
 const collectionRow = (page: Page, printingId: string) =>
@@ -501,6 +530,83 @@ test("@fast a /my row scattered over collections is refused by name, and nothing
     const landed = await viewOf(request, dest.id);
     expect(landed.cards).toHaveLength(0);
   } finally {
+    await deleteCollection(request, dest.id);
+  }
+});
+
+// --------------------------------------- a stale entry does not sink a batch ---
+//
+// P6-122: a tray key can outlive what it names — a stepper commit, a teardown,
+// a collection deletion. This drives exactly the stepper case from outside the
+// page (the same `POST /api/holdings/{id}/quantity` the count stepper's own
+// commit calls), between selecting the row and running the move, and checks
+// the whole contract the staleness policy promises: the live rows still move
+// (no whole-batch abort), the write is honest (nothing lands for the dead
+// entry — no wrong-write), and the tray stops counting it once the server has
+// said so (unlike the still-actionable refusal above, which stays checked).
+
+test("@fast a row driven to zero after selection is refused by name, the rest of the batch still moves, and the tray drops it", async ({
+  page,
+  request,
+}) => {
+  test.slow();
+  const [a, b, zeroed] = await unownedCards(request, 3, 20);
+  const printings = [a, b, zeroed].map((c) => c.printing_id as string);
+  const source = await createCollection(request, "binder", "stalesrc");
+  const dest = await createCollection(request, "binder", "staledest");
+  try {
+    await addHave(request, source.id, a.printing_id as string, 1);
+    await addHave(request, source.id, b.printing_id as string, 1);
+    await addHave(request, source.id, zeroed.printing_id as string, 1);
+
+    await page.goto(`/my/collections/${source.id}`);
+    await hydrated(page);
+
+    // Select all three while every row is still live.
+    await select(collectionRow(page, a.printing_id as string)).click();
+    await select(collectionRow(page, b.printing_id as string)).click();
+    await select(collectionRow(page, zeroed.printing_id as string)).click();
+    await expect(page.locator(COUNT)).toHaveText("3 cards");
+
+    // The stepper's own commit, from outside this page — the row is *already
+    // selected* when its stack goes to zero, which is the case the tray's
+    // staleness policy exists for (SelectionKey's doc comment).
+    const zeroId = await holdingId(
+      request,
+      zeroed.oracle_id,
+      source.id,
+      zeroed.printing_id as string,
+    );
+    const zeroRes = await request.post(`/api/holdings/${zeroId}/quantity`, {
+      data: { quantity: 0 },
+    });
+    expect(zeroRes.status(), "zero the stepper-driven row").toBe(200);
+
+    await moveTo(page, dest.name);
+
+    // The two live rows moved in the same write — one stale entry did not
+    // fail the batch wholesale.
+    await expect(
+      page.locator(TOAST, { hasText: "Moved 2 cards" }),
+    ).toContainText(`Moved 2 cards (1 copy each) → 🗂 ${dest.name}`);
+    // The dead one is named honestly, not silently swallowed.
+    await expect(page.locator(TOAST, { hasText: "wasn't moved" })).toContainText(
+      `${zeroed.name} has no copies left to move — reload the page`,
+    );
+    // …and, unlike a refusal the user can still act on, the tray does not
+    // keep counting something the server just proved gone: every entry
+    // cleared, moved or dropped, so the pill itself is gone.
+    await expect(page.locator(TRAY)).toHaveCount(0);
+
+    // The database agrees: the live pair actually moved, and the dead entry
+    // was never touched again — it stayed at zero, not conjured back or
+    // written into the destination.
+    await expect(async () => {
+      expect(await present(request, source.id, printings)).toEqual([0, 0, 0]);
+      expect(await present(request, dest.id, printings)).toEqual([1, 1, 0]);
+    }).toPass({ timeout: 5000 });
+  } finally {
+    await deleteCollection(request, source.id);
     await deleteCollection(request, dest.id);
   }
 });
