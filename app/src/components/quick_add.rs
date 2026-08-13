@@ -213,6 +213,20 @@ pub fn present_matches(rows: &[CardRow]) -> Vec<PresentMatch> {
     out
 }
 
+/// Should `PresentSection` render at all? An empty (post-trim) query has no
+/// candidate search running either (see the `candidates` `Resource` above,
+/// gated the same way), so without this the section would fill with whatever
+/// `present` currently holds — the destination's unfiltered first page both
+/// when the panel first opens and in the moment after every add clears the
+/// field, since `QuickAddFacts` (`app/src/my/collection.rs`) retains the last
+/// payload across a refetch (P6-068) rather than going empty. This is a
+/// **render** gate on the query text, not a change to what `present` carries —
+/// the retained facts keep flowing to `present` exactly as before; the section
+/// just declines to draw them while there is nothing to have matched.
+fn present_visible(query: &str, present: &[PresentMatch]) -> bool {
+    !query.trim().is_empty() && !present.is_empty()
+}
+
 /// A candidate's disambiguation line. The storyboard shows `DMU · 1R` — set code
 /// plus mana cost — but [`CardSummary`] carries no set (a catalog row is
 /// per-oracle, and its representative printing's set is not projected), so this
@@ -575,7 +589,7 @@ fn QuickAddSurface(
                     aria-label="Card suggestions"
                 >
                     <CommandList class="max-h-[19rem] p-1.5">
-                        <PresentSection present=present />
+                        <PresentSection present=present url_q=url_q />
                         <CandidateSection
                             candidates=candidates
                             present=present
@@ -593,9 +607,9 @@ fn QuickAddSurface(
 }
 
 #[component]
-fn PresentSection(present: Signal<Vec<PresentMatch>>) -> impl IntoView {
+fn PresentSection(present: Signal<Vec<PresentMatch>>, url_q: Memo<String>) -> impl IntoView {
     view! {
-        <Show when=move || !present.read().is_empty()>
+        <Show when=move || present.with(|p| present_visible(&url_q.read(), p))>
             <CommandGroupLabel class="tracking-wide uppercase">
                 "In this collection"
             </CommandGroupLabel>
@@ -955,6 +969,37 @@ mod tests {
             .map(|m| m.name)
             .collect();
         assert_eq!(names, vec!["Zap", "Arc"]);
+    }
+
+    #[test]
+    fn present_hides_on_an_empty_or_blank_query_even_with_matches() {
+        let matches = [PresentMatch {
+            oracle_id: Id::new_v4(),
+            name: "Lightning Bolt".into(),
+            here: 3,
+        }];
+        assert!(
+            !present_visible("", &matches),
+            "no query means the panel is at rest, not filtered by anything"
+        );
+        assert!(
+            !present_visible("   ", &matches),
+            "whitespace-only is the same as no query, post-trim"
+        );
+    }
+
+    #[test]
+    fn present_shows_only_once_a_query_actually_matched_something() {
+        let matches = [PresentMatch {
+            oracle_id: Id::new_v4(),
+            name: "Lightning Bolt".into(),
+            here: 3,
+        }];
+        assert!(present_visible("bolt", &matches));
+        assert!(
+            !present_visible("bolt", &[]),
+            "a query with nothing here is still nothing to show"
+        );
     }
 
     // ---------------------------------------------------------------- meta --

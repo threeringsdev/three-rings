@@ -19,7 +19,9 @@
 // - the loop point: after an add the field is empty and still focused, so the
 //   next card starts with no extra keystroke;
 // - `IN THIS COLLECTION` rows are context, not add targets: they carry the HERE
-//   count and are not part of the `↑↓` walk.
+//   count and are not part of the `↑↓` walk;
+// - `IN THIS COLLECTION` rows wait for a query — none at rest, some once the
+//   query matches, none again once an add clears the field back to rest.
 //
 // **Isolation.** Everything that writes does so inside a `zz-e2e-…` binder or
 // deck it creates via the API and deletes in a `finally` — the convention
@@ -110,6 +112,18 @@ async function openPanel(page: Page, id: string, query: string) {
   await expect(
     page.getByTestId("quick-add-candidate").first(),
   ).toBeAttached({ timeout: 15000 });
+  return box;
+}
+
+/// Open the panel and leave the field untouched — "at rest", no `?q=` at all.
+/// Distinct from [`openPanel`] (which always types a query) so a test can
+/// assert what the panel shows *before* the first keystroke.
+async function openPanelAtRest(page: Page, id: string) {
+  await page.goto(`/my/collections/${id}`);
+  await hydrated(page);
+  const box = page.locator("#collection-query");
+  await box.click();
+  await expect(page.getByTestId("quick-add-panel")).toBeAttached();
   return box;
 }
 
@@ -399,6 +413,60 @@ test("IN THIS COLLECTION rows carry HERE and are not ↑↓ targets @fast", asyn
     await expect(present).not.toHaveAttribute("data-highlighted", "true");
     await expect(highlighted(page)).toHaveCount(1);
     await expect(candidates(page).first()).toBeAttached();
+  } finally {
+    await deleteCollection(request, binder);
+  }
+});
+
+test("present rows wait for a query — none at rest, some on a match, none again once an add clears the field @fast", async ({
+  page,
+  request,
+}) => {
+  const binder = await createCollection(request, "binder");
+  try {
+    // Seed two copies of a real card into the scratch binder, the same pattern
+    // the test above uses — a non-empty collection is exactly the shape that
+    // used to leak its whole first page into an at-rest panel (P6-147).
+    const trade = await page.request.get("/api/collections/tree");
+    expect(trade.status()).toBe(200);
+    const rows = (
+      (await trade.json()) as { collections: { summary: { id: string; name: string } }[] }
+    ).collections;
+    const source = rows.find((r) => r.summary.name === "Trade Binder")!;
+    const seed = (await viewOf(request, source.summary.id)).cards[0];
+    const have = await request.post(`/api/collections/${binder}/have`, {
+      data: { printing_id: seed.printing_id, quantity: 2 },
+    });
+    expect(have.status()).toBe(200);
+
+    const present = page.getByTestId("quick-add-present");
+
+    // At rest — no `?q=` typed yet — the panel must show nothing here, even
+    // though the binder already holds a card the empty-query read would return
+    // as its unfiltered first page.
+    const box = await openPanelAtRest(page, binder);
+    await expect(present).toHaveCount(0);
+
+    // Typing a query matching the seeded card brings the row back.
+    const probe = seed.name.slice(0, 6);
+    await box.pressSequentially(probe, { delay: 30 });
+    await expect(present).toHaveCount(1, { timeout: 15000 });
+    await expect(
+      present.getByTestId("quick-add-present-count"),
+    ).toHaveText("2");
+    // A catalog candidate must also be mounted, or ⏎ below has nothing to add.
+    await expect(candidates(page).first()).toBeAttached();
+
+    // Completing an add clears the field (the loop point another test already
+    // covers) — present rows must go with it, not linger from the retained
+    // facts that P6-068 keeps flowing across the refetch.
+    const add = page.waitForResponse(
+      (r) => r.url().includes("/api/quick_add") && r.status() === 200,
+    );
+    await box.press("Enter");
+    await add;
+    await expect(box).toHaveValue("");
+    await expect(present).toHaveCount(0);
   } finally {
     await deleteCollection(request, binder);
   }
