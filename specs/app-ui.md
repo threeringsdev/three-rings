@@ -5187,3 +5187,82 @@ per-file pool convention needs a real systemic fix (a shared, much larger
 term, or a pool that gets minted rather than searched for) is still the
 follow-up this Findings section already flagged in the first P6-141 entry —
 this task hit the same wall harder than usual, not a new one.
+
+### ⌘K respects open overlays (P6-149, 2026-08-13)
+
+Before this fix `PaletteBody`'s chord handler (`app/src/components/palette.rs`)
+toggled `open` unconditionally: `open.update(|o| *o = !*o)` on every ⌘K/Ctrl+K,
+with no regard for whatever else was already on screen. Opening a tree dialog
+(create/rename/delete/move, all `Dialog`-hosted) and then pressing ⌘K stacked
+the palette's own `CommandDialog` on top of it — two modals, one scrim, the
+underneath dialog's focus trap and Escape/Tab handling both still wired but
+now unreachable behind the palette.
+
+**The fix reads the overlay stack the palette already pushes onto,
+rather than tracking a second copy of "is something else open".**
+`CommandDialog` wraps the vendored `Dialog` (`command.rs`), so `PaletteSurface`
+already registers `PALETTE_ID` on `super::ui::overlay_stack`
+(`app/src/components/ui/overlay_stack.rs`, P6-125/P6-189 lineage — the same
+stack `Dialog`, `Sheet` and `Popover` push/pop, and that gates their own
+Escape/Tab) every time it opens or closes. The new pure decision function
+[`palette_chord_target`] (`palette.rs`) takes `(currently_open, palette_is_top,
+stack_is_empty)` and returns `Option<bool>` — `None` meaning "swallow the
+chord, change nothing":
+
+- **Closed → open** only when the stack is empty. A non-empty stack means some
+  other overlay (a tree dialog, a `Sheet`, a `Popover`) is genuinely showing,
+  and opening on top of it is exactly the bug this task closes.
+- **Open → close** only while the palette is still the *topmost* overlay —
+  mirroring the "topmost only" rule `dialog.rs` already applies to Escape and
+  Tab, for the same reason: if something else somehow opened above the
+  palette, ⌘K should not yank the palette out from under it.
+
+[`overlay_stack::is_empty`] is new — the stack already had `is_top` (the ESC
+gate) and that alone cannot answer "is anything open", since a *closed*
+palette has already popped its own id and every id `is_top` would ever be
+asked about is gone by the time the closed branch needs an answer.
+
+**Known gap, recorded rather than silently worked around: the quick-add panel
+is not on this stack.** `quick_add.rs`'s own module doc explains why it is
+deliberately *not* built on `Dialog`/`Popover` (measured light-dismiss and
+same-page-navigation failures in the native Popover API — see that file's doc
+for the details) — it is a plain absolutely-positioned panel with its own
+`open: RwSignal<bool>`, created fresh inside `QuickAddPanel` per collection
+page and never exposed through a context provider the shell-level palette
+could read. `overlay_stack` has no way to know quick-add is open, and this
+task's gate has no way around that without either (a) wiring quick-add through
+`overlay_stack` itself — a real behavior change to a surface this task did not
+otherwise touch — or (b) growing a second, bespoke channel just for this one
+caller. Neither was in scope for an S-sized fix; ⌘K over an open quick-add
+panel still stacks the palette on top of it today. **Not yet filed as a
+Workbook task** — this task's instructions were explicit no-`workbook`; a
+follow-up task still needs filing by whoever picks this back up.
+
+**Evidence.** `cargo test -p app --features hosted`: 348 passed (2 new —
+`a_closed_palette_opens_only_onto_an_empty_stack`,
+`an_open_palette_closes_only_while_it_is_still_topmost` — pure unit tests on
+`palette_chord_target`, no wasm/DOM needed). New e2e test in
+`command-palette.spec.ts`, "⌘K does not stack over an already-open tree
+dialog, and works again once it closes": opens the tree's own create dialog
+directly (the same background-right-click path
+`collection-tree-manage.spec.ts` uses), types into its name field, presses
+⌘K, and asserts the palette dialog stays `data-state="closed"` while the tree
+dialog stays `data-state="open"` with its typed value intact (not merely
+`open` — genuinely untouched); closes the tree dialog without submitting, then
+confirms ⌘K opens the palette normally with nothing else open. **Kill-verified**
+against base (palette.rs and overlay_stack.rs stashed, test file kept): fails
+exactly as predicted, on the closed-state assertion — the palette dialog reads
+`data-state="open"` where `"closed"` was expected, i.e. it stacked. With the
+fix restored the same test passes standalone.
+
+Full serial `command-palette.spec.ts` run (`--workers=1`) with the fix:
+**4 failed / 17 passed** (21 total incl. the auth-setup step). Base-parity: the
+same 3 failures this file's own header already documents as the fixture-pool
+class (the three `Undo last move` tests, which write through the shared
+`unownedCards` catalog pool against the shared Neon dev branch), plus one
+more — "a no-match query says so instead of erroring" — reproduced
+byte-for-byte on base with this task's Rust changes stashed (same failure,
+same assertion, same locator not found), so it predates this task and is not
+this fix's doing. The `palette.rs`/`overlay_stack.rs` diff cannot be
+implicated in either class: neither touches ranking, the empty-state markup,
+or the undo-ledger code the four failures exercise.

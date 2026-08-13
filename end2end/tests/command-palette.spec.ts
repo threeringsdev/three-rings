@@ -202,6 +202,51 @@ test("@fast ⌘K opens the palette at rest, toggles, and esc closes it", async (
   await expect(dialog(page)).toHaveAttribute("data-state", "closed");
 });
 
+// P6-149: before this fix the chord toggled unconditionally, so ⌘K while a
+// tree dialog (create/rename/delete/move) was already open stacked the
+// palette on top of it instead of respecting the overlay already there. The
+// tree's own create dialog opens the same way "background right-click
+// creates a top-level collection" opens it in collection-tree-manage.spec.ts —
+// directly, not through the palette, so this test does not depend on the very
+// toggle it is checking.
+test("@fast ⌘K does not stack over an already-open tree dialog, and works again once it closes", async ({
+  page,
+}) => {
+  await page.goto("/my");
+  await hydrated(page);
+
+  const root = page.locator("[data-tree-root]");
+  await root.click({ button: "right", position: { x: 5, y: 5 } });
+  const menu = page.locator("#context-menu-tree");
+  await expect
+    .poll(() => menu.evaluate((el: HTMLElement) => el.matches(":popover-open")))
+    .toBe(true);
+  await menu.locator('[role="menuitem"]', { hasText: "New binder…" }).click();
+
+  const treeDialog = page.locator('[role="dialog"]', { hasText: "New binder" });
+  await expect(treeDialog).toHaveAttribute("data-state", "open");
+  const nameField = treeDialog.locator("#tree-create-name");
+  await nameField.fill("zz-e2e-plt-stack-guard");
+
+  // The base bug: the palette used to open here anyway, on top of this dialog.
+  await page.keyboard.press("ControlOrMeta+k");
+  await expect(dialog(page)).toHaveAttribute("data-state", "closed");
+  // …and the tree dialog is genuinely untouched, not merely still `open` —
+  // its typed value survived, so the chord did not close and reopen it either.
+  await expect(treeDialog).toHaveAttribute("data-state", "open");
+  await expect(nameField).toHaveValue("zz-e2e-plt-stack-guard");
+
+  // Close the tree dialog without submitting (no fixture mutation), then ⌘K
+  // works normally again with nothing else open.
+  await treeDialog.getByRole("button", { name: "Close dialog" }).first().click();
+  await expect(treeDialog).toHaveAttribute("data-state", "closed");
+
+  await openPalette(page);
+  await expect(dialog(page)).toHaveAttribute("data-state", "open");
+  await page.keyboard.press("Escape");
+  await expect(dialog(page)).toHaveAttribute("data-state", "closed");
+});
+
 // Dialog's Tab focus trap (P6-125, dialog.rs) composes with the palette's own
 // field-focus-on-open (`palette.rs`'s open `Effect`, which the trap does not
 // replace — it takes over from wherever that autofocus left off). The
