@@ -18,7 +18,7 @@
 //! rather than the control. Two consequences, both deliberate: the section
 //! mounts its own `Toaster` (the count-stepper precedent, since the app's lives
 //! in the shell), and the picker on an anonymous bench shows its
-//! "No collection to move to." empty state, because the collection list is
+//! "No collection matches." empty state, because the collection list is
 //! session-scoped. The bench's ids are synthetic, so a pick from an authed
 //! browser is refused by the server rather than moving anything real.
 

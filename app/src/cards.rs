@@ -476,9 +476,17 @@ pub fn CardDetailPage() -> impl IntoView {
 
     // Parsing client-side means a malformed id renders "not found" without a
     // pointless round trip, and the server fn keeps a typed argument.
+    //
+    // The tray's batch move lives in the shell and has no handle on this
+    // page's resource, so — same idiom as `all_cards.rs` / `collection.rs` —
+    // the revision it bumps is one of the resource's sources: a move refetches
+    // "Your copies" structurally instead of leaving it stale until reload.
+    // `holdings_revision()` is a constant `0` signal outside the shell (the
+    // bench), so this page stays mountable there without an `Option` check.
+    let revision = crate::my::move_selection::holdings_revision();
     let detail_res = Resource::new(
-        move || oracle_id.get(),
-        |id| async move {
+        move || (oracle_id.get(), revision.get()),
+        |(id, _revision)| async move {
             CardDetailPayload {
                 card: match id {
                     Some(id) => CardIdOutcome::Fetched(Box::new(crate::card_detail(id).await)),

@@ -748,3 +748,144 @@ test("@fast a row driven to zero after selection is refused by name, the rest of
     await deleteCollection(request, dest.id);
   }
 });
+
+// --------------------------------- a move made ON the card-detail page ---
+//
+// P6-152: `HoldingsRevision` was a source only on `/my` and
+// `/my/collections/:id` — `/cards/:id`'s own "Your copies" block had no way to
+// hear a move happen, so a batch move performed while parked on that page left
+// it naming the pre-move collection until an unrelated reload. The tray is
+// shell-level and a selection survives navigation (P6-122), so the real repro
+// stays entirely client-side: select the row on `/my`, follow its own link
+// into `/cards/:id` (a real SPA navigation — `page.goto` would legitimately
+// start the selection empty), move through the tray *parked on the detail
+// page*, and assert the ownership block updates with no navigation between
+// the write and the read. Base: the block keeps naming `source` until reload.
+//
+// `unownedCards`'s own "owned nowhere" is only "not in the first 200 rows of
+// `/my`" (its own doc) — on today's bulk-loaded seed the dev user's Inbox
+// already holds nearly the whole catalog at real quantities, so a candidate
+// from it is routinely owned elsewhere too (base-parity triage: the same
+// contamination sinks two of this file's own *unmodified* tests, see the
+// suite header). Adding a copy to a fresh `source` collection therefore
+// cannot assume single-place resolution either — this drives whichever path
+// the tray actually takes (a direct resolve, or the which-copies step,
+// P6-151) rather than assuming one, and its own assertions do not depend on
+// which one fires.
+
+test("@fast a move made from the card-detail page updates its own ownership block without a reload", async ({
+  page,
+  request,
+}) => {
+  const [card] = await unownedCards(request, 1, 40);
+  const source = await createCollection(request, "binder", "detailsrc");
+  const dest = await createCollection(request, "binder", "detaildest");
+  try {
+    await addHave(request, source.id, card.printing_id as string, 1);
+
+    await page.goto(`/my?q=${encodeURIComponent(card.name)}`);
+    await hydrated(page);
+    const row = myRow(page, card.oracle_id);
+    await select(row).click();
+    await expect(page.locator(COUNT)).toHaveText("1 card");
+
+    // The row's own link into the detail page (all_cards.rs) — clicked, not
+    // `goto`'d, so the in-memory tray selection rides along.
+    await row.locator(`a[href="/cards/${card.oracle_id}"]`).click();
+    await page.waitForURL((url) => url.pathname === `/cards/${card.oracle_id}`);
+    await expect(page.getByTestId("card-name")).toContainText(card.name);
+
+    // The tray survived the navigation (P6-122) — still parked, still one
+    // card — and its own picker is what this test drives from here.
+    await expect(page.locator(TRAY)).toBeVisible();
+    await expect(page.locator(COUNT)).toHaveText("1 card");
+
+    const ownership = page.getByTestId("your-copies");
+    await expect(ownership).toBeVisible();
+    await expect(ownership).toContainText(source.name);
+
+    await moveTo(page, dest.name);
+
+    // Either the batch resolved directly, or (the likelier case against
+    // today's seed) it opened the which-copies step — wait for whichever the
+    // tray actually did instead of assuming one, then answer it if it asked:
+    // the `source` stack is the only one this test wants moved.
+    const stepRows = page.locator(STEP_ROW);
+    const movedToast = page.locator(TOAST, { hasText: "Moved" });
+    await expect(async () => {
+      expect((await stepRows.count()) > 0 || (await movedToast.count()) > 0).toBe(
+        true,
+      );
+    }).toPass({ timeout: 5000 });
+    if (await stepRows.count()) {
+      await stepRows.filter({ hasText: source.name }).click();
+      await page.locator(STEP_CONFIRM).click();
+    }
+    await expect(movedToast).toContainText(dest.name);
+    await expect(page.locator(TRAY)).toHaveCount(0);
+
+    // The assertion the whole fix stands on: no navigation happened between
+    // the write above and this read, so a block still naming `source` here
+    // means the page's own resource never took the revision as a source.
+    await expect(ownership).toContainText(dest.name);
+    await expect(ownership).not.toContainText(source.name);
+
+    await expect(async () => {
+      expect(
+        await present(request, source.id, [card.printing_id as string]),
+      ).toEqual([0]);
+      expect(
+        await present(request, dest.id, [card.printing_id as string]),
+      ).toEqual([1]);
+    }).toPass({ timeout: 5000 });
+  } finally {
+    await deleteCollection(request, source.id);
+    await deleteCollection(request, dest.id);
+  }
+});
+
+// ------------------------------- the tray picker's empty line tells the truth ---
+//
+// P6-152, the picker's other gap: `empty="No collection to move to."` on the
+// tray's `DestinationList` fired for a *filtered* zero too, not only a failed
+// or genuinely empty read — so typing a search term that matched nothing
+// claimed the user had nowhere to move copies, which was false (their
+// collections are right there, unfiltered). `DestinationList`'s own default
+// ("No collection matches.", the catalog picker's wording) is the true
+// sentence for a filter, and the tray now uses it instead of overriding it.
+//
+// The genuinely-empty case this override used to (over-)cover cannot happen
+// here: `collection_list()` provisions the caller's undeletable Inbox row as
+// a side effect of the very read backing this list (`ensure_inbox`,
+// collection-api.md → "Inbox provisioning"), so the tray's registry is never
+// really empty — only ever filtered down to nothing.
+
+test("@fast a no-match search in the tray picker says so, not that there's nowhere to move to", async ({
+  page,
+  request,
+}) => {
+  const [card] = await unownedCards(request, 1, 35);
+  const source = await createCollection(request, "binder", "pickersrc");
+  try {
+    await addHave(request, source.id, card.printing_id as string, 1);
+
+    await page.goto(`/my?q=${encodeURIComponent(card.name)}`);
+    await hydrated(page);
+    await select(myRow(page, card.oracle_id)).click();
+    await expect(page.locator(COUNT)).toHaveText("1 card");
+
+    const picker = await openPicker(page);
+    // A term no scratch collection name (nor the seeded Inbox) can match.
+    await picker
+      .locator('[data-name="CommandInput"]')
+      .fill("zzz-no-such-collection-at-all");
+    await expect(picker).toContainText("No collection matches.");
+    await expect(picker).not.toContainText("No collection to move to.");
+
+    // Still selected, and nothing written — opening and filtering the picker
+    // is not itself an action.
+    await expect(page.locator(COUNT)).toHaveText("1 card");
+  } finally {
+    await deleteCollection(request, source.id);
+  }
+});
