@@ -617,13 +617,20 @@ pub async fn set_holding_quantity(
 /// board and the owning collection off the named holding *inside the write
 /// transaction* and appends a `moves` row, so undo is the ledger's `undone_at`
 /// and puts those copies back on that board — the same undo every other move
-/// gets. Returns the move id for the toast.
+/// gets. Returns the move receipt for the toast: the move id for Undo, and the
+/// quantity actually removed (below) for the message text.
 ///
 /// **The whole stack, not a client-supplied count**: "remove this row" is what
 /// the user asked for, and a stale rendered count would otherwise leave copies
-/// behind. Scalar in, scalar out (the `quick_add` convention).
+/// behind. That also means the caller cannot know in advance how many copies
+/// this removes — the row it rendered can be stale by the time the click
+/// lands — so the receipt carries [`shared::MoveReceipt::quantity`], read off
+/// the holding inside the write transaction, rather than leaving the caller to
+/// report whatever count it had on screen.
 #[server(prefix = "/api", endpoint = "remove_holding")]
-pub async fn remove_holding(holding_id: shared::Id) -> Result<shared::Id, ServerFnError<String>> {
+pub async fn remove_holding(
+    holding_id: shared::Id,
+) -> Result<shared::MoveReceipt, ServerFnError<String>> {
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
@@ -637,7 +644,6 @@ pub async fn remove_holding(holding_id: shared::Id) -> Result<shared::Id, Server
                 },
             )
             .await
-            .map(|r| r.move_id)
             .map_err(api_err)
     }
     #[cfg(not(feature = "ssr"))]
