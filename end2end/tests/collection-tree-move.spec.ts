@@ -392,6 +392,131 @@ test.describe("committing", () => {
   });
 });
 
+// P6-121: `plan_move`'s three `None` exits used to collapse into one
+// `manage.move_open.set(false)`, whose own comment named only the "already
+// there" case. A destination gone forbidden or gone entirely between the
+// dialog opening and the pick hit the same silent close — the user saw the
+// dialog close and had every reason to believe the move happened, when
+// nothing was ever sent to the server. `commit_move` now classifies the exit
+// (`MoveBlocked`, table-tested in `tree_manage.rs`'s own `#[cfg(test)]`
+// module, which is the kill-verified coverage for the classification itself —
+// see that module for `Forbidden`/`Gone`/`AlreadyThere`).
+//
+// This file's own attempt at forcing the exact `Gone` race live (delete the
+// picker's own selected destination via a raw API call, then click it)
+// turned out not to reach that branch at all: `move_rows`' `Suspend`
+// resubscribes to the tree resource, so once any refetch lands the stale row
+// simply disappears from the DOM before it can be clicked — verified directly
+// against this fix while writing this test (a real, useful finding: the
+// client-side `Gone`/`Forbidden` arms guard a sub-reactive-tick race that
+// Leptos's own Suspense reactivity makes essentially unreachable from real
+// click timing, not a gap this suite can pretend to close by asserting on
+// a race it cannot win deterministically). What *is* reachable, and still the
+// literal scenario this task names, is deleting the destination and picking
+// it before any refetch lands at all — which sends the pick to the server and
+// gets an honest rejection back. The test below pins that contract so it
+// cannot regress into a silent close, and is the regression net for the
+// pre-existing `(Err(e), false) => manage.error.set(...)` arm this refactor
+// left untouched.
+test.describe("honest exits (P6-121)", () => {
+  test("a destination deleted mid-dialog surfaces an error, not a silent close @fast", async ({
+    page,
+  }) => {
+    const src = await createCollection(page, { name: scratchName("gone-src") });
+    const dst = await createCollection(page, { name: scratchName("gone-dst") });
+    const moves: string[] = [];
+    page.on("request", (r) => {
+      if (r.url().includes("reparent_collection")) moves.push(r.url());
+    });
+    try {
+      await page.goto("/my");
+      await hydrated(page);
+      await openMovePicker(page, src.id);
+      const dstOption = moveOptions(page).filter({ hasText: dst.name });
+      await expect(dstOption).toHaveCount(1);
+
+      // Deleted server-side through the raw API — no client `tree.refetch()`
+      // fires from this, so the picker's already-rendered row for `dst` is
+      // still on screen and clickable, exactly as a user who opened the
+      // dialog a moment before someone (or some other tab) deleted the
+      // destination would see it.
+      await deleteCollection(page, dst.id);
+
+      // Picking it must not look like success. Before this task,
+      // `commit_move`'s `plan_move(..)?` returned the same `None` this ran
+      // into and `move_open.set(false)` closed the dialog on it — silently,
+      // with the comment above that line naming only "already there".
+      await dstOption.click();
+      await expectMoveState(page, "open");
+      await expect(moveDialog(page).locator("[data-tree-dialog-error]")).toHaveText(
+        /not found: parent collection/,
+      );
+    } finally {
+      await deleteCollection(page, src.id);
+    }
+  });
+
+  // B(ii): `busy` is one `RwSignal<bool>` shared by all four tree dialogs
+  // (`TreeManage::busy`), and `Dialog`'s ESC closes an overlay without
+  // cancelling its in-flight request — dismiss a slow Delete, open Move to…,
+  // and every pick used to no-op with the picker looking perfectly idle.
+  // `page.route` holds the delete's response pending on cue (the same
+  // deterministic pattern `collection-header-kebab.spec.ts` uses for its own
+  // in-flight-request race), which is what makes this assertable without
+  // gambling on real timing.
+  test("the move picker renders visibly disabled while another dialog's delete is in flight @fast", async ({
+    page,
+  }) => {
+    const busy = await createCollection(page, { name: scratchName("busy-del") });
+    const src = await createCollection(page, { name: scratchName("busy-src") });
+    try {
+      await page.goto("/my");
+      await hydrated(page);
+
+      await page.route("**/api/delete_collection*", async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        await route.continue();
+      });
+
+      const menu = await openRowMenu(page, busy.id);
+      await menu.locator('[role="menuitem"]', { hasText: "Delete…" }).click();
+      await page
+        .locator('[role="dialog"]', { hasText: "Delete" })
+        .locator("#tree-delete-confirm")
+        .click();
+
+      // ESC closes the confirm's overlay — the request the click just fired
+      // keeps running underneath it, holding `manage.busy` true.
+      await page.keyboard.press("Escape");
+      await expect(page.locator('[role="dialog"]#tree-delete')).toHaveAttribute(
+        "data-state",
+        "closed",
+      );
+
+      await openMovePicker(page, src.id);
+      const list = page.locator('[data-testid="tree-move-list"]');
+      await expect(list).toHaveAttribute("data-busy", "true");
+      await expect(
+        moveDialog(page).getByTestId("tree-move-busy"),
+      ).toBeVisible();
+
+      // Let the held response land, then the indicator clears — proving it
+      // tracks `busy` live rather than being stuck permanently on.
+      await page.waitForResponse(
+        (r) => r.url().includes("/api/delete_collection") && r.status() === 200,
+      );
+      await expect(list).not.toHaveAttribute("data-busy", "true");
+      await expect(
+        moveDialog(page).getByTestId("tree-move-busy"),
+      ).toBeHidden();
+    } finally {
+      await page.unroute("**/api/delete_collection*");
+      await deleteCollection(page, src.id);
+      // `busy` was actually deleted (the held response completed above).
+    }
+  });
+});
+
 test.describe("mobile", () => {
   // A real phone: `hasTouch` so taps are taps, and a width below `md` — the
   // width at which the rail used to be `display:none`, taking the tree, its
