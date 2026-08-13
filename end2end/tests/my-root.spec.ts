@@ -4,8 +4,11 @@
 // The load-bearing contracts, in assertion order:
 //
 // - at 390 px `/my` is the *list* and not the All-cards table, and at desktop
-//   width it is still the table — the switch is CSS over one SSR'd markup, so
-//   every assertion here reads computed visibility rather than DOM presence;
+//   width it is still the table. Since P6-166 the table's *subtree* is mounted
+//   after hydration (gated on the same 768 px line its CSS uses) rather than
+//   SSR'd hidden, so at phone width its absence is now a real `toHaveCount(0)`
+//   — while everything else here still reads computed visibility rather than
+//   DOM presence, because everything else is still one markup + CSS;
 // - the list is the sidebar's top level: same rows, same order (Inbox pinned
 //   first), same rolled-up counts, cross-checked against the tree API — and
 //   nested collections are absent, because you reach those by drilling in;
@@ -90,6 +93,15 @@ test.describe("mobile", () => {
   test("@fast /my is the collection list, not the card table", async ({
     page,
   }) => {
+    // The client half of P6-166: a phone must not *fetch* the aggregate either.
+    // Deferring the table to hydration would be a poor trade if the deferred
+    // mount then ran at every width — the read is the expensive part, and on a
+    // phone its result is never displayed.
+    const calls: string[] = [];
+    page.on("request", (r) => {
+      if (r.url().includes("all_cards")) calls.push(r.url());
+    });
+
     await page.goto("/my");
     await hydrated(page);
 
@@ -98,12 +110,26 @@ test.describe("mobile", () => {
     await expect(page.locator('[data-testid="my-root"] h1')).toHaveText(
       "My cards",
     );
-    // Only then is the absence of the table meaningful. It is in the DOM (one
-    // markup at every width, CSS picks) — `toBeHidden` reads the computed
-    // `display`, which is the thing under test.
-    await expect(page.locator(TABLE)).toHaveCount(1);
-    await expect(page.locator(TABLE)).toBeHidden();
-    await expect(page.locator("#my-query")).toBeHidden();
+    // Only then is the absence of the table meaningful — and since P6-166 it is
+    // a real absence, not a `display: none` one. `/my` no longer SSRs the table
+    // and only mounts it above the `md` line, so at 390 px it is never
+    // constructed: `toHaveCount(0)`, where this used to be `toHaveCount(1)` +
+    // `toBeHidden()`. The bytes-on-the-wire half is
+    // all-cards.spec.ts → "bare /my ships the list, not the hidden table".
+    await expect(page.locator(TABLE)).toHaveCount(0);
+    await expect(page.locator("#my-query")).toHaveCount(0);
+
+    // …and no request went out for rows nothing here can show. Given a window
+    // to happen in: the drawer test below proves the page is live and reacting
+    // by this point, so this is not "too early to have fetched" — the media
+    // gate is `false` at 390 px, so the subtree that would fetch is never
+    // built. Its positive control is the desktop test at the bottom of this
+    // file, which requires the very same request to have been made.
+    await page.waitForTimeout(1000);
+    expect(
+      calls,
+      "a phone fetched the aggregate it cannot display",
+    ).toHaveLength(0);
   });
 
   test("@fast the list is the sidebar's top level — rows, order and counts", async ({
@@ -303,11 +329,13 @@ test.describe("mobile", () => {
     //
     // **Each URL names the container that must actually be measured.** A bare
     // count of measured elements cannot tell "the wrapper is fine" from "the
-    // wrapper was skipped": on `/my` the `TableWrapper` is inside a
-    // `display: none` subtree, so it has no `clientWidth` at all and drops out
-    // silently while the count still reaches three from the document, `main`
-    // and the list. So the wrapper is required on `/my/all`, where it is the
-    // element that can fail, and the list is required on `/my`.
+    // wrapper was skipped": on `/my` at this width there is no `TableWrapper`
+    // at all (P6-166 — the table's subtree is not mounted below `md`; before
+    // that it was present inside a `display: none` subtree and dropped out just
+    // as silently, having no `clientWidth`), while the count still reaches
+    // three from the document, `main` and the list. So the wrapper is required
+    // on `/my/all`, where it is the element that can fail, and the list is
+    // required on `/my`.
     const cases = [
       { url: "/my", required: '[data-testid="my-root-list"]' },
       { url: "/my/all", required: '[data-name="TableWrapper"]' },
@@ -413,8 +441,9 @@ test.describe("mobile", () => {
     ).toBeGreaterThan(0);
 
     // State control first: the table really is unavailable at this width, which
-    // is the whole reason the list has to carry the escape hatch.
-    await expect(page.locator(TABLE)).toBeHidden();
+    // is the whole reason the list has to carry the escape hatch. Since P6-166
+    // it is absent rather than hidden — a stronger version of the same control.
+    await expect(page.locator(TABLE)).toHaveCount(0);
 
     // The defect this test exists for: the two destinations that do not need
     // the tree read must still be on screen. (Asserted before the error copy
@@ -444,14 +473,42 @@ test.describe("desktop", () => {
   test("@fast /my is still the All-cards table, and the list is not shown", async ({
     page,
   }) => {
+    // P6-166 moved the table's *arrival* on this route from SSR to hydration,
+    // so this test now also has to prove it actually arrives — and that it
+    // arrives by asking the server. A client-created resource reads
+    // `__RESOLVED_RESOURCES[<next id>]` whatever the hydration flag says (see
+    // `AllCardsPayload` in app/src/my/all_cards.rs), and a document load of
+    // `/my` serializes the collection tree's slots ahead of it, so the
+    // wrong-payload class of bug now has a *document-load* instance and not
+    // only the client-side-navigation one all-cards.spec.ts guards.
+    const calls: string[] = [];
+    page.on("request", (r) => {
+      if (r.url().includes("all_cards")) calls.push(r.url());
+    });
+
     await page.goto("/my");
     await hydrated(page);
-    // Positive control first: the shipped desktop landing is unchanged.
+    // Positive control first: the shipped desktop landing renders the same
+    // table it always did.
     await expect(page.locator(TABLE)).toBeVisible();
     await expect(page.locator("#my-query")).toBeVisible();
     await expect(page.locator("h1:visible")).toHaveText("All cards");
     await expect(page.locator("h1:visible")).toHaveCount(1);
-    // The mobile list is in this document too, and hidden.
+    // With real rows, and not the empty state — both directions, since "rows
+    // exist" and "the empty state is gone" fail differently.
+    await expect(
+      page.locator('[data-testid="all-cards-row"]').first(),
+    ).toBeVisible();
+    await expect(page.locator('[data-testid="all-cards-empty"]')).toHaveCount(0);
+    // …and they came from the server. Zero requests is the collision's
+    // signature and the half a content assertion cannot see.
+    expect(
+      calls.length,
+      "desktop /my rendered the table without fetching it — a leftover payload",
+    ).toBeGreaterThan(0);
+
+    // The mobile list is in this document too, and hidden — that half is still
+    // one SSR'd markup with CSS picking.
     await expect(page.locator(LIST)).toHaveCount(1);
     await expect(page.locator(LIST)).toBeHidden();
     // The sidebar tree is the desktop navigation, and still is.

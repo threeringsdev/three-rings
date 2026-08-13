@@ -704,66 +704,19 @@ pub fn CommandPalette() -> impl IntoView {
     }
 }
 
-/// `true` while the viewport matches [`DESKTOP_MEDIA`]. Starts `false` and is
-/// corrected in an `Effect` (client-only), then **kept** correct by a `change`
-/// listener on the same `MediaQueryList`.
+/// `true` while the viewport matches [`DESKTOP_MEDIA`] — one line over the
+/// shared [`media_signal`](crate::components::viewport::media_signal), which is
+/// where the "resolve it in an `Effect`, then listen for `change`" mechanism
+/// (and the reasoning for it) lives. `/my`'s desktop All-cards table is the
+/// other caller; one implementation so the two cannot drift on when a width is
+/// allowed to be known.
 ///
 /// Public for the bench, which renders it as a readout: on the real pages the
 /// palette's absence has two possible causes (viewport, session) and the Android
 /// dev proxy can only reach the anonymous ones, so the bench is where the
 /// viewport half is observable on its own.
 pub fn desktop_signal() -> Signal<bool> {
-    let desktop = RwSignal::new(false);
-
-    #[cfg(feature = "hydrate")]
-    {
-        use leptos::prelude::LocalStorage;
-        use wasm_bindgen::closure::Closure;
-        use wasm_bindgen::JsCast;
-
-        // Kept for the lifetime of this component so the listener can be
-        // removed again; the palette lives as long as the shell, so this is one
-        // registration per document load. `new_local` because neither a
-        // `MediaQueryList` nor a `Closure` is `Send` (nor needs to be — this
-        // whole block is wasm-only).
-        type Watch =
-            StoredValue<Option<(web_sys::MediaQueryList, Closure<dyn FnMut()>)>, LocalStorage>;
-        let registration: Watch = StoredValue::new_local(None);
-
-        // In an Effect, not the body: setting `desktop` synchronously during the
-        // hydration render would mount `PaletteBody` against SSR markup that has
-        // no palette in it.
-        Effect::new(move |_| {
-            let Some(mql) = window().match_media(DESKTOP_MEDIA).ok().flatten() else {
-                return;
-            };
-            desktop.set(mql.matches());
-            let watched = mql.clone();
-            // A `FnMut()` re-reading `matches()`, rather than a handler taking a
-            // `MediaQueryListEvent` — that type is not in the crate's web-sys
-            // feature set, and the query is the source of truth anyway.
-            let handler = Closure::wrap(Box::new(move || {
-                desktop.set(watched.matches());
-            }) as Box<dyn FnMut()>);
-            if mql
-                .add_event_listener_with_callback("change", handler.as_ref().unchecked_ref())
-                .is_ok()
-            {
-                registration.set_value(Some((mql, handler)));
-            }
-        });
-
-        on_cleanup(move || {
-            if let Some((mql, handler)) = registration.try_update_value(Option::take).flatten() {
-                let _ = mql.remove_event_listener_with_callback(
-                    "change",
-                    handler.as_ref().unchecked_ref(),
-                );
-            }
-        });
-    }
-
-    desktop.into()
+    crate::components::viewport::media_signal(DESKTOP_MEDIA)
 }
 
 /// The palette proper: the chord listener, the recent ring, the place index, and

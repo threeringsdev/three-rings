@@ -8,11 +8,19 @@
 //! `design/wireframes.pen` → *Mobile — My cards root* makes `/my` a drill-down
 //! list of collections below `md` (built in [`super::root`]), so the table needs
 //! a home a phone can reach: [`ALL_CARDS_PATH`] renders it at every width and is
-//! what the list's `All cards` row drills into. `/my` still renders the table at
-//! `md` and up, unchanged — it is the shipped desktop landing and the target of
-//! every existing `All cards` link, breadcrumb root and `?q=`/`?cursor=` deep
-//! link. Both routes share [`AllCardsBody`], which takes its own base path so
-//! the query bar and the pager build URLs for the route they are actually on.
+//! what the list's `All cards` row drills into. `/my` still shows the table at
+//! `md` and up — it is the shipped desktop landing and the target of every
+//! existing `All cards` link, breadcrumb root and `?q=`/`?cursor=` deep link.
+//! Both routes share [`AllCardsBody`], which takes its own base path so the
+//! query bar and the pager build URLs for the route they are actually on.
+//!
+//! **`/my/all` is the SSR-complete one; `/my` mounts its table on the client.**
+//! `/my` used to emit both markups and let CSS pick, which meant a phone paid
+//! for the aggregate read and downloaded fifty rows it never displayed. It now
+//! ships the list plus a constant-size skeleton and defers the table to
+//! hydration — see [`AllCardsPage`] for the mechanism, the measurements and
+//! what it costs a desktop document load. Nothing about [`AllCardsBody`] itself
+//! changed.
 //!
 //! Three more things are worth knowing before editing this file.
 //!
@@ -49,6 +57,7 @@ use crate::components::ui::skeleton::Skeleton;
 use crate::components::ui::table::{
     Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableWrapper,
 };
+use crate::components::viewport::{media_signal, MD_UP};
 
 /// The keyset page cursor, in the URL beside `?q=`.
 const CURSOR_PARAM: &str = "cursor";
@@ -120,18 +129,77 @@ struct AllCardsPayload {
 }
 
 /// `/my` — the My-cards landing. Below `md` the drill-down root list the
-/// wireframe puts here; at `md` and up the All-cards table, unchanged.
+/// wireframe puts here; at `md` and up the All-cards table.
 ///
-/// Both are in the markup at every width and CSS picks one: SSR cannot know the
-/// viewport, and resolving a media query in Rust would make the server's markup
-/// disagree with what hydrates (see [`super::root`]). The cost is stated plainly
-/// — a phone's `/my` still runs the aggregate read and ships the table's rows
-/// hidden, exactly as it did before this list existed.
+/// **The server ships only the list, and the table mounts client-side**
+/// (P6-166). SSR still cannot know the viewport, so it renders the one markup
+/// that is correct at every width — the root list plus this table's own chrome
+/// — and the aggregate read waits for the client, which *can* know. The
+/// mechanism is [`media_signal`]: `false` during SSR and during the hydration
+/// render, corrected in an `Effect` afterwards, so nothing about the width is
+/// resolved on the server and the hydration render still matches the markup it
+/// hydrates. It is the same gate the ⌘K palette already uses, and CSS is still
+/// the display authority — [`AllCardsBody`] keeps its `hidden md:flex` and the
+/// query names the same 768 px line.
+///
+/// What this buys, measured on the dev seed (specs/app-ui.md → P6-166): bare
+/// `/my` went from 576,473 bytes carrying 50 hidden `<tr>`s to 143,580 with
+/// none — 75% of the document, all of it markup a phone never displayed — and
+/// stopped blocking SSR on the aggregate read (~820 ms → ~480 ms warm).
+///
+/// What it costs, stated as plainly as the old comment stated its own cost: a
+/// **full document load** of `/my` at desktop width no longer arrives with rows
+/// in the HTML — it paints this page's heading and row skeleton and fills in one
+/// round trip after hydration. Every *in-app* arrival at `/my` is unaffected,
+/// because a client-side navigation always mounted and fetched this table
+/// anyway. The SSR-complete table is [`ALL_CARDS_PATH`] (`/my/all`), which
+/// renders it at every width and is where the "the table SSRs every row"
+/// contract now lives.
 #[component]
 pub fn AllCardsPage() -> impl IntoView {
+    let wide = media_signal(MD_UP);
     view! {
         <super::root::MyRootNav />
-        <AllCardsBody base="/my" class="hidden md:flex" back=false />
+        <Show when=move || wide.get() fallback=|| view! { <AllCardsPending /> }>
+            <AllCardsBody base="/my" class="hidden md:flex" back=false />
+        </Show>
+    }
+}
+
+/// What `/my` renders where the table will go until the client has told us the
+/// viewport is wide enough to want one.
+///
+/// Constant-size, and that is the whole point: a phone ships this instead of
+/// O(50 rows) it will never display, and a desktop sees the page's own chrome
+/// rather than an empty column. It carries [`AllCardsBody`]'s wrapper classes
+/// and heading verbatim (one [`AllCardsHeading`], not a second copy) so the
+/// swap when the real body mounts is the skeleton turning into rows and nothing
+/// else moving.
+///
+/// No [`QueryBar`] here on purpose: a second, throwaway instance of it would
+/// accept keystrokes it is about to be unmounted with. The skeleton says
+/// "loading", which is true.
+#[component]
+fn AllCardsPending() -> impl IntoView {
+    view! {
+        <div class="hidden min-w-0 flex-col gap-4 p-4 md:flex md:p-6">
+            <AllCardsHeading />
+            <RowsSkeleton />
+        </div>
+    }
+}
+
+/// The page's title block, shared by [`AllCardsBody`] and [`AllCardsPending`]
+/// so the pending state cannot drift from the state it becomes.
+#[component]
+fn AllCardsHeading() -> impl IntoView {
+    view! {
+        <div>
+            <h1 class="text-2xl font-bold">"All cards"</h1>
+            <p class="text-muted-foreground text-sm">
+                "Every card across your collections, Inbox included."
+            </p>
+        </div>
     }
 }
 
@@ -209,12 +277,7 @@ fn AllCardsBody(base: &'static str, class: &'static str, back: bool) -> impl Int
                         </a>
                     }
                 })}
-            <div>
-                <h1 class="text-2xl font-bold">"All cards"</h1>
-                <p class="text-muted-foreground text-sm">
-                    "Every card across your collections, Inbox included."
-                </p>
-            </div>
+            <AllCardsHeading />
             <QueryBar
                 text=query_text
                 url_q

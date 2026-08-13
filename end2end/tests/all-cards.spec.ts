@@ -2,8 +2,11 @@
 //
 // The load-bearing contracts, in assertion order:
 //
-// - the table SSRs (rows in the raw HTML, not fetched in) — `/my` is
-//   `SsrMode::Async` precisely so this holds;
+// - the table SSRs (rows in the raw HTML, not fetched in) at `/my/all`, which
+//   is `SsrMode::Async` precisely so this holds — and *does not* at bare `/my`,
+//   which ships the drill-down list and mounts the table after hydration so a
+//   phone stops paying for rows it never displays (P6-166). The two are
+//   asserted as a pair, each the other's control;
 // - the three columns say what the aggregate read says: the location summary
 //   is the per-collection breakdown, WANTED is the desire total, OWNED is the
 //   sum of the locations. Every number is cross-checked against the API rather
@@ -45,6 +48,29 @@ test.use({ storageState: AUTH_STATE });
 /// `.expect` on it.
 const quick = expect.configure({ timeout: 2000 });
 
+/// Wait until this page's body has resolved to one of the three things it can
+/// be: the table, the empty state, or the error arm.
+///
+/// `hydrated()` is no longer enough on `/my` (P6-166): the table's subtree is
+/// mounted after hydration and then fetches, so the document can be "hydrated"
+/// with nothing but a row skeleton where the table will go. Assertions written
+/// as retrying locators absorb that on their own; the one-shot reads
+/// (`renderedCells`'s single `$$eval`) cannot, and read an empty page instead —
+/// deterministically, so `toPass` retried it to the same answer every time.
+///
+/// All three outcomes are accepted rather than just the table, so this waits for
+/// *settled* and never for *correct* — deciding which of the three it should
+/// have been is the caller's job, and a wait that pre-judged it would turn a
+/// wrong-page bug into a timeout.
+async function settled(page: Page) {
+  await page
+    .locator(
+      '[data-testid="all-cards-table"], [data-testid="all-cards-empty"], [data-testid="all-cards-error"]',
+    )
+    .first()
+    .waitFor();
+}
+
 /// Re-read `/my` from the API and from the page together, and assert they
 /// agree — retrying the pair so a concurrent write cannot fail the run. See
 /// the file header.
@@ -58,6 +84,7 @@ async function agrees(
     const view = await allCards(request, q);
     await page.goto(q ? `/my?q=${encodeURIComponent(q)}` : "/my");
     await hydrated(page);
+    await settled(page);
     await body(view);
   }).toPass({ timeout: 30_000, intervals: [500, 1_000, 2_000] });
 }
@@ -111,8 +138,17 @@ test("the table SSRs every row server-side @fast", async ({ request }) => {
   // the default out-of-order streaming this page would ship a skeleton with
   // the content parked in a <template>, so assert the skeleton's *absence*
   // too — that is the half that catches an accidental SsrMode change.
+  //
+  // **`/my/all`, not `/my` (P6-166).** This contract belongs to whichever route
+  // renders the table at every width, and that is `/my/all`: bare `/my` shows
+  // the table only at `md`+ and now mounts it after hydration rather than
+  // SSRing rows a phone would download and never display (the test below pins
+  // that). `/my/all` is `SsrMode::Async` for exactly the reason this test
+  // states, is the route the root list and the rail drill into, and mounts the
+  // identical `AllCardsBody` — so nothing about the coverage moved except the
+  // URL.
   await expect(async () => {
-    const raw = await (await request.get("/my")).text();
+    const raw = await (await request.get("/my/all")).text();
     expect(raw).toContain('data-testid="all-cards-table"');
     expect(raw).not.toContain('aria-label="Loading your cards"');
 
@@ -129,6 +165,39 @@ test("the table SSRs every row server-side @fast", async ({ request }) => {
     expect(ssrOracles).toEqual(view.cards.map((r) => r.card.oracle_id));
     expect(raw).toContain(view.cards[view.cards.length - 1].card.name);
   }).toPass({ timeout: 30_000, intervals: [500, 1_000, 2_000] });
+});
+
+test("bare /my ships the list, not the hidden table @fast", async ({
+  request,
+}) => {
+  // P6-166. `/my` used to emit *both* markups and let CSS pick, so a phone —
+  // which displays none of it — still waited on the aggregate read and then
+  // downloaded the whole table: measured 576 KB and 50 `<tr>`s on the dev seed,
+  // against 30 KB and 0 after. This is the request-level half of that fix, and
+  // it is a request rather than a page on purpose: a `display: none` subtree is
+  // still bytes on the wire, so only the raw response can tell "hidden" from
+  // "not sent".
+  const raw = await (await request.get("/my")).text();
+
+  // Positive control first: this really is the signed-in `/my`, and the screen
+  // a phone gets is in it. Without this the count assertion below would pass
+  // just as happily on a login redirect or an error page.
+  expect(raw).toContain('data-testid="my-root-list"');
+
+  // The defect: not one aggregate row. Counted rather than `not.toContain`ed so
+  // the failure message says how many leaked.
+  const rows = [...raw.matchAll(/data-testid="all-cards-row"/g)].length;
+  expect(rows, "bare /my shipped all-cards rows it never displays").toBe(0);
+  expect(raw).not.toContain('data-testid="all-cards-table"');
+
+  // …and the second positive control, in the same run against the same seed:
+  // the rows exist and `/my/all` does send them, so the zero above is about
+  // `/my` and not about an empty account.
+  const table = await (await request.get("/my/all")).text();
+  expect(
+    [...table.matchAll(/data-testid="all-cards-row"/g)].length,
+    "the fixture has no rows at all — the assertion above is vacuous",
+  ).toBeGreaterThan(0);
 });
 
 /// What a row should render, derived from the API row — the expectation half.
@@ -375,9 +444,12 @@ test("quick search filters by name and rides the URL @fast", async ({
 
   const expected = await allCards(request, needle);
 
-  // And a cold load of that URL SSRs the same filtered page.
+  // And a cold load of that URL SSRs the same filtered page — on `/my/all`,
+  // which is the route that SSRs rows at every width (P6-166). `?q=` still
+  // rides the URL identically on both; the assertion above already proved that
+  // on `/my` itself, from the page.
   const raw = await (
-    await request.get(`/my?q=${encodeURIComponent(needle)}`)
+    await request.get(`/my/all?q=${encodeURIComponent(needle)}`)
   ).text();
   expect(raw).toContain(expected.cards[0].card.name);
 });
@@ -450,14 +522,21 @@ test("?cursor= is honored on a cold load @fast", async ({ page, request }) => {
     const rest = await allCards(request, "", first.next_cursor!);
     expect(rest.cards.length).toBeGreaterThan(0);
 
-    // Request-level: the cursor page must be in the raw response too.
-    const url = `/my?cursor=${encodeURIComponent(first.next_cursor!)}`;
-    const raw = await (await request.get(url)).text();
+    // Request-level: the cursor page must be in the raw response too — on
+    // `/my/all`, the route that SSRs rows at every width (P6-166). The two
+    // routes build and read `?cursor=` through the same `my_url`/`AllCardsBody`
+    // pair, so this still pins "a deep-linked cursor is honored before any JS";
+    // it just pins it where there is SSR'd markup to look at.
+    const query = `?cursor=${encodeURIComponent(first.next_cursor!)}`;
+    const raw = await (await request.get(`/my/all${query}`)).text();
     expect(raw).toContain(`data-oracle="${rest.cards[0].card.oracle_id}"`);
     expect(raw).not.toContain(`data-oracle="${first.cards[0].card.oracle_id}"`);
 
-    await page.goto(url);
+    // …and the page half stays on `/my`, which is where a desktop reader
+    // actually lands with a cursor in the URL.
+    await page.goto(`/my${query}`);
     await hydrated(page);
+    await settled(page);
 
     // The page starts *after* the cursor: none of the first three come back…
     for (const row of first.cards) {

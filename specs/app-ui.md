@@ -6014,3 +6014,199 @@ the fix and rebuilding turned it green again. Full serial run (`--workers=1`) of
 `all-cards.spec.ts` + `collection-view.spec.ts`: 37 passed / 1 failed — `all-cards.spec.ts:270`
 is the documented fixture-pool baseline failure (e2e-suite skill), unrelated to table layout,
 present before this task's changes too.
+
+### Bare `/my` ships the list, not the hidden table (2026-08-13, P6-166)
+
+`app/src/my/all_cards.rs` (`AllCardsPage`, new `AllCardsPending` /
+`AllCardsHeading`), new `app/src/components/viewport.rs`, and
+`app/src/components/palette.rs` (`desktop_signal` is now one line over the
+shared helper). Size M. This amends the "Mobile `/my` root" section above,
+which described `/my` as emitting both markups at every width.
+
+**The defect.** `/my` is `SsrMode::Async` and rendered *both* the drill-down
+root list (`md:hidden`) and the All-cards table (`hidden md:flex`), letting CSS
+pick. A phone therefore waited on the aggregate `all_cards` read it would
+display none of, and then downloaded the whole table — including Leptos's
+serialized copy of the resource, which is the bulk of it. Measured against the
+dev seed, signed in, on the watch server:
+
+| | bytes | `all-cards-row` `<tr>`s | SSR (warm, ×3) |
+|---|---|---|---|
+| `/my` before | 576,473 | 50 | 862 / 814 / 821 ms |
+| `/my` after | 143,580 | **0** | 492 / 475 / 467 ms |
+| `/my/all` (untouched) | 548,047 → 548,154 | 50 | ~830 / 900 ms |
+| `/my/shopping` (shell baseline) | 125,940 | — | — |
+
+−432,893 B (−75.1%) and −~345 ms of blocking. The shell baseline is the number
+that says what is left: `/my` now sits ~18 KB over a plain shell page, where it
+used to sit ~450 KB over one. Two caveats on reading the absolute figures, both
+of which leave the deltas intact: these are watch-server responses (`cargo
+leptos watch` injects hot-reload comment markers, so a release build is smaller
+on every row), and the e2e suite writes to this same user, so all four rows were
+captured back-to-back on one fixture state — re-measuring after a suite run
+moved `/my/all` by ~54 KB while `/my` did not move at all, which is itself the
+finding: `/my` no longer carries the aggregate payload that changes. The
+`batch-move` parity check above happens to supply a **second, independent**
+before/after pair, taken hours later on a fixture the suite had grown:
+597,488 B / 50 rows reverted → 164,488 B / **0** rows restored, −72.5%.
+
+**Chosen: the server ships one markup that is correct at every width, and the
+table's subtree mounts client-side.** `/my` SSRs the root list plus this page's
+own heading and row skeleton — constant size — and `AllCardsBody` is mounted
+behind a `Show` gated on `media_signal("(min-width: 768px)")`. That signal is
+`false` during SSR *and* during the hydration render and is corrected in an
+`Effect` afterwards, so **no width is resolved on the server** and the markup
+the server sends is still the markup that hydrates. CSS remains the display
+authority: the mounted body keeps its `hidden md:flex` and the query names the
+same 768 px line, so the gate decides only whether the subtree *exists*.
+
+The mechanism is not new here — the ⌘K palette has used exactly it since
+2026-07-26 (`desktop_signal`, gated on width *and* `pointer: fine`). It is now
+factored into `components/viewport.rs` with one implementation and two callers,
+so the two surfaces cannot drift on when a width is allowed to be known. The
+listener half matters and is kept: a tablet rotated into landscape crosses the
+line, and a sampled-once read would leave it on the skeleton forever.
+
+**What it costs, stated plainly.** A **full document load** of `/my` at desktop
+width no longer arrives with rows in the HTML: it paints the heading and the row
+skeleton, then fills in one round trip after hydration. Every *in-app* arrival is
+unaffected — a client-side navigation always mounted and fetched this table, so
+the mode switch, the breadcrumbs, the palette and the rail row cost exactly what
+they did before. The residual surface is the post-login `/` → `/my` redirect,
+a bookmark, and a refresh. The SSR-complete table is `/my/all`, which renders it
+at every width; the "the table SSRs every row server-side" contract moved there
+with the e2e test that pins it.
+
+**Rejected, with the evidence.**
+
+- **Client-hint cookie** (a script records a viewport class; SSR reads it and
+  skips the table for a phone). It is the only option with *zero* desktop cost,
+  and it was still turned down: it makes the server's markup a **guess**, which
+  is the one thing this page's design has refused since the list shipped. A
+  stale hint (widen the window, then hard-load `/my`) SSRs a list that is
+  `md:hidden` — a blank content column — so it needs a client-side recovery
+  path, which is the deferred mount anyway. That makes it the chosen mechanism
+  *plus* a cookie, a `Vary`-shaped caching hazard on an authed landing page, and
+  a resize listener writing `document.cookie`. More machinery for a first-paint
+  optimisation on one route.
+- **Two documents — `/my` the list at every width, `/my/all` the table —
+  retiring the CSS switch.** Attractive on paper (and the shape P6-154's rail
+  retarget points at), and rejected on what desktop `/my` would then be:
+  `root_rows` is a *strict subset* of the sidebar rail, projected off the same
+  `AssembledTree` (that is its stated design goal). Desktop `/my` would be a
+  240 px rail beside a content column repeating it — and `/` → `/my` after
+  login is the desktop landing, so this is not a corner. There is no designed
+  desktop hub in `design/wireframes.pen`; the frame that produced the list is
+  *Mobile — My cards root*. Retargeting desktop's entry points at `/my/all`
+  does not save it either: `/` → `/my` cannot know the width, so `/my` has to
+  remain good at both.
+- **Streaming the table island instead of blocking on it** (`PartiallyBlocked`
+  / out-of-order for the route). Fixes the blocking half only: under
+  out-of-order the rows still ship, as a `<template>` plus a hoisting script.
+  The task's requirement is neither block *nor* ship.
+
+**Not done, and why — two links of P6-154's family, filed rather than
+absorbed.** The command palette's `All cards` place and the collection view's
+`All cards` breadcrumb both point at `/my`, which is the table only at `md`+;
+on a phone they land on the drill-down list. That is the same defect P6-154
+fixed on the rail's pinned row, on two more shared, width-agnostic links, and
+this change neither creates nor worsens it (both are client-side navigations,
+so neither pays the payload this task is about). It wants P6-154's ruling
+applied, not a payload fix.
+
+**e2e, updated deliberately.** Nothing here was retargeted to make a test go
+green; each move is a contract that changed route.
+
+- **New, and the assertion this task exists for:** `all-cards.spec.ts` →
+  "bare /my ships the list, not the hidden table". Request-level, not
+  page-level, because a `display: none` subtree is still bytes on the wire and
+  only the raw response can tell "hidden" from "not sent". Counts
+  `all-cards-row` occurrences (0, against a base of 50) rather than
+  `not.toContain`, so a failure says how many leaked. Two positive controls:
+  the root list is present in the same document, and `/my/all` in the same run
+  does carry rows — so the zero is about `/my` and not about an empty account.
+  **Kill-verified**: reverting `AllCardsPage` to the pre-fix shape alone and
+  rebuilding fails it (`bare /my shipped all-cards rows it never displays:
+  expected 0, received 50`) and passes again restored.
+- `all-cards.spec.ts` → "the table SSRs every row server-side" now requests
+  `/my/all`. The contract belongs to whichever route renders the table at every
+  width, and that is `/my/all`; it is `SsrMode::Async` for exactly the reason
+  the test states and mounts the identical `AllCardsBody`. Same for the raw-HTML
+  halves of "quick search filters by name and rides the URL" and "?cursor= is
+  honored on a cold load" — both keep their page halves on `/my`, which is where
+  a desktop reader actually lands with those URLs.
+- `states.spec.ts` → the "works with no JS at all" half of the stale-cursor test
+  moved to `/my/all` for the same reason: a shared `?cursor=` link that must
+  survive a dead JS bundle is `/my/all`'s to carry. Its page half stays on `/my`.
+- `all-cards.spec.ts` gained `settled(page)` — `hydrated()` now proves only that
+  the *document* took over, and `/my` can be hydrated with a skeleton where the
+  table will go. Retrying locators absorbed that on their own; the one-shot
+  `$$eval` in `renderedCells` did not, and read an empty page *deterministically*
+  (so `toPass` retried to the same answer). `settled` waits for whichever of
+  table / empty / error the body resolves to — all three, so it waits for
+  settled and never for correct.
+- `my-root.spec.ts`, mobile: the table's absence at 390 px is now
+  `toHaveCount(0)`, where it was `toHaveCount(1)` + `toBeHidden()`. That is a
+  strictly stronger assertion and it is the point of the change; the same swap
+  in "a failed tree read still leaves a way out of My cards" strengthens that
+  test's state control. The same test also now asserts **zero `all_cards`
+  requests** at phone width — the client half, and not redundant with the
+  request-level one: deferring the table to hydration would be a poor trade if
+  the deferred mount then ran at every width, since the read is the expensive
+  part. Its positive control is the desktop test's mirror-image assertion that
+  the very same request *was* made.
+- `my-root.spec.ts`, desktop: "/my is still the All-cards table" now also
+  asserts real rows, no empty state, **and a non-zero `all_cards` request
+  count**. This is new risk the change introduces, not padding: the table's
+  resource is now created *after* hydration on a document load, and
+  `initial_value()` reads `__RESOLVED_RESOURCES[<next id>]` whatever the
+  hydration flag says (see `AllCardsPayload` above) — so the wrong-payload class
+  of bug gains a document-load instance, where before it had only the
+  client-side-navigation one. `AllCardsPayload`'s named field is what closes it;
+  this asserts it stays closed.
+- `responsive.spec.ts` needed no change. Its two `/my` click-path tests reach
+  the page by client-side navigation, which is the path this change does not
+  touch — worth stating, since "the click-path tests still pass" is otherwise
+  easy to read as coverage of the thing that moved.
+
+**Verification, chromium, `--workers=1`.**
+`responsive.spec.ts` + `my-root.spec.ts` + `all-cards.spec.ts` **41/42**;
+`my-root.spec.ts` + `states.spec.ts` + `session-fallback.spec.ts` +
+`collection-tree.spec.ts` **32/32** after the phone no-fetch assertion landed.
+Two failures triaged against base, both **pre-existing**:
+
+- `all-cards.spec.ts` → "the location summary expands to the collections it
+  names" — the dev seed gap P6-154 already recorded. It fails on the **API
+  payload** (`dev seed should hold at least one card in two collections`) before
+  the page is touched, and `GET /api/all_cards` confirms it directly: 50 cards,
+  **0** with more than one location. Nothing in this change can reach it.
+- `batch-move.spec.ts` → "a /my row held in one place resolves to that place and
+  moves" and "a /my row whose copies are all sideboarded moves off the
+  sideboard" — no `Moved 1 card` toast after a move committed from `/my`. These
+  *are* `/my` tests, so they were parity-checked properly rather than argued
+  about: `AllCardsPage` was reverted to its pre-fix shape, the watch server
+  rebuilt and confirmed serving the old markup (`/my` back to 50 rows), and the
+  same two tests fail with the identical signature and the same sibling
+  (`an ambiguous /my row asks which copies, and moves exactly the stack picked`)
+  still passing. Restored after. Not this task's, and filed rather than absorbed.
+
+**The full chromium tier was not run to completion, deliberately and this is a
+gap.** At `--workers=1` against the remote Neon dev branch this box measured
+~1.5 min/test across 305 tests — five hours, most of it in families
+(`batch-move`, `collection-tree-manage`) with no causal path to a change that
+only moves *when* one subtree mounts. The specs that touch `/my`'s table or
+request it raw were run instead, which is where the change can reach; the
+untouched remainder is the honest caveat, and CI runs the gate regardless.
+
+Gate: `cargo fmt --all --check` clean; all five clippy lines clean
+(`--workspace --exclude frontend --exclude three_rings --all-targets`,
+`-p frontend --target wasm32-unknown-unknown`, `-p app --features native`,
+`-p app --features hosted,component-bench`, `-p app --features
+hydrate,component-bench --target wasm32-unknown-unknown`); `cargo test -p app
+--features hosted` **360 passed**.
+
+**Resilience trade, stated (P6-166 review):** desktop `/my`'s main content now
+requires wasm + `matchMedia` to mount — a hydration failure that previously left
+a readable SSR'd table leaves a permanent skeleton. Accepted for the payload
+win; `/my/all` remains the full-SSR table if resilience is ever needed at a
+bookmarkable address.
