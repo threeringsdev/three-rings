@@ -1806,12 +1806,20 @@ close.
 Same pass, two related exits that also went silent, both traced to
 `app/src/my/tree_manage.rs`'s `commit_move`:
 
-- **The tree resource read `None` mid-refetch.** `commit_move` re-reads
-  `tree.0.get_untracked()` live at commit time — some other tree mutation's
-  `tree.refetch()` landing while this dialog is still open can catch the
-  signal between values — and a `None` there previously hit the same blanket
-  `else { return; }`. Now: `None` sets "Still loading — try again."; a failed
-  read or no tree at all sets "Couldn't load your collections — try again."
+- **The tree resource reads `None`.** `commit_move` re-reads
+  `tree.0.get_untracked()` live at commit time, and a `None` there previously
+  hit the same blanket `else { return; }`. **Not** a mid-refetch case — an
+  earlier draft of this note claimed `tree.refetch()` could catch the signal
+  "between values" while this dialog is open, which is wrong per
+  `reactive_graph`'s own semantics: a refetch holds the previous `Some` until
+  the new fetch resolves (`ArcAsyncDerived` never regresses to `None`
+  mid-flight). `None` is only the *never-resolved* state, and `open_move`
+  can't fire until a tree row has already rendered once — so this arm is a
+  defensive fallback for "the tree has somehow never loaded", not a
+  transient this dialog realistically hits. Kept anyway, with honest
+  wording ("Still loading — try again.") rather than a silent close, the
+  same call as the adjacent failed-read arm ("Couldn't load your
+  collections — try again.").
 - **`busy` held by another dialog.** `busy` is one `RwSignal<bool>` shared by
   all four tree dialogs (`TreeManage::busy`), and `Dialog`'s ESC closes an
   overlay without cancelling its in-flight request — dismiss a slow Delete,
@@ -1861,14 +1869,45 @@ pattern `collection-header-kebab.spec.ts`'s race test uses) — deterministic,
 and confirmed to fail on the pre-fix code and pass on the fix by literally
 running it both ways (`git stash` around `tree_manage.rs`).
 
+**Review caught a major in the `busy`-visible-state addition itself, same day
+(P6-121, second pass):** `move_busy = move_open && busy` reads `busy` without
+asking *whose* write set it. `commit_move` sets `busy` for its own commit too
+— the same shared signal every dialog's submit uses — so every ordinary
+successful Move dimmed the row list and showed "Working on another change —
+try again in a moment." for the span of the write the click had just made.
+Factually wrong (it *was* this change) and actively bad advice (the pick was
+already committing; there was nothing to retry). Fixed with a second signal,
+`TreeManage::move_committing`, set/cleared alongside `busy` in `commit_move`
+and nowhere else; `move_busy` (and the parallel "still working" branch inside
+`commit_move`'s own foreign-busy check) now reads `busy && !move_committing`.
+During the move dialog's own commit this renders exactly as it did before any
+of this task's markup existed: no dimming, no message — there is no separate
+submit control here whose disabled state could stand in for one, so "nothing
+new" is the honest baseline, not a gap. Also reworded the `Gone` message
+(minor, same review) from "…pick another destination" to "That collection was
+just deleted — pick another destination.": the stale row can still be the one
+visibly on screen for the sub-tick window this arm guards, so the wording
+must hold up whether or not it has already vanished from the list.
+
+New e2e coverage for the fix: extended the busy-visible-state test with an
+ordinary-commit case — hold *this* move's own `reparent_collection` open via
+`page.route` and assert the "another change" line never appears while it's in
+flight, alongside the pre-existing foreign-busy case (holding an unrelated
+Delete's request instead) still showing it. Kill-verified against the
+pre-review commit (`8b4b405`, `git stash` around `tree_manage.rs`): the new
+own-commit assertion failed there exactly as expected — the dimmed list and
+the "another change" line for an ordinary Move it is possible to reproduce on
+every single successful pick, not a rare race — and passes on the fix.
+
 Verified: `cargo test -p app --features hosted` (320 passed, incl. the three
-new `MoveBlocked` unit tests), gate subset (fmt, workspace clippy, frontend
-wasm clippy) clean, `collection-tree-move.spec.ts` + `collection-tree-manage.spec.ts`
-full chromium `--workers=1` **26/29** (3 failures triaged as pre-existing
-shared-dev-branch data debris unrelated to this change — a `genuinelyUnownedCard`
-pool exhaustion and an Inbox rollup count off by the same kind of leftover
-`zz-e2e` debris the e2e-suite skill already names as a known collision source;
-reproduced solo, no relation to move-dialog code).
+`MoveBlocked` unit tests), gate subset (fmt, workspace clippy, frontend wasm
+clippy) clean, `collection-tree-move.spec.ts` full chromium `--workers=1`
+**12/12**. `collection-tree-manage.spec.ts` in the same run: **26/29** (3
+failures triaged as pre-existing shared-dev-branch data debris unrelated to
+this change — a `genuinelyUnownedCard` pool exhaustion and an Inbox rollup
+count off by the same kind of leftover `zz-e2e` debris the e2e-suite skill
+already names as a known collision source; reproduced solo, no relation to
+move-dialog code).
 
 ### ⌘K command palette (2026-07-26)
 

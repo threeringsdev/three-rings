@@ -347,6 +347,17 @@ pub struct TreeManage {
     pub move_open: RwSignal<bool>,
     /// An op in flight (disables dialog submits).
     busy: RwSignal<bool>,
+    /// `true` for exactly the span of *this* move dialog's own `commit_move`
+    /// — set alongside `busy` in that function, nowhere else. `busy` is
+    /// shared by all four tree dialogs (see its own doc comment) and the move
+    /// picker reads it to render a foreign-busy warning while another
+    /// dialog's write is in flight; without this, that same read is also
+    /// true for the ordinary case of the move dialog's *own* pick committing,
+    /// which would dim the list and blame "another change" for the write
+    /// this very click just made (caught in review of P6-121, before this
+    /// stayed unshipped: every successful Move briefly claimed itself was
+    /// something else in progress).
+    move_committing: RwSignal<bool>,
     /// Inline dialog error (server message) — cleared on open/submit.
     error: RwSignal<Option<String>>,
     /// Bumped after every successful create / rename / move. A page whose own
@@ -423,6 +434,7 @@ pub fn provide_tree_manage() {
         move_req: RwSignal::new(None),
         move_open: RwSignal::new(false),
         busy: RwSignal::new(false),
+        move_committing: RwSignal::new(false),
         error: RwSignal::new(None),
         revision: RwSignal::new(0),
         content_revision: RwSignal::new(0),
@@ -818,7 +830,19 @@ pub fn TreeDialogs() -> impl IntoView {
     // its in-flight request — `Dialog`'s ESC never cancels anything) and then
     // opening Move to… lands here with the list dimmed and inert until that
     // request settles.
-    let move_busy = move || manage.move_open.get() && manage.busy.get();
+    //
+    // **`&& !manage.move_committing.get()`, not just `busy`.** `commit_move`
+    // sets `busy` for its own write too (same shared signal every dialog's
+    // submit uses), and without excluding that span here, every ordinary
+    // successful Move dimmed its own list and blamed "another change" for
+    // the write the click itself had just made (caught in review — this is
+    // the fix for it, not a hypothetical). During the move dialog's own
+    // commit this renders exactly as it did before this task added any of
+    // this markup: no dimming, no message — a deliberate choice, not a gap,
+    // since there is no separate submit control here whose disabled state
+    // could stand in for one.
+    let move_busy =
+        move || manage.move_open.get() && manage.busy.get() && !manage.move_committing.get();
 
     // Put the caret in the move picker's field when it opens. Without this the
     // keyboard path dead-ends: the menu item opens a dialog nothing is focused
@@ -1867,25 +1891,30 @@ pub fn commit_move(
     // moment this click resolved. `move_rows`' own list re-renders off the
     // same resource (see `MoveBlocked`'s doc comment), so the two agree in
     // the overwhelming common case — but a read here can still land in the
-    // narrow flush between a `tree.refetch()` updating the signal and that
-    // re-render committing, which is what `None`/`MoveBlocked::Gone` below
-    // are for.
+    // narrow flush between a `tree.refetch()` resolving a *new* `Some` and
+    // that re-render committing, which is what `MoveBlocked::Gone` below is
+    // for. (Reactive-graph resources hold their previous `Some` across a
+    // refetch until the new fetch resolves — `ArcAsyncDerived` never drops
+    // back to `None` mid-flight — so this read is never genuinely "between
+    // values" the way an earlier draft of this comment claimed.)
     let dto = match tree.0.get_untracked() {
         Some(Some(Ok(dto))) => dto,
-        // The signal is between values — some other tree mutation (a
-        // create/rename/delete on any row, from any of the four dialogs)
-        // called `tree.refetch()` and the new fetch hasn't landed yet. This
-        // is the transient case: closing the dialog here previously told the
-        // user their pick landed when the client never even asked the
-        // server, because there was no row list to plan against yet.
+        // Defensive fallback, not a transient this dialog realistically
+        // hits: `open_move` only fires off a resolved `Row` in
+        // `menu_target`, which means the tree resource had already produced
+        // at least one `Some` before this dialog could even open — and per
+        // the note above, a refetch never regresses that back to `None`.
+        // Reachable only if the tree has somehow never loaded at all by the
+        // time this fires; honest wording rather than a silent close either
+        // way.
         None => {
             manage.error.set(Some("Still loading — try again.".into()));
             return;
         }
         // No tree at all (anonymous shell) or the read failed outright —
-        // `open_move` can't practically be reached in either state (it needs
-        // a resolved `Row` in `menu_target`), but degrade the same honest way
-        // rather than silently closing on a case that shouldn't happen.
+        // `open_move` can't practically be reached in either state either,
+        // for the same reason, but degrade the same honest way rather than
+        // silently closing on a case that shouldn't happen.
         Some(None) | Some(Some(Err(_))) => {
             manage
                 .error
@@ -1911,13 +1940,25 @@ pub fn commit_move(
             return;
         }
         Err(MoveBlocked::Gone) => {
+            // Not "…pick another destination" alone — the stale row can still
+            // be the one visibly on screen for the sub-tick window this arm
+            // guards (see `MoveBlocked`'s own doc comment), so the wording
+            // must hold up whether or not it has already vanished from the
+            // list by the time this reads.
             manage.error.set(Some(
-                "That collection isn't there anymore — pick another destination.".into(),
+                "That collection was just deleted — pick another destination.".into(),
             ));
             return;
         }
     };
     if manage.busy.get_untracked() {
+        if manage.move_committing.get_untracked() {
+            // Not "another change" — *this* dialog's own previous pick is
+            // still finishing (a double click, or a second pick landing
+            // before the first one's dialog-close did). Nothing new to say:
+            // the first pick already owns the honest outcome once it lands.
+            return;
+        }
         // `busy` is shared across all four tree dialogs (`TreeManage::busy`):
         // dismissing a slow Delete (ESC closes the overlay, not the in-flight
         // request) and then opening Move to… lands here. The picker's rows
@@ -1931,6 +1972,10 @@ pub fn commit_move(
         return;
     }
     manage.busy.set(true);
+    // Set alongside `busy`, for exactly its span — see the field's own doc
+    // comment for why the move picker's busy-rendering needs to tell "my own
+    // write" apart from "someone else's write, still going".
+    manage.move_committing.set(true);
     manage.error.set(None);
     spawn_local(async move {
         let mut reparented = false;
@@ -1942,6 +1987,7 @@ pub fn commit_move(
             }
         }
         manage.busy.set(false);
+        manage.move_committing.set(false);
         match (result, reparented) {
             (Ok(()), _) => manage.move_open.set(false),
             (Err(e), true) => {

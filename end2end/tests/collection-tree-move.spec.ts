@@ -515,6 +515,59 @@ test.describe("honest exits (P6-121)", () => {
       // `busy` was actually deleted (the held response completed above).
     }
   });
+
+  // The major review caught on the first pass of this markup: `move_busy`
+  // read `manage.busy` without asking *whose* write set it. `commit_move`
+  // sets `busy` for its own commit too (the same shared signal every
+  // dialog's submit uses), so on `8b4b405` this same "another change" line
+  // rendered for the span of *every ordinary successful Move* — not a rare
+  // race, reproducible on every single pick. `TreeManage::move_committing`
+  // is the fix: set/cleared alongside `busy` in `commit_move` and nowhere
+  // else, so the foreign-busy render can tell its own write apart from
+  // someone else's. This test holds the move's own `reparent_collection`
+  // open (not an unrelated Delete's) and asserts the opposite of the test
+  // above: no dimming, no "another change" line, for the whole span of an
+  // ordinary in-flight Move.
+  test("an ordinary move commit does not blame itself for 'another change' @fast", async ({
+    page,
+  }) => {
+    const src = await createCollection(page, { name: scratchName("own-src") });
+    const dst = await createCollection(page, { name: scratchName("own-dst") });
+    try {
+      await page.goto("/my");
+      await hydrated(page);
+
+      await page.route("**/api/reparent_collection*", async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        await route.continue();
+      });
+
+      await openMovePicker(page, src.id);
+      const list = page.locator('[data-testid="tree-move-list"]');
+      await moveOptions(page).filter({ hasText: dst.name }).click();
+
+      // Still mid-flight (the route above is holding the response) — and
+      // this dialog's own row list must not look like someone else's write
+      // is blocking it, because nothing else is: this *is* the write.
+      await expect(list).not.toHaveAttribute("data-busy", "true");
+      await expect(
+        moveDialog(page).getByTestId("tree-move-busy"),
+      ).toBeHidden();
+      await expect(page.locator("[data-tree-dialog-error]")).toHaveCount(0);
+
+      await page.waitForResponse(
+        (r) => r.url().includes("/api/reparent_collection") && r.status() === 200,
+      );
+      await expect
+        .poll(async () => (await summaryOf(page, src.id)).parent_id)
+        .toBe(dst.id);
+      await expectMoveState(page, "closed");
+    } finally {
+      await page.unroute("**/api/reparent_collection*");
+      await deleteCollection(page, src.id);
+      await deleteCollection(page, dst.id);
+    }
+  });
 });
 
 test.describe("mobile", () => {
