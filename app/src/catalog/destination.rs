@@ -233,6 +233,24 @@ impl DestinationChoice {
 /// `Show`/`CommandEmpty` swap this component used to own. Same output either
 /// way — same sentence, same `data-testid`, same `role="alert"` — just no
 /// longer a workaround `DestinationList` has to rebuild.
+///
+/// **`loading` is the same migration for the third `CommandEmpty` world**
+/// (P6-163). A caller whose rows sit behind their own `Transition`/`Suspend`
+/// — the tree's `Move to…` is the one this was found on — used to put its
+/// "Loading…" line *inside* `children`, as the `Transition`'s `fallback`.
+/// That line and this component's registry-inferred `empty` line are
+/// siblings in the same `CommandList`, and while the fetch is in flight the
+/// registry has zero items either way, so both rendered **at once**: "Loading
+/// collections…" next to "No collection to move into." — the exact
+/// not-fetched/failed/genuinely-empty collapse `CommandEmpty`'s `loading`
+/// prop exists to end (see the primitive's own module doc). Wiring `loading`
+/// here — instead of yet another per-caller `Show`/`Transition`-fallback
+/// workaround — makes it `CommandEmpty`'s call, same as `failed`: the
+/// registry-inferred line is unmounted, not merely hidden, while either is
+/// true, so exactly one line is ever in the DOM. Default (unset) is
+/// byte-identical to before this prop existed — the sticky picker's own
+/// `Transition` never needs it, since [`PickerBody`] keeps this whole
+/// component *outside* its boundary and so is never mounted while pending.
 #[component]
 pub fn DestinationList(
     /// The option rows — `DestinationOption`s, inside the caller's own
@@ -252,6 +270,15 @@ pub fn DestinationList(
     /// closed dialog renders no list), so neither is ever server-rendered.
     #[prop(into, optional)]
     failed: Signal<bool>,
+    /// True while the read behind `children` hasn't resolved yet — see the
+    /// doc comment above for why this exists (P6-163). Takes precedence over
+    /// the registry-inferred `empty` line, same as `failed` (and `failed`
+    /// still wins over this if a caller somehow has both true at once —
+    /// `CommandEmpty`'s own precedence). Effect-written for the same
+    /// SSR-blindness reason as `failed`; every current `loading` caller is
+    /// already client-only for that reason.
+    #[prop(into, optional)]
+    loading: Signal<bool>,
     /// Deterministic DOM id for the search field, for a caller that focuses it
     /// itself. The tree's `Move to…` does: it opens in a dialog, and a dialog
     /// that focuses nothing leaves the keyboard path dead-ended. Omitted = no
@@ -289,6 +316,18 @@ pub fn DestinationList(
                                 data-testid="destination-error"
                             >
                                 "Couldn't load your collections."
+                            </p>
+                        }
+                    }
+                    loading=loading
+                    loading_children=move || {
+                        // Same sentence every `loading` caller used to embed
+                        // itself as a `Transition` `fallback` — centralized so
+                        // it can only ever say one thing, same reasoning as
+                        // `failed_children` above.
+                        view! {
+                            <p class="text-muted-foreground p-3 text-sm">
+                                "Loading collections…"
                             </p>
                         }
                     }

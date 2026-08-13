@@ -1659,6 +1659,45 @@ release CSS with resolved colours in both themes, so no badge ships invisible.
   by the bench section and the unit-tested tone mapping only. Emptying it would mean mutating
   shared fixture data.
 
+**Amendment (2026-08-13, P6-163): `CommandEmpty`'s `loading` world, unused until now, closed
+the tree move dialog's own double-state bug.** `failed` shipped wired for all three
+`DestinationList` consumers above; `loading` shipped on the primitive at the same time
+(P6-011) but nothing used it. The tree's `Move to…` dialog (`TreeDialogs` in
+`tree_manage.rs`) put its own "Loading collections…" line *inside* `DestinationList`'s
+`children`, as a `Transition` `fallback` sitting next to `CommandEmpty`'s registry-inferred
+`empty` line — and while the tree read was pending, the registry had zero items either way
+(nothing had mounted yet), so **both lines rendered at once**: "Loading collections…" beside
+"No collection to move into.", the identical not-fetched/failed/genuinely-empty collapse
+`failed` already existed to end for the failure half. Fix: `DestinationList` now forwards a
+`loading` signal onto `CommandEmpty` too, with its own `loading_children` slot carrying the
+centralized sentence (same pattern as `failed_children`); the tree dialog's own `Transition`
+fallback is now `|| ()` — `CommandEmpty` owns saying "loading" once, not two components saying
+it in two different ways. `command.rs`'s own module doc and `DestinationList`'s doc comment
+both carry the full account.
+
+**e2e finding worth keeping: a full page load never triggers a client-side fetch for
+`collection_tree`.** `AppShell` (which calls `provide_collection_tree()`) wraps every
+catalog/my-cards page, and on a full navigation its `Resource` resolves *during SSR* — the
+value ships already-baked into the initial HTML/hydration payload, so `page.route` on
+`**/api/collection_tree*` catches nothing (measured: zero `request` events on a fresh full
+load of `/my`). The one place a genuine client fetch happens is the *first* client-side (SPA)
+navigation into an `AppShell`-wrapped route in a given browser session — `/dev/components` is
+the one route outside `AppShell` entirely (module doc, `AppShell`: "Auth pages and the bench
+stay outside it"), so landing there first and then routing in client-side (an injected,
+clicked anchor, since there is no on-page link to an arbitrary just-created scratch
+collection) is what makes the fetch, and so the hold, real. Pinned in
+`collection-tree-move.spec.ts`'s "loading state (P6-163)" describe block, kill-verified
+against the pre-fix dialog (both lines present, `toHaveCount(0)` on the empty line failing
+with `Received: 1`).
+
+**Open finding, not fixed here (out of this task's stated scope, `tree_manage.rs` only):**
+`app/src/my/move_selection.rs`'s tray "Move to…" picker wires the identical shape —
+`DestinationList` wrapping its own `Transition` with an inline "Loading collections…"
+fallback, `failed` wired but `loading` not — so it almost certainly has the same double-state
+window on its first render. Flagged rather than silently fixed or silently left; a follow-up
+task should wire `loading=load_loading` there too and drop its own duplicate fallback text,
+the same two-line change this task made in `tree_manage.rs`.
+
 **No mutation pass was run** (switched off in the loop), so each new test is instead anchored
 on a `data-testid`/attribute the fix introduced — `destination-error`,
 `collection-error-home`, `tree-error`, `data-failure`, `data-tone`, `state-retry` — none of
