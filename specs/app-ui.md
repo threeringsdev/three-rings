@@ -2449,23 +2449,33 @@ same RLS scope, so `sum(allocate(gap, locations)) == owned_elsewhere` is an
 identity rather than a hope. A row appears in **both** buckets when part of its
 gap is fillable and part is not — the split is per copy.
 
-**Needs stays board-blind, deliberately, and the page says so.** `desires`
-gained a `board` column in migration 0006, so the sideboard-want case is real:
-a deck holding a card on `main` and wanting it on `side` produces no need row.
-Keeping the blindness was chosen over fixing it because **a board-aware need
-would manufacture rows whose Pull cannot work** — `apply_move`/`move_holding`
-always land `to_board = main` (board relabel is card-tagging's operation), so a
-sideboard need would survive every pull aimed at it, forever. "Unfilled deck
-slot" and "missing copy" are different concepts and only the second is shipped.
-Pinned by an e2e that **fails if `needs()` is made board-aware**, so the
-decision cannot be silently reversed.
+**Needs stayed board-blind, deliberately — reversed 2026-08-12 by P6-074.**
+`desires` gained a `board` column in migration 0006, so the sideboard-want case
+is real: a deck holding a card on `main` and wanting it on `side` produced no
+need row. Keeping the blindness was chosen over fixing it because **a
+board-aware need would manufacture rows whose Pull cannot work** —
+`apply_move`/`move_holding` always land `to_board = main` (board relabel is
+card-tagging's operation), so a sideboard need would survive every pull aimed at
+it, forever. "Unfilled deck slot" and "missing copy" were treated as different
+concepts and only the second was shipped. An e2e pinned the decision so it could
+not be silently reversed.
 
-The empty state was the honesty gap and was fixed in review: it read "Nothing
-missing — every card this collection wants is already here", an unqualified
-claim about *slots* from a page that counts *copies*. It now reads "Nothing to
-pull or buy — this collection holds every copy it wants. Unfilled board slots
-aren't counted here." The module doc and subtitle are not what a user reads when
-the table is empty.
+**What actually happened, so this reads as history rather than current
+behaviour:** P6-074 fixed the blocker itself — a pull now lands on the board
+that wanted it — and only then made the read board-aware, in the same change.
+The decision was re-taken, not drifted from, and the pinning e2e was *inverted*
+rather than deleted, so it still fails loudly if the behaviour moves again. See
+"Board-aware needs rows" below and the same-dated entry in
+[collection-api](collection-api.md). The reasoning above is retained because it
+is exactly why the pull path had to be fixed first.
+
+The empty state was the honesty gap and was fixed in the 2026-07-25 review: it
+read "Nothing missing — every card this collection wants is already here", an
+unqualified claim about *slots* from a page that counted *copies*. It became
+"Nothing to pull or buy — this collection holds every copy it wants. Unfilled
+board slots aren't counted here." — and that last clause became false with
+P6-074 and was rewritten again (below). The module doc and subtitle are not what
+a user reads when the table is empty.
 
 **Review: CLEAN, zero majors**, twelve minors, ten filed. Two were fixed rather
 than filed: the empty-state wording above (an unmet requirement of the board
@@ -4609,3 +4619,44 @@ way to stand inside "old results, new URL, nothing resolved". Two of the six
 tests are meaningless without it. One trap it cost: `page.unroute` while a
 handler is mid-`continue` fulfils the route itself and the `continue` then
 throws "Route is already handled" — the handler stays installed instead.
+
+### Board-aware needs rows (2026-08-12, P6-074)
+
+The needs page's rows are now per `(oracle, board)`, because `NeedRow` is
+(collection-api Findings, same date, carries the query and pull-path reasoning).
+This section records only what the *page* does with the new field.
+
+**The board is shown the way the deck page shows it: by silence for the
+mainboard.** `group_deck` already labels a deck's sections "Instants" vs
+"Sideboard · Instants" — main is the unmarked case. The needs rows follow that
+exactly rather than inventing a second vocabulary: `my::collection::board_label`
+was extracted from the same `BOARD_ORDER` table and is now the one source both
+read, so the two pages cannot call the same board different things. A binder's
+desires are all `main`, so the label never appears outside a deck, and inside one
+it appears only where it distinguishes two rows of the same card. Rows carry
+`data-board` alongside `data-oracle`, matching `collection-row`. The pick-list
+lines carry it too — a card wanted on two boards produces two lines in the same
+group, and without the tag they would read as a duplicate.
+
+**The chip's semantics did not change, only its inputs.** `needs_chip` still
+formats `CollectionTotals`, and `totals_of` still sums per-row gaps; a card
+missing on two boards simply contributes two rows. The header's totals and
+`read_needs_rows` no longer merely *agree* on grain — since the review they are
+the same read (`read_need_gaps`) folded by the same function, so there is no
+second copy left to drift.
+
+**A row offers only its own share of a card's elsewhere copies.** The pool is
+per-card and shared between that card's board rows, so it is apportioned across
+them (mainboard first) rather than offered whole to each; a row's pull lines are
+allocated from `owned_elsewhere`, not from its raw gap, through the one
+`offers_of` the pick list, the row button and the server planner all call. The
+visible consequence: a card wanted on two boards with only one copy elsewhere
+shows **one** pullable line and a Short row, not two pullable lines — and the
+chip says "1 owned elsewhere · 1 to buy" instead of claiming both are covered.
+
+**Two page texts were false after the change and were rewritten, not left.** The
+empty state's "Unfilled board slots aren't counted here" — added in the
+2026-07-25 review precisely to keep the board-blind claim honest — now says the
+remaining true caveat: moving a copy you *already hold* between boards is a
+relabel, not an acquisition. The subtitle gained "board by board". `states.spec.ts`
+asserted on the old wording and moved with it.

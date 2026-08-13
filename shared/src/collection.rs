@@ -802,10 +802,26 @@ pub struct CardLocation {
 /// A needed card in a collection (desired > present here). The gap splits into
 /// `owned_elsewhere` (fillable from the user's other collections, with
 /// `locations`) and `short` (still to buy).
+///
+/// **Grain is `(oracle, board)`, matching [`CardRow`]** (P6-074). `desired` and
+/// `present_here` are both this board's own numbers, so a mainboard copy can no
+/// longer cancel a sideboard want — the two are different rows.
+///
+/// **`owned_elsewhere` / `locations` are deliberately board-blind**, and that
+/// asymmetry is the point: only copies *inside* this collection are committed
+/// to a board, so a copy sitting in another collection can be pulled to fill
+/// **any** board's need. When one oracle yields need rows on two boards, both
+/// rows therefore carry the *same* elsewhere total and the same offers. They
+/// are "places you could pull from", not stock partitioned between the rows —
+/// see `crate::backend::pull_plan` (in `app`), which decrements the stacks it
+/// has already planned against so two boards drawing on one copy plan the
+/// honest partial rather than the same copy twice.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NeedRow {
     pub oracle_id: Id,
     pub name: String,
+    /// Which board wants these copies (`main` outside a deck).
+    pub board: Board,
     pub desired: i32,
     pub present_here: i32,
     pub owned_elsewhere: i32,

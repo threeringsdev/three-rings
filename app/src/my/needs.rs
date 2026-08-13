@@ -1,30 +1,42 @@
 //! `/my/collections/:id/needs` — what a collection is missing, and where to get
 //! it (specs/app-ui.md → `/my/collections/:id/needs`).
 //!
-//! Four things are worth knowing before editing this file.
+//! Five things are worth knowing before editing this file.
 //!
-//! **The page is about *acquisition*, and its arithmetic is board-blind.**
-//! `CollectionStore::needs` groups desires and holdings by `oracle_id` alone,
-//! while the collection view's card rows group by `(oracle, board)`. So a deck
-//! holding a card on `main` and wanting it on `side` renders a Sideboard row
-//! reading `HERE — / WANTED 1` while this page shows nothing. That reads like a
-//! contradiction and is not one: the deck already *has* the copy, so there is
-//! nothing to pull and nothing to buy — the only outstanding action is moving it
-//! between boards, which is [card-tagging](../../../specs/card-tagging.md)'s
-//! quantity-preserving relabel and not a move at all. Both buckets here are
-//! defined by an operation (`move_cards` into this collection, or buying), and
-//! neither operation can fix a mis-boarded copy.
+//! **The arithmetic is board-aware on the wanting side and board-blind on the
+//! offering side** (P6-074). `CollectionStore::needs` groups this collection's
+//! desires and holdings by `(oracle, board)` — the same grain the collection
+//! view's card rows use — so a deck holding a card on `main` and wanting it on
+//! `side` shows a real need here, exactly as its Sideboard row's
+//! `HERE — / WANTED 1` already claimed. Until P6-074 those two disagreed: the
+//! read summed by oracle alone, so the mainboard copy cancelled the sideboard
+//! want and this page showed nothing.
 //!
-//! That is why this page is built on the board-blind arithmetic **deliberately**
-//! rather than by inheritance, and why the subtitle says "more copies than it
-//! holds" instead of "unfilled slots". Making `needs()` board-aware would
-//! manufacture rows whose Pull button cannot work: a pull lands copies on
-//! `to_board = Main` (the ledger's `to_board` is always `main` today — see
-//! specs/app-ui.md → "Undoable removal + deck teardown"), so a sideboard need
-//! would survive every pull aimed at it, forever. The honest board-aware version
-//! needs a board-addressed destination first; until then, "unfilled deck slot"
-//! is a *different* concept from "missing copy" and only the second one is
-//! shipped. Recorded rather than silently inherited.
+//! The offers are the deliberate asymmetry: `owned_elsewhere` and `locations`
+//! group by oracle alone, because only copies *inside* this collection are
+//! committed to a board. A copy in the Trade Binder can fill **any** board's
+//! need, so when one card needs copies on two boards, both rows show the same
+//! elsewhere total and the same locations — "places you could pull from", not
+//! stock split between them. `crate::backend::pull_plan` is where that shared
+//! stock is reconciled at write time: it decrements the stacks it has already
+//! planned against, so two boards drawing on one copy produce the honest
+//! partial (which [`pull_line_outcome`] already knows how to say) rather than
+//! the same copy planned twice.
+//!
+//! **A pull lands on the board that wanted it.** [`PullItem`] carries the need
+//! row's board and `pull_plan` writes `to_board` from it, so a sideboard need
+//! is actually closed by pulling into it. Before P6-074 every pull hardcoded
+//! `to_board = main`, which is why a board-aware needs read could not have
+//! shipped on its own: the sideboard need would have survived every pull aimed
+//! at it, forever.
+//!
+//! What is still *not* here, and is still a different concept: relabelling a
+//! copy this collection **already holds** from one board to another. That is
+//! [card-tagging](../../../specs/card-tagging.md)'s quantity-preserving op, not
+//! an acquisition, and this page's two buckets are both defined by an operation
+//! that brings copies *in* (`move_cards`, or buying). A deck holding one copy
+//! on `main` and wanting one on `main` **and** one on `side` needs one more
+//! copy, and that is what this page says.
 //!
 //! **The pick list is client-composed, and quantity is never the caller's.** No
 //! backend read was added for it: [`allocate`] spreads each row's gap over the
@@ -67,7 +79,7 @@ use serde::{Deserialize, Serialize};
 use shared::{CardLocation, HoldingLine, Id, NeedRow, NeedsView};
 use std::collections::HashSet;
 
-use super::collection::{ancestor_path, assembled_roots, message_of, needs_chip};
+use super::collection::{ancestor_path, assembled_roots, board_label, message_of, needs_chip};
 use super::move_selection::{movable, MoveSource, Skipped};
 use super::tree::CollectionTreeResource;
 use super::tree_manage::TreeManage;
@@ -82,12 +94,20 @@ use crate::components::ui::table::{
 
 // ------------------------------------------------------------ the wire ---
 
-/// One line of a pull: a card this collection needs, and the collection to take
-/// it from. Deliberately carries **no quantity** — see the module doc.
+/// One line of a pull: a card this collection needs, which board wants it, and
+/// the collection to take it from. Deliberately carries **no quantity** — see
+/// the module doc.
+///
+/// `board` is the *destination* board (P6-074): the board of the [`NeedRow`]
+/// this line was allocated from, and therefore the board the pulled copies
+/// land on. It is never the source stack's board — that one is read off the
+/// holding the server actually draws from, so undo puts the copies back where
+/// they were.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullItem {
     pub oracle_id: Id,
     pub from_collection_id: Id,
+    pub board: shared::Board,
 }
 
 impl PullItem {
@@ -95,8 +115,18 @@ impl PullItem {
     /// [`SelectionKey::token`](crate::components::ui::selection_tray::SelectionKey::token),
     /// it exists so the server can report per-line outcomes without shipping
     /// back card names the client already holds.
+    ///
+    /// The board is part of it because it is part of the line's identity: one
+    /// card pulled from one binder onto two different boards is two lines, and
+    /// a token that omitted the board would make the outcomes of the two
+    /// indistinguishable (both would strike through on either one's report).
     pub fn token(&self) -> String {
-        format!("{}@{}", self.oracle_id, self.from_collection_id)
+        format!(
+            "{}@{}@{}",
+            self.oracle_id,
+            self.from_collection_id,
+            self.board.to_pg()
+        )
     }
 }
 
@@ -203,19 +233,94 @@ pub fn gap_of(row: &NeedRow) -> i32 {
     (row.desired - row.present_here).max(0)
 }
 
-/// Collapse a pull request to **one line per (card, source)** — the shape
-/// [`allocate`] produces, enforced rather than assumed.
+/// The copies this row can actually be filled with from elsewhere, spread over
+/// the locations offering them — **the one function every pull path allocates
+/// through**, client and server.
+///
+/// The size allocated is `owned_elsewhere`, **not** `gap_of(row)`. Those were
+/// the same number until P6-074's review: with the elsewhere pool now
+/// apportioned across an oracle's board rows ([`apportion_elsewhere`]), a row's
+/// gap can exceed its share of the pool, and allocating the gap would offer
+/// copies the arithmetic has already promised to another board. Allocating
+/// `owned_elsewhere` restores the identity the pick list rests on —
+/// `sum(offers_of(row)) == row.owned_elsewhere` — exactly, and a row whose
+/// share came out zero offers nothing at all (it is a Short row, and the page
+/// filters it out of the Owned-elsewhere bucket on the same number).
+pub fn offers_of(row: &NeedRow) -> Vec<(Id, i32)> {
+    allocate(row.owned_elsewhere, &row.locations)
+}
+
+/// One board row's inputs to the elsewhere split: which card it is, how many
+/// copies it is short here, and the **whole oracle's** elsewhere pool (the same
+/// number repeated on every board row of that card — see [`NeedRow`]'s doc on
+/// why the offers are board-blind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NeedGap {
+    pub oracle_id: Id,
+    pub gap: i32,
+    pub elsewhere: i32,
+}
+
+/// Split each oracle's elsewhere pool **across** its board rows instead of
+/// offering the whole pool to each — returning one `owned_elsewhere` per input
+/// row, in the input's order.
+///
+/// **The bug this closes** (P6-074 review): a copy in the Trade Binder can fill
+/// *any* board's need, so `pe` is per-oracle and every board row of that card
+/// carries the same total. Computing `min(gap, elsewhere)` per row independently
+/// then let one physical copy satisfy two gaps at once — want 1 on `main` and 1
+/// on `side`, hold none, one copy in a binder, and both rows claimed
+/// `owned_elsewhere: 1` with `short: 0`. The chip read "2 missing — 2 owned
+/// elsewhere" with no to-buy clause at all, while `/my/shopping` (per-oracle,
+/// and always correct) said one to buy. Two surfaces contradicting each other on
+/// one card.
+///
+/// **The rule: greedy, in row order.** Earlier rows take their fill first and
+/// later rows see only what is left. Order is the caller's, and the caller's is
+/// the canonical `(name, board)` the needs read returns and the page renders —
+/// so the mainboard is filled before the sideboard, and the read side, the pick
+/// list and the write side all apportion identically. Rows of one oracle need
+/// not be adjacent: consumption is tracked per oracle id, so only the *relative*
+/// order within a card matters (two distinct cards sharing a name cannot
+/// perturb each other).
+///
+/// Invariants, pinned by tests rather than asserted here:
+/// - `Σ owned_elsewhere` over one oracle's rows `≤` that oracle's pool;
+/// - `Σ short` over one oracle's rows `== max(0, Σ gap − pool)` — the greedy
+///   fill spends exactly `min(Σ gap, pool)`, so nothing is lost or invented;
+/// - a single-board oracle gets `min(gap, pool)`, byte-identical to the
+///   pre-review behaviour.
+pub fn apportion_elsewhere(rows: &[NeedGap]) -> Vec<i32> {
+    let mut spent: std::collections::HashMap<Id, i32> = std::collections::HashMap::new();
+    rows.iter()
+        .map(|r| {
+            let used = spent.entry(r.oracle_id).or_insert(0);
+            let left = (r.elsewhere - *used).max(0);
+            let take = r.gap.max(0).min(left);
+            *used += take;
+            take
+        })
+        .collect()
+}
+
+/// Collapse a pull request to **one line per (card, board, source)** — the
+/// shape [`allocate`] produces over the board-grained needs rows, enforced
+/// rather than assumed.
 ///
 /// Repeating a line is the one way a caller could smuggle a quantity through an
-/// API that deliberately takes none. The server's plan is a fixed per-pair
-/// number and the holdings it reads are not consumed between lines, so two
-/// identical items would each plan the whole gap and move it twice — four copies
-/// into a gap of two. A duplicate is a no-op, not a multiplier.
+/// API that deliberately takes none. The server's plan is a fixed per-key
+/// number, so two identical items would each plan the whole gap and move it
+/// twice — four copies into a gap of two. A duplicate is a no-op, not a
+/// multiplier.
+///
+/// The board joined the key with `NeedRow::board` (P6-074): the same card
+/// pulled from the same binder onto `main` and onto `side` is **two** legitimate
+/// lines with two separate gaps, and collapsing them would silently drop one.
 pub fn dedupe(items: Vec<PullItem>) -> Vec<PullItem> {
-    let mut seen: HashSet<(Id, Id)> = HashSet::new();
+    let mut seen: HashSet<(Id, Id, shared::Board)> = HashSet::new();
     items
         .into_iter()
-        .filter(|i| seen.insert((i.oracle_id, i.from_collection_id)))
+        .filter(|i| seen.insert((i.oracle_id, i.from_collection_id, i.board)))
         .collect()
 }
 
@@ -301,13 +406,16 @@ pub fn totals_of(rows: &[NeedRow]) -> shared::CollectionTotals {
 
 // ------------------------------------------------------------ the picks ---
 
-/// One pick-list line as rendered: a card, how many copies to pull, and the
-/// token both sides know it by.
+/// One pick-list line as rendered: a card, how many copies to pull, which board
+/// they land on, and the token both sides know it by.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PickRow {
     pub item: PullItem,
     pub name: String,
     pub copies: i32,
+    /// The need's board — repeated out of `item` so the label can render it
+    /// without reaching through the wire type.
+    pub board: shared::Board,
 }
 
 /// The pick list, grouped by the collection you walk to.
@@ -324,7 +432,7 @@ pub struct PickGroup {
 pub fn pick_list(rows: &[NeedRow]) -> Vec<PickGroup> {
     let mut groups: Vec<PickGroup> = Vec::new();
     for row in rows {
-        for (collection_id, copies) in allocate(gap_of(row), &row.locations) {
+        for (collection_id, copies) in offers_of(row) {
             let name = row
                 .locations
                 .iter()
@@ -335,9 +443,11 @@ pub fn pick_list(rows: &[NeedRow]) -> Vec<PickGroup> {
                 item: PullItem {
                     oracle_id: row.oracle_id,
                     from_collection_id: collection_id,
+                    board: row.board,
                 },
                 name: row.name.clone(),
                 copies,
+                board: row.board,
             };
             match groups.iter_mut().find(|g| g.collection_id == collection_id) {
                 Some(g) => g.rows.push(pick),
@@ -474,10 +584,13 @@ fn NeedsHeader(
                 "Needs"
             </h1>
             // The subtitle is load-bearing, not decoration: this page counts
-            // *copies to acquire*, which is not the same question as "which deck
-            // slots are unfilled" (module doc).
+            // *copies to acquire*, and since P6-074 it counts them **per
+            // board**, so a deck that wants a card on the sideboard while
+            // holding it on the mainboard is genuinely one copy short. What is
+            // still not counted is a board *relabel* of a copy already held
+            // (module doc).
             <p class="text-muted-foreground text-sm">
-                "Cards this collection wants more copies of than it holds."
+                "Cards this collection wants more copies of than it holds, board by board."
             </p>
         </div>
     }
@@ -510,11 +623,13 @@ fn NeedsBody(view: NeedsView, picks: RwSignal<Option<Vec<PickGroup>>>) -> impl I
 
     if rows.is_empty() {
         return view! {
-            // Stated in **copies**, because copies are all this page can see.
-            // "Nothing missing" was an unqualified claim it has no basis for: a
-            // deck whose only unmet slots are board-level reads it as "your deck
-            // is complete", and the arithmetic behind it never looked at a board
-            // (module doc). The second clause is what keeps the first one true.
+            // Stated in **copies**, because copies are all this page can see —
+            // but they are now counted per board (P6-074), so the old caveat
+            // ("Unfilled board slots aren't counted here") became false and was
+            // dropped rather than left reassuring the user about a hole that no
+            // longer exists. The remaining caveat is the one still true: a copy
+            // this collection already holds, sitting on the wrong board, is a
+            // relabel and not an acquisition (module doc).
             //
             // The badge is the `success` family because this arm is the *good*
             // kind of nothing — the collection holds every copy it wants — and
@@ -527,7 +642,7 @@ fn NeedsBody(view: NeedsView, picks: RwSignal<Option<Vec<PickGroup>>>) -> impl I
             >
                 <StateBadge tone=Tone::Resolved label="All set" />
                 <p>
-                    "Nothing to pull or buy — this collection holds every copy it wants. Unfilled board slots aren't counted here."
+                    "Nothing to pull or buy — this collection holds every copy it wants, on every board. Moving a copy you already hold between boards isn't counted here."
                 </p>
             </div>
         }
@@ -557,6 +672,25 @@ fn NeedsBody(view: NeedsView, picks: RwSignal<Option<Vec<PickGroup>>>) -> impl I
         {(!short.is_empty()).then(|| view! { <ShortBucket rows=short /> })}
     }
     .into_any()
+}
+
+/// The board a need row belongs to, rendered the way the collection page's deck
+/// sections render theirs: **nothing at all for the mainboard**, the board's
+/// name otherwise ([`board_label`] is the shared vocabulary). A binder's
+/// desires are all `main`, so this is silent everywhere outside a deck — the
+/// label only ever appears where it distinguishes two rows of the same card.
+#[component]
+fn BoardTag(board: shared::Board) -> impl IntoView {
+    board_label(board).map(|label| {
+        view! {
+            <span
+                class="bg-muted text-muted-foreground ml-2 rounded px-1.5 py-0.5 align-middle text-xs font-normal"
+                data-testid="need-board"
+            >
+                {label}
+            </span>
+        }
+    })
 }
 
 // --------------------------------------------------------- owned elsewhere ---
@@ -624,18 +758,23 @@ fn ElsewhereRow(row: NeedRow, collection_id: Id, pending: RwSignal<bool>) -> imp
     let revision = use_context::<super::move_selection::HoldingsRevision>();
     let last_move = use_context::<crate::components::palette::LastMoveState>();
     let oracle_id = row.oracle_id;
+    let board = row.board;
     let name = row.name.clone();
     let gap = gap_of(&row);
     let fillable = row.owned_elsewhere;
     let locations = row.locations.clone();
     // The whole row in one tap: every source its allocation names, one
-    // transaction, one Undo.
+    // transaction, one Undo. Every line carries **this row's board**, so the
+    // copies land on the board that wanted them (P6-074). `offers_of`, not the
+    // raw gap: this row's share of a card's elsewhere pool may be smaller than
+    // its gap when another board took some first.
     let items = StoredValue::new(
-        allocate(gap, &row.locations)
+        offers_of(&row)
             .into_iter()
             .map(|(from_collection_id, _)| PullItem {
                 oracle_id,
                 from_collection_id,
+                board,
             })
             .collect::<Vec<_>>(),
     );
@@ -683,11 +822,17 @@ fn ElsewhereRow(row: NeedRow, collection_id: Id, pending: RwSignal<bool>) -> imp
     };
 
     view! {
-        <TableRow {..} data-testid="needs-row" data-oracle=oracle_id.to_string()>
+        <TableRow
+            {..}
+            data-testid="needs-row"
+            data-oracle=oracle_id.to_string()
+            data-board=board.to_pg()
+        >
             <TableCell class="p-2 font-medium">
                 <a href=format!("/cards/{oracle_id}") class="hover:underline">
                     {name}
                 </a>
+                <BoardTag board />
             </TableCell>
             <TableCell class="text-muted-foreground p-2 text-sm">
                 <ul data-testid="need-locations">
@@ -835,6 +980,7 @@ fn PickRowView(
     let token = StoredValue::new(row.item.token());
     let label = StoredValue::new(row.name.clone());
     let item = row.item;
+    let board = row.board;
     // The line's own honest count. Starts at the snapshot's ask; a partial
     // pull rewrites it to the residual rather than lying that the whole ask
     // moved (P6-119). The `pick-label` span below is its one and only
@@ -945,6 +1091,10 @@ fn PickRowView(
             >
                 {move || format!("{} × {}", remaining.get(), label.get_value())}
             </span>
+            // Which board these copies land on — the same silence-for-main
+            // convention as the tables above. Without it, a card wanted on two
+            // boards would show two identical-looking lines in one group.
+            <BoardTag board />
         </li>
     }
 }
@@ -1100,8 +1250,14 @@ fn ShortBucket(rows: Vec<NeedRow>) -> impl IntoView {
                             .into_iter()
                             .map(|row| {
                                 let oracle_id = row.oracle_id;
+                                let board = row.board;
                                 view! {
-                                    <TableRow {..} data-testid="short-row" data-oracle=oracle_id.to_string()>
+                                    <TableRow
+                                        {..}
+                                        data-testid="short-row"
+                                        data-oracle=oracle_id.to_string()
+                                        data-board=board.to_pg()
+                                    >
                                         <TableCell class="p-2 font-medium">
                                             <a
                                                 href=format!("/cards/{oracle_id}")
@@ -1109,6 +1265,7 @@ fn ShortBucket(rows: Vec<NeedRow>) -> impl IntoView {
                                             >
                                                 {row.name}
                                             </a>
+                                            <BoardTag board />
                                         </TableCell>
                                         <TableCell class="p-2 text-right tabular-nums">
                                             {row.desired}
@@ -1149,12 +1306,22 @@ mod tests {
     }
 
     fn need(desired: i32, present_here: i32, locations: Vec<CardLocation>) -> NeedRow {
+        need_on(Board::Main, desired, present_here, locations)
+    }
+
+    fn need_on(
+        board: Board,
+        desired: i32,
+        present_here: i32,
+        locations: Vec<CardLocation>,
+    ) -> NeedRow {
         let gap = desired - present_here;
         let elsewhere: i32 = locations.iter().map(|l| l.quantity).sum();
         let owned_elsewhere = elsewhere.min(gap);
         NeedRow {
             oracle_id: Uuid::from_u128(1),
             name: "Lightning Bolt".to_string(),
+            board,
             desired,
             present_here,
             owned_elsewhere,
@@ -1214,10 +1381,7 @@ mod tests {
             need(2, 0, vec![loc(a, "Trade Binder", 1), loc(b, "Shoebox", 5)]),
             need(3, 3, vec![loc(a, "Trade Binder", 5)]),
         ] {
-            let planned: i32 = allocate(gap_of(&row), &row.locations)
-                .iter()
-                .map(|(_, n)| n)
-                .sum();
+            let planned: i32 = offers_of(&row).iter().map(|(_, n)| n).sum();
             assert_eq!(
                 planned, row.owned_elsewhere,
                 "allocation must equal the row's owned_elsewhere"
@@ -1309,6 +1473,7 @@ mod tests {
         let item = PullItem {
             oracle_id: Uuid::from_u128(1),
             from_collection_id: src,
+            board: Board::Main,
         };
         let want = 2; // the gap, as `allocate` planned it for this pair
         let copies = |lines: &[PullItem]| -> i32 {
@@ -1342,6 +1507,221 @@ mod tests {
         assert!(plan_pull(&[], src, 4).is_empty());
         // A zeroed stack is not a stack.
         assert!(plan_pull(&[holding(src, 0, Finish::Nonfoil, Board::Main)], src, 4).is_empty());
+    }
+
+    // ---------------- P6-074 review: apportioning the elsewhere pool ---------
+
+    fn gap(oracle: u128, gap: i32, elsewhere: i32) -> NeedGap {
+        NeedGap {
+            oracle_id: Uuid::from_u128(oracle),
+            gap,
+            elsewhere,
+        }
+    }
+
+    #[test]
+    fn one_elsewhere_copy_cannot_satisfy_two_boards_at_once() {
+        // The defect the review caught, in its smallest form: want 1 on main
+        // and 1 on side, hold none, exactly one copy in a binder. Applying the
+        // per-oracle pool whole to each row gave both rows `owned_elsewhere: 1`
+        // and `short: 0` — a chip reading "2 missing — 2 owned elsewhere" with
+        // no to-buy clause, while `/my/shopping` (per-oracle, and right) said
+        // one to buy.
+        let rows = [gap(1, 1, 1), gap(1, 1, 1)];
+        assert_eq!(apportion_elsewhere(&rows), vec![1, 0]);
+    }
+
+    #[test]
+    fn a_single_board_oracle_is_unchanged_by_apportioning() {
+        // The pre-review behaviour, pinned: with one row per oracle the answer
+        // must still be exactly `min(gap, pool)`, so nothing about the ordinary
+        // binder case moved.
+        for (g, pool) in [(1, 0), (0, 3), (2, 5), (5, 2), (3, 3)] {
+            assert_eq!(
+                apportion_elsewhere(&[gap(1, g, pool)]),
+                vec![g.min(pool).max(0)],
+                "gap {g} against pool {pool}"
+            );
+        }
+    }
+
+    #[test]
+    fn apportioning_never_spends_more_than_the_pool_and_loses_nothing() {
+        // The two invariants stated on `apportion_elsewhere`, table-tested
+        // across shapes that exercise every boundary: pool larger than the
+        // total gap, smaller, exactly equal, and zero.
+        let cases: Vec<Vec<NeedGap>> = vec![
+            vec![gap(1, 1, 1), gap(1, 1, 1)],
+            vec![gap(1, 2, 5), gap(1, 2, 5), gap(1, 2, 5)],
+            vec![gap(1, 4, 3), gap(1, 1, 3)],
+            vec![gap(1, 3, 0), gap(1, 2, 0)],
+            vec![gap(1, 2, 4), gap(1, 2, 4)],
+            // Two cards interleaved — pools must not leak between oracles, and
+            // rows of one oracle need not be adjacent.
+            vec![gap(1, 2, 2), gap(2, 3, 1), gap(1, 2, 2), gap(2, 1, 1)],
+        ];
+        for rows in cases {
+            let shares = apportion_elsewhere(&rows);
+            for oracle in [Uuid::from_u128(1), Uuid::from_u128(2)] {
+                let mine: Vec<usize> = (0..rows.len())
+                    .filter(|&i| rows[i].oracle_id == oracle)
+                    .collect();
+                if mine.is_empty() {
+                    continue;
+                }
+                let pool = rows[mine[0]].elsewhere;
+                let total_gap: i32 = mine.iter().map(|&i| rows[i].gap).sum();
+                let spent: i32 = mine.iter().map(|&i| shares[i]).sum();
+                let short: i32 = mine.iter().map(|&i| rows[i].gap - shares[i]).sum();
+                assert!(spent <= pool, "spent {spent} exceeds pool {pool}");
+                assert_eq!(
+                    short,
+                    (total_gap - pool).max(0),
+                    "short must be exactly what the pool could not cover"
+                );
+                // No row may be handed more than it asked for, or a negative.
+                for &i in &mine {
+                    assert!(shares[i] >= 0 && shares[i] <= rows[i].gap);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_chip_says_one_to_buy_when_two_boards_share_one_elsewhere_copy() {
+        // The same case at the surface the user reads, through the real
+        // formatter. This is the assertion that would have caught the defect:
+        // the old arithmetic produced "2 missing — 2 owned elsewhere" and
+        // dropped the to-buy clause entirely.
+        let a = Uuid::from_u128(10);
+        let mut main = need(1, 0, vec![loc(a, "Trade Binder", 1)]);
+        let mut side = need_on(Board::Side, 1, 0, vec![loc(a, "Trade Binder", 1)]);
+        // As `read_needs_rows` now builds them: the pool is split, mainboard
+        // first.
+        main.owned_elsewhere = 1;
+        main.short = 0;
+        side.owned_elsewhere = 0;
+        side.short = 1;
+
+        let totals = totals_of(&[main.clone(), side.clone()]);
+        assert_eq!(totals.missing, 2);
+        assert_eq!(totals.owned_elsewhere, 1);
+        assert_eq!(totals.to_buy, 1, "the second copy has to be bought");
+        assert_eq!(
+            super::super::collection::needs_chip(&totals).as_deref(),
+            Some("2 missing — 1 owned elsewhere · 1 to buy"),
+        );
+
+        // And the pick list offers exactly one pullable line, not two: the
+        // sideboard row's share of the pool is zero, so it offers nothing.
+        let groups = pick_list(&[main, side]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].rows.len(), 1);
+        assert_eq!(groups[0].rows[0].copies, 1);
+        assert_eq!(groups[0].rows[0].board, Board::Main);
+    }
+
+    #[test]
+    fn offers_never_exceed_a_rows_apportioned_share() {
+        // The identity the pick list rests on, restated for the capped form:
+        // `sum(offers_of(row)) == row.owned_elsewhere`, including when the row
+        // sees locations holding far more than its share.
+        let a = Uuid::from_u128(10);
+        let b = Uuid::from_u128(11);
+        let mut row = need_on(
+            Board::Side,
+            5,
+            0,
+            vec![loc(a, "Trade Binder", 9), loc(b, "Shoebox", 9)],
+        );
+        row.owned_elsewhere = 2; // an earlier board took the rest
+        row.short = 3;
+        let offers = offers_of(&row);
+        assert_eq!(offers.iter().map(|(_, n)| n).sum::<i32>(), 2);
+        assert_eq!(offers, vec![(a, 2)]);
+
+        // A row left with nothing offers nothing at all — it must not name a
+        // copy the arithmetic already promised to another board.
+        row.owned_elsewhere = 0;
+        row.short = 5;
+        assert!(offers_of(&row).is_empty());
+        assert!(pick_list(&[row]).is_empty());
+    }
+
+    // ------------------------------------------- P6-074: board-aware needs ---
+
+    #[test]
+    fn a_pick_line_carries_the_board_that_wanted_the_copies() {
+        let a = Uuid::from_u128(10);
+        let side = need_on(Board::Side, 2, 0, vec![loc(a, "Trade Binder", 3)]);
+        let groups = pick_list(&[side]);
+        assert_eq!(groups.len(), 1);
+        let row = &groups[0].rows[0];
+        assert_eq!(row.copies, 2);
+        assert_eq!(row.board, Board::Side);
+        assert_eq!(
+            row.item.board,
+            Board::Side,
+            "the wire line names the destination board, not the source's"
+        );
+    }
+
+    #[test]
+    fn one_card_wanted_on_two_boards_is_two_pick_lines_with_two_tokens() {
+        // The board-blind read could not produce this pair at all. Both rows
+        // offer the same location (offers are board-blind on purpose), so the
+        // two lines must still be distinguishable — the server reports per
+        // token, and one token for both would strike through the wrong line.
+        let a = Uuid::from_u128(10);
+        let main = need(1, 0, vec![loc(a, "Trade Binder", 5)]);
+        let side = need_on(Board::Side, 2, 0, vec![loc(a, "Trade Binder", 5)]);
+        let groups = pick_list(&[main, side]);
+        assert_eq!(groups.len(), 1, "one collection to walk to");
+        assert_eq!(groups[0].rows.len(), 2);
+        assert_ne!(
+            groups[0].rows[0].item.token(),
+            groups[0].rows[1].item.token()
+        );
+        assert_eq!(groups[0].rows[0].copies, 1);
+        assert_eq!(groups[0].rows[1].copies, 2);
+    }
+
+    #[test]
+    fn dedupe_keeps_the_two_boards_and_still_collapses_a_repeat() {
+        let src = Uuid::from_u128(20);
+        let main = PullItem {
+            oracle_id: Uuid::from_u128(1),
+            from_collection_id: src,
+            board: Board::Main,
+        };
+        let side = PullItem {
+            board: Board::Side,
+            ..main
+        };
+        // Two boards are two legitimate lines — collapsing them would silently
+        // drop one of the two gaps.
+        assert_eq!(dedupe(vec![main, side]), vec![main, side]);
+        // The same board twice is still the smuggled-quantity case dedupe
+        // exists to refuse.
+        assert_eq!(dedupe(vec![main, side, main, side]), vec![main, side]);
+    }
+
+    #[test]
+    fn the_chip_counts_a_sideboard_want_a_mainboard_copy_used_to_cancel() {
+        // The contradiction P6-074 closes, at the formatter: the deck holds one
+        // copy on `main` (so no `main` row survives the `desired > present`
+        // filter) and wants one on `side`. The rows are now per board, so the
+        // side row stands on its own and the chip counts it.
+        let a = Uuid::from_u128(10);
+        let rows = vec![need_on(Board::Side, 1, 0, vec![loc(a, "Trade Binder", 1)])];
+        let totals = totals_of(&rows);
+        assert_eq!(totals.missing, 1);
+        assert_eq!(totals.owned_elsewhere, 1);
+        assert_eq!(totals.to_buy, 0);
+        assert_eq!(
+            super::super::collection::needs_chip(&totals).as_deref(),
+            Some("1 missing — 1 owned elsewhere"),
+        );
     }
 
     // ------------------------------------------------- P6-119: partial pulls ---

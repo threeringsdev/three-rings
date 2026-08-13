@@ -133,6 +133,11 @@ collection** — the discipline that keeps a 100K-card view bounded.
   (`7 across 3 collections`, expandable to per-location).
 - **`NeedsView`** (per collection) — rows split into **Owned elsewhere** (with a
   per-location listing, e.g. `2 in Trade Binder`) and **Short** (to buy).
+  **`NeedRow` grain = `(oracle, board)`**, the same grain as `CardRow`, so a
+  mainboard copy cannot cancel a sideboard want (P6-074). `locations` stays
+  board-blind (a copy elsewhere fills any board's need), and the pool behind it
+  is **apportioned** across a card's board rows rather than offered whole to
+  each — see the Findings entry.
 - **`ShoppingList`** (global) — one row per short card (shortfall count + which
   collections want it); **text-exportable**.
 
@@ -659,3 +664,142 @@ resolves.
   whose ownership read fails now gets `owned`/`ownership` as `None` (the
   anonymous shape, logged server-side) instead of a 500 — see `degrade_or` in
   `hosted.rs`.
+
+- 2026-08-12 — **Board-aware needs** (P6-074). The needs computation was the one
+  board-blind read left in an otherwise board-aware app: `holdings` and
+  `desires` both carry `card_board` in their uniqueness keys and the collection
+  view's card rows already aggregate per `(oracle/printing, board)`, but
+  `read_needs_rows` summed desires and present-here by **oracle alone**. A deck
+  holding a card on `main` and wanting one on `side` therefore had its want
+  arithmetically cancelled by the mainboard copy: the deck page rendered a
+  Sideboard row reading `WANTED 1 / HERE —` while the needs chip was absent and
+  `GET /api/collections/{id}/needs` returned `[]`. The two halves contradicted
+  each other on the same screen.
+
+  **Grain alignment.** `NeedRow` gains a `board: Board` field, and the gap is
+  computed per `(oracle, board)`: `d` (desires) and `ph` (present-here) group by
+  `(oracle_id, board)` and join on **both** columns, so `desired > present_here`
+  is evaluated per board.
+
+  **One query, not two copies of it.** The chip's `totals` and the `/needs`
+  page used to carry hand-copied versions of these CTEs, which made "the chip
+  agrees with the page it links to" a matter of discipline — the first cut of
+  this task had to change both in lockstep, and the pre-fix code carried a
+  comment refusing to half-fix one of them. The review's fix removed the
+  duplication instead: **`read_need_gaps`** is now the single read, and
+  `collection_view` folds its rows through `fold_need_totals` while
+  `read_needs_rows` decorates them with per-location offers. The header query
+  keeps only `present` / `present_rollup` / `desired`. They cannot drift because
+  there is nothing left to drift.
+
+  **The elsewhere pool is board-blind, and is therefore APPORTIONED across a
+  card's board rows — not applied whole to each.** `pe` and the `locations`
+  query still group by oracle alone, because only copies *inside* this
+  collection are committed to a board: a copy in the Trade Binder can fill
+  **any** board's need. Partitioning the offers at the source was rejected —
+  nothing in the data assigns a binder copy to a board, so any split would be
+  invented. But applying the *whole* pool to each row independently (the first
+  cut) was worse than invented, it was wrong: want 1 on `main` and 1 on `side`,
+  hold none, one copy in a binder, and both rows claimed `owned_elsewhere: 1`
+  with `short: 0`. The chip read "2 missing — 2 owned elsewhere" with the to-buy
+  clause dropped entirely and no Short bucket rendered, while `/my/shopping`
+  (per-oracle, and correct) said one to buy — two surfaces contradicting each
+  other about one card. The pick list offered two pullable lines against one
+  copy, and the second tick round-tripped into a misleading skip.
+
+  The rule, in `my::needs::apportion_elsewhere` (pure, and the only
+  implementation — both hosted call sites go through it): **greedy in row
+  order**, earlier rows filling first and later rows seeing only the remainder.
+  The order is the read's canonical `ORDER BY c.name, d.board`, which is also
+  the order the page renders and the pick list walks, so the read side and the
+  write side spend the pool identically. `card_board` is declared
+  `('main','side','maybe')`, so the mainboard fills before the sideboard,
+  matching the UI's `BOARD_ORDER`. Consumption is tracked per oracle id rather
+  than by assuming rows of one card are adjacent, so two cards sharing a name
+  cannot perturb each other. Invariants, unit-tested rather than asserted:
+  `Σ owned_elsewhere ≤ pool` per oracle; `Σ short == max(0, Σ gap − pool)` per
+  oracle (the greedy fill spends exactly `min(Σ gap, pool)`, so nothing is lost
+  or invented); and a single-board oracle gets `min(gap, pool)` — byte-identical
+  to the pre-review behaviour, which is what keeps every existing binder case
+  unchanged.
+
+  **The offers a row shows are capped by its apportioned share**, via
+  `my::needs::offers_of` — one function, used by the pick list, the row's own
+  Pull button and the server's planner, so the three cannot disagree. It
+  allocates `owned_elsewhere` rather than `gap_of(row)`, which restores the
+  identity the pick list rests on (`sum(offers_of(row)) == row.owned_elsewhere`)
+  and means a row whose share came out zero offers nothing at all — it is a
+  Short row and the page already filters it out of the Owned-elsewhere bucket on
+  that same number.
+
+  **A bounded residual, recorded rather than papered over:** apportioning fixes
+  the *totals*, not the per-*location* split. `offers_of` walks `locations` from
+  the front for each row independently, so a card with 2 in binder A and 1 in
+  binder B, wanted 2 on `main` and 1 on `side`, names A on both rows — 3 copies
+  asked of a stack holding 2. Fixing that would need a location allocation
+  stateful across an oracle's rows, which `ElsewhereRow` (which renders one row
+  and knows nothing of its siblings) cannot do without the three call sites
+  diverging — the drift `my::needs`' own module doc forbids. It is covered at
+  write time instead, where it matters: `plan_pull_needs` tracks per
+  `holdings.id` what earlier lines of the same plan already committed and plans
+  each subsequent line against the decremented stacks, so the second board gets
+  an honest partial or `SkipReason::NoCopies` rather than a write `holding_take`
+  would reject mid-loop, aborting the whole pull. That is the same shape a stale
+  pick list already produces and the toast already says. `dedupe`'s key is now
+  `(oracle, board, from)`.
+
+  **Pull board-landing rule: a pull lands on the board that wanted it.** This
+  was a latent bug the board-blind read hid — `HostedBackend::pull_needs` passed
+  a hardcoded `Board::Main` to both `holding_add` and the ledger's `to_board`, so
+  a non-mainboard need could never have been closed by pulling; the copies would
+  land on `main` and the same need would be re-offered forever. `PullItem` now
+  carries the **destination** board (the `NeedRow`'s board) and `PullWrite`
+  carries it through as `to_board`. The *source* board is unchanged and still
+  read off the locked holding, so the two ends of the move are independent and
+  undo still puts copies back on the stack they left. `PullItem::token` grew the
+  board too (`oracle@from@board`) — one card pulled from one binder onto two
+  boards is two lines, and a token that omitted the board would make their
+  per-line outcomes indistinguishable.
+
+  **Wire compatibility.** `NeedRow.board` is a plain required field, not
+  `#[serde(default)]`: both halves of the wire ship together (the native shell
+  embeds the same `shared` crate it decodes with), nothing persists old-shape
+  `NeedRow`/`PullItem` JSON, and no consumer of either carries
+  `#[serde(deny_unknown_fields)]` (checked repo-wide — the six that do are
+  `cards.rs`, `catalog.rs`, `catalog/destination.rs`, `quick_add.rs`,
+  `all_cards.rs`, `my/collection.rs`, none of them needs types).
+
+  **UI.** The needs page labels a row's board the way the deck page labels its
+  sections: nothing at all for `main`, the board's name otherwise. The
+  vocabulary is shared rather than duplicated — `my::collection::board_label`
+  reads the same `BOARD_ORDER` table `group_deck` uses — so the two pages cannot
+  call the same board different things. Rows also carry `data-board`, matching
+  `collection-row`. The chip's arithmetic is unchanged apart from the grain: it
+  sums per-row gaps, so a card missing on two boards contributes both.
+
+  **Tests.** `pull_plan.rs` gained five unit tests (sideboard want pulls onto the
+  sideboard; two boards are two lines with two tokens; two boards sharing one
+  copy do not plan it twice; a second board takes what the first left; two boards
+  naming the same binder cannot overdraw it) and `my/needs.rs` nine (pick line
+  carries the board; two boards are two pick lines; `dedupe` keeps both boards
+  while still collapsing a repeat; the chip counts a sideboard want a mainboard
+  copy used to cancel; plus the five apportioning tests — one copy cannot satisfy
+  two boards, a single-board oracle is unchanged, the two invariants table-tested
+  across pool-larger/smaller/equal/zero and interleaved oracles, the chip says
+  "1 to buy" on the shared-copy case through the real formatter, and offers never
+  exceed a row's share). The planner's multi-board fixtures go through an
+  `apportioned()` helper that mirrors what `read_needs_rows` builds, so the
+  planner is not tested against snapshots the read cannot produce.
+  `cargo test -p app --features hosted`: 319 passed.
+
+  The e2e that **pinned the old decision** (`needs.spec.ts` → "a want on the
+  sideboard … is not a need") was inverted rather than deleted — it now asserts
+  the need, the chip, `board: "side"` on the wire, the `Sideboard` label on the
+  row, and that pulling it lands the copy on the sideboard with the mainboard
+  copy untouched. A second e2e covers the apportioning end to end: want 1 on
+  each of two boards against one elsewhere copy, asserting the two rows'
+  `owned_elsewhere` are 1 and 0, that the chip names one to buy, that the pick
+  list offers one line rather than two, and that `/my/shopping` agrees with all
+  of it. `states.spec.ts`'s empty-state assertion moved from "board slots" to
+  "between boards" for the same reason as the page text: the old caveat
+  ("Unfilled board slots aren't counted here") became false.

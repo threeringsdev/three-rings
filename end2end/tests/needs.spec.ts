@@ -13,10 +13,11 @@
 // - **Pull all is grouped by where you walk**, and its per-group counts are the
 //   allocation the server then performs — not a hopeful client number;
 // - **the export is pasteable text**, one `N Card Name` line per short card;
-// - **the board case behaves as decided.** `needs()` is board-blind by design
-//   (see below and the `my::needs` module doc). The test pins today's decision
-//   *on purpose*: if someone makes needs board-aware, this test must fail and
-//   the decision must be re-taken, rather than the page quietly changing shape.
+// - **the board case behaves as decided.** `needs()` is board-**aware** since
+//   P6-074 (see below and the `my::needs` module doc): a want on the sideboard
+//   of a card held on the mainboard is a real need, and pulling it lands the
+//   copies on the sideboard. This bullet used to pin the opposite decision;
+//   it was re-taken deliberately, not drifted into.
 // - **a partial pull stays honest (P6-119).** A pick-list line that finds
 //   fewer copies at its source than it asked for — the pick list is a
 //   snapshot, so the source can drain between generating it and ticking the
@@ -25,11 +26,20 @@
 //
 // **On the board case.** A deck holding a card on `main` and wanting it on
 // `side` renders two rows on the collection page — a mainboard row with copies
-// and a sideboard row wanting one — while `/needs` shows nothing and the header
-// carries no chip. That is deliberate: both needs buckets are defined by an
-// operation (pull copies in, or buy them), and neither can fix a mis-boarded
-// copy — the deck already *has* it. The outstanding action is a board relabel,
-// which is card-tagging's quantity-preserving op and not a move.
+// and a sideboard row wanting one — and `/needs` now agrees with them: one need
+// row, `board: "side"`, `present_here: 0`, plus a chip on the header. The deck
+// genuinely wants a second copy; the one it holds is committed to the
+// mainboard. Pulling it lands the copies on `side`, which is what makes the
+// need closable at all (before P6-074 every pull hardcoded `to_board = main`).
+// What is still *not* a need: relabelling a copy the deck already holds from
+// one board to another — card-tagging's quantity-preserving op, which neither
+// bucket here can offer.
+//
+// **And one copy elsewhere still only covers one board.** The elsewhere pool is
+// per *card* (a binder copy fills any board's need), so both board rows see the
+// same offer — but it is apportioned between them, mainboard first, not handed
+// whole to each. The second test below pins that across all four surfaces that
+// state it: the wire rows, the chip, the pick list, and `/my/shopping`.
 //
 // Isolation: scratch `zz-e2e-…` collections created via the API and deleted in a
 // `finally`; printings come from catalog cards the dev fixture owns nowhere, so
@@ -164,8 +174,11 @@ async function copiesIn(
 
 type NeedRow = {
   oracle_id: string;
+  board: string;
   desired: number;
   present_here: number;
+  /// Per-row, and **apportioned**: a card's elsewhere copies are shared between
+  /// its board rows, so these do not each get the whole pool (P6-074 review).
   owned_elsewhere: number;
   short: number;
 };
@@ -548,24 +561,32 @@ test("@fast the shopping list states the shortfall and exports it as text", asyn
 
 // ------------------------------------------------------------ the board case ---
 
-test("@fast a want on the sideboard of a card held on the mainboard is not a need", async ({
+test("@fast a want on the sideboard of a card held on the mainboard is a need, and pulling it lands on the sideboard", async ({
   page,
   request,
 }) => {
-  // **This test pins a decision, not just a behavior** (see the file header).
-  // `needs()` groups desires and holdings by oracle alone, so this deck — one
-  // copy on `main`, one wanted on `side` — has nothing missing: it already owns
-  // the card. The sideboard row on the collection page still shows an unfilled
-  // slot, and that is a *different* statement, fixable only by a board relabel
-  // (card-tagging), which is not a move and not something either needs bucket
-  // can offer. If needs is ever made board-aware, this test must fail loudly.
+  // **This test pins a decision, not just a behavior** (see the file header) —
+  // and P6-074 re-took it. `needs()` groups this deck's desires and holdings by
+  // `(oracle, board)`, so one copy on `main` plus one wanted on `side` is a
+  // genuine gap of one on the sideboard: the copy the deck holds is committed
+  // to the mainboard. The old shape (needs `[]`, no chip, sideboard row still
+  // reading WANTED 1) was the contradiction this task closed.
+  //
+  // The second half is what made the first half shippable: a pull for a
+  // sideboard need has to *land* on the sideboard, or the need survives every
+  // pull aimed at it forever. Read back through `/api/cards/{id}/holdings`,
+  // the one read that does not group the board away.
   const [card] = await unownedCards(request, 1);
   const deck = await createCollection(request, "deck", "board");
+  const binder = await createCollection(request, "binder", "board-src");
   try {
     await addHave(request, deck.id, card.printing_id as string, 1, {
       board: "main",
     });
     await addWant(request, deck.id, card.oracle_id, 1, "side");
+    // The copy the pull will draw from — in another collection, so it shows up
+    // as owned-elsewhere rather than as something the deck already holds.
+    await addHave(request, binder.id, card.printing_id as string, 1);
 
     await page.goto(`/my/collections/${deck.id}`);
     await hydrated(page);
@@ -575,21 +596,137 @@ test("@fast a want on the sideboard of a card held on the mainboard is not a nee
     await expect(sideRow.locator('[data-testid="wanted-count"]')).toHaveText(
       "1",
     );
-    // No chip: the header agrees with the needs page it links to, which is the
-    // whole reason the arithmetic was not half-fixed in one of them.
-    await expect(page.locator('[data-testid="needs-chip"]')).toHaveCount(0);
+    // The chip is the half that used to be absent. Header and needs page are
+    // fed by two different queries at the same grain, which is why they are
+    // asserted together — a half-fix in either one is the failure mode.
+    await expect(page.locator('[data-testid="needs-chip"]')).toContainText(
+      "1 missing",
+    );
+
+    // The wire says which board, not just that something is missing.
+    const rows = await needsOf(request, deck.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].board).toBe("side");
+    expect(rows[0].oracle_id).toBe(card.oracle_id);
+    expect(rows[0].desired).toBe(1);
+    expect(rows[0].present_here).toBe(0);
+    expect(rows[0].owned_elsewhere).toBe(1);
 
     await page.goto(`/my/collections/${deck.id}/needs`);
     await hydrated(page);
-    // The empty state is the *only* thing this user reads, so it must not claim
-    // more than the page can see. "Nothing missing" would tell this deck it is
-    // complete; it has an unfilled sideboard slot the arithmetic never looked
-    // for. The text has to be about copies, and it has to say so.
-    const empty = page.locator('[data-testid="needs-empty"]');
-    await expect(empty).toContainText("holds every copy it wants");
-    await expect(empty).toContainText("Unfilled board slots aren't counted here");
+    const needRow = page.locator(
+      `${NEED_ROW}[data-oracle="${card.oracle_id}"][data-board="side"]`,
+    );
+    await expect(needRow).toHaveCount(1);
+    // The row says which board out loud — the mainboard says nothing, the same
+    // convention the deck page's section headers use.
+    await expect(needRow.locator('[data-testid="need-board"]')).toHaveText(
+      "Sideboard",
+    );
+
+    await needRow.locator('[data-testid="pull-row"]').click();
+    await expect(page.locator(TOAST).first()).toContainText("Pulled 1 copy");
+
+    // Where the copy actually went: the deck's sideboard, not its mainboard.
+    const inDeck = (await holdingsOf(request, card.oracle_id)).filter(
+      (h) => h.collection_id === deck.id,
+    );
+    const onSide = inDeck.filter((h) => h.board === "side");
+    expect(onSide.reduce((n, h) => n + h.quantity, 0)).toBe(1);
+    expect(
+      inDeck
+        .filter((h) => h.board === "main")
+        .reduce((n, h) => n + h.quantity, 0),
+      "the mainboard copy is untouched — the pull added to the sideboard",
+    ).toBe(1);
+    // And the need is closed rather than re-offered forever, which is the whole
+    // point of landing on the board that wanted it.
     expect(await needsOf(request, deck.id)).toEqual([]);
   } finally {
+    await deleteCollection(request, binder.id);
+    await deleteCollection(request, deck.id);
+  }
+});
+
+test("@fast one copy elsewhere cannot cover two boards at once", async ({
+  page,
+  request,
+}) => {
+  // The P6-074 review's major, end to end. The elsewhere pool is per *card* —
+  // a binder copy can fill any board's need — so a deck wanting one copy on
+  // `main` and one on `side` sees the same single binder copy offered to both
+  // rows. Applying that pool whole to each row let one physical copy "satisfy"
+  // two gaps: both rows read `owned_elsewhere: 1 / short: 0`, the chip said
+  // "2 missing — 2 owned elsewhere" with no to-buy clause and no Short bucket,
+  // and the pick list offered two pullable lines against one copy — while
+  // `/my/shopping`, which is per-oracle and was always right, said one to buy.
+  // Two surfaces contradicting each other about one card.
+  //
+  // The pool is now apportioned in the read's own order (mainboard first), and
+  // this test asserts every surface tells the same story.
+  const [card] = await unownedCards(request, 1);
+  const deck = await createCollection(request, "deck", "share");
+  const binder = await createCollection(request, "binder", "share-src");
+  try {
+    await addWant(request, deck.id, card.oracle_id, 1, "main");
+    await addWant(request, deck.id, card.oracle_id, 1, "side");
+    await addHave(request, binder.id, card.printing_id as string, 1);
+
+    // The wire: two rows, and the one copy is promised to exactly one of them.
+    const rows = await needsOf(request, deck.id);
+    expect(rows).toHaveLength(2);
+    const main = rows.find((r) => r.board === "main");
+    const side = rows.find((r) => r.board === "side");
+    expect(main, "a mainboard row").toBeTruthy();
+    expect(side, "a sideboard row").toBeTruthy();
+    expect(main?.owned_elsewhere).toBe(1);
+    expect(main?.short).toBe(0);
+    expect(side?.owned_elsewhere, "the copy is already spoken for").toBe(0);
+    expect(side?.short, "so the sideboard copy has to be bought").toBe(1);
+    // The invariant, restated on live data: the two rows together cannot claim
+    // more than the one copy that exists.
+    expect(
+      rows.reduce((n, r) => n + r.owned_elsewhere, 0),
+    ).toBeLessThanOrEqual(1);
+
+    await page.goto(`/my/collections/${deck.id}`);
+    await hydrated(page);
+    // The chip's to-buy clause is the half that vanished under the bug.
+    await expect(page.locator('[data-testid="needs-chip"]')).toContainText(
+      "2 missing — 1 owned elsewhere · 1 to buy",
+    );
+
+    await page.goto(`/my/collections/${deck.id}/needs`);
+    await hydrated(page);
+    // One pullable row, one Short row — not two of either.
+    await expect(page.locator(NEED_ROW)).toHaveCount(1);
+    await expect(
+      page.locator(`${NEED_ROW}[data-board="main"]`),
+    ).toHaveCount(1);
+    await expect(
+      page.locator(`${SHORT_ROW}[data-board="side"]`),
+    ).toHaveCount(1);
+
+    // And the pick list offers one line, not two — a walk that told you to
+    // fetch the same copy twice is the user-facing form of the same bug.
+    await page.locator('[data-testid="pull-all"]').click();
+    await expect(page.locator(PICK_LIST)).toBeVisible();
+    await expect(page.locator(PICK_ROW)).toHaveCount(1);
+    await expect(page.locator('[data-testid="pick-label"]')).toHaveText(
+      `1 × ${card.name}`,
+    );
+
+    // `/my/shopping` is the surface that was right all along; it must now agree
+    // rather than contradict. Containment only — the list is global.
+    await page.goto("/my/shopping");
+    await hydrated(page);
+    await expect(
+      page
+        .locator(`[data-testid="shopping-row"][data-oracle="${card.oracle_id}"]`)
+        .locator('[data-testid="shortfall"]'),
+    ).toHaveText("1");
+  } finally {
+    await deleteCollection(request, binder.id);
     await deleteCollection(request, deck.id);
   }
 });

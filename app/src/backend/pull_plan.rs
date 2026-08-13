@@ -28,7 +28,7 @@
 //! write might touch was locked before the gap that sized the plan was read."
 //!
 //! **The allocation arithmetic itself is not re-implemented here.**
-//! [`crate::my::needs::allocate`]/`gap_of`/`dedupe`/`plan_pull` are reused
+//! [`crate::my::needs::offers_of`]/`dedupe`/`plan_pull` are reused
 //! directly — that module's own doc is explicit that the client's pick list
 //! and the server's write must run "the *same* function over its *own* fresh
 //! needs() read," and a second copy of that arithmetic in this file would be
@@ -39,10 +39,10 @@
 
 use std::collections::HashMap;
 
-use shared::{HoldingLine, Id, NeedRow};
+use shared::{Board, HoldingLine, Id, NeedRow};
 
 use crate::my::move_selection::{MoveSource, SkipReason, Skipped};
-use crate::my::needs::{allocate, dedupe, gap_of, plan_pull, PullItem, Pulled};
+use crate::my::needs::{dedupe, offers_of, plan_pull, PullItem, Pulled};
 
 /// Everything the pull transaction has read before planning: the
 /// destination's fresh needs (desired vs. present-here vs. elsewhere, the
@@ -64,11 +64,19 @@ pub struct PullSnapshot {
 
 /// One physical write the plan calls for: take `quantity` copies of
 /// `source`'s exact stack (the grain and board actually found, never a
-/// restated default) and land them on the destination's mainboard — a pull
-/// never assigns a board, see [`crate::my::needs`]'s own doc on `to_board`.
+/// restated default) and land them on the destination's `to_board`.
+///
+/// **The two boards are independent and both are real** (P6-074). `source.board`
+/// is where the copies came off — read off the locked holding, so undo puts
+/// them back on the stack they left. `to_board` is the board of the
+/// [`NeedRow`] this write is closing, carried in on [`PullItem::board`]: a
+/// sideboard need is filled by landing copies on the sideboard. It used to be
+/// hardcoded `main` at the call site, which meant a sideboard need could never
+/// be closed by pulling — the copies landed on `main` and the need survived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullWrite {
     pub source: MoveSource,
+    pub to_board: Board,
     pub quantity: i32,
 }
 
@@ -101,28 +109,59 @@ pub fn oracle_ids_of(items: &[PullItem]) -> Vec<Id> {
 /// Plan a pull: the same allocation [`crate::my::needs::pick_list`] shows,
 /// applied to `items` over a snapshot the caller already holds locks for.
 ///
-/// Ported unchanged from `pull_needs`'s pre-P6-120 body: `items` is deduped
+/// Ported from `pull_needs`'s pre-P6-120 body: `items` is deduped
 /// first (a repeated line must not multiply a move — see
 /// [`crate::my::needs::dedupe`]'s own doc); a line naming the destination as
 /// its own source is [`SkipReason::AlreadyThere`]; a line whose `(oracle,
-/// from)` pair no longer appears in the fresh allocation is
+/// board, from)` key no longer appears in the fresh allocation is
 /// [`SkipReason::NoLongerNeeded`]; a line that survives both but finds no
 /// copies at the locked source is [`SkipReason::NoCopies`] — reachable now
 /// exactly when it could not be reached before: the snapshot's `holdings` for
 /// that source held less than `want` (or none at all), because another
 /// operation drained it between the pick list's own snapshot and this
 /// transaction's lock.
+///
+/// **Board grain (P6-074).** `planned` is keyed by `(oracle, board, from)`
+/// because [`NeedRow`] is now per `(oracle, board)`: the same card wanted on
+/// two boards is two rows with two gaps, and each has its own line to pull.
+/// Every write carries the need row's board as its `to_board`, so the copies
+/// land where they were wanted.
+///
+/// **Two boards can still name the same physical stack, so the stacks are
+/// consumed as they are planned.** `NeedRow::locations` is board-blind on
+/// purpose (a copy elsewhere can fill any board's need — see [`NeedRow`]'s own
+/// doc), and while `apportion_elsewhere` now stops two boards claiming the same
+/// copy in *total*, it does not decide *which collection* each board's share
+/// comes out of: [`offers_of`] walks `locations` from the front for every row,
+/// so a card with 2 in binder A and 1 in binder B, wanted 2 on `main` and 1 on
+/// `side`, offers A twice — 2 copies then 1 more — against A's 2. `remaining`
+/// tracks per **holding row** what earlier lines already committed, so the
+/// second board gets the honest partial (or `NoCopies`) instead of a write the
+/// loop's `holding_take` would reject, aborting the whole pull. That is the same
+/// shape a stale pick list already produces, and the toast already says it.
+///
+/// This is also what makes the `dedupe`-guaranteed uniqueness insufficient on
+/// its own: it was one line per `(oracle, from)` before boards existed here.
 pub fn plan_pull_needs(
     to_collection_id: Id,
     snapshot: &PullSnapshot,
     items: Vec<PullItem>,
 ) -> PullPlan {
-    let mut planned: HashMap<(Id, Id), i32> = HashMap::new();
+    let mut planned: HashMap<(Id, Board, Id), i32> = HashMap::new();
     for row in &snapshot.needs {
-        for (from, copies) in allocate(gap_of(row), &row.locations) {
-            planned.insert((row.oracle_id, from), copies);
+        for (from, copies) in offers_of(row) {
+            planned.insert((row.oracle_id, row.board, from), copies);
         }
     }
+
+    // Per `holdings.id`, what is still unspoken for after the lines planned so
+    // far. Seeded from the locked snapshot; only ever decremented here.
+    let mut remaining: HashMap<Id, i32> = snapshot
+        .holdings
+        .values()
+        .flatten()
+        .map(|h| (h.id, h.quantity))
+        .collect();
 
     let empty: Vec<HoldingLine> = Vec::new();
     let mut plan = PullPlan::default();
@@ -135,15 +174,31 @@ pub fn plan_pull_needs(
             });
             continue;
         }
-        let Some(&want) = planned.get(&(item.oracle_id, item.from_collection_id)) else {
+        let Some(&want) = planned.get(&(item.oracle_id, item.board, item.from_collection_id))
+        else {
             plan.skipped.push(Skipped {
                 token,
                 reason: SkipReason::NoLongerNeeded,
             });
             continue;
         };
-        let holdings = snapshot.holdings.get(&item.oracle_id).unwrap_or(&empty);
-        let lines = plan_pull(holdings, item.from_collection_id, want);
+        // The stacks as they stand *after* earlier lines of this same plan —
+        // a drained stack is dropped entirely, exactly as `plan_pull` treats a
+        // zero-quantity holding.
+        let holdings: Vec<HoldingLine> = snapshot
+            .holdings
+            .get(&item.oracle_id)
+            .unwrap_or(&empty)
+            .iter()
+            .filter_map(|h| {
+                let left = remaining.get(&h.id).copied().unwrap_or(h.quantity);
+                (left > 0).then(|| HoldingLine {
+                    quantity: left,
+                    ..h.clone()
+                })
+            })
+            .collect();
+        let lines = plan_pull(&holdings, item.from_collection_id, want);
         if lines.is_empty() {
             plan.skipped.push(Skipped {
                 token,
@@ -153,8 +208,30 @@ pub fn plan_pull_needs(
         }
         let copies = lines.iter().map(|l| l.quantity).sum();
         for line in lines {
+            // `plan_pull` returns a `MoveSource`, which does not carry the
+            // holding's id — match the stack back by its full grain, the same
+            // tuple `holdings_uniq` is keyed on, so the decrement lands on the
+            // row the write will actually touch.
+            if let Some(h) = snapshot
+                .holdings
+                .get(&item.oracle_id)
+                .unwrap_or(&empty)
+                .iter()
+                .find(|h| {
+                    h.collection_id == line.source.from
+                        && h.printing_id == line.source.printing_id
+                        && h.finish == line.source.finish
+                        && h.condition == line.source.condition
+                        && h.language == line.source.language
+                        && h.board == line.source.board
+                })
+            {
+                let left = remaining.entry(h.id).or_insert(h.quantity);
+                *left -= line.quantity;
+            }
             plan.writes.push(PullWrite {
                 source: line.source,
+                to_board: item.board,
                 quantity: line.quantity,
             });
         }
@@ -179,18 +256,55 @@ mod tests {
     const ORACLE: u128 = 10;
 
     fn need(oracle: Id, desired: i32, present_here: i32, locations: Vec<CardLocation>) -> NeedRow {
+        need_on(Board::Main, oracle, desired, present_here, locations)
+    }
+
+    /// The same row on a named board — the shape `read_needs_rows` emits since
+    /// P6-074, where one oracle can yield a row per board.
+    fn need_on(
+        board: Board,
+        oracle: Id,
+        desired: i32,
+        present_here: i32,
+        locations: Vec<CardLocation>,
+    ) -> NeedRow {
         let gap = desired - present_here;
         let elsewhere: i32 = locations.iter().map(|l| l.quantity).sum();
         let owned_elsewhere = elsewhere.min(gap);
         NeedRow {
             oracle_id: oracle,
             name: "Lightning Bolt".to_string(),
+            board,
             desired,
             present_here,
             owned_elsewhere,
             short: gap - owned_elsewhere,
             locations,
         }
+    }
+
+    /// Rewrite a set of rows the way `read_needs_rows` builds them: the
+    /// per-oracle elsewhere pool split across the rows in order, not applied
+    /// whole to each. Every multi-board case below goes through this, so the
+    /// planner is tested against snapshots the read can actually produce.
+    fn apportioned(rows: Vec<NeedRow>) -> Vec<NeedRow> {
+        let gaps: Vec<crate::my::needs::NeedGap> = rows
+            .iter()
+            .map(|r| crate::my::needs::NeedGap {
+                oracle_id: r.oracle_id,
+                gap: r.desired - r.present_here,
+                elsewhere: r.locations.iter().map(|l| l.quantity).sum(),
+            })
+            .collect();
+        let shares = crate::my::needs::apportion_elsewhere(&gaps);
+        rows.into_iter()
+            .zip(shares)
+            .map(|(mut r, share)| {
+                r.owned_elsewhere = share;
+                r.short = (r.desired - r.present_here) - share;
+                r
+            })
+            .collect()
     }
 
     fn loc(id: Id, name: &str, quantity: i32) -> CardLocation {
@@ -215,9 +329,15 @@ mod tests {
     }
 
     fn item(from: Id) -> PullItem {
+        item_on(Board::Main, from)
+    }
+
+    /// A line asking for the copies to land on a named board.
+    fn item_on(board: Board, from: Id) -> PullItem {
         PullItem {
             oracle_id: id(ORACLE),
             from_collection_id: from,
+            board,
         }
     }
 
@@ -292,6 +412,7 @@ mod tests {
                     language: "en".to_string(),
                     board: Board::Main,
                 },
+                to_board: Board::Main,
                 quantity: 1,
             }]
         );
@@ -337,6 +458,184 @@ mod tests {
         assert_eq!(plan.pulled[0].copies, 2, "the gap, once, not twice");
     }
 
+    // ------------------------------------------- P6-074: board-aware needs ---
+
+    /// The defect this task fixes, at the planner's own layer: the deck holds
+    /// the card on `main` and wants one on `side`. `read_needs_rows` now emits
+    /// a `side` row (present_here 0 on that board), and the plan has to pull
+    /// **for the sideboard** — a write landing on `main` would leave the need
+    /// standing and the same pull would be offered forever.
+    #[test]
+    fn a_want_on_the_sideboard_pulls_onto_the_sideboard() {
+        let snapshot = PullSnapshot {
+            needs: vec![need_on(
+                Board::Side,
+                id(ORACLE),
+                1,
+                0,
+                vec![loc(id(SRC_A), "A", 2)],
+            )],
+            holdings: HashMap::from([(id(ORACLE), vec![holding(id(SRC_A), 2)])]),
+        };
+        let plan = plan_pull_needs(id(DEST), &snapshot, vec![item_on(Board::Side, id(SRC_A))]);
+        assert_eq!(plan.writes.len(), 1);
+        assert_eq!(plan.writes[0].quantity, 1);
+        assert_eq!(
+            plan.writes[0].to_board,
+            Board::Side,
+            "the copies land on the board that wanted them"
+        );
+        // The *source* board is still whatever the locked stack was found at,
+        // so undo puts the copy back on the binder's mainboard.
+        assert_eq!(plan.writes[0].source.board, Board::Main);
+        assert!(plan.skipped.is_empty());
+    }
+
+    /// One card wanted on two boards is two rows with two gaps and two lines —
+    /// the shape the board-blind read could not produce at all. The tokens must
+    /// differ too, or the client cannot tell the two outcomes apart.
+    #[test]
+    fn two_boards_wanting_the_same_card_are_two_lines() {
+        let snapshot = PullSnapshot {
+            needs: apportioned(vec![
+                need(id(ORACLE), 1, 0, vec![loc(id(SRC_A), "A", 4)]),
+                need_on(Board::Side, id(ORACLE), 2, 0, vec![loc(id(SRC_A), "A", 4)]),
+            ]),
+            holdings: HashMap::from([(id(ORACLE), vec![holding(id(SRC_A), 4)])]),
+        };
+        let plan = plan_pull_needs(
+            id(DEST),
+            &snapshot,
+            vec![item(id(SRC_A)), item_on(Board::Side, id(SRC_A))],
+        );
+        assert_eq!(plan.pulled.len(), 2);
+        assert_ne!(
+            plan.pulled[0].token, plan.pulled[1].token,
+            "the board is part of a line's identity"
+        );
+        assert_eq!(plan.pulled[0].copies, 1);
+        assert_eq!(plan.pulled[1].copies, 2);
+        assert_eq!(plan.writes.len(), 2);
+        assert_eq!(plan.writes[0].to_board, Board::Main);
+        assert_eq!(plan.writes[1].to_board, Board::Side);
+        assert!(plan.skipped.is_empty());
+    }
+
+    /// One elsewhere copy, two boards wanting it. Since the review the *read*
+    /// already refuses to promise it twice (`apportion_elsewhere`), so the
+    /// sideboard line is not in the fresh allocation at all and a client that
+    /// sends it anyway is told so — rather than the plan quietly writing two
+    /// moves against one copy.
+    #[test]
+    fn two_boards_sharing_one_copy_do_not_plan_it_twice() {
+        let snapshot = PullSnapshot {
+            needs: apportioned(vec![
+                need(id(ORACLE), 1, 0, vec![loc(id(SRC_A), "A", 1)]),
+                need_on(Board::Side, id(ORACLE), 1, 0, vec![loc(id(SRC_A), "A", 1)]),
+            ]),
+            holdings: HashMap::from([(id(ORACLE), vec![holding(id(SRC_A), 1)])]),
+        };
+        // The apportioning itself: the sideboard row is Short, not pullable.
+        assert_eq!(snapshot.needs[0].owned_elsewhere, 1);
+        assert_eq!(snapshot.needs[1].owned_elsewhere, 0);
+        assert_eq!(snapshot.needs[1].short, 1);
+
+        let plan = plan_pull_needs(
+            id(DEST),
+            &snapshot,
+            vec![item(id(SRC_A)), item_on(Board::Side, id(SRC_A))],
+        );
+        let moved: i32 = plan.writes.iter().map(|w| w.quantity).sum();
+        assert_eq!(moved, 1, "one copy exists, so one copy moves");
+        assert_eq!(plan.pulled.len(), 1);
+        assert_eq!(plan.writes[0].to_board, Board::Main);
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(plan.skipped[0].reason, SkipReason::NoLongerNeeded);
+    }
+
+    /// The partial version of the same shape: three copies at the source, a
+    /// mainboard gap of two and a sideboard gap of two. Apportioning gives the
+    /// mainboard its two and the sideboard the one that is left.
+    #[test]
+    fn a_second_board_takes_what_the_first_left() {
+        let snapshot = PullSnapshot {
+            needs: apportioned(vec![
+                need(id(ORACLE), 2, 0, vec![loc(id(SRC_A), "A", 3)]),
+                need_on(Board::Side, id(ORACLE), 2, 0, vec![loc(id(SRC_A), "A", 3)]),
+            ]),
+            holdings: HashMap::from([(id(ORACLE), vec![holding(id(SRC_A), 3)])]),
+        };
+        let plan = plan_pull_needs(
+            id(DEST),
+            &snapshot,
+            vec![item(id(SRC_A)), item_on(Board::Side, id(SRC_A))],
+        );
+        assert_eq!(plan.pulled.len(), 2);
+        assert_eq!(plan.pulled[0].copies, 2);
+        assert_eq!(
+            plan.pulled[1].copies, 1,
+            "the honest residual, not the 2 its own gap asked for"
+        );
+        let moved: i32 = plan.writes.iter().map(|w| w.quantity).sum();
+        assert_eq!(moved, 3, "never more than the source holds");
+    }
+
+    /// **Apportioning fixes the totals, not the per-location split**, and the
+    /// stack-consumption guard is what covers the difference. Two binders — A
+    /// holds 2, B holds 1 — with a mainboard gap of 2 and a sideboard gap of 1.
+    /// The pool (3) covers both gaps, so both rows are fully pullable; but
+    /// `offers_of` walks `locations` from the front for each row independently,
+    /// so both name **A**, asking 3 copies of a stack that holds 2. The plan
+    /// must draw A twice for a total of 2, not 3.
+    #[test]
+    fn two_boards_naming_the_same_binder_cannot_overdraw_it() {
+        let snapshot = PullSnapshot {
+            needs: apportioned(vec![
+                need(
+                    id(ORACLE),
+                    2,
+                    0,
+                    vec![loc(id(SRC_A), "A", 2), loc(id(SRC_B), "B", 1)],
+                ),
+                need_on(
+                    Board::Side,
+                    id(ORACLE),
+                    1,
+                    0,
+                    vec![loc(id(SRC_A), "A", 2), loc(id(SRC_B), "B", 1)],
+                ),
+            ]),
+            holdings: HashMap::from([(
+                id(ORACLE),
+                vec![holding(id(SRC_A), 2), holding(id(SRC_B), 1)],
+            )]),
+        };
+        // Both rows are fully covered by the pool, so both offer against A.
+        assert_eq!(snapshot.needs[0].owned_elsewhere, 2);
+        assert_eq!(snapshot.needs[1].owned_elsewhere, 1);
+
+        let plan = plan_pull_needs(
+            id(DEST),
+            &snapshot,
+            vec![item(id(SRC_A)), item_on(Board::Side, id(SRC_A))],
+        );
+        let from_a: i32 = plan
+            .writes
+            .iter()
+            .filter(|w| w.source.from == id(SRC_A))
+            .map(|w| w.quantity)
+            .sum();
+        assert_eq!(from_a, 2, "A holds 2 and cannot be drawn for 3");
+        assert_eq!(plan.pulled.len(), 1);
+        assert_eq!(plan.pulled[0].copies, 2, "the mainboard line, in full");
+        // The sideboard line named A, and A is spent. It is refused rather than
+        // claiming a copy it did not get — the same honest shape a stale pick
+        // list produces. (Its copy is genuinely available in B; nothing here
+        // re-aims a line at another source, and nothing pretends it moved.)
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(plan.skipped[0].reason, SkipReason::NoCopies);
+    }
+
     #[test]
     fn oracle_ids_of_is_sorted_and_deduplicated() {
         let a = id(1);
@@ -345,14 +644,17 @@ mod tests {
             PullItem {
                 oracle_id: b,
                 from_collection_id: id(90),
+                board: Board::Main,
             },
             PullItem {
                 oracle_id: a,
                 from_collection_id: id(91),
+                board: Board::Main,
             },
             PullItem {
                 oracle_id: b,
                 from_collection_id: id(92),
+                board: Board::Side,
             },
         ];
         let mut expected = [a, b];
