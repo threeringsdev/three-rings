@@ -862,6 +862,28 @@ test("@fast a row-level Pull that closes a need drops the stale line from an ope
     // is not what this test is about.)
     expect(await copiesIn(request, card.oracle_id, deck.id)).toBe(2);
     expect(await needsOf(request, deck.id)).toEqual([]);
+
+    // Undo must not be a one-way door on the checklist: the pull reverses,
+    // which reopens this exact need, and the checklist that dropped the line
+    // has to say so again — not silently disagree with the table row that
+    // `report`'s own Undo already makes reappear.
+    await page.locator(TOAST).getByRole("button", { name: "Undo" }).click();
+    await expect(page.locator(TOAST)).toContainText("Put them back");
+
+    // The table row is back...
+    await expect(needRow(page, card.oracle_id)).toBeVisible();
+    await expect(page.locator('[data-testid="needs-empty"]')).toHaveCount(0);
+    // ...and so is the checklist's own line for it, in the same open session.
+    await expect(list.locator(PICK_ROW)).toHaveCount(1);
+    await expect(list.locator('[data-testid="pick-label"]')).toHaveText(
+      `2 × ${card.name}`,
+    );
+
+    // Read back through the API: the copies really did move back.
+    await expect(async () => {
+      expect(await copiesIn(request, card.oracle_id, deck.id)).toBe(0);
+    }).toPass({ timeout: 5000 });
+    expect(await needsOf(request, deck.id)).toHaveLength(1);
   } finally {
     await deleteCollection(request, source.id);
     await deleteCollection(request, deck.id);

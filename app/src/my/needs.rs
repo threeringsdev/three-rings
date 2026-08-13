@@ -228,6 +228,22 @@ pub fn pull_line_outcome(asked: i32, moved: i32) -> PullLineOutcome {
     }
 }
 
+/// Whether a row-level Pull's own outcome proves its need is fully closed —
+/// the one condition `ElsewhereRow` gates [`drop_closed_need`] on (P6-141).
+///
+/// Pulled out as its own named check rather than an inline `matches!` at the
+/// call site: "closed" here is not "moved something", it is specifically
+/// [`PullLineOutcome::Full`] against the row's *whole* `owned_elsewhere` —
+/// a `Partial` outcome still owes the row copies and must not touch the
+/// checklist (`drop_closed_need`'s own doc on why `Full` is the one safe
+/// trigger).
+pub fn row_pull_closed_the_need(fillable: i32, copies_moved: i32) -> bool {
+    matches!(
+        pull_line_outcome(fillable, copies_moved),
+        PullLineOutcome::Full
+    )
+}
+
 // -------------------------------------------------------- the arithmetic ---
 
 /// Copies to take from each location to fill one row's gap, in the needs read's
@@ -519,23 +535,111 @@ pub fn pick_list(rows: &[NeedRow]) -> Vec<PickGroup> {
 /// dropping a struck-through line would erase a completed step off the walk
 /// mid-way through it. A group left with no lines is dropped too, so its
 /// "walk to this collection" heading does not outlive everything it named.
+///
+/// **The drop is reversible, because the pull that caused it is.** A row-level
+/// Pull's toast carries the same Undo every pull's toast does, and Undo puts
+/// the copies back — which reopens the very need this function just closed.
+/// Returning what was removed (with the group context needed to reinsert it)
+/// is what lets the caller wire that Undo to restore the checklist rather than
+/// leave two representations of one need disagreeing for the rest of the
+/// session: the table row reappears (the Undo's own `tree`/`revision` refetch
+/// already does that), but nothing else was putting the checklist line back
+/// with it. See [`restore_dropped`], the round trip's other half.
 pub fn drop_closed_need(
     groups: Vec<PickGroup>,
     done: &HashSet<String>,
     oracle_id: Id,
     board: shared::Board,
-) -> Vec<PickGroup> {
-    groups
+) -> (Vec<PickGroup>, Vec<DroppedPick>) {
+    let mut dropped = Vec::new();
+    let kept = groups
         .into_iter()
-        .filter_map(|mut group| {
-            group.rows.retain(|row| {
-                row.item.oracle_id != oracle_id
-                    || row.item.board != board
-                    || done.contains(&row.item.token())
-            });
-            (!group.rows.is_empty()).then_some(group)
+        .filter_map(|group| {
+            let collection_id = group.collection_id;
+            let collection_name = group.collection_name;
+            let (keep, remove): (Vec<PickRow>, Vec<PickRow>) =
+                group.rows.into_iter().partition(|row| {
+                    row.item.oracle_id != oracle_id
+                        || row.item.board != board
+                        || done.contains(&row.item.token())
+                });
+            dropped.extend(remove.into_iter().map(|row| DroppedPick {
+                collection_id,
+                collection_name: collection_name.clone(),
+                row,
+            }));
+            (!keep.is_empty()).then_some(PickGroup {
+                collection_id,
+                collection_name,
+                rows: keep,
+            })
         })
-        .collect()
+        .collect();
+    (kept, dropped)
+}
+
+/// One line [`drop_closed_need`] removed, carrying the group identity it came
+/// from — `PickRow` alone does not name its own group, and a restore has to
+/// know which heading to put the line back under (or recreate, if the whole
+/// group was dropped with it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DroppedPick {
+    pub collection_id: Id,
+    pub collection_name: String,
+    pub row: PickRow,
+}
+
+/// Undo's half of the round trip: reinsert lines [`drop_closed_need`] removed,
+/// back into the group they came from — recreating that group if the drop
+/// took the last row with it.
+///
+/// **Unconditional — the safety check lives one level up.** This function
+/// only performs the splice; it has no way to know whether `groups` is still
+/// the same checklist session the lines were dropped from. Every real caller
+/// should go through [`restore_dropped_if_current`] instead, which decides
+/// that first and only calls down to this when it is actually safe.
+pub fn restore_dropped(groups: Vec<PickGroup>, dropped: &[DroppedPick]) -> Vec<PickGroup> {
+    let mut groups = groups;
+    for d in dropped {
+        match groups
+            .iter_mut()
+            .find(|g| g.collection_id == d.collection_id)
+        {
+            Some(g) => g.rows.push(d.row.clone()),
+            None => groups.push(PickGroup {
+                collection_id: d.collection_id,
+                collection_name: d.collection_name.clone(),
+                rows: vec![d.row.clone()],
+            }),
+        }
+    }
+    groups.sort_by_key(|g| g.collection_name.to_lowercase());
+    groups
+}
+
+/// The full on-undo decision for a row-level Pull's reconcile, as one pure,
+/// testable gate rather than logic scattered across a reactive closure.
+///
+/// `current` is the checklist's live state at the moment Undo actually runs —
+/// `None` when it has been closed (nothing to restore into, so `None` back:
+/// closing already recovers correctly on its own, since a later "Pull all…"
+/// regenerates from the database, which the reversed pull has by then made
+/// honest again). `current_generation`/`drop_generation` are
+/// [`NeedsPage`]'s `picks_generation` read at Undo-time and captured at
+/// drop-time; a mismatch means the checklist has moved on — closed and
+/// reopened, or simply regenerated by a second "Pull all…" click — to a
+/// *different* snapshot that never named this drop, and splicing into it
+/// blind would resurrect a need that snapshot's own fresh read did not.
+pub fn restore_dropped_if_current(
+    current: Option<Vec<PickGroup>>,
+    current_generation: u64,
+    dropped: &[DroppedPick],
+    drop_generation: u64,
+) -> Option<Vec<PickGroup>> {
+    if current_generation != drop_generation {
+        return None;
+    }
+    current.map(|groups| restore_dropped(groups, dropped))
 }
 
 // -------------------------------------------------------------- the page ---
@@ -579,6 +683,14 @@ pub fn NeedsPage() -> impl IntoView {
     // see the module doc on why this is a snapshot.
     let picks = RwSignal::new(None::<Vec<PickGroup>>);
     let done = RwSignal::new(HashSet::<String>::new());
+    // Bumped every time `picks` is (re)generated from scratch — never on a
+    // mere reconcile-prune. A row-level Pull's Undo captures this value
+    // alongside the lines it removed from the checklist (`ElsewhereRow`'s
+    // `pull`); when Undo actually runs, a mismatch means the session it
+    // dropped from is gone — closed, reopened, or simply regenerated by a
+    // second "Pull all…" click — and reinserting into whatever is open now
+    // would resurrect a need the current snapshot never named.
+    let picks_generation = RwSignal::new(0u64);
 
     view! {
         <div class="flex min-w-0 flex-col gap-4 p-4 md:p-6" data-testid="needs-page">
@@ -589,7 +701,7 @@ pub fn NeedsPage() -> impl IntoView {
                 {move || Suspend::new(async move {
                     match needs_res.await {
                         Ok(view) => {
-                            view! { <NeedsBody view picks done /> }
+                            view! { <NeedsBody view picks picks_generation done /> }
                                 .into_any()
                         }
                         // The way out is already on the page: `NeedsHeader` sits
@@ -688,6 +800,7 @@ fn RowsSkeleton() -> impl IntoView {
 fn NeedsBody(
     view: NeedsView,
     picks: RwSignal<Option<Vec<PickGroup>>>,
+    picks_generation: RwSignal<u64>,
     done: RwSignal<HashSet<String>>,
 ) -> impl IntoView {
     let collection_id = view.collection_id;
@@ -751,7 +864,9 @@ fn NeedsBody(
                 }
             })}
         {(!elsewhere.is_empty())
-            .then(|| view! { <OwnedElsewhere rows=elsewhere collection_id picks done /> })}
+            .then(|| {
+                view! { <OwnedElsewhere rows=elsewhere collection_id picks picks_generation done /> }
+            })}
         {(!short.is_empty()).then(|| view! { <ShortBucket rows=short /> })}
     }
     .into_any()
@@ -783,12 +898,17 @@ fn OwnedElsewhere(
     rows: Vec<NeedRow>,
     collection_id: Id,
     picks: RwSignal<Option<Vec<PickGroup>>>,
+    picks_generation: RwSignal<u64>,
     done: RwSignal<HashSet<String>>,
 ) -> impl IntoView {
     let total: i32 = rows.iter().map(|r| r.owned_elsewhere).sum();
     let all = StoredValue::new(rows.clone());
 
     let open_picks = move |_| {
+        // A fresh snapshot — bump first, so anything captured off the *old*
+        // generation (a row-level Pull's pending Undo, see `ElsewhereRow`)
+        // reads as stale against this one rather than splicing into it.
+        picks_generation.update(|g| *g += 1);
         picks.set(Some(pick_list(&all.get_value())));
     };
 
@@ -825,7 +945,11 @@ fn OwnedElsewhere(
                     <TableBody>
                         {rows
                             .into_iter()
-                            .map(|row| view! { <ElsewhereRow row collection_id picks done /> })
+                            .map(|row| {
+                                view! {
+                                    <ElsewhereRow row collection_id picks picks_generation done />
+                                }
+                            })
                             .collect_view()}
                     </TableBody>
                 </Table>
@@ -839,6 +963,7 @@ fn ElsewhereRow(
     row: NeedRow,
     collection_id: Id,
     picks: RwSignal<Option<Vec<PickGroup>>>,
+    picks_generation: RwSignal<u64>,
     done: RwSignal<HashSet<String>>,
 ) -> impl IntoView {
     // Owned per row, not threaded in from `OwnedElsewhere` (P6-140). A pull's
@@ -905,17 +1030,36 @@ fn ElsewhereRow(
                     // as safe to reconcile on (module doc, P6-141). Checked
                     // before `report`, but order does not matter to either —
                     // there is no shared state between them.
-                    if matches!(
-                        pull_line_outcome(fillable, outcome.copies()),
-                        PullLineOutcome::Full
-                    ) {
+                    //
+                    // The reconcile is one-way unless Undo reverses it too:
+                    // undoing the pull reopens this exact need, and a
+                    // checklist that stayed pruned would disagree with the
+                    // table row `report`'s own Undo makes reappear. `dropped`
+                    // and `gen_at_drop` are captured by the closure below so
+                    // `restore_dropped_if_current` — the whole decision, one
+                    // pure gate — can (a) know what to put back and (b)
+                    // refuse to touch a checklist that has since moved on —
+                    // closed, reopened, or simply regenerated by a second
+                    // "Pull all…" click.
+                    let mut undo_reconcile: Option<Callback<()>> = None;
+                    if row_pull_closed_the_need(fillable, outcome.copies()) {
                         if let Some(groups) = picks.get_untracked() {
-                            picks.set(Some(drop_closed_need(
-                                groups,
-                                &done.get_untracked(),
-                                oracle_id,
-                                board,
-                            )));
+                            let (kept, dropped) =
+                                drop_closed_need(groups, &done.get_untracked(), oracle_id, board);
+                            if !dropped.is_empty() {
+                                picks.set(Some(kept));
+                                let gen_at_drop = picks_generation.get_untracked();
+                                undo_reconcile = Some(Callback::new(move |()| {
+                                    if let Some(restored) = restore_dropped_if_current(
+                                        picks.get_untracked(),
+                                        picks_generation.get_untracked(),
+                                        &dropped,
+                                        gen_at_drop,
+                                    ) {
+                                        picks.set(Some(restored));
+                                    }
+                                }));
+                            }
                         }
                     }
                     report(
@@ -927,7 +1071,7 @@ fn ElsewhereRow(
                             revision,
                             last_move,
                         },
-                        None,
+                        undo_reconcile,
                         // `fillable` is this row's own asked total across every
                         // source its allocation named — the honest baseline the
                         // toast checks a shortfall against, same as the pick
@@ -1929,6 +2073,32 @@ mod tests {
     // ------------------------------------------------- P6-141: reconcile ---
 
     #[test]
+    fn a_row_pull_closes_the_need_exactly_when_the_outcome_is_full() {
+        // The glue condition `ElsewhereRow` gates the whole reconcile on —
+        // pinned on its own rather than left provable only by the e2e test,
+        // since a `Partial` here must leave the checklist untouched (some of
+        // the row's allocation is still out there, so other pick-list lines
+        // for it may still be live).
+        assert!(
+            row_pull_closed_the_need(2, 2),
+            "asked and got exactly the row's whole allocation"
+        );
+        assert!(
+            row_pull_closed_the_need(2, 3),
+            "more than asked still counts as closed — pull_line_outcome's own \
+             Full rule, not narrowed here"
+        );
+        assert!(
+            !row_pull_closed_the_need(2, 1),
+            "a partial pull must not trigger the reconcile"
+        );
+        assert!(
+            !row_pull_closed_the_need(2, 0),
+            "nothing moved for this row at all"
+        );
+    }
+
+    #[test]
     fn a_closed_needs_open_line_is_dropped_and_its_group_with_it() {
         // The base bug: a row-level Pull closes the need through a control
         // the checklist snapshot never sees, and the stale line used to sit
@@ -1938,15 +2108,20 @@ mod tests {
         let groups = pick_list(&[side]);
         assert_eq!(groups.len(), 1, "one group, one line, before reconcile");
 
-        let closed = drop_closed_need(
+        let (kept, dropped) = drop_closed_need(
             groups,
             &HashSet::new(),
             Uuid::from_u128(1), // `need`'s fixed oracle id
             Board::Side,
         );
         assert!(
-            closed.is_empty(),
+            kept.is_empty(),
             "the only group named the closed need, so it goes with the line"
+        );
+        assert_eq!(dropped.len(), 1, "the one line is reported, not discarded");
+        assert_eq!(
+            dropped[0].collection_id, a,
+            "its group's identity travels with it"
         );
     }
 
@@ -1960,9 +2135,10 @@ mod tests {
         let token = groups[0].rows[0].item.token();
         let done: HashSet<String> = [token].into_iter().collect();
 
-        let closed = drop_closed_need(groups, &done, Uuid::from_u128(1), Board::Side);
-        assert_eq!(closed.len(), 1, "the ticked line stays");
-        assert_eq!(closed[0].rows.len(), 1);
+        let (kept, dropped) = drop_closed_need(groups, &done, Uuid::from_u128(1), Board::Side);
+        assert_eq!(kept.len(), 1, "the ticked line stays");
+        assert_eq!(kept[0].rows.len(), 1);
+        assert!(dropped.is_empty(), "nothing was actually removed");
     }
 
     #[test]
@@ -1988,15 +2164,112 @@ mod tests {
             "one group — same source for all three"
         );
 
-        let closed = drop_closed_need(groups, &HashSet::new(), Uuid::from_u128(1), Board::Main);
-        assert_eq!(closed.len(), 1, "the group survives — two lines remain");
-        assert_eq!(closed[0].rows.len(), 2);
+        let (kept, dropped) =
+            drop_closed_need(groups, &HashSet::new(), Uuid::from_u128(1), Board::Main);
+        assert_eq!(kept.len(), 1, "the group survives — two lines remain");
+        assert_eq!(kept[0].rows.len(), 2);
         assert!(
-            closed[0]
+            kept[0]
                 .rows
                 .iter()
                 .all(|r| r.item.oracle_id != Uuid::from_u128(1) || r.item.board != Board::Main),
             "only the closed (oracle, board) line was dropped"
+        );
+        assert_eq!(dropped.len(), 1, "exactly the one matching line");
+        assert_eq!(dropped[0].row.item.oracle_id, Uuid::from_u128(1));
+        assert_eq!(dropped[0].row.item.board, Board::Main);
+    }
+
+    #[test]
+    fn drop_then_restore_round_trips_back_to_the_original_checklist() {
+        // Undo's whole point: a row-level Pull's reconcile must not be a
+        // one-way door when the pull itself is reversible. Two sources for
+        // one need (`the_pick_list_groups_by_the_collection_you_walk_to`'s own
+        // shape), so the round trip also proves a drop spanning two groups
+        // restores both, not just one.
+        let a = Uuid::from_u128(10);
+        let b = Uuid::from_u128(11);
+        let side = need_on(
+            Board::Side,
+            3,
+            0,
+            vec![loc(a, "Trade Binder", 2), loc(b, "Shoebox", 5)],
+        );
+        let original = pick_list(&[side]);
+        assert_eq!(original.len(), 2, "two sources, two groups");
+        let original_total: usize = original.iter().map(|g| g.rows.len()).sum();
+
+        let (kept, dropped) = drop_closed_need(
+            original.clone(),
+            &HashSet::new(),
+            Uuid::from_u128(1),
+            Board::Side,
+        );
+        assert!(kept.is_empty(), "both groups named the closed need");
+        assert_eq!(dropped.len(), original_total);
+
+        let restored = restore_dropped(kept, &dropped);
+        assert_eq!(
+            restored.len(),
+            original.len(),
+            "both groups came back, not just the last one inserted"
+        );
+        let restored_total: usize = restored.iter().map(|g| g.rows.len()).sum();
+        assert_eq!(restored_total, original_total);
+        // Same rows, same groups — order within `restore_dropped`'s own
+        // re-sort is stable and matches `pick_list`'s (alphabetical), so a
+        // direct comparison holds rather than just a count.
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn restoring_into_a_since_regenerated_checklist_is_refused() {
+        // The gate `ElsewhereRow`'s on-undo wiring relies on: a checklist
+        // that was closed-then-reopened, or simply regenerated by a second
+        // "Pull all…" click, carries a *different* generation than the one
+        // the drop was captured against — reinserting the old drop into it
+        // would resurrect a need the fresh snapshot never named.
+        let a = Uuid::from_u128(10);
+        let side = need_on(Board::Side, 2, 0, vec![loc(a, "Trade Binder", 3)]);
+        let dropped = vec![DroppedPick {
+            collection_id: a,
+            collection_name: "Trade Binder".to_string(),
+            row: pick_list(&[side]).remove(0).rows.remove(0),
+        }];
+        let fresh_checklist = vec![PickGroup {
+            collection_id: Uuid::from_u128(99),
+            collection_name: "Unrelated Binder".to_string(),
+            rows: vec![],
+        }];
+
+        assert_eq!(
+            restore_dropped_if_current(Some(fresh_checklist.clone()), 2, &dropped, 1),
+            None,
+            "generation moved on — refused, not spliced into the new snapshot"
+        );
+        assert_eq!(
+            restore_dropped_if_current(None, 1, &dropped, 1),
+            None,
+            "the checklist is closed — nothing to restore into, and closing already \
+             recovers correctly on its own the next time it is opened"
+        );
+        assert_eq!(
+            restore_dropped_if_current(Some(fresh_checklist), 1, &dropped, 1),
+            Some(vec![
+                // Alphabetical, same as `pick_list`'s own order ("Trade" <
+                // "Unrelated") — `restore_dropped` re-sorts after splicing.
+                PickGroup {
+                    collection_id: a,
+                    collection_name: "Trade Binder".to_string(),
+                    rows: vec![dropped[0].row.clone()],
+                },
+                PickGroup {
+                    collection_id: Uuid::from_u128(99),
+                    collection_name: "Unrelated Binder".to_string(),
+                    rows: vec![],
+                },
+            ]),
+            "same generation — the drop is spliced back in"
         );
     }
 
