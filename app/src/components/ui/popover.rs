@@ -24,6 +24,21 @@
 //!   never sees it, exactly `DialogContent`'s own multi-overlay reasoning.
 //!   A **second** Escape press then closes the dialog, since the popover has
 //!   dropped off the stack by then.
+//! - **no `relative` on the panel** (the selection tray's "Move to…" opening
+//!   off the bottom of the window bug): a top-layer element's used `position`
+//!   is `absolute`, not the UA-default `fixed`, whenever the author sets any
+//!   non-`static` `position` — so the leftover `relative` this component
+//!   copied from the upstream (non-native-popover) registry source silently
+//!   swapped the panel's containing block from the viewport to the page,
+//!   corrupting every `anchor()` offset on a page taller than the viewport.
+//!   See `PopoverContent`'s own comment for the mechanism.
+//! - **the JS positioning fallback now watches the panel's own size**
+//!   (`watch_panel_resize`/`ResizeObserver`), not just the trigger's, so a
+//!   panel whose rows arrive after a `Resource` resolves (every
+//!   `DestinationList` consumer) does not stay pinned to the flip decision
+//!   made for its much-shorter "Loading…" placeholder as it grows underneath
+//!   that stale position — the second contributor to the same bug, on an
+//!   engine without CSS anchor positioning.
 
 use leptos::prelude::*;
 use tw_merge::tw_merge;
@@ -197,17 +212,56 @@ pub fn PopoverTrigger(children: Children, #[prop(optional, into)] class: String)
     }
 }
 
+/// The [`ResizeObserver`](web_sys::ResizeObserver) + its callback `Closure`,
+/// kept alive across opens — see [`watch_panel_resize`] and
+/// [`stop_watching_resize`], the two functions that hold one of these.
+#[cfg(feature = "hydrate")]
+type ResizeWatch = StoredValue<
+    Option<(
+        web_sys::ResizeObserver,
+        leptos::wasm_bindgen::closure::Closure<dyn FnMut()>,
+    )>,
+    leptos::prelude::LocalStorage,
+>;
+
 #[component]
 pub fn PopoverContent(children: Children, #[prop(optional, into)] class: String) -> impl IntoView {
     let ctx = expect_context::<PopoverContext>();
     let open = ctx.open;
+    // **No `relative` here — that's a bug fix, not a stylistic call.** The
+    // upstream registry source positions its panel with a JS library (portal +
+    // `position: absolute`), where a `relative` ancestor made sense. This panel
+    // is a native `popover="auto"` element promoted to the top layer, where
+    // `position: fixed` is the UA default and the mechanism CSS anchor
+    // positioning assumes. Per the CSS Position spec, a top-layer element's used
+    // `position` is `fixed` only when its *computed* value is `static` —
+    // anything else (author-set `relative`, as here) resolves to `absolute`
+    // instead. `absolute`'s containing block is the nearest positioned ancestor
+    // (or the ICB sized to the whole *document*, not the viewport, when there is
+    // none) rather than the viewport `fixed` gets — so every `anchor()` offset
+    // above was computed against document height instead of viewport height.
+    // On a long page (the `/my` list behind the selection tray) that is
+    // thousands of pixels taller than the viewport, which is exactly what
+    // parked the tray's "Move to…" panel off the bottom of the window with no
+    // way to scroll to it (verified: forcing `position: fixed` here by deleting
+    // this class in devtools puts the panel back in-viewport; specs/app-ui.md
+    // Findings).
     let class = tw_merge!(
-        "overflow-visible relative z-50 p-4 rounded-md border bg-popover text-popover-foreground shadow-md my-[1ch] w-[250px]",
+        "overflow-visible z-50 p-4 rounded-md border bg-popover text-popover-foreground shadow-md my-[1ch] w-[250px]",
         class
     );
 
     let node_ref: NodeRef<leptos::html::Div> = NodeRef::new();
     let target_id = ctx.target_id.clone();
+
+    // Re-runs `position_below_trigger` whenever the panel's own size changes
+    // while it is open on a no-anchor-positioning engine — see that function's
+    // caller below for why this exists. `new_local`, exactly `viewport.rs`'s
+    // `media_signal` watch: neither a `ResizeObserver` nor a `Closure` is
+    // `Send`, and both need to outlive one Effect run to be reused across
+    // opens instead of leaking a new observer per open.
+    #[cfg(feature = "hydrate")]
+    let resize_watch: ResizeWatch = StoredValue::new_local(None);
 
     // Two-way sync with the native popover: signal → showPopover/hidePopover
     // (Effects only run client-side, so no cfg gate), native toggle events
@@ -233,9 +287,30 @@ pub fn PopoverContent(children: Children, #[prop(optional, into)] class: String)
             // (flipping above if it would overflow the viewport bottom).
             // Hydrate-only: the DOM measurement APIs and the mispositioning
             // it corrects both exist only client-side.
+            //
+            // **Also kept in sync with a `ResizeObserver`, not just this one
+            // call.** `position_below_trigger` measures the panel's *current*
+            // height to decide whether to flip above the trigger — but this
+            // Effect fires once per `open` toggle, right when `show_popover()`
+            // runs, which on a picker whose rows come from a `Resource` (every
+            // `DestinationList` consumer: the catalog toolbar, the tray's own
+            // "Move to…") is *before* the real rows have arrived. The first
+            // measurement catches the much shorter "Loading collections…"
+            // placeholder, pins `top` to a flip decision made for that height,
+            // and then never revisits it as the real rows land and the panel
+            // grows underneath that stale `top` — parking the now-taller
+            // bottom edge off the target device's screen with no way to
+            // scroll to it. A fixed delay cannot promise the fetch has landed
+            // by then; a `ResizeObserver` reacts to the panel's real size
+            // settling, however long that takes.
             #[cfg(feature = "hydrate")]
-            if want_open && !anchor_positioning_supported() {
-                position_below_trigger(&el, &target_id);
+            {
+                if want_open && !anchor_positioning_supported() {
+                    position_below_trigger(&el, &target_id);
+                    watch_panel_resize(&el, &target_id, resize_watch);
+                } else {
+                    stop_watching_resize(resize_watch);
+                }
             }
             #[cfg(not(feature = "hydrate"))]
             let _ = &target_id;
@@ -279,6 +354,12 @@ pub fn PopoverContent(children: Children, #[prop(optional, into)] class: String)
         if open.get_untracked() {
             super::overlay_stack::remove(&unmount_id);
         }
+        // Disconnects (does not need to drop) the `ResizeObserver` set up
+        // above, same as the two lines above it clean up their own watches —
+        // a no-op if anchor positioning was supported and none was ever
+        // created.
+        #[cfg(feature = "hydrate")]
+        stop_watching_resize(resize_watch);
     });
 
     view! {
@@ -341,4 +422,59 @@ fn position_below_trigger(panel: &web_sys::HtmlElement, target_id: &str) {
     let _ = style.set_property("margin", "0");
     let _ = style.set_property("left", &format!("{}px", t.left()));
     let _ = style.set_property("top", &format!("{top}px"));
+}
+
+/// Start (or resume) watching `panel` for size changes, re-running
+/// [`position_below_trigger`] on every one — the fix for the stale-height race
+/// documented at this function's one call site. Idempotent: a panel already
+/// being watched just gets `observe`d again (a no-op per the
+/// `ResizeObserver` spec for a target already under observation) rather than
+/// growing a second observer, so re-opening the same popover cannot leak one
+/// per open.
+#[cfg(feature = "hydrate")]
+fn watch_panel_resize(panel: &web_sys::HtmlElement, target_id: &str, watch: ResizeWatch) {
+    use leptos::wasm_bindgen::closure::Closure;
+    use leptos::wasm_bindgen::JsCast;
+
+    let already_watching = watch.with_value(|v| {
+        let Some((observer, _)) = v else {
+            return false;
+        };
+        observer.observe(panel);
+        true
+    });
+    if already_watching {
+        return;
+    }
+
+    // The observer fires on the panel's own content-box size changing —
+    // never on `position_below_trigger`'s own writes below, which only touch
+    // `position`/`left`/`top` and never the panel's size — so this cannot
+    // re-trigger itself.
+    let watched_panel = panel.clone();
+    let watched_target = target_id.to_string();
+    let handler = Closure::wrap(Box::new(move || {
+        position_below_trigger(&watched_panel, &watched_target);
+    }) as Box<dyn FnMut()>);
+    let Ok(observer) = web_sys::ResizeObserver::new(handler.as_ref().unchecked_ref()) else {
+        return;
+    };
+    observer.observe(panel);
+    watch.set_value(Some((observer, handler)));
+}
+
+/// Stop the [`ResizeObserver`](web_sys::ResizeObserver) [`watch_panel_resize`]
+/// started, if one was. Disconnects rather than dropping it: the `StoredValue`
+/// keeps the observer and its closure alive across the toggle (the same
+/// non-`Send`-JS-object-outliving-one-`Effect`-run reason `media_signal`'s own
+/// watch in `components/viewport.rs` is a `StoredValue`), so the next open's
+/// [`watch_panel_resize`] can `observe` the same panel again instead of
+/// constructing a fresh observer and closure.
+#[cfg(feature = "hydrate")]
+fn stop_watching_resize(watch: ResizeWatch) {
+    watch.with_value(|v| {
+        if let Some((observer, _)) = v {
+            observer.disconnect();
+        }
+    });
 }
