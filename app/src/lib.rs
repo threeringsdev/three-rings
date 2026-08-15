@@ -2046,7 +2046,12 @@ fn google_error_redirect(clear_challenge: String) -> axum::response::Response {
 /// server answers both correctly on `localhost` (confirmed live against the
 /// dev branch: `curl` reproduction in the task history). A redirect at the
 /// page load is enough — every same-origin call the hydrated app makes
-/// afterward already carries the right `Host`.
+/// afterward already carries the right `Host`. One boundary: `Router::layer`
+/// wraps only the routes declared before it, so requests that fall through to
+/// `file_and_error_handler` (static `/pkg/*` assets, unmatched paths) are not
+/// redirected — assets don't need it, and the bare "Page not found." fallback
+/// carries no sign-in affordance, but a future dynamically-registered page
+/// would sit outside this redirect.
 ///
 /// Scoped narrowly to avoid the two other places a request legitimately
 /// carries a `127.0.0.1` `Host`: behind Render (`x-forwarded-*` is always
