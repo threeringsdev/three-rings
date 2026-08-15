@@ -34,7 +34,7 @@ The collection tree carries the entire IA, keeping the file-explorer metaphor en
 ```
 
 - **All cards** is a pinned virtual view at the very top, separated from the tree by a delimiter. It aggregates every collection — Inbox included (Inbox's 7 are part of the 812) — and is the mode's landing view. It is not a tree node: the collections below aren't visually nested under it, only accounted within it.
-- **Inbox** is a real collection (undeletable, renamable) pinned first in the tree, above the user's collections; the pin targets its collection route.
+- **Inbox** is a real collection (undeletable, unrenamable — the fixed name keeps it recognizable everywhere the UI says "Inbox") pinned first in the tree, above the user's collections; the pin targets its collection route.
 - **Shopping list** is a pinned system row below the tree — always one click away in the mode where you act on it, without being a top-level destination.
 - Tree behaviors per the spec: nested, collapsible, drag to reparent/reorder, rolled-up present-count badges.
 - Tree management (create / rename / delete / move) happens in place via context menus — there is no separate "manage collections" page.
