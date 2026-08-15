@@ -411,15 +411,19 @@ test("a single-collection row links instead of disclosing @fast", async ({
 test("the hover preview closes without ever changing the row's height @fast", async ({
   page,
 }) => {
-  // Regression guard for the hover-preview-flash task: a leftover `relative`
-  // Tailwind class on the popover panel (components/ui/hover_card.rs) — the
-  // exact leftover the shared `popover` primitive already had fixed (#148,
-  // `PopoverContent`) — resolved a top-layer element's used `position` to
-  // `absolute` instead of the UA's `fixed`. A single before/after height
-  // comparison would miss a one-frame layout spike mid-close, so this
-  // samples the row's own box every animation frame across the whole close
-  // transition (the 150ms hover-intent delay plus the ~200ms CSS
-  // display/opacity transition) rather than at one instant.
+  // Guards the property the hover-preview-flash task's report violated: the
+  // preview must never participate in the row's layout, open or closing. It
+  // is deliberately broader than the leftover-`relative`-class cleanup that
+  // shipped with it (components/ui/hover_card.rs, the same leftover #148
+  // fixed on `PopoverContent`) — a top-layer element is out of normal flow
+  // whether its used `position` is `fixed` or `absolute`, so that class
+  // alone never moved this row and re-adding it would not fail this test.
+  // What keeps the row still is the layout model (top layer, out of flow),
+  // not the tolerances below; the sampling exists because a single
+  // before/after height comparison would miss a one-frame in-flow spike
+  // mid-close, the reported (never reproduced) symptom. Samples every
+  // animation frame across the 150ms hover-intent delay plus the ~200ms CSS
+  // display/opacity close transition.
   await page.goto("/my/all");
   await hydrated(page);
   await settled(page);
