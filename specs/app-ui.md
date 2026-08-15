@@ -6210,3 +6210,81 @@ requires wasm + `matchMedia` to mount — a hydration failure that previously le
 a readable SSR'd table leaves a permanent skeleton. Accepted for the payload
 win; `/my/all` remains the full-SSR table if resilience is ever needed at a
 bookmarkable address.
+
+### Hover-preview mouseout flash — leftover class fixed, symptom not reproduced (2026-08-15)
+
+`app/src/components/ui/hover_card.rs` (`HoverCardContent`), `end2end/tests/all-cards.spec.ts`
+(new regression test). Bug report (Workbook WB-01M031SABTFM1FXYAF6EG2CEKV): on
+`/my`, a card row's mouseout shows "a brief flash of content that appears to be
+the card preview rendering inside the row instead of a hovering modal, causing
+the row to resize to hold the card image, then... the row resizes again back to
+normal."
+
+**The lead.** `#148`'s `PopoverContent` fix (`popover.rs`, same day, merged
+14:07) removed a leftover `relative` Tailwind class copied from the upstream
+(non-native-popover) registry source: on a `popover`-attribute element promoted
+to the top layer, an author-set non-`static` `position` overrides the UA's
+`position: fixed`, corrupting `anchor()`-based positioning on a page taller than
+the viewport. `hover_card.rs`'s `HoverCardContent` carried the identical
+leftover class, found during that fix and left out of scope — the obvious
+hypothesis for this bug, filed as a follow-up the same day.
+
+**Confirmed: the class is a real defect here too, but with no reproducible
+visual effect.** Verified in real (headed) chromium via direct DOM manipulation
+on a genuinely open panel: `getComputedStyle(el).position` reads `"absolute"`
+with the class present, `"fixed"` immediately after `el.classList.remove
+("relative")` — so the same top-layer-position-override mechanism is active.
+But unlike `PopoverContent` (raw `anchor()` calls in `left`/`right`/`top`/
+`bottom`), `HoverCardContent` positions itself via the `position-area`
+shorthand, and that rendered **pixel-identical** with the class present or
+removed — checked scrolled 2249px down a 4026px document and unscrolled, panel
+below the anchor and flipped above it. No mispositioning was reproducible from
+this class for this component in current chromium.
+
+**The row-height flash itself was not reproduced, despite extensive attempts.**
+Eight separate Playwright scripts (real headed chromium, not just headless):
+single hover cycles and 30+ varied-dwell hover/unhover cycles (including
+sub-150ms flickers that interrupt the open-intent timer) across single and
+multiple rows simultaneously; scrolled and unscrolled; a continuous
+`requestAnimationFrame` collector sampling the row's `getBoundingClientRect()`
+every frame across the whole close transition rather than at one instant (a
+one-shot before/after check would miss a one-frame spike). Direct
+`getComputedStyle` sampling showed the panel's `display` and `position` change
+**simultaneously** on close (`block`/`absolute` → `none`/`relative` in the same
+sampled frame, both with and without the leftover class) — i.e. no captured
+frame ever had the panel both rendered and in-flow, which is the necessary
+condition for the reported row growth. Row height never deviated from baseline
+in any run. Console was clean (no errors) across all runs.
+
+**Fixed anyway.** The leftover class is a genuine, confirmed correctness bug
+matching an already-accepted sibling fix — worth removing so `HoverCardContent`
+does not keep relying on `position-area` happening to compensate for a
+spec-incorrect `position` value, a property of this chromium build/version and
+not a guarantee. No consumer regressed: catalog list-view hover preview,
+`/cards/:id`'s own hover card, and DFC flip-in-preview all reverified by hand
+and via the existing `card-detail.spec.ts` suite (30/30 relevant tests green).
+
+**Open question, for whoever picks this back up if the flash persists after
+this ships:** the reported mechanism could not be confirmed. Candidates not yet
+ruled out — a browser-version-specific Popover-API/CSS-transition interaction
+this chromium build's synced `display`/`position` change doesn't exhibit; or
+something entirely outside `hover_card.rs`'s own CSS (Leptos DOM-construction
+ordering during a row re-render, though the architecture — signals updating in
+place, `<Show>` mounted once and latched — gives no obvious trigger for one on
+mouseout). Get a screen recording and the exact browser/version/row from the
+reporter before spending more automated-repro budget on this; every angle
+scripted-Playwright could try has now been tried.
+
+**Verification.** `end2end/tests/all-cards.spec.ts` gained "the hover preview
+closes without ever changing the row's height @fast" — hovers a row, then
+samples `getBoundingClientRect().height` every animation frame for 700ms after
+mouseout (covering the 150ms hover-intent delay plus the ~200ms CSS close
+transition), asserting every sample stays within 1px of baseline. Stable across
+6 consecutive local runs. `card-detail.spec.ts` + `all-cards.spec.ts` +
+`catalog.spec.ts` fast tier: 92/93 (one new test added), the sole failure
+("the location summary expands to the collections it names") confirmed
+pre-existing via `git stash` against unmodified branch — a documented dev-seed
+gap (e2e-suite skill), not a regression. `cargo fmt --all --check` clean;
+`cargo clippy -p app --features hydrate,component-bench --target
+wasm32-unknown-unknown`, `--features hosted,component-bench --all-targets`, and
+`--features native --all-targets` all clean.
