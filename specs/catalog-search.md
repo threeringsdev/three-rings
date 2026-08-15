@@ -310,6 +310,75 @@ catalog (38,623 rows) at `limit=500`: browse-all walked 194 pages / 38,623
 rows exactly matching the count, zero duplicates; the filtered walk covered
 101 pages / 20,087 rows, zero duplicates, order held throughout both.
 
+### Numbered page links (2026-08-15, WB-01M032Q6BX8BM7NPK8H3AQKGWF)
+
+`/catalog`'s pager grew a numbered strip (`[Prev] [1] … 9 [10] [11] [12] … [28]
+[Next]`, up to 6 numbers, current plain-text) replacing the old right-aligned
+"Next page" / "Back to the start" pair. The pure shape is `page_strip(current,
+last: Option<usize>) -> Vec<PageSlot>` (`app/src/catalog.rs`), unit-tested
+against the task's three worked examples verbatim plus 1/2/6/7-page and
+`current == last` edges.
+
+**This reverses "Rejected: … a page ordinal in the URL" above** (2026-08-12
+paging-honesty batch) — that batch's reasons (URL-thread cost, syncing an
+ordinal with a cursor that can arrive from a shared link with no ordinal
+beside it) no longer apply once the ordinal's job is purely cosmetic: `?page=`
+now rides beside `?cursor=` as a **display-only label** (`PAGE_PARAM`), echoed
+through `SearchPayload` the same way `q`/`cursor` are, never read by
+`results`' fetch key. A stale or hand-edited `?page=` can only mislabel the
+number shown, never fetch the wrong rows — the correctness property the old
+rejection was protecting stays intact.
+
+**Which numbers are real links is bounded by what forward-only keyset paging
+can actually address.** Confirmed against real dev data (38,623 rows / 773
+pages at the current 50-row page size, derived from the observed page length —
+`page_size` is nowhere hardcoded, so the queued 50→60 page-size task needs no
+edit here): only three kinds of page number are ever backed by a cursor this
+screen has — page 1 (the empty cursor), the current page, and current + 1
+(`next_cursor`, identical to what Next already uses). A client-side `trail`
+(`CatalogPage`, one entry per page a reader has actually stood on this search)
+adds every page reached by paging forward, which is what makes **Prev** — and
+a band member behind `current`, in the "counting down near the end" shape —
+real navigations too, without a reverse-ordered query. Any other number
+`page_strip` wants to show (a page ahead nobody has walked to yet, or
+browse-all's true last page before it's been reached) renders **inert**: a
+real `<a aria-disabled="true">`, not a fake link and not omitted. Verified live
+(screenshots + Playwright, not just the pure function): page one shows
+`[Prev✗] 1 [2] [3✗] [4✗] [5✗] … [773✗] [Next]`; walking forward via real clicks
+makes Prev and page one real at every step; a cold load 8 hops into a filtered
+search (no trail) shows only `[1] … 9 [10]`, matching the pure function's
+`last = None` degrade exactly.
+
+**`last = None` is a third rendering mode**, not just a missing-data
+fallback: a filtered search never gets a total until it is *walked* to its
+real end (`next_cursor` comes back empty — knowable with no `COUNT`, same as
+the existing count-label honesty rule above), so `page_strip` degrades to
+naming only 1, current, and current + 1 rather than fabricate a "last" this
+screen cannot back up. Direct page-N addressing (jumping to an unwalked page
+without a cursor) needs either an offset-capable query or a server-side walk —
+genuinely out of scope here (a materially different, larger change than a
+pagination UI), flagged as a follow-up rather than filed by this task.
+
+**A live-only bug this batch found and fixed, worth recording because it
+would bite the next dynamic list of links inside a `<Transition>`:** building
+each numbered link as its own child component taking `href:
+Signal<Option<String>>` via `Signal::derive(move || …)` — the same shape the
+pre-existing "Back to the start" / "Next page" links used — panicked at
+runtime ("you tried to access a reactive value … but it has already been
+disposed") the instant a sibling signal (`stale` flipping on a keystroke, or a
+`trail` write landing in the same reactive tick as the old pager's teardown)
+changed while `<Transition>` still held the previous pager mounted. Unit tests
+and `cargo check` are both silent on this — it only surfaces as a live WASM
+panic that kills all further reactivity on the page, caught here only by
+driving the real dev server with Playwright (`page.on("pageerror", …)`), not
+by `cargo test` or a cold curl of the SSR HTML. The fix: build the whole strip
+as **one** `{move || { … }}` dynamic child (the same pattern
+`ResultCards` already uses for `list_view`), rather than N sibling components
+each owning an independent derived signal. No repro was reduced to a minimal
+case beyond this one; flagged here so a future `Signal::derive`-per-list-item
+pattern near a `Transition` gets tested against a real browser, not just
+`cargo test`.
+
 ## Open questions
 
 - ~~Which Scryfall syntax subset ships in v1?~~ **Proposed above** (the
