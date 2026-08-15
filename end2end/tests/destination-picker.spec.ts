@@ -261,4 +261,96 @@ test.describe("signed in", () => {
     await page.getByPlaceholder("Search collections…").fill("zzz-no-such");
     await expect(page.getByText("No collection matches.")).toBeVisible();
   });
+
+  // Regression guard for a maintainer bug report filed against pre-#148 code:
+  // (a) the picker appeared to render outside the view frame — only "a slim
+  // gray bar above the picker" was visible — and (b) clicking away flashed
+  // the card grid down a frame before it snapped back. #148 removed a
+  // leftover `relative` class on `PopoverContent` that broke top-layer
+  // `position: fixed`, corrupting every `anchor()` offset against document
+  // height instead of viewport height (app/src/components/ui/popover.rs).
+  // Verified by hand against this branch: both symptoms are already gone.
+  // These two tests pin that down mechanically so a regression fails loudly.
+  test("the picker panel renders fully inside the viewport @fast", async ({
+    page,
+  }) => {
+    await page.goto("/catalog?q=bolt");
+    await hydrated(page);
+    const label = page.getByTestId("destination-label");
+    await expect(label).toHaveText(/Inbox/, { timeout: 10000 });
+
+    await label.click();
+    const content = page.locator("#popover-destination-picker");
+    await expect(content).toBeVisible();
+    // Let the native popover's open transition (150ms, popover.rs) settle
+    // before measuring — mid-transition the panel is still animating in from
+    // `scale(0.95) translateY(-2px)`.
+    await page.waitForTimeout(250);
+
+    const viewport = page.viewportSize();
+    const box = await content.boundingBox();
+    expect(box, "panel has no bounding box — not actually visible").not.toBeNull();
+    // The bug report's symptom: the panel positioned itself against document
+    // height, not viewport height, so most of it fell below the fold. A
+    // correctly-positioned panel's box sits entirely within [0, viewport].
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.y).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.width + 1);
+    expect(box!.y + box!.height).toBeLessThanOrEqual(viewport!.height + 1);
+  });
+
+  test("dismissing the picker does not flash the results grid @fast", async ({
+    page,
+  }) => {
+    await page.goto("/catalog?q=bolt");
+    await hydrated(page);
+    const label = page.getByTestId("destination-label");
+    await expect(label).toHaveText(/Inbox/, { timeout: 10000 });
+
+    await label.click();
+    await expect(page.locator("#popover-destination-picker")).toBeVisible();
+
+    const grid = page.getByTestId("results-grid");
+    await expect(grid).toBeVisible();
+
+    // Per-frame bounding-box sampling of the grid container across the close
+    // transition — the measurable signature a layout flash leaves — run
+    // in-page via requestAnimationFrame so it isn't limited by CDP
+    // round-trip latency between frames.
+    await page.evaluate(() => {
+      (window as unknown as { __gridSamples: unknown[] }).__gridSamples = [];
+      const el = document.querySelector('[data-testid="results-grid"]');
+      let frames = 0;
+      function sample() {
+        const r = el!.getBoundingClientRect();
+        (window as unknown as { __gridSamples: unknown[] }).__gridSamples.push({
+          top: r.top,
+          height: r.height,
+        });
+        frames++;
+        if (frames < 60) requestAnimationFrame(sample);
+      }
+      requestAnimationFrame(sample);
+    });
+
+    // Click away on plain page background — the result-count text, a `<p>`
+    // with no click handler of its own — to trigger the popover's native
+    // light-dismiss without navigating anywhere.
+    await page.getByTestId("result-count").click();
+    await page.waitForTimeout(800);
+
+    const samples = await page.evaluate(
+      () =>
+        (window as unknown as { __gridSamples: { top: number; height: number }[] })
+          .__gridSamples,
+    );
+    expect(samples.length).toBeGreaterThan(0);
+    const tops = samples.map((s) => s.top);
+    const heights = samples.map((s) => s.height);
+    // The bug report's symptom: the grid visibly pushed down for a frame
+    // before snapping back. 1px of slack absorbs subpixel rounding without
+    // hiding a real flash, which moves tens to hundreds of pixels.
+    expect(Math.max(...tops) - Math.min(...tops)).toBeLessThanOrEqual(1);
+    expect(Math.max(...heights) - Math.min(...heights)).toBeLessThanOrEqual(1);
+  });
 });
