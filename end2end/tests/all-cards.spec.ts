@@ -408,6 +408,60 @@ test("a single-collection row links instead of disclosing @fast", async ({
   });
 });
 
+test("the hover preview closes without ever changing the row's height @fast", async ({
+  page,
+}) => {
+  // Guards the property the hover-preview-flash task's report violated: the
+  // preview must never participate in the row's layout, open or closing. It
+  // is deliberately broader than the leftover-`relative`-class cleanup that
+  // shipped with it (components/ui/hover_card.rs, the same leftover #148
+  // fixed on `PopoverContent`) — a top-layer element is out of normal flow
+  // whether its used `position` is `fixed` or `absolute`, so that class
+  // alone never moved this row and re-adding it would not fail this test.
+  // What keeps the row still is the layout model (top layer, out of flow),
+  // not the tolerances below; the sampling exists because a single
+  // before/after height comparison would miss a one-frame in-flow spike
+  // mid-close, the reported (never reproduced) symptom. Samples every
+  // animation frame across the 150ms hover-intent delay plus the ~200ms CSS
+  // display/opacity close transition.
+  await page.goto("/my/all");
+  await hydrated(page);
+  await settled(page);
+
+  const row = page.locator('[data-testid="all-cards-row"]').first();
+  const trigger = row.getByTestId("card-preview-trigger").first();
+  const baseline = (await row.boundingBox())!.height;
+
+  await trigger.hover();
+  const preview = row.getByTestId("card-preview-hover").first();
+  await expect(preview).toBeVisible(); // 150 ms hover intent
+
+  const samplesPromise = row.evaluate(async (el) => {
+    const samples: number[] = [];
+    const start = performance.now();
+    await new Promise<void>((resolve) => {
+      function loop() {
+        samples.push(el.getBoundingClientRect().height);
+        if (performance.now() - start < 700) {
+          requestAnimationFrame(loop);
+        } else {
+          resolve();
+        }
+      }
+      requestAnimationFrame(loop);
+    });
+    return samples;
+  });
+  await page.mouse.move(5, 5); // leaves the row — starts the close sequence
+
+  const heights = await samplesPromise;
+  expect(heights.length).toBeGreaterThan(10);
+  for (const h of heights) {
+    expect(Math.abs(h - baseline)).toBeLessThan(1);
+  }
+  await expect(preview).toBeHidden();
+});
+
 test("quick search filters by name and rides the URL @fast", async ({
   page,
   request,

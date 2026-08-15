@@ -17,6 +17,23 @@
 //! - **`on_open_change`** (added by the preview-flip-reset task): mirrors the
 //!   internal `open` signal out to the caller, so a body that stays mounted
 //!   across closes can still tell a genuine reopen from "still open".
+//! - **no `relative` on the panel** (the hover-preview-flash task): identical
+//!   leftover Tailwind class from the upstream (non-native-popover) registry
+//!   source as `popover.rs`'s own fix, and the same mechanism applies —
+//!   `HoverCardContent` is a `popover="manual"` element promoted to the top
+//!   layer while shown, where `position: fixed` is the UA default; an
+//!   author-set non-`static` `position` (this `relative`) overrides that,
+//!   confirmed here to flip the computed value to `absolute` while
+//!   `:popover-open` (verified: `getComputedStyle(el).position` reads
+//!   `"absolute"` with the class present, `"fixed"` with it removed, on the
+//!   same open panel). Fixed for the same correctness reason as `popover.rs`
+//!   even though — unlike that component's raw `anchor()` calls — this
+//!   panel's `position-area` shorthand was verified to render pixel-identical
+//!   with the class present or absent, scrolled or not (see hover-preview-
+//!   flash task Findings in specs/app-ui.md): no reflow, mispositioning, or
+//!   row-height change was reproducible from this class in current chromium.
+//!   Removed anyway to stop relying on that as permanent and to match the
+//!   sibling component's accepted fix.
 
 use leptos::prelude::*;
 use tw_merge::tw_merge;
@@ -241,8 +258,11 @@ pub fn HoverCardContent(
     let ctx = expect_context::<HoverCardContext>();
     let open = ctx.open;
     let timer = ctx.timer; // shared with the trigger — see HoverCardContext
+
+    // No `relative` here — see the module doc comment ("no `relative` on the
+    // panel"); it's a leftover-class correctness fix, not a stylistic call.
     let class = tw_merge!(
-        "overflow-visible relative z-50 p-4 rounded-lg border bg-card text-card-foreground shadow-md w-64",
+        "overflow-visible z-50 p-4 rounded-lg border bg-card text-card-foreground shadow-md w-64",
         class
     );
     let node_ref: NodeRef<leptos::html::Div> = NodeRef::new();
