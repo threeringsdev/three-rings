@@ -162,7 +162,11 @@ Want. E2E asserts the keystroke contract.
    from `button` + `input`.
 3. **Selection tray** — docked thumbnail stack + count + "Move to…" + clear;
    cross-view selection state. (Registry `action_bar` was evaluated and ruled
-   out in the gap analysis.)
+   out in the gap analysis.) The pill counts **entries** (cards), not copies;
+   how many copies of each move is chosen in the move's **which-copies picker**
+   — one row per full grain, each with a `− n +` bounded by its stack, default
+   one (P6-150 ruling, 2026-08-15; Findings). An entry whose stack holds exactly
+   one copy skips the picker and moves directly.
 
 ### Conventions established by this spec
 
@@ -236,6 +240,128 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### The which-copies step became the quantity-and-version picker (P6-150, 2026-08-15)
+
+`app/src/my/move_selection.rs`, `app/src/lib.rs`, `end2end/tests/batch-move.spec.ts`
+— the maintainer's P6-150 ruling, and the end of "one copy per entry".
+
+**The ruling (2026-08-15).** A tray entry is a *card*; the move flow must let
+the user choose **how many** copies move and **which version** (finish /
+condition / language) when a row spans several. All-or-one-copy does not serve
+the point of moving cards between collections. It settles the four questions
+the old decision task bundled: the tray keeps counting entries; quantity is
+chosen at **move time, per entry**; duplicate `/my`-vs-collection entries
+collapse in the move step's stack resolution; and multi-grain rows stay
+selectable, because the step **asks** which grain instead of refusing.
+
+**What changed, in one sentence.** The which-copies dialog stopped being a
+disambiguation escape hatch and became the move's ordinary second step: its
+rows split to the **full grain** — `(collection, printing, board, finish,
+condition, language)` — and each carries a `− n +` stepper bounded by its own
+stack, so "2 foil and 1 etched" is two rows with two counts instead of one
+un-actionable row.
+
+**The routing rule, and why it lives server-side.** A plain tray entry still
+carries no quantity. Resolution moves it only when the stack it resolves to
+holds **exactly one copy** — the one quantity that needs no answer — and
+refuses anything larger as the new `SkipReason::Several(n)`, which is askable
+and therefore opens the picker. So a batch of single-copy entries keeps the
+direct path (one request, no dialog) and everything else asks, per entry,
+without the client having to know a count it cannot keep fresh. The alternative
+considered and rejected was routing on a copy count carried on `SelectedCard`:
+the tray is long-lived by design, so that number is stale by construction, and
+— the deciding reason — the client cannot tell `Several` from
+`ManyCollections`, so every refusal toast the user sees on cancel would have
+degraded to "you didn't pick anything". `SelectedCard` therefore keeps its
+shape; the *chosen* quantity rides on `SelectionItem`, its wire form, where it
+can be checked. (`shared::MoveItem` already carried `quantity`, and
+`append_move`/`undo_one` already read it — the write layer needed no change at
+all, which is why this story is a client-and-adapter story.)
+
+**Quantity is validated, never clamped.** `SelectionItem` gained
+`pick: Option<Pick>` (grain + count, `#[serde(default)]` so an unpicked entry
+sends exactly the shape it always sent). The server re-resolves every pick
+against its own fresh, ungrouped `holdings_of_oracle` read and refuses per
+entry: `NotEnough(n)` naming the stack's real size when the ask exceeds it,
+`NoneRequested` for a zero, `NoCopies` for a grain that has since emptied. A
+clamp was rejected outright — it moves a different number of cards than the
+dialog said, behind a success toast, which is this repo's recurring defect
+shape. Skipped reporting and batch survival are unchanged.
+
+**`SkipReason::Grain` is gone, and not by being suppressed.** It named a stack
+of several grains with no default one, which the old rows could not tell apart.
+Two copies of anything now exceed one, so that stack is `Several` first, and
+the picker renders it as one row per grain — the variant had no reachable case
+left. `is_ambiguous` was renamed `is_askable` for the same reason: `Several` is
+a *how many* question, not an ambiguity.
+
+**Two tokens for one row, or the outcome cannot be read.** The picker's rows
+are finer than `SelectionKey::Held`, so two picks on one card can differ only
+by finish and would report under the same token — the toast's copy count, the
+tray reconciliation and the refusal naming all read that list.
+`SelectionItem::token()` appends the grain when a pick is present and is
+byte-identical to the tray token when it is not, so nothing outside the picker
+changed.
+
+**A `Held` entry is asked only about its own stack.** The stacks read answers
+per *oracle*, so without a filter a row selected in one binder would offer to
+move copies out of another the user never pointed at. `card_choices` now
+narrows by the entry's key: a `Held` entry gets its own stack split by grain, a
+`/my` entry gets everywhere.
+
+**Every row opens at one copy** — the maintainer's small-blast-radius default,
+carried over from the old fixed quantity. The tension is real and was accepted
+deliberately: a card sitting in three stacks now says "Move 3 copies" on the
+button before it is pressed, where the checkbox version started at zero.
+Nothing is hidden (each row shows its count, the button names the total, and
+Undo covers the batch), and the common case — one stack, "how many" the only
+open question — is one press of the button instead of two.
+
+**One toast sentence for both passes.** `moved_message(copies, cards, dest)`
+replaced the pair: the batch's "Moved 3 cards (1 copy each)" was true only
+while quantity was fixed, and `picked_message`'s "across 2 cards" existed
+solely because the other one could not say it. Both counts come from what the
+server reported *moved*, never from what was asked for.
+
+**Not `CountStepper`, and the reason is the phone.** The collection view's
+stepper commits on blur, raises its own undo toast, and hides its ± buttons
+below `sm` (a phone taps the number and types). Inside a dialog whose commit is
+its own button, all three are wrong — and on the one surface this story exists
+to serve there would have been no visible control at all. The picker's `PickCount`
+is the same shape with none of the persistence contract: 44 px targets at phone
+width, `sm:` back to the dense size, and it writes one slot of the dialog's count
+vector. E2E covers it at 390 px (targets, no sideways scroll, a real press).
+
+**Two view-macro traps, both silent, both cost real time:**
+
+- **`slot=` on a component makes the node vanish.** leptos reserves it for its
+  `#[slot]` composition mechanism, so `<PickCount … slot=i …/>` compiled
+  cleanly, rendered nothing, and announced itself only as an "unused variable"
+  warning on the value being passed. The prop is named `index`.
+- **A bare `>` inside an attribute value ends the tag.**
+  `attr:disabled=move || value.get() >= max` made `= max …` the button's *text*
+  and left it permanently disabled — the `+` could never raise the count, which
+  is how it was found (an e2e stepper that would not step). Parenthesised.
+
+**A fixture helper that could not promise what its name said, fixed properly
+this time.** `unownedCards` filtered against the first 200 rows of `/my`, and
+today's bulk-loaded seed parks nearly the whole catalog in the dev user's
+Inbox — so "owned nowhere" cards came back holding 51 copies in the Inbox, and
+every single-place assertion in the file turned into a which-copies dialog.
+(P6-151 recorded this and fixed one *assertion* around it.) It now verifies each
+candidate with `GET /api/cards/{id}/holdings` and takes the first `n` that
+really are held nowhere. This is the file's share of the known
+fixture-pool failure class; the class itself is still owned by its own task.
+
+**Evidence.** `cargo test -p app --features hosted --lib` 384 passed / 0 failed
+(the quantity validation trio — over the stack, zero, a vanished grain — the
+per-grain take, the full-grain split, the `Held`-entry row filter, the
+count-vector→picks mapping, the two-tokens-for-one-row case, and the unified
+toast). Full `batch-move.spec.ts` @fast 12/12 chromium, including the new
+grain-split test (2 foil + 1 etched → two rows → the foils move, the etched
+copy stays, read back by grain through the API) and the phone-width picker
+test. Android webview: see the task report.
+
 ### Ambiguous batch-move refusals became a which-copies step (P6-151, 2026-08-13)
 
 `app/src/my/move_selection.rs`, `app/src/lib.rs` — the refusal contract the two
@@ -262,8 +388,8 @@ has nothing left to be ambiguous about.
 
 | Refusal | Now |
 |---|---|
-| `ManyCollections` / `ManyPrintings` / `ManyBoards` | **the step** (`SkipReason::is_ambiguous`) |
-| `Grain(n)` | still a toast — a stack with several finish/condition/language grains and no default one is **one** row on any list this app can render (the step's rows are `(collection, printing, board)`), so offering it as a choice would show rows the user cannot tell apart |
+| `ManyCollections` / `ManyPrintings` / `ManyBoards` | **the step** (`SkipReason::is_ambiguous`, renamed `is_askable` by P6-150) |
+| `Grain(n)` | still a toast — a stack with several finish/condition/language grains and no default one is **one** row on any list this app can render (the step's rows are `(collection, printing, board)`), so offering it as a choice would show rows the user cannot tell apart **(superseded by P6-150: the rows are full grain now, that stack is simply several of them, and the variant is deleted)** |
 | `AlreadyThere` | still a toast — the copies are at the destination; there is nothing to choose between |
 | `NoCopies` / `NoLongerNeeded` | still toasts — the fresh server read just proved the stack (or the gap) gone; no choice fixes that |
 
@@ -289,7 +415,10 @@ common two-binders case costs no `card_detail` at all.
 **One copy per ticked row, matching the pill.** Two ticks on one card are two
 items and two copies; the same "the tray counts entries" rule the batch follows.
 A count picker per row was considered and dropped: the tray's pill has never
-counted copies, and a step that quietly could would make it lie.
+counted copies, and a step that quietly could would make it lie. (**Reversed by
+the P6-150 ruling, above**: the count picker is the feature, the pill still
+counts entries, and the toasts count copies out loud so neither number has to
+be inferred from the other.)
 
 **But that is exactly where the batch's own toast stops being true, and review
 caught it.** `moved_message`'s unit is the tray entry, where one entry is one
@@ -2970,7 +3099,9 @@ row says which the checkbox meant. `ManyCollections`/`ManyPrintings`/`ManyBoards
 remain, each a question the user answers by opening a page where the choice is a
 visible row. (**Superseded on that last point by P6-151, above**: those three are
 now asked in the move itself — the which-copies step — and only the toast the
-user gets for *declining* it remains. `Grain` is unchanged.)
+user gets for *declining* it remains. **And on `Grain` by P6-150**: the step's
+rows are the full grain now, so 2 foil + 1 etched is two rows with two
+steppers, and the variant is deleted rather than kept as a refusal.)
 
 **The batch-path TOCTOU stays open, deliberately, but is now attributable.**
 Grain+board on `MoveItem` is the same addressing as a holding id
@@ -3080,7 +3211,10 @@ a partial-revert failure mode — the exact defect shape this repo already hit
 (committing 0 ran `DELETE FROM holdings` behind a success toast). Quantity is
 server-fixed at one copy per entry, and the toast says "(1 copy each)", because
 the tray's pill counts entries and one copy each is the only quantity it does
-not lie about. The destination picker was *extracted* for sharing
+not lie about. (**Superseded by P6-150, above**: quantity is chosen per entry in
+the which-copies picker and validated server-side against the caller's real
+holdings; a stack of exactly one copy still moves unasked, and the toast counts
+copies and cards separately.) The destination picker was *extracted* for sharing
 (`DestinationList`/`DestinationOption`/`DestinationChoice`), not forked.
 `HoldingsRevision` is provided by the shell and consumed as a resource *source*
 by both holdings-rendering pages, so a move made from the shell invalidates the

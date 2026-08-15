@@ -21,6 +21,7 @@ mod checkbox;
 mod collapsible;
 mod command;
 mod context_menu;
+mod copy_picker;
 mod count_stepper;
 mod dialog;
 mod header_kebab;
@@ -171,6 +172,11 @@ const SECTIONS: &[BenchSection] = &[
         id: "selection-tray",
         title: "Selection tray (custom)",
         demo: selection_tray::demo,
+    },
+    BenchSection {
+        id: "copy-picker",
+        title: "Which-copies picker rows (custom)",
+        demo: copy_picker::demo,
     },
     BenchSection {
         id: "my-root-list",

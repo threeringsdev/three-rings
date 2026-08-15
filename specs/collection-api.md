@@ -167,7 +167,15 @@ correction makes it materially more likely than data-model assumed.
   **suggested-destinations** read returns collections where desired > present
   for the card (the destination picker's ranking).
 - **Move (batch)** — the persistent selection tray: N `(card, from)` pairs → one
-  destination, one transaction, N move rows.
+  destination, one transaction, N move rows. Each item carries its own
+  `quantity` (`MoveItem`), and the UI adapter over it (`move_selection`) is
+  where a tray entry becomes one: an entry resolving to a stack of exactly one
+  copy moves unasked, and anything larger is refused per entry so the
+  which-copies picker can ask **how many and which version** (P6-150 ruling,
+  2026-08-15 — app-ui.md → Selection tray). A picked entry names the full grain
+  and a count; the server **validates that count against the caller's real
+  ungrouped holdings** for that stack and refuses that entry politely if it no
+  longer fits — never a clamp, never a whole-batch failure.
 - **Undo** — **flag, not compensating row.** Reverse the holdings effect and
   stamp `undone_at` on the original move; the append-only ledger keeps the row,
   undo is idempotent, and history reads cleanly. Targets a specific move id (the
@@ -812,3 +820,19 @@ resolves.
   adjacent tagging (`tag = "code", content = "message"`) repairs it as a side
   effect and changes that route's per-line error JSON shape; native artifacts
   built before P6-083 never saw the old shape work, so nothing can regress.
+
+- **Batch move carries a per-item quantity the server validates (P6-150,
+  2026-08-15).** `MoveItem.quantity` was already on the wire and already honored
+  by `move_batch`/`append_move`/`undo_one`; what changed is that the UI adapter
+  over it (`move_selection`) stopped fixing it at 1. A tray entry with no
+  picker answer moves only when the stack it resolves to holds exactly **one**
+  copy, and is otherwise refused per entry so the which-copies picker can ask
+  how many and which grain; a picked entry names
+  `(finish, condition, language, quantity)` and is re-resolved against a fresh
+  `holdings_of_oracle` read. The three quantity refusals are per entry and never
+  fatal to the batch: over the stack's real size, zero requested, and a grain
+  that emptied between the ask and the submit. **No clamping** — the number the
+  dialog showed is the number that moves, or nothing moves for that entry and
+  the toast says why. Undo is unchanged and still reverses the ledger's own
+  recorded quantities in one transaction (`undo_moves`), which is what makes a
+  3-copy move undo as 3 copies rather than 1.

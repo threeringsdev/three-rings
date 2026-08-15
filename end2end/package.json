@@ -14,6 +14,7 @@
     "probe:android-collection": "node android-collection-check.mjs",
     "probe:android-quick-add": "node android-quick-add-check.mjs",
     "probe:android-selection-tray": "node android-selection-tray-check.mjs",
+    "probe:android-copy-picker": "node android-copy-picker-check.mjs",
     "probe:android-rail": "node android-rail-check.mjs",
     "probe:android-needs": "node android-needs-check.mjs",
     "probe:android-palette": "node android-palette-check.mjs",

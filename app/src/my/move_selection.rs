@@ -31,12 +31,18 @@
 //! why. A batch that silently shrank would be indistinguishable from one that
 //! worked — and a batch that died whole would be worse.
 //!
-//! **One copy per selected entry.** The tray counts *entries* ("2 cards"), not
-//! copies, and `SelectedCard` carries no quantity, so a move of one copy per
-//! entry is the only reading of the pill that cannot lie. It is also the small
-//! blast radius: a mis-click moves one card, not a playset. Quantity is fixed
-//! server-side rather than taken from the caller (the `quick_add` precedent —
-//! an adapter whose wire contract is wider than its name is a trap).
+//! **How many copies move is the user's answer, and the picker is where it is
+//! given** (P6-150, maintainer ruling 2026-08-15). A tray entry is a *card*;
+//! all-or-one-copy does not serve the point of moving cards between
+//! collections. So the quantity is never guessed: an entry whose stack holds
+//! exactly **one** copy needs no answer and moves directly, and anything larger
+//! is refused as [`SkipReason::Several`] — which opens the picker, where every
+//! row carries a stepper. The number then rides the wire on [`Pick`] and is
+//! **validated server-side against the caller's actual ungrouped holdings**,
+//! per entry: too many copies is that entry's own polite refusal
+//! ([`SkipReason::NotEnough`]), never a clamp and never a dead batch. The tray's
+//! pill still counts entries, because that is what it shows; the toasts count
+//! **copies**, because that is what moved.
 //!
 //! **The undo is one action over N ledger rows.** A batch move writes one
 //! `moves` row per item — the ledger has no batch id — so "one undo covering
@@ -45,32 +51,35 @@
 //! transactions, and a failure part-way would leave the batch half-reverted
 //! behind a toast that said it was undone.
 //!
-//! **An ambiguous `/my` row is a question, and the move now asks it.** Three of
-//! the refusals below — [`SkipReason::ManyCollections`], [`ManyPrintings`],
-//! [`ManyBoards`] — say "your copies are spread out, and this code may not
-//! choose for you". They used to end the batch's story for that card and send
-//! the user to another page. They now open the **which-copies step**
-//! ([`WhichCopiesDialog`]): the concrete stacks behind the card, one row per
-//! (collection, printing, board) with its count, checkboxes, and a second
-//! submit through the *same* write path — each picked row becomes a
-//! [`SelectionKey::Held`] entry, which is by construction unambiguous, so
-//! nothing about the server, the wire, or `move_batch` changed to allow it. The
-//! refusal toast survives for whoever cancels out of the step, and for every
-//! refusal the step cannot answer (see [`SkipReason::is_ambiguous`]).
+//! **A question the batch cannot answer is asked, not reported.** Four of the
+//! refusals below — [`SkipReason::ManyCollections`], [`ManyPrintings`],
+//! [`ManyBoards`], [`Several`] — say "this row means more than one thing, and
+//! this code may not choose for you". They open the **which-copies step**
+//! ([`WhichCopiesDialog`]): the concrete stacks behind the card, **one row per
+//! full grain** (collection, printing, board, finish, condition, language) with
+//! its size and a quantity stepper, and a second submit through the *same*
+//! write path — each picked row becomes a [`SelectionKey::Held`] entry carrying
+//! a [`Pick`], which names one stack and one count, so `move_batch` and
+//! `MoveItem` are untouched. The refusal toast survives for whoever cancels out
+//! of the step, and for every refusal the step cannot answer (see
+//! [`SkipReason::is_askable`]).
 //!
 //! [`ManyPrintings`]: SkipReason::ManyPrintings
 //! [`ManyBoards`]: SkipReason::ManyBoards
+//! [`Several`]: SkipReason::Several
 //!
-//! **Boards and off-default grains are now moved, not refused.** They were
-//! refused for one task because `moves` had no board column and `holding_take`
-//! pinned `board = 'main'` at the default finish/condition/language, so a move
-//! from a sideboard row — or a foil-only stack — would have taken *different
-//! copies than the row the user checked*, or none at all. The ledger now carries
-//! a board at each end and `MoveItem` carries the full grain, so resolution
-//! passes on the stack it actually found instead of restating a default. One
-//! refusal survives, and it is not a limitation of the write: a stack holding
-//! several grains and no default one (2 foil + 1 etched) does not say which copy
-//! the user meant, and this code's whole job is not to invent that answer.
+//! **Boards and off-default grains are moved, not refused, and the picker
+//! splits them.** They were refused for one task because `moves` had no board
+//! column and `holding_take` pinned `board = 'main'` at the default
+//! finish/condition/language, so a move from a sideboard row — or a foil-only
+//! stack — would have taken *different copies than the row the user checked*,
+//! or none at all. The ledger now carries a board at each end and `MoveItem`
+//! carries the full grain, so resolution passes on the stack it actually found
+//! instead of restating a default. The last refusal that survived that work —
+//! a stack holding several grains and no default one (2 foil + 1 etched) — is
+//! gone with P6-150: those are **two rows** in the picker now, so the answer is
+//! asked for rather than invented, and the old `SkipReason::Grain` has no
+//! remaining case to name.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -80,8 +89,7 @@ use shared::{Board, CollectionSummary, Condition, Finish, HoldingLine, Id, Sugge
 use crate::catalog::destination::{
     picker_order, Destination, DestinationChoice, DestinationList, DestinationOption,
 };
-use crate::components::ui::button::Button;
-use crate::components::ui::checkbox::Checkbox;
+use crate::components::ui::button::{Button, ButtonVariant};
 use crate::components::ui::dialog::{
     Dialog, DialogBody, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader,
     DialogTitle,
@@ -92,8 +100,9 @@ use crate::components::ui::sonner::{ToastHandle, ToastKind, ToastOptions};
 
 // ------------------------------------------------------ what a batch takes ---
 
-/// One entry of a batch move on the wire: what the row addresses, plus the
-/// oracle card it is a copy of.
+/// One entry of a batch move on the wire: what the row addresses, the oracle
+/// card it is a copy of, and — once the user has been through the picker — the
+/// exact copies and how many of them.
 ///
 /// The oracle rides along because resolution needs the caller's holdings of
 /// *that card* ungrouped, and a `Held` key names only a printing. Trusting the
@@ -101,11 +110,43 @@ use crate::components::ui::sonner::{ToastHandle, ToastKind, ToastOptions};
 /// solely to look up the caller's own (RLS-scoped) holdings, and every
 /// resolution path then re-checks that the named collection/printing/board
 /// actually appears in what came back. A wrong oracle therefore produces a
-/// [`SkipReason::NoCopies`] refusal, never a write somewhere else.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// [`SkipReason::NoCopies`] refusal, never a write somewhere else. The same
+/// sentence covers [`Pick`]: it selects among the caller's own rows and is
+/// re-checked against them, so a grain nobody holds refuses instead of writing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SelectionItem {
     pub key: SelectionKey,
     pub oracle_id: Id,
+    /// The picker's answer, when the user has given one. `None` is a plain tray
+    /// row that has been asked nothing — it moves only if its stack holds
+    /// exactly one copy, and is refused as [`SkipReason::Several`] otherwise
+    /// (which is what opens the picker). Optional on the wire so the shape a
+    /// tray row sends is exactly the shape it always sent.
+    #[serde(default)]
+    pub pick: Option<Pick>,
+}
+
+impl SelectionItem {
+    /// How this entry is named in [`MoveOutcome`] — the tray token, plus the
+    /// grain when one was picked.
+    ///
+    /// The suffix is not decoration. The picker's rows are **full grain**, so
+    /// two picks on one card can differ only by finish: both are
+    /// `held:<collection>:<printing>:main`, and an outcome that named them the
+    /// same could not say which of the two moved. A `None` pick keeps exactly
+    /// the token the tray, the DOM and every earlier task already use.
+    pub fn token(&self) -> String {
+        match &self.pick {
+            None => self.key.token(),
+            Some(p) => format!(
+                "{}#{}/{}/{}",
+                self.key.token(),
+                p.finish.to_pg(),
+                p.condition.to_pg(),
+                p.language
+            ),
+        }
+    }
 }
 
 impl From<&SelectedCard> for SelectionItem {
@@ -113,8 +154,25 @@ impl From<&SelectedCard> for SelectionItem {
         Self {
             key: card.key,
             oracle_id: card.oracle_id,
+            pick: None,
         }
     }
+}
+
+/// The picker's answer for one row: which copies, and how many of them.
+///
+/// The grain completes what [`SelectionKey::Held`] leaves out — a `Held` key is
+/// `(collection, printing, board)`, which is the grain a *rendered row* has,
+/// and the picker's rows go one level finer because that is where "2 foil + 1
+/// etched" stops being one thing. Quantity is the caller's here and only here:
+/// it is checked against the stack the resolution actually finds, and a request
+/// larger than the stack is refused per entry ([`SkipReason::NotEnough`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pick {
+    pub finish: Finish,
+    pub condition: Condition,
+    pub language: String,
+    pub quantity: i32,
 }
 
 // ------------------------------------------------ what a batch move reports ---
@@ -149,16 +207,26 @@ pub struct Skipped {
 /// no variant left for "the write cannot express that" — a board and a full
 /// grain are both addressable now, so anything unambiguous moves.
 ///
-/// Three of them are questions the *move* can now ask on the spot
-/// ([`Self::is_ambiguous`]); the rest end the batch's story for that card and
-/// are reported as toasts, as all seven used to be.
+/// Four of them are questions the *move* asks on the spot
+/// ([`Self::is_askable`]); the rest end the batch's story for that card and
+/// are reported as toasts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkipReason {
     /// The copies are already in the destination.
     AlreadyThere,
-    /// One stack, several finish/condition/language grains, none of them the
-    /// default — so which copies the row meant is genuinely undecided.
-    Grain(usize),
+    /// The stack holds more than one copy and nobody has said how many to move
+    /// — the quantity question P6-150 exists to ask. The count is the whole
+    /// stack, across every grain in it, because that is the number the row the
+    /// user checked was showing.
+    Several(i32),
+    /// A picked row asked for more copies than its stack holds — the stepper's
+    /// ceiling read a stack that has since shrunk. The count is what is really
+    /// there.
+    NotEnough(i32),
+    /// A picked row asked for no copies at all. Unreachable from the picker
+    /// (a zero row is not submitted) and refused rather than treated as a
+    /// successful move of nothing.
+    NoneRequested,
     /// Nothing is held any more — the selection outlived the copies (another
     /// tab, the stepper, or simply a tray left open a long time).
     NoCopies,
@@ -182,18 +250,22 @@ pub enum SkipReason {
 impl SkipReason {
     /// The half-sentence the toast appends to a card name.
     ///
-    /// The three ambiguous ones still name what is undecided (the count is the
-    /// whole point — "in 2 collections" is why the row could not move) but no
-    /// longer send the reader to another page: the move asks the question
-    /// itself now, and this sentence is what they see after **declining** to
-    /// answer it. "Pick the copies to move" is therefore an offer they can take
-    /// by moving again, not an errand.
+    /// The askable ones still name what is undecided (the count is the whole
+    /// point — "in 2 collections" is why the row could not move) but no longer
+    /// send the reader to another page: the move asks the question itself now,
+    /// and this sentence is what they see after **declining** to answer it.
+    /// "Pick the copies to move" is therefore an offer they can take by moving
+    /// again, not an errand.
     pub fn phrase(self) -> String {
         match self {
             Self::AlreadyThere => "is already there".to_string(),
-            Self::Grain(n) => {
-                format!("is held in {n} finishes or conditions at once — a move has to name one")
+            Self::Several(n) => {
+                format!("has {n} copies — pick how many to move")
             }
+            Self::NotEnough(n) => {
+                format!("has only {n} left — pick fewer copies")
+            }
+            Self::NoneRequested => "had no copies picked".to_string(),
             Self::NoCopies => "has no copies left to move — reload the page".to_string(),
             Self::NoLongerNeeded => "is no longer missing here — reload the page".to_string(),
             Self::ManyCollections(n) => {
@@ -208,24 +280,31 @@ impl SkipReason {
         }
     }
 
-    /// Is this refusal a *which copies did you mean* question the which-copies
-    /// step can put to the user?
+    /// Is this refusal a question the which-copies step can put to the user —
+    /// *which* copies, or *how many*?
     ///
-    /// The three `Many*` arms are, and they are the only ones. The others are
-    /// not narrower questions, they are different sentences entirely:
-    /// `AlreadyThere` has nothing to choose between (the copies are at the
-    /// destination), `NoCopies`/`NoLongerNeeded` name something the fresh
-    /// server read just proved gone, and `Grain` is a distinction **no read
-    /// model this app has can render as a row** — the stacks the step lists are
-    /// `(collection, printing, board)`, exactly the grain
-    /// [`SelectionKey::Held`] addresses, and a stack whose several
-    /// finish/condition/language grains hold no default one is one row on that
-    /// list, not several. Offering it as a choice would mean showing rows the
-    /// user cannot tell apart.
-    pub fn is_ambiguous(self) -> bool {
+    /// The three `Many*` arms and `Several` are, and they are the only ones.
+    /// The others are not narrower questions, they are different sentences
+    /// entirely: `AlreadyThere` has nothing to choose between (the copies are
+    /// at the destination), `NoCopies`/`NoLongerNeeded` name something the
+    /// fresh server read just proved gone, and `NotEnough`/`NoneRequested` are
+    /// answers to a question the picker **already asked** — re-opening it on
+    /// them would loop the user through the same dialog on a stack that just
+    /// told them its real size.
+    ///
+    /// `Grain` used to sit on the other side of this line, for a reason that
+    /// expired with P6-150: the step's rows were `(collection, printing,
+    /// board)`, so a stack holding several finish/condition/language grains was
+    /// one row on it and offering it as a choice would have shown rows the user
+    /// could not tell apart. The rows are full grain now, so that stack is
+    /// simply several rows, and the variant has no case left to name.
+    pub fn is_askable(self) -> bool {
         matches!(
             self,
-            Self::ManyCollections(_) | Self::ManyPrintings(_) | Self::ManyBoards(_)
+            Self::ManyCollections(_)
+                | Self::ManyPrintings(_)
+                | Self::ManyBoards(_)
+                | Self::Several(_)
         )
     }
 }
@@ -239,29 +318,54 @@ pub fn movable(h: &HoldingLine) -> bool {
     h.quantity > 0
 }
 
-/// Whether a holding sits at the grain a caller who states nothing would mean.
-fn default_grain(h: &HoldingLine) -> bool {
-    h.finish == Finish::default()
-        && h.condition == Condition::default()
-        && h.language == shared::default_language()
-}
-
-/// Choose the one stack a row's checkbox meant, out of the grains it summed.
+/// Turn the stack a key resolved to into the copies that will actually move.
 ///
-/// The default grain wins when it is there — it is what an unqualified "move
-/// this card" means, and it keeps a plain single beside a foil playset behaving
-/// as it always did. Failing that, a stack with exactly one grain is
-/// unambiguous however exotic it is (a foil-only row is a real row, reachable on
-/// the dev fixture today, and refusing it was the defect this replaces).
-/// Several grains and no default one is a question, and this returns `None`
-/// rather than answering it.
-fn pick<'a>(candidates: &[&'a HoldingLine]) -> Option<&'a HoldingLine> {
-    if let Some(h) = candidates.iter().find(|h| default_grain(h)) {
-        return Some(h);
+/// **This is where quantity is decided, and it decides it exactly twice.**
+///
+/// * **Nobody asked** (`pick = None`, a plain tray row): a stack holding
+///   exactly one copy has one answer and moves; anything larger is
+///   [`SkipReason::Several`], which opens the picker. Guessing "one of them"
+///   was the old behavior and is what P6-150 removed — a row reading 3 copies
+///   that quietly moves 1 is a move the user did not ask for, and the default
+///   grain it used to prefer could be a *different copy* than the row's biggest
+///   stack. Note that this is also why `Grain` is gone: several grains means
+///   the total exceeds one, so the question asked is "how many, from which of
+///   these rows", not a refusal.
+/// * **The picker answered** (`pick = Some`): the named grain must still be
+///   there (else [`SkipReason::NoCopies`] — it emptied between the ask and the
+///   submit), the count must be at least one, and it must fit in what the
+///   stack **actually** holds now. A request over that ceiling is refused with
+///   the real size rather than clamped: a silent clamp would move a different
+///   number of cards than the dialog said, behind a success toast.
+fn take(stack: &[&HoldingLine], pick: Option<&Pick>) -> CardSource {
+    let Some(pick) = pick else {
+        let total: i32 = stack.iter().map(|h| h.quantity).sum();
+        return match stack {
+            // Unreachable through either caller (both refuse an empty stack as
+            // `NoCopies` first) and matched anyway, because the alternative is
+            // a "has 0 copies — pick how many to move" toast.
+            [] => CardSource::Refuse(SkipReason::NoCopies),
+            [only] if only.quantity == 1 => CardSource::Move {
+                source: (*only).into(),
+                quantity: 1,
+            },
+            _ => CardSource::Refuse(SkipReason::Several(total)),
+        };
+    };
+    let Some(h) = stack.iter().find(|h| {
+        h.finish == pick.finish && h.condition == pick.condition && h.language == pick.language
+    }) else {
+        return CardSource::Refuse(SkipReason::NoCopies);
+    };
+    if pick.quantity < 1 {
+        return CardSource::Refuse(SkipReason::NoneRequested);
     }
-    match candidates {
-        [only] => Some(only),
-        _ => None,
+    if pick.quantity > h.quantity {
+        return CardSource::Refuse(SkipReason::NotEnough(h.quantity));
+    }
+    CardSource::Move {
+        source: (*h).into(),
+        quantity: pick.quantity,
     }
 }
 
@@ -305,8 +409,14 @@ impl From<&HoldingLine> for MoveSource {
 /// What a selection resolves to, given everything the caller holds of that card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CardSource {
-    /// The one unambiguous candidate stack.
-    Move(MoveSource),
+    /// The one unambiguous candidate stack, and how many of its copies move.
+    /// The quantity is separate from [`MoveSource`] because that type is also
+    /// the pull path's grain (`backend::pull_plan`), which carries its own,
+    /// differently-derived count.
+    Move {
+        source: MoveSource,
+        quantity: i32,
+    },
     Refuse(SkipReason),
 }
 
@@ -324,9 +434,10 @@ pub enum CardSource {
 /// be needlessly useless.
 ///
 /// After that the rule is deliberately strict — **exactly one** movable
-/// candidate. Anything else is a question only the user can answer, and the
-/// enum's whole purpose is that this code cannot invent an answer.
-pub fn resolve_card(holdings: &[HoldingLine], to: Id) -> CardSource {
+/// candidate stack, and (unless the picker said otherwise) exactly one copy in
+/// it. Anything else is a question only the user can answer, and the enum's
+/// whole purpose is that this code cannot invent an answer.
+pub fn resolve_card(holdings: &[HoldingLine], to: Id, pick: Option<&Pick>) -> CardSource {
     let held: Vec<&HoldingLine> = holdings.iter().filter(|h| movable(h)).collect();
     if held.is_empty() {
         return CardSource::Refuse(SkipReason::NoCopies);
@@ -352,10 +463,7 @@ pub fn resolve_card(holdings: &[HoldingLine], to: Id) -> CardSource {
     if boards > 1 {
         return CardSource::Refuse(SkipReason::ManyBoards(boards));
     }
-    match pick(&candidates) {
-        Some(h) => CardSource::Move(h.into()),
-        None => CardSource::Refuse(SkipReason::Grain(candidates.len())),
-    }
+    take(&candidates, pick)
 }
 
 /// Resolve a `/my/collections/:id` row, or refuse.
@@ -376,6 +484,7 @@ pub fn resolve_held(
     printing_id: Id,
     board: Board,
     to: Id,
+    pick: Option<&Pick>,
 ) -> CardSource {
     if from == to {
         return CardSource::Refuse(SkipReason::AlreadyThere);
@@ -394,10 +503,7 @@ pub fn resolve_held(
     if stack.is_empty() {
         return CardSource::Refuse(SkipReason::NoCopies);
     }
-    match pick(&stack) {
-        Some(h) => CardSource::Move(h.into()),
-        None => CardSource::Refuse(SkipReason::Grain(stack.len())),
-    }
+    take(&stack, pick)
 }
 
 // ------------------------------------------------- the which-copies step ---
@@ -409,31 +515,42 @@ pub fn resolve_held(
 // ticked (picks), and those picks turned back into wire items and tray tokens.
 // All of it is pure, and deliberately so — the dialog does no arithmetic.
 
-/// One physical stack of a card's copies: a `(collection, printing, board)`
-/// triple and how many copies sit in it.
+/// One physical stack of a card's copies: a **full grain** — collection,
+/// printing, board, finish, condition, language — and how many copies sit in
+/// it.
 ///
-/// **This is exactly the grain [`SelectionKey::Held`] addresses**, which is
-/// what makes the whole step cost nothing on the server: a picked row is a
-/// `Held` key, and a `Held` key resolves through [`resolve_held`] — the same
-/// path a collection-page row already takes. The finish/condition/language
-/// *inside* a stack are summed here, again exactly as the collection page's own
-/// row sums them; picking a stack that holds several grains and no default one
-/// therefore still lands on [`SkipReason::Grain`], which is the honest answer
-/// (see [`SkipReason::is_ambiguous`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// **The grain is one level finer than [`SelectionKey::Held`], and that is the
+/// P6-150 change.** A `Held` key is what a *rendered row* knows
+/// (`collection_view` groups by printing and board), so the step used to list
+/// its rows at that grain and sum the finishes inside them — which made "two
+/// foils beside one etched" a single row nobody could act on, and left
+/// `SkipReason::Grain` as a dead end. Splitting here is what lets the picker ask the question
+/// instead: each row goes back as a `Held` key **plus** a [`Pick`] naming the
+/// grain and the count, so `resolve_held` still resolves it against the same
+/// fresh holdings read and no new write path exists for any of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackTally {
     pub collection_id: Id,
     pub printing_id: Id,
     pub board: Board,
+    pub finish: Finish,
+    pub condition: Condition,
+    pub language: String,
     pub quantity: i32,
 }
 
-/// Roll ungrouped holdings up into the stacks a user can point at.
+/// The stacks a user can point at, out of ungrouped holdings.
 ///
 /// Input is `holdings_of_oracle`'s own shape (the read that already backs
-/// resolution), so this adds no query. Order is the input's order — the hosted
-/// read sorts by `(collection, printing, board, finish)` — so the rows the
-/// dialog lists are stable between two opens rather than hash-shuffled.
+/// resolution), so this adds no query — and since that read is already one row
+/// per grain, this is a filter, not a rollup. It still merges equal grains
+/// rather than trusting that: two rows the picker cannot tell apart would be
+/// two steppers over the same copies, which is a way to move more than the
+/// stack holds.
+///
+/// Order is the input's order — the hosted read sorts by `(collection,
+/// printing, board, finish)` — so the rows the dialog lists are stable between
+/// two opens rather than hash-shuffled.
 pub fn stacks_of(holdings: &[HoldingLine]) -> Vec<StackTally> {
     let mut out: Vec<StackTally> = Vec::new();
     for h in holdings.iter().filter(|h| movable(h)) {
@@ -441,12 +558,18 @@ pub fn stacks_of(holdings: &[HoldingLine]) -> Vec<StackTally> {
             t.collection_id == h.collection_id
                 && t.printing_id == h.printing_id
                 && t.board == h.board
+                && t.finish == h.finish
+                && t.condition == h.condition
+                && t.language == h.language
         }) {
             Some(t) => t.quantity += h.quantity,
             None => out.push(StackTally {
                 collection_id: h.collection_id,
                 printing_id: h.printing_id,
                 board: h.board,
+                finish: h.finish,
+                condition: h.condition,
+                language: h.language.clone(),
                 quantity: h.quantity,
             }),
         }
@@ -468,7 +591,22 @@ pub struct CopyStack {
     pub printing_id: Id,
     pub printing: Option<String>,
     pub board: Board,
+    pub finish: Finish,
+    pub condition: Condition,
+    pub language: String,
     pub quantity: i32,
+}
+
+impl CopyStack {
+    /// The row as an answer to move `quantity` of it.
+    pub fn pick(&self, quantity: i32) -> Pick {
+        Pick {
+            finish: self.finish,
+            condition: self.condition,
+            language: self.language.clone(),
+            quantity,
+        }
+    }
 }
 
 /// Every stack of one card, as the step's read answers it.
@@ -502,15 +640,25 @@ pub fn printing_label(set_code: Option<&str>, collector_number: &str) -> String 
 /// One tray entry the batch could not resolve, carrying the name it was shown
 /// under so the step and the fallback toast say the same word for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AmbiguousCard {
-    /// The **original** tray token — a `card:<oracle>` key. The picks made
-    /// against this card submit `held:` tokens, so this is the only thing that
-    /// can put the answer back on the row the user actually checked
-    /// ([`answered_tokens`]).
-    pub token: String,
+pub struct AskedCard {
+    /// The **original** tray key. Its token is the one the tray holds; the
+    /// picks made against this card submit grain-suffixed `held:` tokens, so
+    /// this is the only thing that can put the answer back on the row the user
+    /// actually checked ([`answered_tokens`]).
+    ///
+    /// It is also what keeps a collection-page row honest: a `Held` entry means
+    /// "these copies, here", so the step must offer that stack's grains and not
+    /// every place the card sits ([`card_choices`]).
+    pub key: SelectionKey,
     pub oracle_id: Id,
     pub name: String,
     pub reason: SkipReason,
+}
+
+impl AskedCard {
+    pub fn token(&self) -> String {
+        self.key.token()
+    }
 }
 
 /// Split a finished batch's refusals into the ones the step can ask about and
@@ -526,14 +674,14 @@ pub struct AmbiguousCard {
 pub fn split_skips(
     skipped: &[Skipped],
     entries: &[SelectedCard],
-) -> (Vec<AmbiguousCard>, Vec<Skipped>) {
+) -> (Vec<AskedCard>, Vec<Skipped>) {
     let mut ask = Vec::new();
     let mut tell = Vec::new();
     for s in skipped {
         let entry = entries.iter().find(|c| c.key.token() == s.token);
-        match (s.reason.is_ambiguous(), entry) {
-            (true, Some(c)) => ask.push(AmbiguousCard {
-                token: s.token.clone(),
+        match (s.reason.is_askable(), entry) {
+            (true, Some(c)) => ask.push(AskedCard {
+                key: c.key,
                 oracle_id: c.oracle_id,
                 name: c.name.clone(),
                 reason: s.reason,
@@ -548,27 +696,34 @@ pub fn split_skips(
 /// with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardChoices {
-    pub card: AmbiguousCard,
+    pub card: AskedCard,
     pub rows: Vec<CopyStack>,
 }
 
 /// Join the cards the batch refused to the stacks the follow-up read found.
 ///
-/// Two filters, both of them the same rules [`resolve_card`] applies, restated
-/// here because the read behind `stacks` is a plain "everything you hold of
-/// this card" and knows nothing about the move:
+/// Three filters, all of them rules the resolution applies too, restated here
+/// because the read behind `stacks` is a plain "everything you hold of this
+/// card" and knows nothing about the move:
 ///
 /// * **the destination is not a source** — offering "move these from the deck
 ///   you are moving into" is a row whose only outcomes are a no-op or an
 ///   `AlreadyThere` refusal;
 /// * **empty stacks are not rows** — `stacks_of` already drops them, and this
-///   restates it because the read and the write are separate requests.
+///   restates it because the read and the write are separate requests;
+/// * **a `Held` entry asks only about its own stack** — the entry the user
+///   checked was a collection-page row, which means "these copies, here". The
+///   stacks read answers per *oracle*, so without this a row selected in one
+///   binder would offer to move copies out of another one the user never
+///   pointed at. Its grains are still several rows, which is the whole point of
+///   asking. A `Card` entry (`/my`) is the opposite: it names no place, so
+///   every place is a candidate.
 ///
 /// A card whose rows all fall away keeps its section with zero rows rather than
 /// disappearing from the dialog: its copies moved or vanished between the batch
 /// and this read, and a card silently missing from a list the user was asked to
 /// act on is exactly the "did that land?" state the toasts exist to refuse.
-pub fn card_choices(cards: Vec<AmbiguousCard>, stacks: &[CardStacks], to: Id) -> Vec<CardChoices> {
+pub fn card_choices(cards: Vec<AskedCard>, stacks: &[CardStacks], to: Id) -> Vec<CardChoices> {
     cards
         .into_iter()
         .map(|card| {
@@ -578,7 +733,9 @@ pub fn card_choices(cards: Vec<AmbiguousCard>, stacks: &[CardStacks], to: Id) ->
                 .map(|s| {
                     s.stacks
                         .iter()
-                        .filter(|r| r.collection_id != to && r.quantity > 0)
+                        .filter(|r| {
+                            r.collection_id != to && r.quantity > 0 && addressed_by(&card.key, r)
+                        })
                         .cloned()
                         .collect()
                 })
@@ -588,68 +745,141 @@ pub fn card_choices(cards: Vec<AmbiguousCard>, stacks: &[CardStacks], to: Id) ->
         .collect()
 }
 
-/// One row the user ticked: the stack to take a copy from, plus the tray entry
-/// and name it answers for.
+/// Does this stack sit inside what the tray entry pointed at?
+fn addressed_by(key: &SelectionKey, row: &CopyStack) -> bool {
+    match key {
+        SelectionKey::Held {
+            collection_id,
+            printing_id,
+            board,
+        } => {
+            row.collection_id == *collection_id
+                && row.printing_id == *printing_id
+                && row.board == *board
+        }
+        SelectionKey::Card { .. } => true,
+    }
+}
+
+/// One row the user chose copies from: the stack, how many of it, plus the tray
+/// entry and name it answers for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackPick {
-    /// The original `card:` token this answers — see [`AmbiguousCard::token`].
+    /// The original tray token this answers — see [`AskedCard::key`].
     pub token: String,
     pub name: String,
     pub oracle_id: Id,
-    pub collection_id: Id,
-    pub printing_id: Id,
-    pub board: Board,
+    pub row: CopyStack,
+    /// Copies to move off this stack. Always ≥ 1: a row left at zero is not a
+    /// pick, and [`picks_of`] drops it before anything sees it.
+    pub quantity: i32,
 }
 
 impl StackPick {
-    /// The pick as a tray-style key: precise by construction, which is the
-    /// entire trick this step turns.
+    /// The pick as a tray-style key. Precise by construction at the row's own
+    /// grain, with the finish/condition/language the key cannot carry riding
+    /// alongside it in [`Self::pick`].
     pub fn key(&self) -> SelectionKey {
         SelectionKey::Held {
-            collection_id: self.collection_id,
-            printing_id: self.printing_id,
-            board: self.board,
+            collection_id: self.row.collection_id,
+            printing_id: self.row.printing_id,
+            board: self.row.board,
         }
     }
 
-    fn of(card: &AmbiguousCard, row: &CopyStack) -> Self {
-        Self {
-            token: card.token.clone(),
-            name: card.name.clone(),
-            oracle_id: card.oracle_id,
-            collection_id: row.collection_id,
-            printing_id: row.printing_id,
-            board: row.board,
+    /// The pick as one wire item.
+    pub fn item(&self) -> SelectionItem {
+        SelectionItem {
+            key: self.key(),
+            oracle_id: self.oracle_id,
+            pick: Some(self.row.pick(self.quantity)),
         }
     }
+
+    /// How the server will name this pick back (see [`SelectionItem::token`]).
+    pub fn item_token(&self) -> String {
+        self.item().token()
+    }
+
+    fn of(card: &AskedCard, row: &CopyStack, quantity: i32) -> Self {
+        Self {
+            token: card.token(),
+            name: card.name.clone(),
+            oracle_id: card.oracle_id,
+            row: row.clone(),
+            quantity,
+        }
+    }
+}
+
+/// The dialog's state — its sections and the stepper value standing against
+/// each row, in row order — as the picks a submit is made of.
+///
+/// Pure, and the dialog does no arithmetic of its own: it renders `sections`
+/// and owns a flat `Vec<i32>` of counts, and this is the one place that knows
+/// the two line up. **Rows left at zero are not picks** — that is how a user
+/// declines a stack now that every row starts at one, and shipping a
+/// zero-quantity item would only earn a [`SkipReason::NoneRequested`] refusal
+/// naming a card the user deliberately left alone.
+pub fn picks_of(sections: &[CardChoices], counts: &[i32]) -> Vec<StackPick> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    for section in sections {
+        for row in &section.rows {
+            let quantity = counts.get(i).copied().unwrap_or(0);
+            if quantity > 0 {
+                out.push(StackPick::of(&section.card, row, quantity));
+            }
+            i += 1;
+        }
+    }
+    out
 }
 
 /// The picks as a batch the existing write already takes.
 ///
 /// **No new mutation exists for this step, and none is needed.** A `Held` key
-/// carries `(collection, printing, board)`, which is what every refusal here
-/// said was missing; the server resolves it through the same `resolve_held` a
-/// collection-page row uses, against its own fresh holdings read, and one copy
-/// per item is the same quantity rule the first pass followed. Two ticks on one
-/// card are two items, so a user who wants a copy from each of two collections
-/// gets exactly that.
+/// carries `(collection, printing, board)` and the [`Pick`] carries the rest —
+/// the grain and the count — so the server resolves it through the same
+/// `resolve_held` a collection-page row uses, against its own fresh holdings
+/// read. Two rows picked on one card are two items, so a user who wants two
+/// foils from one binder and one plain from another gets exactly that.
 pub fn picked_items(picks: &[StackPick]) -> Vec<SelectionItem> {
-    picks
-        .iter()
-        .map(|p| SelectionItem {
-            key: p.key(),
-            oracle_id: p.oracle_id,
-        })
-        .collect()
+    picks.iter().map(StackPick::item).collect()
 }
 
 /// Names for the second pass's refusal toast, keyed by the tokens *that* pass
-/// answers in (`held:…`), not the tray's.
+/// answers in (grain-suffixed `held:…`), not the tray's.
 pub fn picked_names(picks: &[StackPick]) -> Vec<(String, String)> {
     picks
         .iter()
-        .map(|p| (p.key().token(), p.name.clone()))
+        .map(|p| (p.item_token(), p.name.clone()))
         .collect()
+}
+
+/// Copies the server actually reported moved, out of what was picked.
+///
+/// Counted from `moved`, never from the picks: a pick the server refused
+/// (`NotEnough`, a stack that emptied) must not be claimed as a copy that
+/// landed.
+pub fn moved_copies(picks: &[StackPick], moved: &[String]) -> i32 {
+    picks
+        .iter()
+        .filter(|p| moved.contains(&p.item_token()))
+        .map(|p| p.quantity)
+        .sum()
+}
+
+/// The distinct tray entries those landed copies belonged to — "of 2 cards".
+pub fn moved_cards(picks: &[StackPick], moved: &[String]) -> usize {
+    let mut tokens: Vec<&str> = picks
+        .iter()
+        .filter(|p| moved.contains(&p.item_token()))
+        .map(|p| p.token.as_str())
+        .collect();
+    tokens.sort_unstable();
+    tokens.dedup();
+    tokens.len()
 }
 
 /// The **tray** tokens a finished disambiguation move answered.
@@ -666,7 +896,7 @@ pub fn picked_names(picks: &[StackPick]) -> Vec<(String, String)> {
 pub fn answered_tokens(picks: &[StackPick], moved: &[String]) -> Vec<String> {
     let mut tokens: Vec<String> = Vec::new();
     for p in picks {
-        if moved.contains(&p.key().token()) && !tokens.contains(&p.token) {
+        if moved.contains(&p.item_token()) && !tokens.contains(&p.token) {
             tokens.push(p.token.clone());
         }
     }
@@ -682,10 +912,13 @@ pub fn answered_tokens(picks: &[StackPick], moved: &[String]) -> Vec<String> {
 /// would get a confirmation for the one and nothing whatsoever about the other
 /// two, which is the "did that land?" state every toast in this file exists to
 /// refuse.
-pub fn unanswered(cards: &[AmbiguousCard], picks: &[StackPick]) -> Vec<(String, SkipReason)> {
+pub fn unanswered(cards: &[AskedCard], picks: &[StackPick]) -> Vec<(String, SkipReason)> {
     cards
         .iter()
-        .filter(|c| !picks.iter().any(|p| p.token == c.token))
+        .filter(|c| {
+            let token = c.token();
+            !picks.iter().any(|p| p.token == token)
+        })
         .map(|c| (c.name.clone(), c.reason))
         .collect()
 }
@@ -786,55 +1019,32 @@ pub fn picker_options(
 
 // ----------------------------------------------------------------- wording ---
 
-/// The confirmation toast's message for a **batch** move. The count is stated in
-/// **copies**, because the pill counts entries and one copy each is the thing a
-/// reader would otherwise have to infer.
+/// The confirmation toast, for **both** submit paths.
 ///
-/// Its premise — one entry is one card is one copy — is the tray's, and it is
-/// exactly what the which-copies step breaks: there, several ticks can belong to
-/// the same card. That pass phrases itself with [`picked_message`] instead of
-/// stretching this one over a shape it was never true for.
-pub fn moved_message(moved: usize, destination: &str) -> String {
-    let copies = if moved == 1 { "1 copy" } else { "1 copy each" };
-    let cards = if moved == 1 {
-        "1 card".to_string()
-    } else {
-        format!("{moved} cards")
-    };
-    format!("Moved {cards} ({copies}) → {destination}")
-}
-
-/// The confirmation toast for the **which-copies** pass, counted from the picks
-/// that actually moved.
+/// **Both numbers are said out loud and neither is inferred**, which is what
+/// P6-150 required and what one sentence can now carry for both passes. The
+/// old pair could not: the batch's message counted tray entries and asserted
+/// "1 copy each" — true only while quantity was fixed at one — and the picker
+/// grew a second sentence ("across 2 cards") for the case that broke it. With
+/// quantity chosen per row, copies and cards are simply two different counts of
+/// the same move: 5 copies of 3 cards is 5 copies of 3 cards whichever path
+/// produced it, and the one-card case still names the card count ("of 1 card")
+/// so the two shapes read as the same sentence.
 ///
-/// [`moved_message`] cannot speak here. Its unit is the tray entry, and one
-/// entry is one card; a pick is a *stack*, and ticking all three stacks of one
-/// Bolt moves three copies of **one** card. Phrased through the batch message
-/// that reads "Moved 3 cards (1 copy each)" — a plain false statement about the
-/// user's collection, on the step's headline flow.
-///
-/// So both numbers are said out loud, and neither is inferred: copies is how
-/// many ticks landed (one copy per pick, the same server-fixed quantity the
-/// batch uses), cards is how many distinct tray entries those ticks belonged to.
-/// The one-card case names the card count anyway ("of 1 card") rather than
-/// dropping to bare copies, so the two shapes read as the same sentence.
-pub fn picked_message(picks: &[StackPick], moved: &[String], destination: &str) -> String {
-    let landed: Vec<&StackPick> = picks
-        .iter()
-        .filter(|p| moved.contains(&p.key().token()))
-        .collect();
-    let copies = if landed.len() == 1 {
+/// Both counts come from what the **server reported moved**, never from what
+/// was asked for: a refused entry must not be claimed as a copy that landed.
+pub fn moved_message(copies: i32, cards: usize, destination: &str) -> String {
+    let copies = if copies == 1 {
         "1 copy".to_string()
     } else {
-        format!("{} copies", landed.len())
+        format!("{copies} copies")
     };
-    let mut tokens: Vec<&str> = landed.iter().map(|p| p.token.as_str()).collect();
-    tokens.sort();
-    tokens.dedup();
-    match tokens.len() {
-        1 => format!("Moved {copies} of 1 card → {destination}"),
-        n => format!("Moved {copies} across {n} cards → {destination}"),
-    }
+    let cards = if cards == 1 {
+        "1 card".to_string()
+    } else {
+        format!("{cards} cards")
+    };
+    format!("Moved {copies} of {cards} → {destination}")
 }
 
 /// The refusal toast. Names up to [`NAMED_SKIPS`] cards with their reasons and
@@ -1068,13 +1278,18 @@ pub fn MoveSelection(selection: SelectionState) -> impl IntoView {
             match result {
                 Ok(outcome) => {
                     // Both halves are said in the picks' own terms: the tray
-                    // holds `card:` entries and this pass answered in `held:`
-                    // tokens, and one card can have contributed several of them
-                    // — which is exactly what `moved_message` cannot say.
+                    // holds `card:` entries and this pass answered in
+                    // grain-suffixed `held:` tokens, one card can have
+                    // contributed several of them, and each of those carried a
+                    // count of its own.
                     report.moved_as(
                         &outcome,
                         &answered_tokens(&picks, &outcome.moved),
-                        picked_message(&picks, &outcome.moved, &dest.label()),
+                        moved_message(
+                            moved_copies(&picks, &outcome.moved),
+                            moved_cards(&picks, &outcome.moved),
+                            &dest.label(),
+                        ),
                     );
                     report.refused(&label_skips(&outcome.skipped, &names));
                 }
@@ -1184,10 +1399,16 @@ impl MoveReport {
     /// The batch's own reporting: [`moved_message`], whose unit is the tray
     /// entry.
     fn moved(self, outcome: &MoveOutcome, dest: &Destination, drop_tokens: &[String]) {
+        // One copy per entry on this path by construction: a plain tray row
+        // carries no [`Pick`], and resolution moves such a row only when its
+        // whole stack is a single copy (anything larger is `Several`, which
+        // opens the picker). So copies and cards are the same number here, and
+        // both are counted rather than one of them asserted.
+        let moved = outcome.moved.len();
         self.moved_as(
             outcome,
             drop_tokens,
-            moved_message(outcome.moved.len(), &dest.label()),
+            moved_message(moved as i32, moved, &dest.label()),
         );
     }
 
@@ -1264,17 +1485,25 @@ impl MoveReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WhichCopies {
     dest: Destination,
-    cards: Vec<AmbiguousCard>,
+    cards: Vec<AskedCard>,
 }
 
 /// The step itself: one section per unresolved card, one row per stack its
-/// copies actually sit in, and a submit that goes back through the ordinary
-/// batch move.
+/// copies actually sit in **at full grain**, a quantity stepper on each, and a
+/// submit that goes back through the ordinary batch move.
 ///
 /// **A step, not a second move flow.** It does not pick a destination (the
 /// batch already did), does not touch the tray (its caller's `MoveReport`
-/// does), and does not know what a `MoveItem` is — it collects ticks and hands
+/// does), and does not know what a `MoveItem` is — it collects counts and hands
 /// them back as [`StackPick`]s.
+///
+/// **Its rows live in a signal, not inside the `Suspend`.** A stepper is state
+/// standing beside each row, and the two have to be indexable together
+/// ([`picks_of`]); resolving the read in an `Effect` — the same shape the
+/// picker's `load_failed`/`load_loading` above use, and sound for the same
+/// reason (this subtree never server-renders, since a selection starts empty on
+/// every document load) — is what lets the counts be a plain `Vec<i32>` the
+/// submit can read without walking the view.
 #[component]
 fn WhichCopiesDialog(
     step: RwSignal<Option<WhichCopies>>,
@@ -1284,7 +1513,13 @@ fn WhichCopiesDialog(
     answered: RwSignal<bool>,
     on_confirm: Callback<Vec<StackPick>>,
 ) -> impl IntoView {
-    let picks = RwSignal::new(Vec::<StackPick>::new());
+    // The rows, and the stepper value standing against each of them in row
+    // order. Written together, always — `picks_of` is the one place that knows
+    // they line up.
+    let sections = RwSignal::new(Vec::<CardChoices>::new());
+    let counts = RwSignal::new(Vec::<i32>::new());
+    let loading = RwSignal::new(true);
+    let failed = RwSignal::new(false);
 
     // The stacks behind the question. A read of its own, deliberately: the
     // batch's own resolution had these rows in hand but shipping them back
@@ -1293,7 +1528,8 @@ fn WhichCopiesDialog(
     // it is taken at the moment the user is asked, not at the moment the batch
     // was refused. Staleness beyond that is the server's to catch: the second
     // pass re-resolves every pick against its own fresh holdings, so a stack
-    // that emptied in between comes back as an honest `NoCopies` refusal.
+    // that emptied in between comes back as an honest `NoCopies` refusal, and
+    // one that shrank as `NotEnough` naming its real size.
     let stacks = Resource::new(
         move || {
             step.get()
@@ -1308,24 +1544,50 @@ fn WhichCopiesDialog(
         },
     );
 
-    // A new question starts with nothing ticked. Answering *for* the user is
-    // the one thing this dialog exists to stop doing.
+    // Every row opens at **one copy** (the maintainer's small-blast-radius
+    // default, P6-150): the common shape is a single stack whose only open
+    // question is "how many", and making that user press `+` before the button
+    // will do anything is a step for nothing. What is chosen is never hidden —
+    // each row shows its count and the submit button names the total — so a
+    // card scattered over three stacks says "Move 3 copies" before it is
+    // pressed, and a stack the user does not want is stepped to 0.
     Effect::new(move |_| {
-        step.track();
-        picks.set(Vec::new());
+        let asked = step.get();
+        let loaded = stacks.get();
+        let Some(WhichCopies { dest, cards }) = asked else {
+            sections.set(Vec::new());
+            counts.set(Vec::new());
+            return;
+        };
+        match loaded {
+            None => {
+                loading.set(true);
+                failed.set(false);
+                sections.set(Vec::new());
+                counts.set(Vec::new());
+            }
+            // Not an empty list: that would read as "you hold none of these",
+            // which is the opposite of what the batch just refused for.
+            Some(Err(_)) => {
+                loading.set(false);
+                failed.set(true);
+                sections.set(Vec::new());
+                counts.set(Vec::new());
+            }
+            Some(Ok(payload)) => {
+                let rows = card_choices(cards, &payload.cards, dest.id);
+                counts.set(vec![1; rows.iter().map(|c| c.rows.len()).sum()]);
+                sections.set(rows);
+                loading.set(false);
+                failed.set(false);
+            }
+        }
     });
 
-    let toggle = Callback::new(move |pick: StackPick| {
-        picks.update(|v| match v.iter().position(|p| *p == pick) {
-            Some(i) => {
-                v.remove(i);
-            }
-            None => v.push(pick),
-        })
-    });
+    let total = Memo::new(move |_| counts.with(|v| v.iter().sum::<i32>()));
 
     let submit = move || {
-        let chosen = picks.get_untracked();
+        let chosen = picks_of(&sections.get_untracked(), &counts.get_untracked());
         if chosen.is_empty() {
             return;
         }
@@ -1351,9 +1613,7 @@ fn WhichCopiesDialog(
                                     .get()
                                     .map(|s| s.dest.label())
                                     .unwrap_or_else(|| "the destination".to_string());
-                                format!(
-                                    "These are in more than one place. Tick the copies to move to {to} — one copy from each.",
-                                )
+                                format!("Choose how many copies of each to move to {to}.")
                             }}
                         </DialogDescription>
                     </DialogHeader>
@@ -1366,54 +1626,30 @@ fn WhichCopiesDialog(
                             class="max-h-[45vh] space-y-4 overflow-y-auto"
                             data-testid="which-copies"
                         >
-                            <Transition fallback=|| {
-                                view! {
-                                    <p class="text-muted-foreground text-sm">"Finding your copies…"</p>
-                                }
-                            }>
-                                {move || {
-                                    let asked = step.get();
-                                    Suspend::new(async move {
-                                        let Some(WhichCopies { dest, cards }) = asked else {
-                                            return ().into_any();
-                                        };
-                                        // Not `unwrap_or_default()`: an empty list
-                                        // here would read as "you hold none of
-                                        // these", which is the opposite of what
-                                        // the batch just refused for.
-                                        let Ok(payload) = stacks.await else {
-                                            return view! {
-                                                <p
-                                                    role="alert"
-                                                    class="text-destructive text-sm"
-                                                    data-testid="which-copies-error"
-                                                >
-                                                    "Couldn't load your copies. Close this and try the move again."
-                                                </p>
-                                            }
-                                                .into_any();
-                                        };
-                                        card_choices(cards, &payload.cards, dest.id)
-                                            .into_iter()
-                                            .map(|choices| {
-                                                view! { <CardSection choices picks toggle /> }
-                                            })
-                                            .collect_view()
-                                            .into_any()
-                                    })
-                                }}
-                            </Transition>
+                            <Show when=move || loading.get()>
+                                <p class="text-muted-foreground text-sm">"Finding your copies…"</p>
+                            </Show>
+                            <Show when=move || failed.get()>
+                                <p
+                                    role="alert"
+                                    class="text-destructive text-sm"
+                                    data-testid="which-copies-error"
+                                >
+                                    "Couldn't load your copies. Close this and try the move again."
+                                </p>
+                            </Show>
+                            <PickerRows sections counts />
                         </div>
                     </Show>
                     <DialogFooter>
                         <DialogClose attr:data-testid="which-copies-cancel">"Cancel"</DialogClose>
                         <Button
                             attr:data-testid="which-copies-confirm"
-                            attr:disabled=move || picks.with(Vec::is_empty)
+                            attr:disabled=move || total.get() < 1
                             on:click=move |_| submit()
                         >
                             {move || {
-                                match picks.with(Vec::len) {
+                                match total.get() {
                                     0 => "Move copies".to_string(),
                                     1 => "Move 1 copy".to_string(),
                                     n => format!("Move {n} copies"),
@@ -1427,18 +1663,47 @@ fn WhichCopiesDialog(
     }
 }
 
-/// One card's block of the step: its name, why it was asked about, and a row
-/// per stack.
+/// The picker's rows: every asked card's section, in the order [`picks_of`]
+/// walks them, each told where its rows start in the dialog's flat count
+/// vector.
+///
+/// A component of its own so the **bench** can mount the one control this
+/// feature adds without the dialog, the destination, or a server around it
+/// (`app/src/bench/copy_picker.rs`). That is not a convenience: the tray's
+/// hosting pages are authed and the Android dev webview cannot hold a session
+/// (ui-work-loop Findings), so the bench is the only place the stepper's touch
+/// behavior is reachable on a real phone engine.
 #[component]
-fn CardSection(
-    choices: CardChoices,
-    picks: RwSignal<Vec<StackPick>>,
-    toggle: Callback<StackPick>,
+pub fn PickerRows(
+    sections: RwSignal<Vec<CardChoices>>,
+    counts: RwSignal<Vec<i32>>,
 ) -> impl IntoView {
+    view! {
+        {move || {
+            let mut offset = 0;
+            sections
+                .get()
+                .into_iter()
+                .map(|choices| {
+                    let first = offset;
+                    offset += choices.rows.len();
+                    view! { <CardSection choices counts first /> }
+                })
+                .collect_view()
+        }}
+    }
+}
+
+/// One card's block of the step: its name, and a row per stack of its copies.
+///
+/// `first` is where this section's rows start in the dialog's flat count
+/// vector — the sections are rendered in the order [`picks_of`] walks them, so
+/// one running offset is all the two need to agree.
+#[component]
+fn CardSection(choices: CardChoices, counts: RwSignal<Vec<i32>>, first: usize) -> impl IntoView {
     let CardChoices { card, rows } = choices;
     let name = card.name.clone();
     let empty = rows.is_empty();
-    let card = StoredValue::new(card);
 
     view! {
         <section data-testid="which-copies-card" data-card=name.clone()>
@@ -1457,32 +1722,26 @@ fn CardSection(
                     {rows
                         .clone()
                         .into_iter()
-                        .map(|row| {
-                            let pick = StackPick::of(&card.get_value(), &row);
-                            let checked = {
-                                let pick = pick.clone();
-                                Signal::derive(move || picks.with(|v| v.contains(&pick)))
-                            };
+                        .enumerate()
+                        .map(|(i, row)| {
+                            // `index=`, never `slot=`: leptos reserves `slot`
+                            // on a component node for its `#[slot]` composition
+                            // mechanism, and a prop by that name makes the
+                            // **whole node vanish from the view with no error**
+                            // — the dialog rendered rows with no stepper on
+                            // them and only an "unused variable" warning said
+                            // so (P6-150).
+                            let index = first + i;
                             let label = stack_label(&row);
+                            let max = row.quantity;
                             view! {
-                                <li>
-                                    // The whole row is the hit area, for the reason
-                                    // the tray's own checkbox documents: a 16 px box
-                                    // is not a phone target. The box keeps its role
-                                    // and focus and has no handler of its own, so a
-                                    // keyboard Space and a tap take one code path.
-                                    <span
-                                        class="flex w-full cursor-pointer items-center gap-2 rounded-md px-1 py-1.5 text-sm"
-                                        data-testid="which-copies-row"
-                                        data-stack=row.collection_id.to_string()
-                                        on:click={
-                                            let pick = pick.clone();
-                                            move |_| toggle.run(pick.clone())
-                                        }
-                                    >
-                                        <Checkbox checked aria_label=label.clone() />
-                                        <span class="truncate">{label}</span>
-                                    </span>
+                                <li
+                                    class="flex w-full items-center justify-between gap-2 rounded-md px-1 py-1 text-sm"
+                                    data-testid="which-copies-row"
+                                    data-stack=row.collection_id.to_string()
+                                >
+                                    <span class="truncate">{label.clone()}</span>
+                                    <PickCount counts=counts index=index max=max label=label />
                                 </li>
                             }
                         })
@@ -1493,15 +1752,91 @@ fn CardSection(
     }
 }
 
+/// The `− n +` on one picker row: how many copies of *this* stack to move.
+///
+/// **Not [`CountStepper`](crate::components::ui::count_stepper::CountStepper),
+/// deliberately.** That component is the collection view's in-place editor: it
+/// commits on blur, raises its own undo toast, and hides its ± buttons below
+/// `sm` (a phone taps the number and types). All three are wrong inside a form
+/// whose commit is the dialog's own button — a blur-commit that fires as the
+/// pointer travels to "Move copies", a toast offering to undo a write that has
+/// not happened, and, on the surface this task exists to serve, no visible
+/// control at all. This is the same shape without any of the persistence
+/// contract: it writes one slot of the dialog's count vector and nothing else.
+#[component]
+fn PickCount(
+    counts: RwSignal<Vec<i32>>,
+    /// This row's place in the dialog's flat count vector.
+    index: usize,
+    /// The stack's size — the ceiling, so a stepper cannot ask for copies that
+    /// are not there. (The server re-checks it: the stack can shrink between
+    /// this read and the submit.)
+    max: i32,
+    #[prop(into)] label: String,
+) -> impl IntoView {
+    let value = Signal::derive(move || counts.with(|v| v.get(index).copied().unwrap_or(0)));
+    let set = move |n: i32| {
+        counts.update(|v| {
+            if let Some(slot) = v.get_mut(index) {
+                *slot = n.clamp(0, max);
+            }
+        })
+    };
+    // 44 px targets at phone width (the tray checkbox's own number), reverting
+    // to the dense desktop size at `sm` where the pointer is a mouse.
+    let button = "size-11 sm:size-8 text-base";
+
+    view! {
+        <span class="flex shrink-0 items-center gap-0.5" data-testid="pick-quantity">
+            <Button
+                variant=ButtonVariant::Ghost
+                class=button
+                attr:data-testid="pick-dec"
+                attr:aria-label=format!("One fewer copy of {label}")
+                attr:disabled=move || value.get() <= 0
+                on:click=move |_| set(value.get_untracked() - 1)
+            >
+                "−"
+            </Button>
+            <span
+                class="w-6 text-center tabular-nums"
+                data-testid="pick-value"
+                aria-label=format!("Copies of {label} to move")
+                aria-live="polite"
+            >
+                {move || value.get()}
+            </span>
+            <Button
+                variant=ButtonVariant::Ghost
+                class=button
+                attr:data-testid="pick-inc"
+                attr:aria-label=format!("One more copy of {label}")
+                // Operands reversed on purpose, so this comparison carries no
+                // `>`: the view macro reads a bare `>` as the end of the
+                // opening tag, and `value.get() >= max` silently made `= max …`
+                // the button's *text* and left it permanently disabled — the
+                // stepper could never be raised. (Parenthesising also works and
+                // is what clippy's `unused_parens` then objects to.)
+                attr:disabled=move || max <= value.get()
+                on:click=move |_| set(value.get_untracked() + 1)
+            >
+                "+"
+            </Button>
+        </span>
+    }
+}
+
 /// One stack's sentence: where it is, which printing (only when that
 /// distinguishes anything — see [`CopyStack`]), which board (only inside a deck
-/// where it is not the mainboard), and **what a tick does to it**.
+/// where it is not the mainboard), **what makes these copies different from the
+/// next row's** (finish, condition, language — each named only when it is not
+/// the ordinary one), and how big the stack is.
 ///
-/// That last part is why the count reads `1 of 3 copies` rather than
-/// `3 copies`: a row is a checkbox that moves exactly one copy, and a row
-/// labelled with the stack's whole size invites the reading that ticking it
-/// moves the stack. The dialog's description says "one copy from each", but it
-/// sits above a scrolling list and cannot be the only place that is stated.
+/// The count is the stack's own size again — `3 copies`, not the `1 of 3
+/// copies` a checkbox row needed — because the stepper beside it now states
+/// what is being taken. The grain parts are the P6-150 addition and the reason
+/// the row can be trusted: two rows reading `Trade Binder · 2 copies` and
+/// `Trade Binder · 1 copy` are indistinguishable, and one of them is the foils.
 pub fn stack_label(row: &CopyStack) -> String {
     let mut parts = vec![row.collection_name.clone()];
     if let Some(printing) = &row.printing {
@@ -1517,10 +1852,26 @@ pub fn stack_label(row: &CopyStack) -> String {
             .to_string(),
         );
     }
+    if row.finish != Finish::default() {
+        parts.push(
+            match row.finish {
+                Finish::Foil => "foil",
+                Finish::Etched => "etched",
+                Finish::Nonfoil => "nonfoil",
+            }
+            .to_string(),
+        );
+    }
+    if row.condition != Condition::default() {
+        parts.push(row.condition.to_pg().to_uppercase());
+    }
+    if row.language != shared::default_language() {
+        parts.push(row.language.to_uppercase());
+    }
     parts.push(if row.quantity == 1 {
         "1 copy".to_string()
     } else {
-        format!("1 of {} copies", row.quantity)
+        format!("{} copies", row.quantity)
     });
     parts.join(" · ")
 }
@@ -1645,35 +1996,75 @@ mod tests {
 
     /// What a resolved move should look like for a plain mainboard single.
     fn plain(collection: u128, printing: u128) -> CardSource {
-        CardSource::Move(MoveSource {
-            from: id(collection),
-            printing_id: id(printing),
+        CardSource::Move {
+            source: MoveSource {
+                from: id(collection),
+                printing_id: id(printing),
+                finish: Finish::Nonfoil,
+                condition: Condition::Nm,
+                language: shared::default_language(),
+                board: Board::Main,
+            },
+            quantity: 1,
+        }
+    }
+
+    /// The grain out of a resolved move, for the tests that assert on it.
+    fn moved_source(source: CardSource) -> MoveSource {
+        match source {
+            CardSource::Move { source, .. } => source,
+            other => panic!("expected a move, got {other:?}"),
+        }
+    }
+
+    /// The picker's answer for the default grain.
+    fn want(quantity: i32) -> Pick {
+        Pick {
             finish: Finish::Nonfoil,
             condition: Condition::Nm,
             language: shared::default_language(),
-            board: Board::Main,
-        })
+            quantity,
+        }
     }
 
     #[test]
-    fn one_source_resolves_to_that_printing() {
+    fn one_source_of_one_copy_resolves_to_that_printing() {
+        let entries = [own(1, 100, 1)];
+        assert_eq!(resolve_card(&entries, id(9), None), plain(1, 100));
+    }
+
+    #[test]
+    fn a_stack_of_several_copies_is_a_question_about_how_many() {
+        // P6-150: the row says 3, and this code may not decide that "move it"
+        // meant one of them. The picker asks, and the answer comes back as a
+        // `Pick` — which is checked against this same read.
         let entries = [own(1, 100, 3)];
-        assert_eq!(resolve_card(&entries, id(9)), plain(1, 100));
+        assert_eq!(
+            resolve_card(&entries, id(9), None),
+            CardSource::Refuse(SkipReason::Several(3))
+        );
+        assert_eq!(
+            resolve_card(&entries, id(9), Some(&want(2))),
+            CardSource::Move {
+                source: moved_source(plain(1, 100)),
+                quantity: 2,
+            }
+        );
     }
 
     #[test]
     fn the_destination_is_not_a_candidate_source() {
         // Held in the deck we're moving to *and* in the binder: exactly one
         // place it can come from, so this resolves rather than refusing.
-        let entries = [own(9, 100, 1), own(1, 101, 2)];
-        assert_eq!(resolve_card(&entries, id(9)), plain(1, 101));
+        let entries = [own(9, 100, 1), own(1, 101, 1)];
+        assert_eq!(resolve_card(&entries, id(9), None), plain(1, 101));
     }
 
     #[test]
     fn two_collections_are_a_question_for_the_user() {
         let entries = [own(1, 100, 1), own(2, 100, 1)];
         assert_eq!(
-            resolve_card(&entries, id(9)),
+            resolve_card(&entries, id(9), None),
             CardSource::Refuse(SkipReason::ManyCollections(2))
         );
     }
@@ -1684,8 +2075,81 @@ mod tests {
         // its representative printing may be one of them or neither.
         let entries = [own(1, 100, 1), own(1, 101, 1)];
         assert_eq!(
-            resolve_card(&entries, id(9)),
+            resolve_card(&entries, id(9), None),
             CardSource::Refuse(SkipReason::ManyPrintings(2))
+        );
+    }
+
+    #[test]
+    fn a_requested_quantity_is_checked_against_the_stack_that_is_really_there() {
+        // The three per-entry quantity refusals, all of them against the
+        // caller's own ungrouped holdings: over the stack's size, none at all,
+        // and a grain nobody holds. None of them is a clamp, and none of them
+        // is a batch failure — each is this entry's own polite refusal.
+        let entries = [own(1, 100, 2)];
+        assert_eq!(
+            resolve_held(&entries, id(1), id(100), Board::Main, id(9), Some(&want(3))),
+            CardSource::Refuse(SkipReason::NotEnough(2)),
+            "asking for more than the stack holds names what is really there"
+        );
+        assert_eq!(
+            resolve_held(&entries, id(1), id(100), Board::Main, id(9), Some(&want(0))),
+            CardSource::Refuse(SkipReason::NoneRequested),
+        );
+        assert_eq!(
+            resolve_held(
+                &entries,
+                id(1),
+                id(100),
+                Board::Main,
+                id(9),
+                Some(&want(-1))
+            ),
+            CardSource::Refuse(SkipReason::NoneRequested),
+        );
+        let gone = Pick {
+            finish: Finish::Etched,
+            ..want(1)
+        };
+        assert_eq!(
+            resolve_held(&entries, id(1), id(100), Board::Main, id(9), Some(&gone)),
+            CardSource::Refuse(SkipReason::NoCopies),
+            "a grain the stack does not hold is refused, never written at another grain"
+        );
+        // The whole stack is a legal answer — it is the ceiling, not a limit
+        // below it.
+        assert_eq!(
+            resolve_held(&entries, id(1), id(100), Board::Main, id(9), Some(&want(2))),
+            CardSource::Move {
+                source: moved_source(plain(1, 100)),
+                quantity: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn a_grain_is_taken_from_its_own_stack_not_the_row_total() {
+        // 2 foil + 1 plain is one collection-page row of 3 and **two** picker
+        // rows. Asking for 2 foils is legal; asking for 2 plain is not, even
+        // though the row the user checked said 3.
+        let entries = [foil(1, 100, 2), own(1, 100, 1)];
+        let foils = Pick {
+            finish: Finish::Foil,
+            ..want(2)
+        };
+        assert_eq!(
+            resolve_held(&entries, id(1), id(100), Board::Main, id(9), Some(&foils)),
+            CardSource::Move {
+                source: MoveSource {
+                    finish: Finish::Foil,
+                    ..moved_source(plain(1, 100))
+                },
+                quantity: 2,
+            }
+        );
+        assert_eq!(
+            resolve_held(&entries, id(1), id(100), Board::Main, id(9), Some(&want(2))),
+            CardSource::Refuse(SkipReason::NotEnough(1))
         );
     }
 
@@ -1695,7 +2159,7 @@ mod tests {
         // `MoveItem` means copies arriving from outside the system, so an
         // unresolvable selection must refuse, not fall back to it.
         assert_eq!(
-            resolve_card(&[], id(9)),
+            resolve_card(&[], id(9), None),
             CardSource::Refuse(SkipReason::NoCopies)
         );
     }
@@ -1704,7 +2168,7 @@ mod tests {
     fn everything_already_in_the_destination_says_so() {
         let entries = [own(9, 100, 2)];
         assert_eq!(
-            resolve_card(&entries, id(9)),
+            resolve_card(&entries, id(9), None),
             CardSource::Refuse(SkipReason::AlreadyThere)
         );
     }
@@ -1719,41 +2183,37 @@ mod tests {
 
     #[test]
     fn a_foil_only_card_moves_as_foil() {
-        // `/my` shows OWNED 3 and `collection_view` shows HERE 3; neither says
+        // `/my` shows OWNED 1 and `collection_view` shows HERE 1; neither says
         // "foil". Resolving to the default grain would reach `holding_take`,
         // find nothing, and roll the whole transaction back.
-        let entries = [foil(1, 100, 3)];
-        let expected = CardSource::Move(MoveSource {
-            finish: Finish::Foil,
-            ..match plain(1, 100) {
-                CardSource::Move(m) => m,
-                _ => unreachable!(),
-            }
-        });
-        assert_eq!(resolve_card(&entries, id(9)), expected);
+        let entries = [foil(1, 100, 1)];
+        let expected = CardSource::Move {
+            source: MoveSource {
+                finish: Finish::Foil,
+                ..moved_source(plain(1, 100))
+            },
+            quantity: 1,
+        };
+        assert_eq!(resolve_card(&entries, id(9), None), expected);
         assert_eq!(
-            resolve_held(&entries, id(1), id(100), Board::Main, id(9)),
+            resolve_held(&entries, id(1), id(100), Board::Main, id(9), None),
             expected
         );
     }
 
     #[test]
-    fn a_foil_stack_beside_a_plain_one_moves_the_plain_one() {
-        // The row sums both (the view groups by printing+board). Both are
-        // movable now, so the tie-break is what an unqualified "move this card"
-        // means: the default grain.
-        let entries = [foil(1, 100, 3), own(1, 100, 1)];
+    fn several_grains_in_one_stack_are_asked_about_not_guessed() {
+        // Two shapes of the same question, and the reason `SkipReason::Grain`
+        // is gone. Before P6-150 the first of these silently moved the plain
+        // copy (the default grain won) and the second refused outright, because
+        // the picker's rows could not tell foil from etched. Both are now the
+        // same sentence: more than one copy is here, say which and how many.
+        let mixed = [foil(1, 100, 3), own(1, 100, 1)];
         assert_eq!(
-            resolve_held(&entries, id(1), id(100), Board::Main, id(9)),
-            plain(1, 100)
+            resolve_held(&mixed, id(1), id(100), Board::Main, id(9), None),
+            CardSource::Refuse(SkipReason::Several(4))
         );
-    }
-
-    #[test]
-    fn two_exotic_grains_with_no_default_is_the_one_refusal_left() {
-        // 3 foil + 1 etched: nothing about the row says which the checkbox
-        // meant, and inventing an answer is the thing this module may not do.
-        let entries = [
+        let exotic = [
             foil(1, 100, 3),
             HoldingLine {
                 finish: Finish::Etched,
@@ -1761,9 +2221,12 @@ mod tests {
             },
         ];
         assert_eq!(
-            resolve_held(&entries, id(1), id(100), Board::Main, id(9)),
-            CardSource::Refuse(SkipReason::Grain(2))
+            resolve_held(&exotic, id(1), id(100), Board::Main, id(9), None),
+            CardSource::Refuse(SkipReason::Several(4))
         );
+        // …and the picker has two rows to ask it with, which is what the old
+        // refusal said no list could render.
+        assert_eq!(stacks_of(&exotic).len(), 2);
     }
 
     #[test]
@@ -1771,16 +2234,16 @@ mod tests {
         // `CardDetail::ownership` groups board away, so this looked movable
         // before the ungrouped read — and `holding_take` used to pin
         // `board = 'main'`, so the write took nothing.
-        let entries = [on_board(Board::Side, 1, 100, 2)];
+        let entries = [on_board(Board::Side, 1, 100, 1)];
         assert_eq!(
-            resolve_card(&entries, id(9)),
-            CardSource::Move(MoveSource {
-                board: Board::Side,
-                ..match plain(1, 100) {
-                    CardSource::Move(m) => m,
-                    _ => unreachable!(),
-                }
-            })
+            resolve_card(&entries, id(9), None),
+            CardSource::Move {
+                source: MoveSource {
+                    board: Board::Side,
+                    ..moved_source(plain(1, 100))
+                },
+                quantity: 1,
+            }
         );
     }
 
@@ -1791,7 +2254,7 @@ mod tests {
         // at.
         let entries = [own(1, 100, 2), on_board(Board::Side, 1, 100, 2)];
         assert_eq!(
-            resolve_card(&entries, id(9)),
+            resolve_card(&entries, id(9), None),
             CardSource::Refuse(SkipReason::ManyBoards(2))
         );
     }
@@ -1800,24 +2263,27 @@ mod tests {
     fn a_collection_row_moves_the_board_it_names() {
         // The same two stacks, addressed from the collection page: each row
         // names its own board, so each resolves to its own copies.
-        let entries = [own(1, 100, 2), on_board(Board::Side, 1, 100, 2)];
-        let main = match plain(1, 100) {
-            CardSource::Move(m) => m,
-            _ => unreachable!(),
-        };
+        let entries = [own(1, 100, 1), on_board(Board::Side, 1, 100, 1)];
+        let main = moved_source(plain(1, 100));
         assert_eq!(
-            resolve_held(&entries, id(1), id(100), Board::Side, id(9)),
-            CardSource::Move(MoveSource {
-                board: Board::Side,
-                ..main.clone()
-            })
+            resolve_held(&entries, id(1), id(100), Board::Side, id(9), None),
+            CardSource::Move {
+                source: MoveSource {
+                    board: Board::Side,
+                    ..main.clone()
+                },
+                quantity: 1,
+            }
         );
         assert_eq!(
-            resolve_held(&entries, id(1), id(100), Board::Main, id(9)),
-            CardSource::Move(main)
+            resolve_held(&entries, id(1), id(100), Board::Main, id(9), None),
+            CardSource::Move {
+                source: main,
+                quantity: 1,
+            }
         );
         assert_eq!(
-            resolve_held(&entries, id(1), id(100), Board::Main, id(1)),
+            resolve_held(&entries, id(1), id(100), Board::Main, id(1), None),
             CardSource::Refuse(SkipReason::AlreadyThere)
         );
     }
@@ -1828,13 +2294,13 @@ mod tests {
         // Without the read this reached `holding_take` and took the batch with
         // it; the tray is long-lived by design, so this is not exotic.
         assert_eq!(
-            resolve_held(&[], id(1), id(100), Board::Main, id(9)),
+            resolve_held(&[], id(1), id(100), Board::Main, id(9), None),
             CardSource::Refuse(SkipReason::NoCopies)
         );
         // …and so is a row whose *printing* is gone while the card remains.
         let entries = [own(1, 999, 2)];
         assert_eq!(
-            resolve_held(&entries, id(1), id(100), Board::Main, id(9)),
+            resolve_held(&entries, id(1), id(100), Board::Main, id(9), None),
             CardSource::Refuse(SkipReason::NoCopies)
         );
     }
@@ -1844,15 +2310,21 @@ mod tests {
         // A reason with no phrase is a refusal the user cannot act on.
         for reason in [
             SkipReason::AlreadyThere,
-            SkipReason::Grain(2),
+            SkipReason::Several(3),
+            SkipReason::NotEnough(2),
+            SkipReason::NoneRequested,
             SkipReason::NoCopies,
+            SkipReason::NoLongerNeeded,
             SkipReason::ManyCollections(2),
             SkipReason::ManyPrintings(2),
             SkipReason::ManyBoards(2),
         ] {
             assert!(!reason.phrase().is_empty(), "{reason:?} has no phrase");
         }
-        assert!(SkipReason::Grain(2).phrase().contains("finishes"));
+        // The counts are the point of the two quantity refusals: "pick fewer"
+        // with no number is not an instruction anyone can follow.
+        assert!(SkipReason::Several(3).phrase().contains('3'));
+        assert!(SkipReason::NotEnough(2).phrase().contains('2'));
         assert!(SkipReason::NoCopies.phrase().contains("reload"));
     }
 
@@ -1935,11 +2407,22 @@ mod tests {
     }
 
     #[test]
-    fn the_toast_counts_copies_not_just_cards() {
-        assert_eq!(moved_message(1, "🗂 Deck"), "Moved 1 card (1 copy) → 🗂 Deck");
+    fn the_toast_counts_copies_and_cards_separately() {
+        // Both numbers said out loud, neither inferred — the sentence both
+        // submit paths use now that a card can move any number of copies.
         assert_eq!(
-            moved_message(3, "🗂 Deck"),
-            "Moved 3 cards (1 copy each) → 🗂 Deck"
+            moved_message(1, 1, "🗂 Deck"),
+            "Moved 1 copy of 1 card → 🗂 Deck"
+        );
+        assert_eq!(
+            moved_message(5, 3, "🗂 Deck"),
+            "Moved 5 copies of 3 cards → 🗂 Deck"
+        );
+        // The shape the old "(1 copy each)" wording could not say at all:
+        // several copies of a single card.
+        assert_eq!(
+            moved_message(3, 1, "🗂 Deck"),
+            "Moved 3 copies of 1 card → 🗂 Deck"
         );
     }
 
@@ -1999,63 +2482,84 @@ mod tests {
             printing_id: id(printing),
             printing: None,
             board: Board::Main,
+            finish: Finish::Nonfoil,
+            condition: Condition::Nm,
+            language: shared::default_language(),
             quantity,
         }
     }
 
     #[test]
     fn only_the_which_copies_questions_are_askable() {
-        // The step lists `(collection, printing, board)` rows. The three `Many*`
-        // refusals name exactly those dimensions; nothing else on this enum is a
-        // choice between rows a user could tell apart.
+        // The step's rows are full grains of one card, and a stepper stands
+        // beside each: the three `Many*` refusals name which row, `Several`
+        // names how many. Nothing else on this enum is a choice the dialog can
+        // offer — `NotEnough`/`NoneRequested` are answers to a question it
+        // already asked, and re-opening on them would loop.
         for reason in [
             SkipReason::ManyCollections(2),
             SkipReason::ManyPrintings(2),
             SkipReason::ManyBoards(2),
+            SkipReason::Several(3),
         ] {
-            assert!(
-                reason.is_ambiguous(),
-                "{reason:?} is a which-copies question"
-            );
+            assert!(reason.is_askable(), "{reason:?} is a which-copies question");
         }
         for reason in [
             SkipReason::AlreadyThere,
-            SkipReason::Grain(2),
+            SkipReason::NotEnough(2),
+            SkipReason::NoneRequested,
             SkipReason::NoCopies,
             SkipReason::NoLongerNeeded,
         ] {
-            assert!(!reason.is_ambiguous(), "{reason:?} has no rows to offer");
+            assert!(!reason.is_askable(), "{reason:?} has no rows to offer");
         }
     }
 
     #[test]
-    fn a_stack_is_one_row_however_many_grains_it_holds() {
-        // The rows the step offers are the grain the *write* is addressed at
-        // minus finish/condition/language — so a foil and a plain copy of the
-        // same printing in the same binder are one row of 4, exactly as the
-        // collection page renders them.
+    fn every_grain_is_its_own_row() {
+        // P6-150: the rows are the **full** grain, so a foil and a plain copy
+        // of the same printing in the same binder are two rows — the split the
+        // collection page cannot render and `SkipReason::Grain` used to refuse
+        // over. Order is the read's order, so the dialog is stable between two
+        // opens.
         let holdings = [foil(1, 100, 3), own(1, 100, 1), own(2, 100, 2)];
         assert_eq!(
-            stacks_of(&holdings),
+            stacks_of(&holdings)
+                .iter()
+                .map(|t| (t.collection_id, t.finish, t.quantity))
+                .collect::<Vec<_>>(),
             vec![
-                StackTally {
-                    collection_id: id(1),
-                    printing_id: id(100),
-                    board: Board::Main,
-                    quantity: 4,
-                },
-                StackTally {
-                    collection_id: id(2),
-                    printing_id: id(100),
-                    board: Board::Main,
-                    quantity: 2,
-                },
+                (id(1), Finish::Foil, 3),
+                (id(1), Finish::Nonfoil, 1),
+                (id(2), Finish::Nonfoil, 2),
             ]
         );
+        // Condition and language split too — two rows a label must tell apart.
+        let graded = [
+            own(1, 100, 2),
+            HoldingLine {
+                condition: Condition::Lp,
+                ..own(1, 100, 1)
+            },
+            HoldingLine {
+                language: "ja".to_string(),
+                ..own(1, 100, 4)
+            },
+        ];
+        assert_eq!(stacks_of(&graded).len(), 3);
         // Boards stay apart — they are two rows on the deck page and two
         // choices here, which is the whole of `ManyBoards`.
         let boards = [own(1, 100, 2), on_board(Board::Side, 1, 100, 1)];
         assert_eq!(stacks_of(&boards).len(), 2);
+        // Equal grains are one row even if the read hands them over twice: two
+        // steppers over the same copies could ask for more than is there.
+        assert_eq!(
+            stacks_of(&[own(1, 100, 2), own(1, 100, 3)])
+                .iter()
+                .map(|t| t.quantity)
+                .collect::<Vec<_>>(),
+            vec![5]
+        );
         // An emptied stack is not a row.
         assert!(stacks_of(&[own(1, 100, 0)]).is_empty());
     }
@@ -2092,12 +2596,11 @@ mod tests {
         assert_eq!(tell.len(), 1);
     }
 
-    fn asked(oracle: u128, name: &str) -> AmbiguousCard {
-        AmbiguousCard {
-            token: SelectionKey::Card {
+    fn asked(oracle: u128, name: &str) -> AskedCard {
+        AskedCard {
+            key: SelectionKey::Card {
                 oracle_id: id(oracle),
-            }
-            .token(),
+            },
             oracle_id: id(oracle),
             name: name.to_string(),
             reason: SkipReason::ManyCollections(2),
@@ -2127,6 +2630,55 @@ mod tests {
     }
 
     #[test]
+    fn a_collection_row_is_only_asked_about_its_own_stack() {
+        // The entry was a `/my/collections/:id` row — "these copies, here" —
+        // so the step may split it by grain but must not offer to move copies
+        // out of a binder the user never pointed at. The `/my` entry over the
+        // same holdings is the opposite: it names no place, so every place is a
+        // candidate.
+        let stacks = [CardStacks {
+            oracle_id: id(1),
+            stacks: vec![
+                stack(1, 100, 2),
+                CopyStack {
+                    finish: Finish::Foil,
+                    ..stack(1, 100, 1)
+                },
+                stack(2, 100, 5),
+                CopyStack {
+                    board: Board::Side,
+                    ..stack(1, 100, 4)
+                },
+            ],
+        }];
+        let here = AskedCard {
+            key: SelectionKey::Held {
+                collection_id: id(1),
+                printing_id: id(100),
+                board: Board::Main,
+            },
+            reason: SkipReason::Several(3),
+            ..asked(1, "Bolt")
+        };
+        let rows = card_choices(vec![here], &stacks, id(9));
+        assert_eq!(
+            rows[0]
+                .rows
+                .iter()
+                .map(|r| (r.collection_id, r.board, r.finish, r.quantity))
+                .collect::<Vec<_>>(),
+            vec![
+                (id(1), Board::Main, Finish::Nonfoil, 2),
+                (id(1), Board::Main, Finish::Foil, 1),
+            ],
+            "its own stack, split by grain — not the other binder, not the sideboard"
+        );
+        // The same holdings behind a `/my` row: all four stacks are offered.
+        let anywhere = card_choices(vec![asked(1, "Bolt")], &stacks, id(9));
+        assert_eq!(anywhere[0].rows.len(), 4);
+    }
+
+    #[test]
     fn a_card_whose_copies_vanished_keeps_its_section() {
         // Its stacks moved or emptied between the batch and this read. A card
         // silently absent from a list the user was asked to act on is the
@@ -2137,19 +2689,21 @@ mod tests {
     }
 
     #[test]
-    fn a_picked_row_is_an_ordinary_held_item() {
-        // The whole trick: no new write, no new wire shape — a pick is the same
-        // key a collection-page row already submits, so the server resolves it
-        // through `resolve_held` against its own fresh read.
+    fn a_picked_row_is_a_held_item_carrying_its_grain_and_count() {
+        // Still no new write and no new mutation: a pick is the same `Held` key
+        // a collection-page row submits, with the grain and the quantity the
+        // key cannot carry riding alongside it. The server resolves it through
+        // `resolve_held` against its own fresh read.
         let card = asked(1, "Bolt");
         let picks = vec![
-            StackPick::of(&card, &stack(1, 100, 2)),
+            StackPick::of(&card, &stack(1, 100, 5), 2),
             StackPick::of(
                 &card,
                 &CopyStack {
                     board: Board::Side,
                     ..stack(2, 101, 1)
                 },
+                1,
             ),
         ];
         assert_eq!(
@@ -2162,6 +2716,12 @@ mod tests {
                         board: Board::Main,
                     },
                     oracle_id: id(1),
+                    pick: Some(Pick {
+                        finish: Finish::Nonfoil,
+                        condition: Condition::Nm,
+                        language: shared::default_language(),
+                        quantity: 2,
+                    }),
                 },
                 SelectionItem {
                     key: SelectionKey::Held {
@@ -2170,6 +2730,12 @@ mod tests {
                         board: Board::Side,
                     },
                     oracle_id: id(1),
+                    pick: Some(Pick {
+                        finish: Finish::Nonfoil,
+                        condition: Condition::Nm,
+                        language: shared::default_language(),
+                        quantity: 1,
+                    }),
                 },
             ]
         );
@@ -2181,90 +2747,150 @@ mod tests {
                 .map(|(t, n)| format!("{t}|{n}"))
                 .collect::<Vec<_>>(),
             vec![
-                format!("{}|Bolt", picks[0].key().token()),
-                format!("{}|Bolt", picks[1].key().token()),
+                format!("{}|Bolt", picks[0].item_token()),
+                format!("{}|Bolt", picks[1].item_token()),
             ]
         );
     }
 
     #[test]
-    fn a_moved_pick_retires_the_tray_row_it_answered_for() {
-        // The pass moves `held:` tokens; the tray holds the `card:` entry those
-        // answer. Without the translation the pill keeps counting a card whose
-        // copies just moved.
+    fn two_grains_of_one_stack_are_two_distinguishable_items() {
+        // The bug this token suffix exists to prevent: both rows are
+        // `held:<collection>:<printing>:main`, so an outcome naming them by the
+        // bare tray token could not say which of the two moved — and the
+        // toast, the tray reconciliation and the copy count all read that
+        // list.
         let card = asked(1, "Bolt");
-        let here = StackPick::of(&card, &stack(1, 100, 2));
-        let there = StackPick::of(&card, &stack(2, 100, 1));
+        let plain = StackPick::of(&card, &stack(1, 100, 2), 1);
+        let foil = StackPick::of(
+            &card,
+            &CopyStack {
+                finish: Finish::Foil,
+                ..stack(1, 100, 3)
+            },
+            3,
+        );
+        assert_eq!(plain.key(), foil.key(), "same row, so the same tray key");
+        assert_ne!(plain.item_token(), foil.item_token());
+        assert!(plain.item_token().starts_with(&plain.key().token()));
+        // An item nobody picked keeps exactly the token the tray uses — the
+        // one the DOM, the earlier tasks and `tokens_to_drop` all match on.
+        let untouched = SelectionItem {
+            key: plain.key(),
+            oracle_id: id(1),
+            pick: None,
+        };
+        assert_eq!(untouched.token(), plain.key().token());
+        // Only what the server said moved is counted, and it is counted in
+        // copies.
+        let picks = vec![plain.clone(), foil.clone()];
+        assert_eq!(moved_copies(&picks, &[foil.item_token()]), 3);
+        assert_eq!(moved_cards(&picks, &[foil.item_token()]), 1);
+        assert_eq!(
+            moved_copies(&picks, &[plain.item_token(), foil.item_token()]),
+            4
+        );
+    }
+
+    #[test]
+    fn a_moved_pick_retires_the_tray_row_it_answered_for() {
+        // The pass moves grain-suffixed `held:` tokens; the tray holds the
+        // `card:` entry those answer. Without the translation the pill keeps
+        // counting a card whose copies just moved.
+        let card = asked(1, "Bolt");
+        let here = StackPick::of(&card, &stack(1, 100, 2), 1);
+        let there = StackPick::of(&card, &stack(2, 100, 1), 1);
         let picks = vec![here.clone(), there.clone()];
         // One of two moved: the question was answered, so the entry goes —
         // whatever did not move has its own refusal toast.
         assert_eq!(
-            answered_tokens(&picks, &[here.key().token()]),
-            vec![card.token.clone()]
+            answered_tokens(&picks, &[here.item_token()]),
+            vec![card.token()]
         );
         // Both moved: named once, not twice.
         assert_eq!(
-            answered_tokens(&picks, &[here.key().token(), there.key().token()]),
-            vec![card.token]
+            answered_tokens(&picks, &[here.item_token(), there.item_token()]),
+            vec![card.token()]
         );
         // Nothing moved: nothing leaves the tray.
         assert!(answered_tokens(&picks, &[]).is_empty());
     }
 
     #[test]
-    fn a_row_says_where_it_is_and_what_ticking_it_does() {
-        // Not "3 copies": the row is a checkbox that moves exactly one, and a
-        // label naming the stack's whole size reads as though ticking it takes
-        // the stack.
-        assert_eq!(stack_label(&stack(1, 100, 3)), "Binder 1 · 1 of 3 copies");
+    fn a_row_says_where_it_is_what_it_is_and_how_big_it_is() {
+        // The count is the stack's own size now — the stepper beside it states
+        // what is being taken — and the grain parts are what keep two rows of
+        // the same binder from being indistinguishable.
+        assert_eq!(stack_label(&stack(1, 100, 3)), "Binder 1 · 3 copies");
         assert_eq!(stack_label(&stack(1, 100, 1)), "Binder 1 · 1 copy");
         // A printing chip only when the read decided it distinguishes
-        // something, and a board only when it is not the mainboard.
+        // something, a board only when it is not the mainboard, and each grain
+        // part only when it is not the ordinary one.
         assert_eq!(
             stack_label(&CopyStack {
                 printing: Some("MH3 #123".to_string()),
                 board: Board::Side,
+                finish: Finish::Foil,
+                condition: Condition::Lp,
+                language: "ja".to_string(),
                 ..stack(1, 100, 2)
             }),
-            "Binder 1 · MH3 #123 · sideboard · 1 of 2 copies"
+            "Binder 1 · MH3 #123 · sideboard · foil · LP · JA · 2 copies"
+        );
+        // The two rows the old label could not tell apart.
+        assert_ne!(
+            stack_label(&stack(1, 100, 2)),
+            stack_label(&CopyStack {
+                finish: Finish::Foil,
+                ..stack(1, 100, 2)
+            })
         );
     }
 
     #[test]
-    fn the_step_counts_copies_and_cards_separately() {
-        // The headline flow, and the one `moved_message` gets wrong: three ticks
-        // on one card are three copies of ONE card. Phrased through the batch
-        // message this read "Moved 3 cards (1 copy each)".
-        let bolt = asked(1, "Bolt");
-        let picks: Vec<StackPick> = [stack(1, 100, 2), stack(2, 100, 1), stack(3, 100, 5)]
-            .iter()
-            .map(|row| StackPick::of(&bolt, row))
-            .collect();
-        let all: Vec<String> = picks.iter().map(|p| p.key().token()).collect();
-        assert_eq!(
-            picked_message(&picks, &all, "🗂 Deck"),
-            "Moved 3 copies of 1 card → 🗂 Deck"
-        );
-
-        // Two cards, one tick each: the plural form names both numbers rather
-        // than leaving either to be inferred.
-        let brainstorm = asked(2, "Brainstorm");
-        let pair = vec![
-            StackPick::of(&bolt, &stack(1, 100, 2)),
-            StackPick::of(&brainstorm, &stack(1, 200, 4)),
+    fn the_dialogs_counts_become_picks_in_row_order() {
+        // The one place that knows the flat `Vec<i32>` of steppers lines up
+        // with the sections' rows. A slip here moves the wrong stack's copies,
+        // which is the failure the whole picker exists to prevent.
+        let sections = vec![
+            CardChoices {
+                card: asked(1, "Bolt"),
+                rows: vec![
+                    stack(1, 100, 2),
+                    CopyStack {
+                        finish: Finish::Foil,
+                        ..stack(1, 100, 3)
+                    },
+                ],
+            },
+            CardChoices {
+                card: asked(2, "Brainstorm"),
+                rows: vec![stack(3, 200, 4)],
+            },
         ];
-        let both: Vec<String> = pair.iter().map(|p| p.key().token()).collect();
+        let picks = picks_of(&sections, &[1, 0, 4]);
         assert_eq!(
-            picked_message(&pair, &both, "🗂 Deck"),
-            "Moved 2 copies across 2 cards → 🗂 Deck"
+            picks
+                .iter()
+                .map(|p| (
+                    p.name.as_str(),
+                    p.row.finish,
+                    p.row.collection_id,
+                    p.quantity
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Bolt", Finish::Nonfoil, id(1), 1),
+                ("Brainstorm", Finish::Nonfoil, id(3), 4),
+            ],
+            "a row stepped to zero is not a pick, and the rest keep their own rows"
         );
-
-        // Counted from what *moved*, not from what was ticked: a pick the
-        // server refused must not be claimed as a copy that landed.
-        assert_eq!(
-            picked_message(&picks, &all[..1], "🗂 Deck"),
-            "Moved 1 copy of 1 card → 🗂 Deck"
-        );
+        // Nothing chosen at all is no submit — the button is disabled, and this
+        // is the same answer if it were not.
+        assert!(picks_of(&sections, &[0, 0, 0]).is_empty());
+        // A short count vector cannot mis-address a row: missing slots read as
+        // zero rather than shifting.
+        assert!(picks_of(&sections, &[]).is_empty());
     }
 
     #[test]
@@ -2274,7 +2900,7 @@ mod tests {
         let bolt = asked(1, "Bolt");
         let brainstorm = asked(2, "Brainstorm");
         let cards = vec![bolt.clone(), brainstorm];
-        let picks = vec![StackPick::of(&bolt, &stack(1, 100, 2))];
+        let picks = vec![StackPick::of(&bolt, &stack(1, 100, 2), 1)];
         assert_eq!(
             unanswered(&cards, &picks),
             vec![("Brainstorm".to_string(), SkipReason::ManyCollections(2))]
@@ -2336,10 +2962,10 @@ mod tests {
 
     #[test]
     fn tokens_to_drop_leaves_every_other_refusal_alone() {
-        // `AlreadyThere`, `Grain`, `ManyPrintings`, `ManyBoards` all name a
-        // real question the user can still answer — none of them mean the
-        // stack is gone, so none of them should be swept off the tray with
-        // `NoCopies`.
+        // `AlreadyThere`, `Several`, `NotEnough`, `ManyPrintings`,
+        // `ManyBoards` all name a real question the user can still answer —
+        // none of them mean the stack is gone, so none of them should be swept
+        // off the tray with `NoCopies`.
         let outcome = MoveOutcome {
             move_ids: vec![],
             moved: vec![],
@@ -2350,7 +2976,11 @@ mod tests {
                 },
                 Skipped {
                     token: "b".to_string(),
-                    reason: SkipReason::Grain(2),
+                    reason: SkipReason::Several(2),
+                },
+                Skipped {
+                    token: "e".to_string(),
+                    reason: SkipReason::NotEnough(1),
                 },
                 Skipped {
                     token: "c".to_string(),
