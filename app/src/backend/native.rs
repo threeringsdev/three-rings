@@ -214,7 +214,12 @@ impl CatalogStore for NativeBackend {
         self.get(&super::paths::card_summary(oracle_id)).await
     }
 
-    async fn search(&self, query: SearchQuery, page: Page) -> ApiResult<SearchResults> {
+    async fn search(
+        &self,
+        query: SearchQuery,
+        page: Page,
+        page_number: Option<u32>,
+    ) -> ApiResult<SearchResults> {
         let mut path = super::paths::CATALOG_SEARCH.to_string();
         let mut qs = Vec::new();
         if let Some(q) = &query.q {
@@ -226,9 +231,21 @@ impl CatalogStore for NativeBackend {
         if let Some(limit) = page.limit {
             qs.push(format!("limit={limit}"));
         }
+        if let Some(n) = page_number {
+            qs.push(format!("page={n}"));
+        }
         if !qs.is_empty() {
             path.push('?');
             path.push_str(&qs.join("&"));
+        }
+        self.get(&path).await
+    }
+
+    async fn search_count(&self, query: SearchQuery) -> ApiResult<CatalogCount> {
+        let mut path = super::paths::CATALOG_SEARCH_COUNT.to_string();
+        if let Some(q) = &query.q {
+            path.push_str("?q=");
+            path.push_str(&urlencode(q));
         }
         self.get(&path).await
     }

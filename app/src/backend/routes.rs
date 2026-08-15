@@ -34,6 +34,7 @@ where
     router
         .route(paths::CATALOG_COUNT, get(catalog_count))
         .route(paths::CATALOG_SEARCH, get(search))
+        .route(paths::CATALOG_SEARCH_COUNT, get(search_count))
         .route(paths::CATALOG_SETS, get(list_sets))
         .route(paths::CARD_DETAIL_ROUTE, get(card_detail))
         .route(paths::CARD_SUMMARY_ROUTE, get(card_summary))
@@ -137,16 +138,39 @@ struct SearchParams {
     q: Option<String>,
     cursor: Option<String>,
     limit: Option<u32>,
+    /// An explicit page-N jump — see `CatalogStore::search`'s doc comment.
+    /// `page`, not `offset`: the wire carries a 1-indexed page *number*: the
+    /// row offset is `page_offset`'s (hosted-only) job, so a bumped page size
+    /// (queued: 50→60) changes what `page=9` fetches without this route or the
+    /// client needing to know the arithmetic.
+    page: Option<u32>,
 }
 
-/// `GET /api/catalog/search?q=&cursor=&limit=` — one keyset page of results.
+/// `GET /api/catalog/search?q=&cursor=&limit=&page=` — one page of results,
+/// either the keyset continuation (`cursor`) or an explicit jump (`page`).
 async fn search(headers: http::HeaderMap, Query(p): Query<SearchParams>) -> Response {
     let query = SearchQuery { q: p.q };
     let page = Page {
         cursor: p.cursor,
         limit: p.limit,
     };
-    json_result(async { catalog_backend(&headers).await?.search(query, page).await }.await)
+    json_result(
+        async {
+            catalog_backend(&headers)
+                .await?
+                .search(query, page, p.page)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `GET /api/catalog/search/count?q=` — the row count for this query.
+/// Anonymous, like `search` itself and `catalog_count`: the count carries no
+/// ownership data, so there is nothing a session would add to the answer.
+async fn search_count(Query(p): Query<SearchParams>) -> Response {
+    let query = SearchQuery { q: p.q };
+    json_result(async { HostedBackend::anonymous().await?.search_count(query).await }.await)
 }
 
 /// `GET /api/catalog/sets?q=&limit=` — one window of the set list (the rail's

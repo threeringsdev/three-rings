@@ -11,12 +11,15 @@
 //! - **First page SSRs when the URL carries `q`.** The results `Resource` is
 //!   keyed on the URL's query *and* its `?cursor=`, so a cold load — page one or
 //!   a shared page-three link — renders markup, not a spinner.
-//! - **Paging is forward-only and lives in the URL too** (`?cursor=`), the same
-//!   keyset shape `/my` uses. A cursor names a position in the result set the
+//! - **Paging lives in the URL too, two ways.** `?cursor=` is the same
+//!   forward-only keyset shape `/my` uses — a position in the result set the
 //!   query produced, so **every path that edits the query drops it**; see
-//!   [`catalog_url`]. `?page=` rides beside it as a *cosmetic* ordinal only —
-//!   see [`PAGE_PARAM`] — so the numbered pager (`Pager`, [`page_strip`]) can
-//!   label a page without pretending the cursor mechanics changed.
+//!   [`catalog_url`]. `?page=` is a *second*, independent primitive
+//!   (maintainer ruling, 2026-08-15, specs/catalog-search.md "Numbered page
+//!   links, round 2"): an explicit page-N jump, turned server-side into an
+//!   `OFFSET` under the same sort the cursor uses — see [`PAGE_PARAM`]. A
+//!   `?cursor=` still wins when both are present (a legacy shared link
+//!   carries only a cursor, never a page).
 //! - **What is *displayed* comes from the payload, not the URL.** The two
 //!   disagree for the whole of every search — `<Transition>` holds the previous
 //!   page on screen while the next resolves — so which page this is, how many
@@ -70,12 +73,40 @@ const LIST_VIEW: &str = "list";
 /// `/catalog?q=…&cursor=…`, shareable/restorable/SSR-able).
 const CURSOR_PARAM: &str = "cursor";
 
-/// The page-number *label* riding beside `?cursor=` (WB-01M032Q6BX8BM7NPK8H3AQKGWF,
-/// specs/catalog-search.md "Numbered page links (2026-08-15)"). It is display
-/// data, not fetch input — `results` keys on `(q, cursor)` alone, so a hand-edited
-/// or stale `?page=` can only mislabel the page number on screen, never fetch the
-/// wrong rows. Omitted for page one, same as `cursor`.
+/// The page number, in the URL beside `?q=`/`?cursor=` (WB-01M032Q6BX8BM7NPK8H3AQKGWF,
+/// specs/catalog-search.md "Numbered page links"). **Real fetch input as of
+/// the maintainer's round-2 ruling (2026-08-15)** — `results` keys on it and,
+/// when there is no `?cursor=` riding along, sends it to `search_catalog` as
+/// an explicit page-N jump, turned server-side into an `OFFSET` under the same
+/// sort the keyset cursor uses. A `?cursor=` still wins when both are present
+/// (legacy/shared links from before this ruling carry only a cursor, never a
+/// page). Omitted for page one, same as `cursor`.
 const PAGE_PARAM: &str = "page";
+
+/// A hard ceiling on the page number this screen will ever parse out of the
+/// URL or hand to the server — nowhere close to a claim about the catalog's
+/// real size (at 50 rows/page that's 50 million rows), just large enough to
+/// need no per-request knowledge of the true last page while still bounding
+/// every downstream `usize`/`u32` computation (`page_strip`, `page_offset`)
+/// against an adversarial `?page=` (WB-01M032Q6BX8BM7NPK8H3AQKGWF round 2's
+/// adversarial-review blocker: `GET /catalog?page=18446744073709551615`
+/// reaching unguarded `page + 1` arithmetic panicked an anonymous SSR request
+/// in debug builds). `page_offset` (hosted.rs) is `saturating` on its own
+/// terms too — this ceiling is defense in depth, not the only guard, so a
+/// direct hosted-API caller bypassing this parse entirely still cannot
+/// overflow anything server-side.
+const MAX_PAGE: usize = 1_000_000;
+
+/// Parse `?page=`, clamped to `1..=MAX_PAGE`. Absent, zero, unparsable, or a
+/// number so large it can't even fit a `usize` (`usize::MAX` on a 64-bit
+/// build parses fine as a `usize` — the crafted case this function exists to
+/// defuse) all land on a sane, bounded value; nothing here can panic or wrap.
+fn parse_page(raw: Option<&str>) -> usize {
+    raw.and_then(|p| p.parse::<usize>().ok())
+        .filter(|p| *p > 0)
+        .unwrap_or(1)
+        .min(MAX_PAGE)
+}
 
 /// Build `/catalog?q=…&view=…&cursor=…&page=…`, omitting empty parts. The
 /// single place a catalog URL is constructed, so the canonical form can't
@@ -96,6 +127,17 @@ const PAGE_PARAM: &str = "page";
 ///
 /// The only callers that carry a cursor (and its page label) forward are
 /// [`ViewSwitch`] and [`Pager`], neither of which touches the query.
+///
+/// **`page` and `cursor` name the same thing two ways, and `cursor` wins when
+/// both are present** (`CatalogStore::search`'s doc comment). `Pager` never
+/// generates both together — every link it builds carries `page` alone — but
+/// a **legacy shared link from before round 2** (`?cursor=…`, no `?page=`)
+/// still works, unchanged, for fetching: `results` uses the cursor and
+/// ignores the absent page. What it does *not* get right is the *label*:
+/// `page` there parses to 1 (nothing else to read), so `SearchPayload.page`
+/// mislabels a genuinely later page as page one. Callers that key behavior on
+/// "is this really page one" (`last_good`) check `cursor.is_empty() &&
+/// page <= 1` together for exactly this reason — `page` alone is not enough.
 fn catalog_url(q: &str, list_view: bool, cursor: Option<&str>, page: Option<usize>) -> String {
     let mut url = String::from("/catalog");
     let mut sep = '?';
@@ -261,10 +303,12 @@ pub(crate) struct SearchPayload {
     pub(crate) q: String,
     /// The cursor they were fetched with; empty means page one.
     pub(crate) cursor: String,
-    /// The `?page=` label this request was made under (1 when absent/unparsable
-    /// — see [`PAGE_PARAM`]). Echoed for the same reason `q`/`cursor` are: the
-    /// pager describes the payload on screen, not whatever the URL has moved
-    /// on to under a `<Transition>`.
+    /// The page number this request was made under (1 when absent/unparsable
+    /// — see [`PAGE_PARAM`]/[`parse_page`]); when `cursor` is empty, this is
+    /// what actually drove the fetch (an explicit `OFFSET` jump), not just a
+    /// label. Echoed for the same reason `q`/`cursor` are: the pager describes
+    /// the payload on screen, not whatever the URL has moved on to under a
+    /// `<Transition>`.
     pub(crate) page: usize,
     pub(crate) search: Result<shared::SearchResults, ServerFnError<shared::ApiError>>,
 }
@@ -280,37 +324,32 @@ pub fn CatalogPage() -> impl IntoView {
     let list_view =
         Memo::new(move |_| query_map.read().get(VIEW_PARAM).as_deref() == Some(LIST_VIEW));
     let url_cursor = Memo::new(move |_| query_map.read().get(CURSOR_PARAM).unwrap_or_default());
-    // Display-only (see `PAGE_PARAM`): 1 when absent, unparsable, or zero — a
-    // hand-edited `?page=` can only mislabel this page, never fetch a different
-    // one, since it plays no part in `results`' key below.
-    let url_page = Memo::new(move |_| {
-        query_map
-            .read()
-            .get(PAGE_PARAM)
-            .and_then(|p| p.parse::<usize>().ok())
-            .filter(|p| *p > 0)
-            .unwrap_or(1)
-    });
+    // `parse_page` clamps and never panics — see its own doc comment
+    // (WB-01M032Q6BX8BM7NPK8H3AQKGWF round 2's adversarial-review blocker).
+    let url_page = Memo::new(move |_| parse_page(query_map.read().get(PAGE_PARAM).as_deref()));
 
     // The text in the box. The URL⇄field sync lives in QueryBar, which is the
     // only thing that writes either one.
     let query_text = RwSignal::new(url_q.get_untracked());
 
-    // One keyset page. Keyed on the URL's query, cursor *and* page label: the
+    // One page of results. Keyed on the URL's query, cursor *and* page: the
     // debounce decides *when* the URL moves, this decides what is displayed
     // once it has. A navigation that changes only `view` moves none of the
-    // three, so switching layout does not re-search. `page` never changes what
-    // is fetched (only `q`/`cursor` do — see `PAGE_PARAM`), so keying on it too
-    // is a correctness-over-cost call: every `href` this screen generates moves
-    // `page` in lockstep with `cursor`, so it never causes a *spurious* refetch
-    // in practice, and it guarantees the echoed `page` below can never lag the
-    // cursor it labels.
+    // three, so switching layout does not re-search.
+    //
+    // **`page` is real fetch input now** (maintainer ruling, 2026-08-15 —
+    // specs/catalog-search.md "Numbered page links"), not just a label: when
+    // there is no `cursor`, a `page > 1` becomes an explicit jump —
+    // `search_catalog`'s `page` argument, turned server-side into an `OFFSET`
+    // under the same sort the keyset cursor uses. A `cursor` still wins when
+    // both are present (a legacy/shared link from before this ruling carries
+    // only a cursor, never a page) — see `catalog_url`'s doc comment.
     let results = Resource::new(
         move || (url_q.get(), url_cursor.get(), url_page.get()),
         |(q, cursor, page)| async move {
-            let search =
-                crate::search_catalog(q.clone(), (!cursor.is_empty()).then(|| cursor.clone()))
-                    .await;
+            let cursor_arg = (!cursor.is_empty()).then(|| cursor.clone());
+            let page_arg = (cursor.is_empty() && page > 1).then_some(page as u32);
+            let search = crate::search_catalog(q.clone(), cursor_arg, page_arg).await;
             SearchPayload {
                 q,
                 cursor,
@@ -319,34 +358,6 @@ pub fn CatalogPage() -> impl IntoView {
             }
         },
     );
-
-    // Which pages this browser has actually fetched a cursor for, this search.
-    // The catalog's paging primitive is a forward-only keyset cursor with no
-    // offset (specs/catalog-search.md "What a keyset page may claim") — there
-    // is no way to *derive* the cursor for an arbitrary page, only to have
-    // fetched it already. `1` is always reachable (the empty cursor); every
-    // other page number a reader has actually stood on lands here, keyed by
-    // its `?page=` label, so **Prev** and any earlier numbered link the strip
-    // shows are real navigations back to a page this trail already proves
-    // exists — never a fabricated jump. Reset whenever the query changes (the
-    // same rule `catalog_url`'s callers already follow for the cursor itself);
-    // nothing ever clears a single entry, since a page's cursor for a given
-    // query never changes.
-    let trail = RwSignal::new(std::collections::HashMap::<usize, String>::new());
-    let trail_query = RwSignal::new(None::<String>);
-    Effect::new(move |_| {
-        let Some(p) = results.get() else { return };
-        if p.search.is_err() {
-            return;
-        }
-        if trail_query.get_untracked().as_deref() != Some(p.q.as_str()) {
-            trail_query.set(Some(p.q.clone()));
-            trail.set(std::collections::HashMap::from([(1, String::new())]));
-        }
-        trail.update(|t| {
-            t.entry(p.page).or_insert(p.cursor.clone());
-        });
-    });
 
     // The last result set that came back OK, and the query it answered. A
     // rejected query must not take the results down with it
@@ -357,15 +368,22 @@ pub fn CatalogPage() -> impl IntoView {
     //
     // **Only page one is ever kept, and paging away forgets it** (P6-131). The
     // set exists to survive a *typing* error, and every edit to the query drops
-    // the cursor, so the page an error lands on is always page one. Retaining a
-    // cursored page instead put "rows 51–73 of a search you have since left"
-    // under an error about a different one — dimmed and labelled "Previous
-    // results", which made it look deliberate.
+    // the cursor (and the page), so the page an error lands on is always page
+    // one. Retaining a paged result instead put "rows 51–73 of a search you
+    // have since left" under an error about a different one — dimmed and
+    // labelled "Previous results", which made it look deliberate.
+    //
+    // Checked on **both** `p.cursor` and `p.page` now: an explicit page-N
+    // jump also fetches with an empty cursor (round 2's offset path), so
+    // cursor-emptiness alone no longer means "page one" — and a legacy
+    // `?cursor=`-only link (no `page`) still defaults `page` to 1 despite
+    // answering a later page (`catalog_url`'s doc comment has the caveat).
+    // Only a fetch that is unambiguously page one on *both* counts is kept.
     let last_good = RwSignal::new(None::<(String, Vec<CardSummary>)>);
     Effect::new(move |_| {
         let Some(p) = results.get() else { return };
         match p.search {
-            Ok(r) if p.cursor.is_empty() => last_good.set(Some((p.q, r.cards))),
+            Ok(r) if p.cursor.is_empty() && p.page <= 1 => last_good.set(Some((p.q, r.cards))),
             Ok(_) => last_good.set(None),
             // An error keeps whatever is there — that *is* the feature.
             Err(_) => {}
@@ -384,6 +402,20 @@ pub fn CatalogPage() -> impl IntoView {
                 false => None,
             }
         },
+    );
+
+    // The row count *for this query* — filtered or browse-all, either way —
+    // powering the pager's true-last-page number (maintainer ruling,
+    // 2026-08-15). A second, independent request from `results`/`count`
+    // itself, keyed the same way `count` is (fires once per settled query,
+    // same debounce protection) but never awaited alongside `results`: `Pager`
+    // reads it with a plain, non-blocking `.get()`, so the strip renders with
+    // `results` immediately and *upgrades* once this resolves — never the
+    // reverse. Kept off the per-keystroke path only by never being on it:
+    // nothing here runs any more often than `results` itself already does.
+    let search_count = Resource::new(
+        move || url_q.get(),
+        |q| async move { crate::search_catalog_count(q).await.ok().map(|c| c.cards) },
     );
 
     view! {
@@ -419,7 +451,7 @@ pub fn CatalogPage() -> impl IntoView {
                 aria_label="Search the catalog"
             />
             <ResultsToolbar results list_view />
-            <Results results last_good list_view url_q query_text count trail />
+            <Results results last_good list_view url_q query_text search_count />
         </div>
     }
 }
@@ -668,8 +700,7 @@ fn Results(
     list_view: Memo<bool>,
     url_q: Memo<String>,
     query_text: RwSignal<String>,
-    count: Resource<Option<shared::CatalogCount>>,
-    trail: RwSignal<std::collections::HashMap<usize, String>>,
+    search_count: Resource<Option<i64>>,
 ) -> impl IntoView {
     view! {
         // Transition, not Suspense: re-searching keeps the previous results on
@@ -685,8 +716,14 @@ fn Results(
                 // routinely moved past what is rendered here (P6-133a: reading
                 // `?cursor=` grew a "Back to the start" on a page that was
                 // still page one).
+                //
+                // `paged`: not `page`'s own request `p.page` alone — a legacy
+                // `?cursor=`-only link (no `page`) still has to read as "not
+                // page one" for `NoResults`/the error banner's recovery link,
+                // even though `page` there defaults to 1 (see `catalog_url`'s
+                // doc comment on that caveat).
                 let SearchPayload { q, cursor, page, search } = results.await;
-                let paged = !cursor.is_empty();
+                let paged = !cursor.is_empty() || page > 1;
                 let stale = displaced_by(q.clone(), url_q, query_text);
                 match search {
                     Ok(r) if r.cards.is_empty() => {
@@ -694,37 +731,16 @@ fn Results(
                     }
                     Ok(r) => {
                         let shared::SearchResults { cards, next_cursor } = r;
-                        // The true last page, honestly known only in two cases
-                        // (`page_strip`'s doc comment has the full reasoning):
-                        // this *is* the last page (no `next_cursor`), or this is
-                        // browse-all and `catalog_count` resolved — the one total
-                        // this screen has never needed a per-search `COUNT` for,
-                        // because it counts the *whole* catalog, matching the
-                        // query exactly when the query is empty. `page_size` is
-                        // read off this page rather than hardcoded 50, so a
-                        // future page-size change (queued) needs no edit here.
-                        let last = if next_cursor.is_none() {
-                            Some(page)
-                        } else if q.is_empty() {
-                            let page_size = cards.len();
-                            count
-                                .await
-                                .filter(|_| page_size > 0)
-                                .map(|c| (c.cards as usize).div_ceil(page_size))
-                        } else {
-                            None
-                        };
+                        let has_more = next_cursor.is_some();
+                        // `page_size` read off this page rather than hardcoded
+                        // 50, so a future page-size change (queued) needs no
+                        // edit here — only meaningful (and only used) when
+                        // `has_more`, since the server always returns exactly
+                        // `limit` rows in that case.
+                        let page_size = cards.len();
                         view! {
                             <ResultCards cards list_view stale=false />
-                            <Pager
-                                page
-                                next=next_cursor
-                                last
-                                q
-                                list_view
-                                stale
-                                trail
-                            />
+                            <Pager page has_more page_size q list_view stale search_count />
                         }
                             .into_any()
                     }
@@ -903,7 +919,12 @@ pub(crate) fn page_strip(current: usize, last: Option<usize>) -> Vec<PageSlot> {
             }
         }
         out.push(PageSlot::Current(current));
-        out.push(PageSlot::Number(current + 1));
+        // `saturating_add`: `current` is clamped well below `usize::MAX` by
+        // every real caller (`MAX_PAGE`), but this function is unit-tested
+        // directly against the crafted `usize::MAX` case (adversarial-review
+        // blocker, WB-01M032Q6BX8BM7NPK8H3AQKGWF round 2) and must not panic
+        // or wrap on its own terms, independent of what a caller clamped.
+        out.push(PageSlot::Number(current.saturating_add(1)));
         return out;
     };
     let last = last.max(current);
@@ -920,10 +941,11 @@ pub(crate) fn page_strip(current: usize, last: Option<usize>) -> Vec<PageSlot> {
 
     // A band of 4 around `current`, counting up unless that would run past
     // the `last` boundary reserved below -- then counting down instead, ending
-    // *at* `current` (examples 1 vs. 3).
-    let counting_up = current + 3 < last;
+    // *at* `current` (examples 1 vs. 3). `saturating_add` throughout: same
+    // no-panic-on-its-own-terms contract as the `last = None` branch above.
+    let counting_up = current.saturating_add(3) < last;
     let (mut lo, mut hi) = if counting_up {
-        (current, current + 3)
+        (current, current.saturating_add(3))
     } else {
         (current.saturating_sub(3).max(1), current)
     };
@@ -981,32 +1003,32 @@ pub(crate) fn page_strip(current: usize, last: Option<usize>) -> Vec<PageSlot> {
     out
 }
 
-/// Keyset paging controls (specs/catalog-search.md `/catalog?q=...&cursor=...`).
+/// Numbered paging controls (specs/catalog-search.md `/catalog?q=...&page=...`).
 ///
 /// **Left-justified, Prev/Next always rendered, wrapping up to 6 page-number
 /// links** (WB-01M032Q6BX8BM7NPK8H3AQKGWF), replacing the old right-aligned
 /// "Next page (arrow)" / "(arrow) Back to the start" pair.
 ///
-/// **Which numbers are real links.** The paging primitive underneath this is
-/// still a forward-only keyset cursor with no offset (see [`page_strip`]'s doc
-/// comment) -- there is no way to *derive* the cursor for a page this browser
-/// has not fetched, only to have fetched it already. Exactly three page
-/// numbers are ever backed by a cursor this component actually has: **1**
-/// (the empty cursor, always valid), **the current page**, and **current + 1**
-/// (`next_cursor` -- the same cursor Next already uses). `trail` (built by
-/// `CatalogPage`, one entry per page this browser has actually stood on for
-/// this query) adds every earlier page a reader reached by paging forward --
-/// which is how **Prev** and a band member below `current` (example 3's
-/// `[6][7][8]`) become real links too, without ever needing a cursor nobody
-/// has fetched yet. A number `page_strip` wants to show that isn't 1, isn't
-/// current + 1, and isn't in the trail -- a page ahead nobody has visited, e.g.
-/// `[10][11][12]` when freshly landing on page 9, or browse-all's true `last`
-/// before it's been walked to -- renders **inert**: present (a real `<a>`,
-/// satisfying the a11y contract) but disabled, the same "greyed, not gone"
-/// contract `PagerLink` already gives a stale link, rather than a link that
-/// would need to walk there itself or 404 into the wrong page. Follow-up:
-/// direct page-N addressing needs either an offset-capable query or a client
-/// walk; out of scope here (see specs/catalog-search.md Findings).
+/// **Every rendered number is a real link, from round 2 on** (maintainer
+/// ruling, 2026-08-15, superseding round 1's "some numbers render inert"
+/// compromise): an explicit page-N jump no longer needs a cursor this browser
+/// happens to have already fetched — `href_for` hands every number straight to
+/// `catalog_url`, which the server turns into an `OFFSET` under the same sort
+/// the keyset cursor uses (`CatalogStore::search`'s doc comment). This retired
+/// the client-side `trail` `CatalogPage` used to keep (one entry per page a
+/// reader had actually stood on) — with every page directly addressable,
+/// remembering *which* pages had been visited no longer earns its keep.
+///
+/// **`last` (the true last page) is two-tier honest**, same principle as
+/// before, cheaper to reach now: `has_more == false` means this *is* the last
+/// page, exactly, no query needed. Otherwise `search_count` (a second,
+/// independent request `CatalogPage` fires alongside `results`, not blocking
+/// it) supplies the row count once it resolves — read here with a plain,
+/// non-blocking `.get()`, so the strip renders immediately with `results` and
+/// upgrades in place the moment the count lands, never the reverse. Until
+/// then (or for the true edge case a `search_count` fetch itself errors),
+/// `last = None` and `page_strip` degrades to naming only 1, current, and
+/// current + 1 — the only pages nameable without a total, same as always.
 ///
 /// **`paged`/`last` are the rendered page's own facts, not the URL's**
 /// (P6-133a), and there is **no `<nav>` at all when there is nothing to page**
@@ -1017,87 +1039,50 @@ pub(crate) fn page_strip(current: usize, last: Option<usize>) -> Vec<PageSlot> {
 #[component]
 fn Pager(
     page: usize,
-    next: Option<String>,
-    last: Option<usize>,
+    has_more: bool,
+    page_size: usize,
     q: String,
     list_view: Memo<bool>,
     stale: Signal<bool>,
-    trail: RwSignal<std::collections::HashMap<usize, String>>,
+    search_count: Resource<Option<i64>>,
 ) -> impl IntoView {
-    let has_next = next.is_some();
     // Nothing before this page and nothing after it: the whole landmark is
     // noise, so it is not rendered.
-    if !pager_is_needed(page > 1, has_next) {
+    if !pager_is_needed(page > 1, has_more) {
         return ().into_any();
     }
     let q = StoredValue::new(q);
-    let next_cursor = StoredValue::new(next);
-    let slots = StoredValue::new(page_strip(page, last));
 
     view! {
         <nav aria-label="Pagination" class="flex flex-wrap items-center gap-1">
             {move || {
-                // The whole strip is *one* dynamic child, rebuilt fresh
-                // whenever `list_view` or `stale` changes -- the same
+                // The whole strip is *one* dynamic child, rebuilt whenever
+                // `list_view`, `stale`, or `search_count` changes -- the same
                 // "reactive dependencies read inside a `move ||` block that
                 // rebuilds the subtree" shape `ResultCards` already uses for
-                // `list_view`, not N sibling components each holding their
-                // own `Signal::derive` prop.
-                //
-                // That used to be N `PagerLink`s, each taking
-                // `href: Signal<Option<String>>` built via
-                // `Signal::derive(move || href_for(n))` in *this* function's
-                // scope. `<Transition>` keeps the previous `Pager` mounted
-                // (and reactive) while the next one resolves, and every one
-                // of those derives stayed subscribed to `stale` and (for any
-                // number backed by `trail`) to a signal `CatalogPage` writes
-                // to *in the same reactive tick* the new `Pager` replaces this
-                // one. The result was a live "you tried to access a reactive
-                // value ... but it has already been disposed" panic —
-                // reproduced two ways: clicking Next once (the trail write),
-                // and typing a new query into the box (`stale` flipping) —
-                // both stopped all further reactivity on the page stone dead.
-                // Building the whole strip inside one dynamic child sidesteps
-                // it: nothing here is a signal with an owner of its own that
-                // could outlive (or be outlived by) the content around it.
+                // `list_view`, not N sibling components each holding their own
+                // `Signal::derive` prop (round 1 built it that way for the
+                // numbered links and hit a live "already disposed" panic the
+                // instant a sibling signal changed while `<Transition>` still
+                // held the previous `Pager` mounted — see git history on this
+                // function for the fuller account).
                 let list = list_view.get();
                 let is_stale = stale.get();
-                let cursor_for = |n: usize| -> Option<String> {
-                    if n == 1 {
-                        Some(String::new())
-                    } else if has_next && n == page + 1 {
-                        next_cursor.get_value()
-                    } else {
-                        // Untracked: this closure already reruns whenever
-                        // `list_view`/`stale` do, and `trail` only ever
-                        // changes in step with a *new* `Pager` replacing this
-                        // one outright — there is nothing for a tracked read
-                        // here to buy.
-                        trail.with_untracked(|t| t.get(&n).cloned())
-                    }
+                // Two-tier honesty -- see the doc comment above.
+                let last = if !has_more {
+                    Some(page)
+                } else {
+                    search_count
+                        .get()
+                        .flatten()
+                        .filter(|_| page_size > 0)
+                        .map(|total| (total.max(0) as usize).div_ceil(page_size))
                 };
-                let href_for = |n: usize| -> Option<String> {
-                    cursor_for(n).map(|c| {
-                        catalog_url(
-                            &q.get_value(),
-                            list,
-                            (!c.is_empty()).then_some(c.as_str()),
-                            Some(n),
-                        )
-                    })
+                let href_for = |n: usize| -> String {
+                    catalog_url(&q.get_value(), list, None, Some(n))
                 };
-                // One pager link, inert while unreachable or stale. "Inert,
-                // not gone" ([`PageLink`]'s contract, generalized): removing
-                // the control -- or its `href`, the same thing to the tab
-                // order -- would drop keyboard focus mid-navigation, so a
-                // disabled link keeps its tab stop and an `aria-disabled`
-                // read `on:click` also honors (a keyboard activation
-                // dispatches a real click, and `leptos_router`'s bubble
-                // listener bails on `defaultPrevented` -- load-bearing on
-                // `tachys/delegation` staying off in this build, same
-                // assumption `PageLink` already documents).
-                let link = move |href: Option<String>, testid: String, label: String| {
-                    let disabled = href.is_none() || is_stale;
+                let link = move |href: String, testid: String, label: String, boundary: bool| {
+                    let disabled = is_stale || boundary;
                     let class = if disabled {
                         "border-input hover:bg-accent hover:text-accent-foreground rounded-md border px-3 py-1.5 text-sm pointer-events-none opacity-50"
                             .to_string()
@@ -1107,7 +1092,7 @@ fn Pager(
                     };
                     view! {
                         <a
-                            href=href.unwrap_or_else(|| "#".to_string())
+                            href=href
                             class=class
                             aria-disabled=disabled.then_some("true")
                             data-testid=testid
@@ -1123,15 +1108,15 @@ fn Pager(
                         .into_any()
                 };
 
-                let mut children: Vec<leptos::prelude::AnyView> = Vec::with_capacity(
-                    slots.with_value(|s| s.len()) + 2,
-                );
+                let slots = page_strip(page, last);
+                let mut children: Vec<leptos::prelude::AnyView> = Vec::with_capacity(slots.len() + 2);
                 children.push(link(
                     href_for(page.saturating_sub(1)),
                     "pager-prev".to_string(),
                     "\u{2190} Prev".to_string(),
+                    page <= 1,
                 ));
-                for slot in slots.get_value() {
+                for slot in slots {
                     children.push(match slot {
                         PageSlot::Ellipsis => {
                             view! {
@@ -1156,13 +1141,16 @@ fn Pager(
                             }
                                 .into_any()
                         }
-                        PageSlot::Number(n) => link(href_for(n), format!("pager-page-{n}"), n.to_string()),
+                        PageSlot::Number(n) => {
+                            link(href_for(n), format!("pager-page-{n}"), n.to_string(), false)
+                        }
                     });
                 }
                 children.push(link(
-                    href_for(page + 1),
+                    href_for(page.saturating_add(1)),
                     "pager-next".to_string(),
                     "Next \u{2192}".to_string(),
+                    !has_more,
                 ));
                 children.into_iter().collect_view()
             }}
@@ -1748,8 +1736,8 @@ pub(crate) fn raise_add_toast(t: AddToast) {
 #[cfg(test)]
 mod tests {
     use super::{
-        catalog_url, count_label, encode_query_value, page_strip, pager_is_needed, same_search,
-        PageSlot,
+        catalog_url, count_label, encode_query_value, page_strip, pager_is_needed, parse_page,
+        same_search, PageSlot, MAX_PAGE,
     };
 
     #[test]
@@ -1981,5 +1969,55 @@ mod tests {
             page_strip(9, None),
             vec![Number(1), Ellipsis, Current(9), Number(10)]
         );
+    }
+
+    // Overflow safety (WB-01M032Q6BX8BM7NPK8H3AQKGWF round 2's adversarial-
+    // review blocker): `GET /catalog?page=18446744073709551615` (usize::MAX
+    // on a 64-bit build) reaching unguarded `page + 1` / `current + 1` /
+    // `current + 3` arithmetic panicked an anonymous SSR request in debug
+    // builds. The crafted string, verbatim.
+
+    #[test]
+    fn the_crafted_overflow_url_clamps_instead_of_parsing_raw() {
+        assert_eq!(parse_page(Some("18446744073709551615")), MAX_PAGE);
+        // Every other edge `parse_page` exists to defuse, alongside it.
+        assert_eq!(parse_page(None), 1);
+        assert_eq!(parse_page(Some("")), 1);
+        assert_eq!(parse_page(Some("0")), 1);
+        assert_eq!(parse_page(Some("-1")), 1);
+        assert_eq!(parse_page(Some("not a number")), 1);
+        assert_eq!(parse_page(Some("9")), 9);
+        // A merely-large-but-parseable number still clamps to the ceiling —
+        // not just the one value that happens to equal `usize::MAX`.
+        assert_eq!(parse_page(Some("999999999999")), MAX_PAGE);
+    }
+
+    #[test]
+    fn page_strip_does_not_panic_or_wrap_on_the_largest_possible_current() {
+        // `page_strip` is unit-tested directly against the raw, unclamped
+        // value too — defense in depth, independent of whatever a caller
+        // (`parse_page`, or a direct hosted-API caller bypassing the UI
+        // entirely) already clamped. Must not panic; the exact shape is not
+        // the point (nothing sane can be shown for this input) — only that a
+        // huge `current` alone, with no `last`, produces a small, bounded
+        // strip rather than climbing toward `usize::MAX`.
+        let strip = page_strip(usize::MAX, None);
+        assert_eq!(strip.len(), 4); // [1] ... current [current+1], saturated
+        assert!(strip.contains(&PageSlot::Current(usize::MAX)));
+        // `current + 1` saturates rather than wrapping to 0.
+        assert!(strip.contains(&PageSlot::Number(usize::MAX)));
+
+        // The same input with a `last` that also happens to be huge (the
+        // `last.max(current)` defensive clamp reaching for `usize::MAX` too)
+        // — still no panic, still a bounded result: at most 6 *numbers*
+        // (`strip.len()` itself can run a couple over that, `...` fillers
+        // between them).
+        let strip = page_strip(usize::MAX, Some(773));
+        assert!(!strip.is_empty());
+        let numbered = strip
+            .iter()
+            .filter(|s| !matches!(s, PageSlot::Ellipsis))
+            .count();
+        assert!(numbered <= 6, "{numbered} numbered slots: {strip:?}");
     }
 }

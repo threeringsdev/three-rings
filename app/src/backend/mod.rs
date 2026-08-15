@@ -81,6 +81,15 @@ pub mod paths {
 
     pub const CATALOG_COUNT: &str = "/api/catalog/count";
     pub const CATALOG_SEARCH: &str = "/api/catalog/search";
+    /// GET `?q=` — the row count *for that query* (filtered or browse-all),
+    /// under the same grammar `CATALOG_SEARCH` parses. Separate from
+    /// `CATALOG_SEARCH` and from `CATALOG_COUNT` (which is unconditional, no
+    /// `q`) on purpose: a per-search `COUNT` is deliberately not on the
+    /// per-keystroke path (specs/catalog-search.md "What a keyset page may
+    /// claim" / "Numbered page links" — maintainer ruling, 2026-08-15) — the
+    /// pager fetches it as its own request, resolving after (never blocking)
+    /// the results themselves.
+    pub const CATALOG_SEARCH_COUNT: &str = "/api/catalog/search/count";
     /// GET one window of the set list — the rail's Set facet picker.
     pub const CATALOG_SETS: &str = "/api/catalog/sets";
     /// GET = list the tree; POST = create.
@@ -239,7 +248,7 @@ pub trait CatalogStore {
     /// The hover / quick-preview subset for a card; `owned` filled when authed.
     async fn card_summary(&self, oracle_id: Id) -> ApiResult<CardSummary>;
 
-    /// One keyset page of catalog search results. This is the endpoint *shell*
+    /// One page of catalog search results. This is the endpoint *shell*
     /// (specs/collection-api.md): the query→SQL translation is
     /// [catalog-search](../../specs/catalog-search.md)'s — until it lands, `q`
     /// does a fuzzy name match. Empty until catalog-ingestion populates the rows.
@@ -248,7 +257,35 @@ pub trait CatalogStore {
     /// [`card_summary`](Self::card_summary) — the caller's global count when the
     /// backend carries a session, `None` (unknown, *not* zero) when anonymous.
     /// Ownership never affects *which* cards a search returns or how it pages.
-    async fn search(&self, query: SearchQuery, page: Page) -> ApiResult<SearchResults>;
+    ///
+    /// **`page_number` is a second, independent way to name a page** — an
+    /// explicit page-N jump (specs/catalog-search.md "Numbered page links" —
+    /// maintainer ruling, 2026-08-15), computed server-side into `OFFSET
+    /// (page_number - 1) * limit` under the *same* `ORDER BY (name,
+    /// oracle_id)` the keyset cursor uses, so a `page.cursor` walk and a
+    /// `page_number` jump agree on row order. It is not threaded through
+    /// `Page` (`shared::collection::Page`, also `/my`'s type) to keep this a
+    /// catalog-search-only capability. When both are `Some` (never generated
+    /// by this app's own UI, but not rejected either), `page_number` wins —
+    /// an explicit jump is a stronger statement about *which* page than a
+    /// carried-over cursor. Every caller not making an explicit jump passes
+    /// `None`, unchanged from before this capability existed.
+    async fn search(
+        &self,
+        query: SearchQuery,
+        page: Page,
+        page_number: Option<u32>,
+    ) -> ApiResult<SearchResults>;
+
+    /// The row count *for this query* — filtered or browse-all, same grammar
+    /// `search` parses. A second, independent query from `search` itself
+    /// (never a `JOIN`/subquery folded into it): the pager needs it only to
+    /// name a numbered strip's true last page, and it must never slow down —
+    /// or run on — the per-keystroke search path itself
+    /// (specs/catalog-search.md "What a keyset page may claim"). Callers fetch
+    /// it as its own, separate request, resolving independently of (and later
+    /// than) `search`'s own results.
+    async fn search_count(&self, query: SearchQuery) -> ApiResult<CatalogCount>;
 
     /// The set list, newest first, narrowed by [`SetQuery::term`] — the
     /// vocabulary behind the filter rail's Set facet, so a user picks *Modern

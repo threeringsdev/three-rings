@@ -235,6 +235,7 @@ async fn depth_picks(be: &HostedBackend, taken: &[Id]) -> Result<(Pick, MultiPic
                     cursor,
                     limit: Some(200),
                 },
+                None,
             )
             .await?;
         for card in &page.cards {
@@ -461,6 +462,7 @@ async fn find(be: &HostedBackend, q: &str, n: usize) -> Result<Vec<Pick>, ApiErr
                 cursor: None,
                 limit: Some(n as u32 + 5),
             },
+            None,
         )
         .await?;
     let mut picks = Vec::with_capacity(n);
