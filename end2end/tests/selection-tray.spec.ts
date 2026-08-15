@@ -258,6 +258,51 @@ test.describe("cross-view", () => {
     await expect(page.locator(COUNT)).toHaveText("2 cards");
   });
 
+  // The tray's own trigger docks at the very bottom of the window (the
+  // `mobile` describe below, and the desktop dock above the same tab-bar-less
+  // chrome) — exactly the position a popover's default placement or its
+  // no-anchor-positioning JS fallback can get wrong and park off-screen at
+  // the document's bottom edge (fixed: `components/ui/popover.rs`). Asserted
+  // at both a desktop and a narrow viewport per that fix's own two
+  // contributing bugs — a leftover `relative` class (any anchor-positioning
+  // engine, any viewport) and a stale pre-content-load flip decision (the
+  // JS fallback, not currently exercisable by this suite's chromium-only
+  // tier since Chromium supports CSS anchor positioning natively — see the
+  // primitive's module doc for both).
+  test("@fast \"Move to…\" opens fully inside the viewport, adjacent to its trigger", async ({
+    page,
+  }) => {
+    await openMy(page, "/my/all");
+    await clickUntil(page.locator(MY_ROW_SELECT).first(), () =>
+      textEquals(page.locator(COUNT), "1 card"),
+    );
+    await page.locator(MOVE).click();
+
+    const panel = page.locator("#popover-tray-destination");
+    // Content, not just a visibility flag — the e2e-suite skill's own
+    // "closed popover is in the DOM" caveat, though moot here: a *closed*
+    // native popover is `display:none`, so `boundingBox()` below already
+    // returns `null` rather than a lying zero-size box.
+    await expect(
+      panel.locator('[data-name="CommandInput"]'),
+    ).toHaveAttribute("placeholder", "Search collections…");
+
+    const box = await panel.boundingBox();
+    const viewport = page.viewportSize();
+    expect(box, "picker panel should be rendered and open").toBeTruthy();
+    expect(viewport, "viewport size should be known").toBeTruthy();
+    expect(box!.y, "panel top should not be above the viewport").toBeGreaterThanOrEqual(0);
+    expect(
+      box!.y + box!.height,
+      "panel bottom should not run past the viewport — the reported bug",
+    ).toBeLessThanOrEqual(viewport!.height);
+    expect(box!.x, "panel left should not be off the left edge").toBeGreaterThanOrEqual(0);
+    expect(
+      box!.x + box!.width,
+      "panel right should not run past the viewport",
+    ).toBeLessThanOrEqual(viewport!.width);
+  });
+
   test.describe("mobile", () => {
     test.use({ viewport: { width: 390, height: 844 } });
 
@@ -278,6 +323,30 @@ test.describe("cross-view", () => {
       expect(tray!.y + tray!.height).toBeLessThanOrEqual(tabs!.y);
       // And the tabs are still the thing at the bottom of the viewport.
       expect(tabs!.y + tabs!.height).toBeGreaterThanOrEqual(844 - 1);
+    });
+
+    test("@fast \"Move to…\" still opens fully inside a narrow viewport", async ({ page }) => {
+      await openMy(page, "/my/all");
+      await clickUntil(page.locator(MY_ROW_SELECT).first(), () =>
+        textEquals(page.locator(COUNT), "1 card"),
+      );
+      await page.locator(MOVE).click();
+
+      const panel = page.locator("#popover-tray-destination");
+      await expect(
+        panel.locator('[data-name="CommandInput"]'),
+      ).toHaveAttribute("placeholder", "Search collections…");
+
+      const box = await panel.boundingBox();
+      expect(box, "picker panel should be rendered and open").toBeTruthy();
+      expect(box!.y).toBeGreaterThanOrEqual(0);
+      expect(box!.y + box!.height, "panel bottom should not run past 844px").toBeLessThanOrEqual(
+        844,
+      );
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width, "panel right should not run past 390px").toBeLessThanOrEqual(
+        390,
+      );
     });
   });
 });
