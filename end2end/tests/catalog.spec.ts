@@ -41,9 +41,14 @@ test("browse-all renders without a query @fast", async ({ page }) => {
 test("typing debounces into a URL-canonical search @fast", async ({ page }) => {
   await page.goto("/catalog");
   await hydrated(page);
+  // Exact endpoint match, not a substring: `/api/search_catalog_count`
+  // (round 2's independent count request) also contains "/api/search_catalog"
+  // as a substring and would otherwise double-count here.
   const requests: string[] = [];
   page.on("request", (r) => {
-    if (r.url().includes("/api/search_catalog")) requests.push(r.url());
+    if (new URL(r.url()).pathname === "/api/search_catalog") {
+      requests.push(r.url());
+    }
   });
 
   // fill() sets the value in one input event — the debounce collapses it to a
@@ -300,17 +305,36 @@ type Results = {
 /// it is used here rather than `/api/search_catalog`: the page always asks for
 /// 50, and a small page is the only way to put a *known* mid-set boundary under
 /// an assertion instead of wherever the 50th card happens to fall.
+///
+/// `page` is round 2's explicit-jump parameter (maintainer ruling,
+/// 2026-08-15) — an offset under the same sort `cursor` walks; either names a
+/// page, never both from one call here (matching `Pager`, which never
+/// generates both together either).
 async function search(
   request: APIRequestContext,
-  opts: { q?: string; cursor?: string; limit?: number } = {},
+  opts: { q?: string; cursor?: string; limit?: number; page?: number } = {},
 ): Promise<Results> {
   const params = new URLSearchParams({ q: opts.q ?? "" });
   if (opts.cursor !== undefined) params.set("cursor", opts.cursor);
   if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+  if (opts.page !== undefined) params.set("page", String(opts.page));
   const url = `/api/catalog/search?${params}`;
   const res = await request.get(url);
   expect(res.status(), `GET ${url}`).toBe(200);
   return (await res.json()) as Results;
+}
+
+/// The row count for a query (round 2's `search_count`) — `/api/catalog/search/count`.
+async function searchCount(
+  request: APIRequestContext,
+  q?: string,
+): Promise<number> {
+  const params = new URLSearchParams({ q: q ?? "" });
+  const url = `/api/catalog/search/count?${params}`;
+  const res = await request.get(url);
+  expect(res.status(), `GET ${url}`).toBe(200);
+  const body = (await res.json()) as { cards: number };
+  return body.cards;
 }
 
 /// A card's tile, by the oracle id its link carries — the grid has no per-tile
@@ -362,27 +386,41 @@ test("the pager walks to a second page of different cards @fast", async ({
 }) => {
   // The pager's own link, clicked — deep-linking a cursor from the JSON route
   // would leave `Pager`'s href free to point anywhere (the lesson `/my`'s
-  // paging review left behind).
+  // paging review left behind). Round 2 (maintainer ruling, 2026-08-15):
+  // every pager link is now an explicit page-N jump (`?page=`, no cursor at
+  // all) — `search` at the JSON route with `page=2` is the equivalent
+  // request, cross-checked against the true row order.
   const first = await search(request);
   expect(
     first.next_cursor,
     "browse-all must exceed one page for this to mean anything",
   ).toBeTruthy();
-  const second = await search(request, { cursor: first.next_cursor! });
+  const second = await search(request, { page: 2 });
   expect(second.cards.length).toBeGreaterThan(0);
 
   await page.goto("/catalog");
   await hydrated(page);
-  await expect(page.getByTestId("page-first")).toHaveCount(0);
-  await page.getByTestId("page-next").click();
+  // Prev always renders now (WB-01M032Q6BX8BM7NPK8H3AQKGWF) — disabled on
+  // page one, not absent.
+  await expect(page.getByTestId("pager-prev")).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+  await page.getByTestId("pager-next").click();
 
-  // The URL carries the cursor the endpoint handed out — a base64url cursor is
-  // unreserved throughout, so it is its own encoding.
-  await page.waitForURL(`/catalog?cursor=${first.next_cursor}`);
+  // The URL carries only the page number — no cursor at all (round 2: every
+  // page is directly offset-addressable server-side).
+  await page.waitForURL("/catalog?page=2");
   // ...and the rows are the ones that follow page one, not page one again.
   await expect(tileFor(page, second.cards[0].oracle_id)).toBeVisible();
   await expect(tileFor(page, first.cards[0].oracle_id)).toHaveCount(0);
-  await expect(page.getByTestId("page-first")).toBeVisible();
+  // Prev is now a real link back to page one, and the strip labels the
+  // current page.
+  await expect(page.getByTestId("pager-prev")).not.toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+  await expect(page.getByTestId("pager-current")).toHaveText("2");
 });
 
 test("a shared ?cursor= URL restores that page, SSR included @fast", async ({
@@ -396,11 +434,14 @@ test("a shared ?cursor= URL restores that page, SSR included @fast", async ({
 
   // Request-level: no JS has run, so page-two markup in the raw HTML is proof
   // the cursor reached the server render rather than being applied afterwards.
+  // No `&page=` on this link on purpose: an old-style or hand-built shared
+  // link carries only `?cursor=`, and the page label is cosmetic (`PAGE_PARAM`)
+  // — the rows it restores must still be exactly right regardless.
   const url = `/catalog?cursor=${first.next_cursor}`;
   const html = await (await request.get(url)).text();
   expect(html).toContain(`/cards/${rest.cards[0].oracle_id}`);
   expect(html).not.toContain(`/cards/${first.cards[0].oracle_id}`);
-  expect(html).toContain('data-testid="page-first"');
+  expect(html).toContain('data-testid="pager-prev"');
 
   await page.goto(url);
   await hydrated(page);
@@ -410,7 +451,7 @@ test("a shared ?cursor= URL restores that page, SSR included @fast", async ({
   await expect(tileFor(page, rest.cards[0].oracle_id)).toBeVisible();
 });
 
-test("the last page offers no next, and back to the start returns @fast", async ({
+test("the last page disables Next, and Prev returns to page one @fast", async ({
   page,
   request,
 }) => {
@@ -422,7 +463,7 @@ test("the last page offers no next, and back to the start returns @fast", async 
   expect(last.next_cursor, "the rest of `bolt` must fit one page").toBeNull();
   expect(last.cards.length).toBeGreaterThan(0);
 
-  await page.goto(`/catalog?q=bolt&cursor=${one.next_cursor}`);
+  await page.goto(`/catalog?q=bolt&cursor=${one.next_cursor}&page=2`);
   await hydrated(page);
   await expect(tileFor(page, last.cards[0].oracle_id)).toBeVisible();
   // The card the cursor was taken *after* is gone. Without this the whole test
@@ -430,15 +471,25 @@ test("the last page offers no next, and back to the start returns @fast", async 
   // the unpaged render also contains `last.cards[0]` and also has no next
   // (found by mutating the resource to pass `None` — it survived).
   await expect(tileFor(page, one.cards[0].oracle_id)).toHaveCount(0);
-  // No next cursor, no Next control — offering one would page into nothing.
-  await expect(page.getByTestId("page-next")).toHaveCount(0);
+  // Next always renders now (WB-01M032Q6BX8BM7NPK8H3AQKGWF) — disabled on
+  // the true last page, not absent. `last = Some(page)` (this *is* the last
+  // page, per `page_strip`'s doc comment) is knowable with no `COUNT`, so the
+  // current page's own number renders too, plain and un-linked.
+  await expect(page.getByTestId("pager-next")).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+  await expect(page.getByTestId("pager-current")).toHaveText("2");
 
-  await page.getByTestId("page-first").click();
+  await page.getByTestId("pager-prev").click();
   // Home means page one *of the same search*: a cursor is the only thing the
   // link drops. Losing `q` would throw away the search to fix the page.
   await page.waitForURL("/catalog?q=bolt");
   await expect(tileFor(page, one.cards[0].oracle_id)).toBeVisible();
-  await expect(page.getByTestId("page-first")).toHaveCount(0);
+  // `bolt` fits one page start to finish, so page one has nowhere to page
+  // *to* either — no pager at all, the same landmark-free case
+  // "a single-page result set renders no pagination landmark" pins.
+  await expect(page.getByTestId("pager-prev")).toHaveCount(0);
 });
 
 test("typing drops the page cursor @fast", async ({ page, request }) => {
@@ -489,7 +540,7 @@ test("the view switch keeps your place in the results @fast", async ({
   await expect(page.getByTestId("results-list")).toBeVisible();
   // And the pager keeps the layout, or Next would drop a list reader into the
   // grid (the hrefs are reactive in `view` for exactly this).
-  await expect(page.getByTestId("page-next")).toHaveAttribute(
+  await expect(page.getByTestId("pager-next")).toHaveAttribute(
     "href",
     /view=list/,
   );
@@ -577,7 +628,7 @@ test("a stale pager cannot revert what you just typed @fast", async ({
 
   await page.goto("/catalog");
   await hydrated(page);
-  const next = page.getByTestId("page-next");
+  const next = page.getByTestId("pager-next");
   await expect(next).toBeVisible();
 
   // A query with a page two of its own, so the pager is still there afterwards
@@ -606,7 +657,7 @@ test("a stale pager cannot revert what you just typed @fast", async ({
   // during the search, not broken.
   release();
   await expect(page.getByTestId("result-count")).toHaveText(/^\d+\+ results$/);
-  await expect(page.getByTestId("page-next")).not.toHaveAttribute(
+  await expect(page.getByTestId("pager-next")).not.toHaveAttribute(
     "aria-disabled",
     "true",
   );
@@ -677,32 +728,38 @@ test("the count says which page it is counting @fast", async ({
   await expect(page.getByTestId("result-count")).toHaveText(/^\d+\+ results$/);
 });
 
-test("no premature Back to the start while the next page loads @fast", async ({
+test("Prev does not enable prematurely while the next page loads @fast", async ({
   page,
   request,
 }) => {
-  // P6-133a. "Am I past the start?" used to be read off the URL, which moves the
-  // instant Next is clicked — so page one, still on screen through the load,
-  // grew a "Back to the start" pointing at itself.
+  // P6-133a, restated for the numbered pager: "Am I past the start?" used to
+  // be read off the URL, which moves the instant Next is clicked — so page
+  // one, still on screen through the load, grew a "Back to the start"
+  // pointing at itself. Prev always renders now (WB-01M032Q6BX8BM7NPK8H3AQKGWF)
+  // instead of appearing/disappearing, so the same bug would show up as Prev
+  // enabling early rather than appearing early — same regression, new shape.
   const browse = await search(request);
   expect(browse.next_cursor).toBeTruthy();
 
   await page.goto("/catalog");
   await hydrated(page);
-  await expect(page.getByTestId("page-first")).toHaveCount(0);
+  const prev = page.getByTestId("pager-prev");
+  await expect(prev).toHaveAttribute("aria-disabled", "true");
 
   const release = await holdSearches(page);
-  await page.getByTestId("page-next").click();
-  await page.waitForURL(`/catalog?cursor=${browse.next_cursor}`);
+  await page.getByTestId("pager-next").click();
+  // Round 2: Next is an explicit page-N jump too — the URL carries only the
+  // page number, no cursor at all.
+  await page.waitForURL("/catalog?page=2");
   // The URL is page two; the DOM is still page one. The pager belongs to what
   // is rendered.
   await expect(tileFor(page, browse.cards[0].oracle_id)).toBeVisible();
-  await expect(page.getByTestId("page-first")).toHaveCount(0);
+  await expect(prev).toHaveAttribute("aria-disabled", "true");
 
-  // Positive control: it appears the moment page two actually renders, so this
-  // test cannot pass on a build that never offers the control at all.
+  // Positive control: it enables the moment page two actually renders, so
+  // this test cannot pass on a build that never enables it at all.
   release();
-  await expect(page.getByTestId("page-first")).toBeVisible();
+  await expect(prev).not.toHaveAttribute("aria-disabled", "true");
 });
 
 test("a single-page result set renders no pagination landmark @fast", async ({
@@ -730,6 +787,219 @@ test("a single-page result set renders no pagination landmark @fast", async ({
   await expect(
     page.getByRole("navigation", { name: "Pagination" }),
   ).toBeVisible();
+});
+
+// ---------------------------------------------------------------------------
+// The numbered page strip (WB-01M032Q6BX8BM7NPK8H3AQKGWF, `page_strip` in
+// app/src/catalog.rs). Real dev data (38k+ cards) stands in for the task's
+// abstract "28 pages" examples — same shapes, real numbers, asserted against
+// the real DOM rather than the pure function alone (that has its own unit
+// tests).
+//
+// **Round 2 (maintainer ruling, 2026-08-15): every rendered number is a real
+// link, no exceptions.** An explicit page-N jump is a server-side `OFFSET`
+// under the same sort the keyset cursor uses — it needs no cursor this
+// browser happens to have already fetched, so round 1's "some numbers render
+// inert, present but unreachable" compromise no longer applies to anything
+// except staleness (an in-flight newer search) and the Prev/Next boundary
+// (page one / the true last page).
+// ---------------------------------------------------------------------------
+
+test("page one shows every numbered link as real, none inert @fast", async ({
+  page,
+  request,
+}) => {
+  const first = await search(request);
+  const pageSize = first.cards.length;
+  expect(first.next_cursor, "browse-all must exceed one page").toBeTruthy();
+  const count = await ((await request.get("/api/catalog/count")).json() as Promise<{
+    cards: number;
+  }>);
+  const lastPage = Math.ceil(count.cards / pageSize);
+  expect(lastPage, "the fixture must be large enough for a real ellipsis")
+    .toBeGreaterThan(6);
+
+  await page.goto("/catalog");
+  await hydrated(page);
+
+  await expect(page.getByTestId("pager-current")).toHaveText("1");
+  await expect(page.getByTestId("pager-prev")).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+  // Every numbered slot the strip shows — the near band *and* the true last
+  // page — is a real, working link now, not just the ones adjacent to page
+  // one or already fetched.
+  for (const n of [2, 3, 4, 5, lastPage]) {
+    await expect(page.getByTestId(`pager-page-${n}`)).not.toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+  }
+  await expect(page.getByTestId("pager-next")).not.toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+});
+
+test("a distant page number jumps there directly, no walking required @fast", async ({
+  page,
+  request,
+}) => {
+  // The whole point of round 2's offset path: page one links straight to the
+  // true last page (or any other far-off number `page_strip` shows), and
+  // clicking it is a single navigation — never N clicks through the pages
+  // between, and no trail needs to have been built up first.
+  const count = await ((await request.get("/api/catalog/count")).json() as Promise<{
+    cards: number;
+  }>);
+  const first = await search(request);
+  const lastPage = Math.ceil(count.cards / first.cards.length);
+  const lastPageRows = await search(request, { page: lastPage });
+  expect(lastPageRows.cards.length).toBeGreaterThan(0);
+
+  await page.goto("/catalog");
+  await hydrated(page);
+  await page.getByTestId(`pager-page-${lastPage}`).click();
+
+  await page.waitForURL(`/catalog?page=${lastPage}`);
+  await expect(page.getByTestId("pager-current")).toHaveText(String(lastPage));
+  await expect(tileFor(page, lastPageRows.cards[0].oracle_id)).toBeVisible();
+  await expect(tileFor(page, first.cards[0].oracle_id)).toHaveCount(0);
+  // Landed on (or past) the true last page: Next has nowhere further to go.
+  await expect(page.getByTestId("pager-next")).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+});
+
+test("a fresh ?page=N URL lands on the real page N, no prior visit @fast", async ({
+  page,
+  request,
+}) => {
+  // "Shareable URLs must be honest" (maintainer ruling, 2026-08-15): a
+  // `?page=9` link pasted into a brand-new session — no cursor, no cookies,
+  // no prior navigation in this browser at all — must resolve to the actual
+  // ninth page, cross-checked against the JSON route's own `page=9` fetch.
+  const nine = await search(request, { q: "t:instant", page: 9 });
+  expect(nine.cards.length, "t:instant must reach a real page 9").toBeGreaterThan(0);
+  const one = await search(request, { q: "t:instant" });
+
+  // Request-level: no JS runs, so page-nine markup in the raw HTML is proof
+  // the jump reached the server render, not a client-side patch afterward.
+  const url = `/catalog?q=t%3Ainstant&page=9`;
+  const html = await (await request.get(url)).text();
+  expect(html).toContain(`/cards/${nine.cards[0].oracle_id}`);
+  expect(html).not.toContain(`/cards/${one.cards[0].oracle_id}`);
+
+  await page.goto(url);
+  await hydrated(page);
+  await expect(page.getByTestId("pager-current")).toHaveText("9");
+  await expect(tileFor(page, nine.cards[0].oracle_id)).toBeVisible();
+  // Prev is real too — this browser never "walked" here, but page 8 is just
+  // as directly addressable as page 9 was.
+  await expect(page.getByTestId("pager-prev")).not.toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+});
+
+test("an out-of-range page number renders no results, not a crash @fast", async ({
+  page,
+}) => {
+  // Adversarial-review blocker (WB-01M032Q6BX8BM7NPK8H3AQKGWF round 2):
+  // `GET /catalog?page=18446744073709551615` (usize::MAX on a 64-bit build)
+  // reached unguarded `page + 1` arithmetic and panicked an anonymous SSR
+  // request in debug builds. `parse_page` now clamps to a bounded ceiling —
+  // still far past the real last page, so the honest answer is an empty
+  // page (reusing the existing "walked off the end" empty state), never a
+  // panic or a 500.
+  const res = await page.goto("/catalog?page=18446744073709551615");
+  expect(res?.status()).toBe(200);
+  await hydrated(page);
+  await expect(page.getByTestId("no-results")).toContainText(
+    "Nothing on this page",
+  );
+  await expect(page.getByTestId("results-grid")).toHaveCount(0);
+});
+
+test("the strip shows a short form immediately, then upgrades once the count resolves @fast", async ({
+  page,
+  request,
+}) => {
+  // "the strip may briefly show the short form while the count resolves"
+  // (maintainer ruling, 2026-08-15): `search_count` is a second, independent
+  // request — `results` (and the near band it draws from) must not wait on
+  // it. Delay the count route specifically and watch the true last-page
+  // number arrive after the results already have.
+  //
+  // Must be a *client-side* query change, not a cold `page.goto`: SSR
+  // resolves both `results` and `search_count` server-side and embeds them
+  // for hydration, so a route interception armed before a cold load never
+  // gets a chance to intercept anything — the race this test is about only
+  // exists once the app is already running in the browser.
+  const total = await searchCount(request, "t:instant");
+  const pageSizeProbe = await search(request, { q: "t:instant" });
+  const truePage = Math.ceil(total / pageSizeProbe.cards.length);
+  expect(truePage, "fixture must have a real last page beyond the near band")
+    .toBeGreaterThan(6);
+
+  await page.goto("/catalog");
+  await hydrated(page);
+
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  await page.route("**/api/search_catalog_count*", async (route) => {
+    await gate;
+    await route.continue();
+  });
+
+  await page.fill("#catalog-query", "t:instant");
+  await page.waitForURL((url) => url.searchParams.get("q") === "t:instant");
+  // Results render without waiting on the held count request.
+  await expect(page.getByTestId("results-grid")).toBeVisible();
+  await expect(page.getByTestId(`pager-page-${truePage}`)).toHaveCount(0);
+
+  release();
+  await expect(page.getByTestId(`pager-page-${truePage}`)).toBeVisible();
+  await expect(page.getByTestId(`pager-page-${truePage}`)).not.toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+});
+
+test("the true last page of a filtered query disables Next @fast", async ({
+  page,
+  request,
+}) => {
+  // `t:planeswalker c:g` is a two-page fixture at today's catalog size (95
+  // rows / 50-row pages) — small enough to walk to its real last page inside
+  // one test. If catalog growth changes that shape, the `expect` below is the
+  // signal to pick a new query rather than the test silently testing page one.
+  const q = "t:planeswalker c:g";
+  const first = await search(request, { q });
+  expect(first.next_cursor, `${q} must run past one page`).toBeTruthy();
+  const rest = await search(request, { q, cursor: first.next_cursor! });
+  expect(rest.next_cursor, `${q} must fit exactly two pages`).toBeNull();
+
+  await page.goto(`/catalog?q=${encodeURIComponent(q)}`);
+  await hydrated(page);
+  await page.getByTestId("pager-next").click();
+  await expect(page.getByTestId("pager-current")).toHaveText("2");
+
+  // `next_cursor` is empty — this *is* the last page, knowable with no
+  // `COUNT` at all (`page_strip`'s `last = Some(page)` case).
+  await expect(page.getByTestId("pager-next")).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+  // Only two pages total: `page_strip(2, Some(2))` is the `last <= 6` shortcut
+  // — every number shown, no ellipsis, nothing past page 2.
+  await expect(page.getByTestId("pager-page-1")).not.toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+  await expect(page.getByTestId("pager-page-3")).toHaveCount(0);
 });
 
 test.describe("mobile", () => {

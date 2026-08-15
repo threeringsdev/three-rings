@@ -356,27 +356,46 @@ impl CatalogStore for HostedBackend {
         Ok(card.into_summary(owned_of(&owned, oracle_id)))
     }
 
-    async fn search(&self, query: SearchQuery, page: Page) -> ApiResult<SearchResults> {
+    async fn search(
+        &self,
+        query: SearchQuery,
+        page: Page,
+        page_number: Option<u32>,
+    ) -> ApiResult<SearchResults> {
         // The catalog-search query engine: parse the v1 grammar (a parse error
         // is a 422 naming the offending term — never silently-wrong results),
         // emit the WHERE clause, keyset by (name, oracle) — Scryfall's own
         // default sort. Empty query = browse-all.
         let terms = shared::search::parse(query.q.as_deref().unwrap_or(""))
             .map_err(|e| ApiError::Validation(e.to_string()))?;
-        let cursor: Option<OracleCursor> = page.cursor.as_deref().map(decode_cursor).transpose()?;
         let limit = page.limit();
         let mut qb: sqlx::QueryBuilder<'_, sqlx::Postgres> =
             sqlx::QueryBuilder::new(summary_select() + REPRESENTATIVE_PRINTING_JOIN + "WHERE true");
         crate::search::sql::apply(&mut qb, &terms);
-        if let Some(c) = &cursor {
-            qb.push(" AND (c.name, c.oracle_id) > (");
-            qb.push_bind(c.name.clone());
-            qb.push(", ");
-            qb.push_bind(c.oracle_id);
-            qb.push(")");
+        // An explicit page-N jump (`page_number`) wins over a carried cursor —
+        // see the trait doc comment. `page_offset` is `checked`/saturating on
+        // purpose: an adversarial or hand-edited `?page=` must not overflow or
+        // wrap here, only ever produce a large-but-bounded `OFFSET` a query
+        // planner shrugs at (measured: specs/catalog-search.md "Numbered page
+        // links").
+        if let Some(n) = page_number {
+            qb.push(" ORDER BY c.name, c.oracle_id OFFSET ");
+            qb.push_bind(page_offset(n, limit));
+            qb.push(" LIMIT ");
+            qb.push_bind(limit + 1);
+        } else {
+            let cursor: Option<OracleCursor> =
+                page.cursor.as_deref().map(decode_cursor).transpose()?;
+            if let Some(c) = &cursor {
+                qb.push(" AND (c.name, c.oracle_id) > (");
+                qb.push_bind(c.name.clone());
+                qb.push(", ");
+                qb.push_bind(c.oracle_id);
+                qb.push(")");
+            }
+            qb.push(" ORDER BY c.name, c.oracle_id LIMIT ");
+            qb.push_bind(limit + 1);
         }
-        qb.push(" ORDER BY c.name, c.oracle_id LIMIT ");
-        qb.push_bind(limit + 1);
         let mut rows: Vec<SearchRowSql> = qb
             .build_query_as()
             .fetch_all(self.pool)
@@ -429,6 +448,30 @@ impl CatalogStore for HostedBackend {
                 .collect(),
             next_cursor,
         })
+    }
+
+    async fn search_count(&self, query: SearchQuery) -> ApiResult<CatalogCount> {
+        // The exact same grammar and WHERE clause `search` builds, minus the
+        // SELECT list and printing JOIN (`apply` only ever references `c.`,
+        // the bare `cards` alias — see its own doc) — a second, independent
+        // query, never folded into `search`'s. `q` empty reduces to the same
+        // unconditional `SELECT count(*) FROM cards` `card_count` already
+        // runs, deliberately duplicated rather than shared: `card_count` is
+        // the anonymous catalog-size probe (no grammar, no failure mode),
+        // this is "how many rows does *this* query match" (can 422 on a bad
+        // term) — different questions that happen to coincide when `q` is
+        // empty.
+        let terms = shared::search::parse(query.q.as_deref().unwrap_or(""))
+            .map_err(|e| ApiError::Validation(e.to_string()))?;
+        let mut qb: sqlx::QueryBuilder<'_, sqlx::Postgres> =
+            sqlx::QueryBuilder::new("SELECT count(*) FROM cards c WHERE true");
+        crate::search::sql::apply(&mut qb, &terms);
+        let (cards,): (i64,) = qb
+            .build_query_as()
+            .fetch_one(self.pool)
+            .await
+            .map_err(upstream)?;
+        Ok(CatalogCount { cards })
     }
 
     async fn list_sets(&self, query: SetQuery) -> ApiResult<Vec<SetSummary>> {
@@ -3733,6 +3776,47 @@ fn decode_cursor<T: serde::de::DeserializeOwned>(s: &str) -> ApiResult<T> {
     serde_json::from_slice(&bytes).map_err(|_| ApiError::BadCursor("invalid cursor".into()))
 }
 
+/// `OFFSET` for an explicit page-N jump (`CatalogStore::search`'s
+/// `page_number`, WB-01M032Q6BX8BM7NPK8H3AQKGWF round 2's adversarial-review
+/// blocker): `(page_number - 1) * limit`, entirely in `saturating` arithmetic.
+/// `page_number` is `u32` (never negative) but is client-suppliable — an
+/// unauthenticated `GET /catalog?page=18446744073709551615` reaching this
+/// point must produce a large, harmless `i64` bind, never panic or wrap. The
+/// client-side parse already clamps to a far smaller ceiling
+/// (`app/src/catalog.rs`'s `parse_page`), so this is defense in depth, not the
+/// only guard — a direct hosted-API caller (bypassing the UI's clamp
+/// entirely) still cannot make this overflow.
+fn page_offset(page_number: u32, limit: i64) -> i64 {
+    (page_number.saturating_sub(1) as i64).saturating_mul(limit)
+}
+
+#[cfg(test)]
+mod page_offset_tests {
+    use super::page_offset;
+
+    #[test]
+    fn page_one_is_no_offset() {
+        assert_eq!(page_offset(1, 50), 0);
+        assert_eq!(page_offset(0, 50), 0);
+    }
+
+    #[test]
+    fn offset_is_pages_before_this_one_times_limit() {
+        assert_eq!(page_offset(9, 50), 400);
+        assert_eq!(page_offset(700, 50), 34_950);
+    }
+
+    #[test]
+    fn the_largest_possible_page_number_neither_panics_nor_wraps() {
+        // u32::MAX pages at the widest allowed limit (200): a large i64, not a
+        // panic, and nowhere near i64::MAX (so a caller stacking this with
+        // further arithmetic downstream still has headroom).
+        let offset = page_offset(u32::MAX, 200);
+        assert!(offset > 0);
+        assert!(offset < i64::MAX);
+    }
+}
+
 /// Lazily provision the caller's one Inbox (idempotent via the
 /// `collections_one_inbox` partial unique index). Every "first `/my` request"
 /// read runs this — `list_collections` and `collection_tree`
@@ -4038,8 +4122,9 @@ mod search_live {
             cursor: None,
             limit: Some(10),
         };
-        let search =
-            |query: SearchQuery, page: Page| async { CatalogStore::search(&b, query, page).await };
+        let search = |query: SearchQuery, page: Page| async {
+            CatalogStore::search(&b, query, page, None).await
+        };
 
         // browse-all pages by (name, oracle) with a live cursor
         let p1 = search(SearchQuery::default(), page.clone()).await.unwrap();

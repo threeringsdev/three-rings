@@ -293,7 +293,7 @@ pub async fn catalog_count() -> Result<shared::CatalogCount, ServerFnError<share
     }
 }
 
-/// One keyset page of catalog search results (specs/catalog-search.md) — the
+/// One page of catalog search results (specs/catalog-search.md) — the
 /// exemplar thin server-fn adapter the later page tasks copy: extract headers,
 /// pick the backend, project one trait method, map the error. No business logic
 /// here; the grammar and its SQL live behind `CatalogStore::search`.
@@ -305,6 +305,13 @@ pub async fn catalog_count() -> Result<shared::CatalogCount, ServerFnError<share
 /// Auth is **opportunistic**: a valid session fills `CardSummary::owned`, an
 /// absent or expired one degrades to the anonymous public projection rather than
 /// 401ing. `/catalog` is a public page.
+///
+/// **`page` is an explicit page-N jump** (specs/catalog-search.md "Numbered
+/// page links" — maintainer ruling, 2026-08-15), turned into a server-side
+/// `OFFSET` by `CatalogStore::search` — this adapter still does no business
+/// logic, just forwards the number through. `cursor` is unchanged: the
+/// per-keystroke path (typing a query, always page one) never carries either
+/// argument and stays byte-for-byte the query it always was.
 #[server(
     prefix = "/api",
     endpoint = "search_catalog",
@@ -313,13 +320,14 @@ pub async fn catalog_count() -> Result<shared::CatalogCount, ServerFnError<share
 pub async fn search_catalog(
     q: String,
     cursor: Option<String>,
+    page: Option<u32>,
 ) -> Result<shared::SearchResults, ServerFnError<shared::ApiError>> {
     #[cfg(feature = "ssr")]
     let headers = leptos_axum::extract::<axum::http::HeaderMap>()
         .await
         .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
     #[cfg(feature = "ssr")]
-    let (query, page) = (
+    let (query, page_arg) = (
         shared::SearchQuery { q: Some(q) },
         shared::Page {
             cursor,
@@ -333,7 +341,7 @@ pub async fn search_catalog(
         catalog_backend_with_fallback(&headers)
             .await
             .map_err(api_err)?
-            .search(query, page)
+            .search(query, page_arg, page)
             .await
             .map_err(api_err)
     }
@@ -349,13 +357,52 @@ pub async fn search_catalog(
         let session = cookies::cookie_value(&headers, cookies::SESSION_COOKIE);
         let origin = cookies::request_origin(&headers);
         NativeBackend::authed(token, session, origin)
-            .search(query, page)
+            .search(query, page_arg, page)
             .await
             .map_err(api_err)
     }
     #[cfg(not(feature = "ssr"))]
     {
-        let _ = (q, cursor);
+        let _ = (q, cursor, page);
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
+/// The row count for `q` — filtered or browse-all (specs/catalog-search.md
+/// "Numbered page links" — maintainer ruling, 2026-08-15). Deliberately a
+/// **separate** server fn from [`search_catalog`], not a field folded onto its
+/// response: the pager calls this only to name a numbered strip's true last
+/// page, as its own request, resolving independently of (and never blocking)
+/// the results themselves. Never called from the per-keystroke query-bar path.
+#[server(
+    prefix = "/api",
+    endpoint = "search_catalog_count",
+    input = leptos::server_fn::codec::GetUrl
+)]
+pub async fn search_catalog_count(
+    q: String,
+) -> Result<shared::CatalogCount, ServerFnError<shared::ApiError>> {
+    #[cfg(feature = "hosted")]
+    {
+        use crate::backend::{CatalogStore, HostedBackend};
+        HostedBackend::anonymous()
+            .await
+            .map_err(api_err)?
+            .search_count(shared::SearchQuery { q: Some(q) })
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(all(feature = "native", not(feature = "hosted")))]
+    {
+        use crate::backend::{CatalogStore, NativeBackend};
+        NativeBackend::anonymous()
+            .search_count(shared::SearchQuery { q: Some(q) })
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = q;
         Err(ServerFnError::ServerError("server-only".into()))
     }
 }

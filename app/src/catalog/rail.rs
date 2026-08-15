@@ -489,10 +489,11 @@ fn use_navigate_query() -> impl Fn(String) + Clone + 'static {
         // previous page under one entry per checkbox. The two surfaces edit the
         // same string, so they must agree on this or Back behaves differently
         // depending on which one you used last.
-        // `None` for the cursor: a rail edit *is* a query edit, and a cursor
-        // from the old result set names a row the new one need not contain.
+        // `None` for the cursor (and its page label): a rail edit *is* a query
+        // edit, and a cursor from the old result set names a row the new one
+        // need not contain.
         navigate(
-            &super::catalog_url(&next, list_view, None),
+            &super::catalog_url(&next, list_view, None, None),
             NavigateOptions {
                 replace: was_searching,
                 ..Default::default()

@@ -310,6 +310,182 @@ catalog (38,623 rows) at `limit=500`: browse-all walked 194 pages / 38,623
 rows exactly matching the count, zero duplicates; the filtered walk covered
 101 pages / 20,087 rows, zero duplicates, order held throughout both.
 
+### Numbered page links (2026-08-15, WB-01M032Q6BX8BM7NPK8H3AQKGWF)
+
+`/catalog`'s pager grew a numbered strip (`[Prev] [1] … 9 [10] [11] [12] … [28]
+[Next]`, up to 6 numbers, current plain-text) replacing the old right-aligned
+"Next page" / "Back to the start" pair. The pure shape is `page_strip(current,
+last: Option<usize>) -> Vec<PageSlot>` (`app/src/catalog.rs`), unit-tested
+against the task's three worked examples verbatim plus 1/2/6/7-page and
+`current == last` edges.
+
+**This reverses "Rejected: … a page ordinal in the URL" above** (2026-08-12
+paging-honesty batch) — that batch's reasons (URL-thread cost, syncing an
+ordinal with a cursor that can arrive from a shared link with no ordinal
+beside it) no longer apply once the ordinal's job is purely cosmetic: `?page=`
+now rides beside `?cursor=` as a **display-only label** (`PAGE_PARAM`), echoed
+through `SearchPayload` the same way `q`/`cursor` are, never read by
+`results`' fetch key. A stale or hand-edited `?page=` can only mislabel the
+number shown, never fetch the wrong rows — the correctness property the old
+rejection was protecting stays intact.
+
+**Which numbers are real links is bounded by what forward-only keyset paging
+can actually address.** Confirmed against real dev data (38,623 rows / 773
+pages at the current 50-row page size, derived from the observed page length —
+`page_size` is nowhere hardcoded, so the queued 50→60 page-size task needs no
+edit here): only three kinds of page number are ever backed by a cursor this
+screen has — page 1 (the empty cursor), the current page, and current + 1
+(`next_cursor`, identical to what Next already uses). A client-side `trail`
+(`CatalogPage`, one entry per page a reader has actually stood on this search)
+adds every page reached by paging forward, which is what makes **Prev** — and
+a band member behind `current`, in the "counting down near the end" shape —
+real navigations too, without a reverse-ordered query. Any other number
+`page_strip` wants to show (a page ahead nobody has walked to yet, or
+browse-all's true last page before it's been reached) renders **inert**: a
+real `<a aria-disabled="true">`, not a fake link and not omitted. Verified live
+(screenshots + Playwright, not just the pure function): page one shows
+`[Prev✗] 1 [2] [3✗] [4✗] [5✗] … [773✗] [Next]`; walking forward via real clicks
+makes Prev and page one real at every step; a cold load 8 hops into a filtered
+search (no trail) shows only `[1] … 9 [10]`, matching the pure function's
+`last = None` degrade exactly.
+
+**`last = None` is a third rendering mode**, not just a missing-data
+fallback: a filtered search never gets a total until it is *walked* to its
+real end (`next_cursor` comes back empty — knowable with no `COUNT`, same as
+the existing count-label honesty rule above), so `page_strip` degrades to
+naming only 1, current, and current + 1 rather than fabricate a "last" this
+screen cannot back up. Direct page-N addressing (jumping to an unwalked page
+without a cursor) needs either an offset-capable query or a server-side walk —
+genuinely out of scope here (a materially different, larger change than a
+pagination UI), flagged as a follow-up rather than filed by this task.
+
+**A live-only bug this batch found and fixed, worth recording because it
+would bite the next dynamic list of links inside a `<Transition>`:** building
+each numbered link as its own child component taking `href:
+Signal<Option<String>>` via `Signal::derive(move || …)` — the same shape the
+pre-existing "Back to the start" / "Next page" links used — panicked at
+runtime ("you tried to access a reactive value … but it has already been
+disposed") the instant a sibling signal (`stale` flipping on a keystroke, or a
+`trail` write landing in the same reactive tick as the old pager's teardown)
+changed while `<Transition>` still held the previous pager mounted. Unit tests
+and `cargo check` are both silent on this — it only surfaces as a live WASM
+panic that kills all further reactivity on the page, caught here only by
+driving the real dev server with Playwright (`page.on("pageerror", …)`), not
+by `cargo test` or a cold curl of the SSR HTML. The fix: build the whole strip
+as **one** `{move || { … }}` dynamic child (the same pattern
+`ResultCards` already uses for `list_view`), rather than N sibling components
+each owning an independent derived signal. No repro was reduced to a minimal
+case beyond this one; flagged here so a future `Signal::derive`-per-list-item
+pattern near a `Transition` gets tested against a real browser, not just
+`cargo test`.
+
+### Numbered page links, round 2: cursor-less jumps (2026-08-15, maintainer ruling, WB-01M032Q6BX8BM7NPK8H3AQKGWF)
+
+**Supersedes the section above's "inert, present-but-unreachable" compromise
+in full: "this PR does not merge until every rendered page number is a REAL
+link from day one."** The forward-only-keyset limitation that produced that
+compromise is real, but the fix is a second, narrower paging primitive
+alongside the keyset one, not a permanent constraint on the pager.
+
+**The mechanism — explicit jumps get an `OFFSET`, typing still doesn't.**
+`CatalogStore::search` gained a third argument, `page_number: Option<u32>`
+(`app/src/backend/mod.rs`), independent of `Page`
+(`shared::collection::Page`, also `/my`'s type — deliberately not touched, to
+keep this a catalog-search-only capability). When set, `hosted.rs` computes
+`OFFSET (page_number - 1) * limit` under the *same* `ORDER BY (name,
+oracle_id)` the keyset cursor uses (`page_offset`, `hosted.rs`, its own unit
+tests) instead of the `cursor`'s `AND (name, oracle_id) > (...)` clause — a
+`page_number` wins if both are present, though this app's own UI never
+generates both at once. **The per-keystroke path is untouched**: typing (or a
+rail edit, or Enter) always drops both cursor and page and re-fetches page one
+plain, exactly the query it always was — this only ever engages on an explicit
+pager click. `?page=` in the URL, cosmetic-only in round 1, is now the real
+fetch input when no `?cursor=` rides beside it (`results`' key in
+`CatalogPage`); a `?cursor=` still wins when both are present, so a legacy
+shared link from before this ruling keeps working unchanged.
+
+**The trail is gone.** With every page directly addressable, remembering
+which pages a reader had actually visited stopped earning its keep — deleted
+along with its `RwSignal<HashMap<usize, String>>` and the `Effect` that grew
+it. `Pager`'s `href_for` is now a single, un-conditional `catalog_url(q, view,
+None, Some(n))` for every slot the strip shows, including Prev.
+
+**A real total for filtered queries: `search_count`, a second, independent
+query.** `CatalogStore::search_count(query) -> CatalogCount` (`hosted.rs`)
+runs `SELECT count(*) FROM cards c WHERE true` plus the *same*
+`crate::search::sql::apply(&mut qb, &terms)` `search` itself uses — never
+folded into `search`'s own query, never gating its response. Wired through a
+sibling Leptos server fn (`search_catalog_count`, GET, same shape as
+`search_catalog`) and a sibling JSON route (`GET
+/api/catalog/search/count?q=`). `CatalogPage` fires it as its own `Resource`,
+keyed the same way `results` is (once per settled query — the existing
+debounce is the only throttle it needs, since it never runs more often than
+`results` itself does) but **never awaited alongside `results`**: `Pager`
+reads it with a plain `.get()` inside its one reactive dynamic child, so the
+strip renders with whatever `results` already has and *upgrades in place* the
+moment the count resolves — confirmed live (Playwright, holding the count
+route open): typing into a filtered query shows the near band and the
+*previous* query's (now-stale) last page immediately, then swaps to the new
+query's own true last page once its count lands, with zero console errors
+through the whole sequence.
+
+**`page_strip`'s two-tier honesty collapses to one common case now.** `last =
+Some(page)` when `next_cursor` is empty (this genuinely is the last page,
+still free) or once `search_count` resolves (now: *any* query, not just
+browse-all). `last = None` persists only for the brief window before
+`search_count` has resolved at all — no longer the permanent state a filtered,
+not-yet-finished search was stuck in through round 1.
+
+**Adversarial-review blocker, fixed: unchecked `usize`/`u32` arithmetic on a
+client-suppliable page number.** `GET /catalog?page=18446744073709551615`
+(`usize::MAX` on a 64-bit build) reached unguarded `page + 1` (`Pager`) and
+`current + 1`/`current + 3` (`page_strip`) and panicked an anonymous SSR
+request in debug builds. Two independent layers now, neither trusting the
+other:
+
+1. **Parse-time ceiling** — `parse_page` (`app/src/catalog.rs`) clamps
+   `?page=` to `1..=MAX_PAGE` (`1_000_000`, chosen only to be far past any
+   plausible catalog size while keeping every downstream `usize`/`u32`
+   computation comfortably bounded), covering absent/zero/negative/unparsable
+   too. Unit-tested against the crafted string verbatim.
+2. **`saturating` arithmetic in `page_strip` and `page_offset`**, independent
+   of what any caller clamped — `page_strip(usize::MAX, …)` and
+   `page_offset(u32::MAX, 200)` are both unit-tested directly and neither
+   panics nor wraps.
+
+**Resolution for an out-of-range page (past the true last one): the honest
+empty page, not a redirect or a clamp.** `OFFSET` past the end of a Postgres
+result set is not an error — it returns zero rows, which the *existing*
+`NoResults`/"Nothing on this page. Back to the start." UI already renders
+correctly (round 1: "past a cursor... the reader has walked off the end").
+Confirmed live for both the client's own clamped ceiling
+(`/catalog?page=18446744073709551615` → 200, "Nothing on this page") and a
+raw hosted-API call bypassing the client's clamp entirely
+(`/api/catalog/search?page=4294967295` → 200, `{"cards":[],"next_cursor":null}`)
+— no new code needed either way.
+
+**Offset cost, measured honestly (the maintainer asked for this specifically,
+expecting a real number, not an assumption).** Against the dev catalog
+(38,623 rows) over the network to Neon's dev branch (not local Postgres):
+page 1 (no offset) ~160–210 ms; page 700 (`OFFSET ≈34,950`) ~425–570 ms; page
+773, the true last page (`OFFSET ≈38,600`) ~480–540 ms. `search_count`
+(a full `count(*)`) ~90 ms unfiltered, ~145–155 ms filtered. So: a real,
+measurable cost — roughly 2–3× a keyset fetch at this catalog's current
+size — but still comfortably sub-second, and paid only on an explicit pager
+click, never on a keystroke. Not benchmarked at a materially larger catalog
+size; if ingestion grows the row count by an order of magnitude or more,
+re-measure before assuming this still holds (`OFFSET` cost is roughly linear
+in the skipped-row count on an indexed sort, so the trend is predictable even
+without a fresh measurement, but "predictable" is not "measured").
+
+Verified live end to end, not just the pure function and its callers in
+isolation: a **fresh** `/catalog?page=9` request — no prior visit, no
+cookies, a single cold HTTP request — SSRs the real ninth page with every
+pager number (Prev, 1, 8, 10, 11, 12, the true last page, Next) a working
+link and zero `aria-disabled` anywhere on the strip; clicking the true last
+page directly from page one (no intermediate clicks) lands there in one
+navigation.
+
 ## Open questions
 
 - ~~Which Scryfall syntax subset ships in v1?~~ **Proposed above** (the

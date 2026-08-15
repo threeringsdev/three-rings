@@ -402,7 +402,7 @@ fn QuickAddSurface(
                 });
             }
             Ok(QuickAddPayload {
-                quick_add: crate::search_catalog(q, None).await?,
+                quick_add: crate::search_catalog(q, None, None).await?,
             })
         },
     );
