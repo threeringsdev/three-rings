@@ -501,3 +501,122 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     `auth_callback` — the system browser is a different cookie jar, so it
     necessarily falls to the memory arm. Not worth taking while the config
     scoping holds.
+- 2026-08-15 (`fix/local-dev-sign-in`) — **"Sign in is broken" on local
+  web dev: root-caused to `127.0.0.1` vs `localhost`, fixed with a redirect;
+  the "isn't available right now" Google message was the same bug in
+  different clothes.** The maintainer's report (web password sign-in:
+  `"Invalid origin"`; web Google: "isn't available right now"; desktop-dev
+  Google: stuck on "Waiting for Google…") was reproduced live against the
+  dev branch before any fix, per the systematic-debugging skill's "reproduce
+  first" rule:
+  - `curl -i -X POST http://127.0.0.1:3000/api/sign_in …` →
+    `{"Failed":{"message":"Invalid origin"}}` (upstream's literal string —
+    matches the report verbatim). The identical request against
+    `http://localhost:3000/api/sign_in` returns the ordinary
+    `"Invalid email or password"` for bad creds — the *only* variable is the
+    request's own `Host` header, which `app/src/auth/cookies.rs`
+    `request_origin` (no `x-forwarded-*` in plain local dev) forwards
+    verbatim as the upstream `Origin`. Confirms the dev-branch Neon Auth
+    "Allow Localhost" trusted-origin setting matches the literal `localhost`
+    hostname and not `127.0.0.1` — the same behavior the e2e suite already
+    hit and pinned down as a maintainer ruling (`specs/ui-work-loop.md`
+    P6-060, 2026-08-11; `.claude/skills/e2e-suite`), just never before
+    connected to the *app's* auth screens or written into this spec.
+  - `curl -i -X POST http://127.0.0.1:3000/api/google_sign_in …` →
+    `ServerError|auth api INVALID_CALLBACKURL: auth service returned 403
+    Forbidden` — the callback URL `google_sign_in` builds
+    (`app/src/account.rs`) is `${origin}/auth/callback`, so it inherits the
+    same untrusted `127.0.0.1` origin and gets rejected before Google is ever
+    reached. `account::google_sign_in`'s `Err(_)` arm on the client
+    (`app/src/auth_pages.rs` `GoogleButton`) collapses every transport/config
+    failure to the canned "isn't available right now" line — so this is
+    **not** a distinct bug, it is symptom 1 wearing the Google button's
+    generic error message. Fixing the origin fixes both.
+  - **Fix:** `app::build_router` gained a `redirect_localhost_dev` middleware
+    (`app/src/lib.rs`) — a GET request whose `Host` is `127.0.0.1:<port>`
+    gets a same-path 307 to `http://localhost:<port>`, so the *page load* is
+    where the correction happens and every subsequent same-origin call the
+    hydrated app makes already carries the right `Host`. Scoped off in the
+    two cases that legitimately keep a `127.0.0.1` `Host`: behind a proxy
+    (`x-forwarded-proto` present — Render) and inside a Tauri shell
+    (`native::embedded_origin().is_some()`, i.e. `TR_EMBEDDED_ORIGIN` set) —
+    the release desktop window deliberately navigates itself to
+    `127.0.0.1:<dynamic port>` (`src-tauri/src/lib.rs`) and must not be
+    fought by this redirect. Verified live post-fix: `GET
+    http://127.0.0.1:3000/login` → `307` → `http://localhost:3000/login` →
+    `200`; the same request with `TR_EMBEDDED_ORIGIN` exported (simulating
+    the Tauri shell) stays `200` on `127.0.0.1` with no redirect; sign-in and
+    Google-start both succeed once the page has loaded from `localhost`.
+    `specs/dev-environment.md` now documents `localhost:3000` as the
+    canonical dev URL and explains why.
+  - **Desktop-dev "Waiting for Google…" (symptom 3) — diagnosed, not
+    independently reproduced live (no GUI session available for this task;
+    concurrent-build constraints in the shared `CARGO_TARGET_DIR` made a
+    clean two-process repro impractical — see Open questions).** Tracing the
+    code: `cargo tauri dev`'s window always loads `devUrl =
+    http://localhost:3000` (`src-tauri/tauri.conf.json`), so this is *not*
+    the 127.0.0.1 bug — password sign-in in that mode never depended on
+    `TR_EMBEDDED_ORIGIN` in the first place (it only reads the *request's*
+    `Host`, which is always `localhost:3000` for the webview regardless).
+    The most likely mechanism: `TR_EMBEDDED_ORIGIN` only reaches the
+    `cargo leptos watch` process `beforeDevCommand` itself starts. If a
+    *plain* `cargo leptos watch` (e.g. left running from testing symptom 1
+    on the web) is already bound to `:3000` when `cargo tauri dev` starts,
+    `beforeDevCommand`'s own `TR_EMBEDDED_ORIGIN`-carrying process fails to
+    bind and exits — but `tauri-cli` only polls `devUrl` for reachability,
+    not the child command's exit status, so it opens the window against the
+    *stale* process anyway. That stale process never calls
+    `native::stash_challenge` (its `native_origin` is `None`), so the
+    challenge only ever lands in the **webview's** cookie jar; the
+    system-browser callback (`app/src/lib.rs` `auth_callback`) checks that
+    cookie first, finds nothing (different browser/profile), falls to
+    `native::take_challenge()`, and finds nothing there either →
+    `"missing verifier or challenge"` → the `/login?error=google` bounce —
+    while the button's poll loop (`app/src/auth_pages.rs` `GoogleButton`,
+    2 s × 90 attempts = 3 min) sits at "Waiting for Google…" until it times
+    out. Not fixed here: the mechanism is a startup race between two
+    processes, not a small code change, and the specific trigger (a stale
+    watch server) wasn't independently confirmed live. **Recommended
+    workaround, worth adding to onboarding docs:** always `lsof -i :3000`
+    (or just stop any bare `cargo leptos watch`) before running
+    `cargo tauri dev`.
+  - **Neon Auth config change this task deliberately did *not* make:**
+    adding `http://127.0.0.1:3000` (and, for completeness, whatever port
+    range Tauri release desktop dynamically binds — infeasible to
+    enumerate) to the dev branch's `trusted_origins` would make `127.0.0.1`
+    work too, alongside `localhost`. Not applied — this task's scope is
+    code-side; a maintainer can add it via the Neon Auth console → the `dev`
+    project → Auth settings → Trusted origins if browsing via `127.0.0.1` is
+    ever wanted as well as `localhost` (the app-side redirect makes this
+    unnecessary for the documented flow, so there's no urgency).
+  - **New discovery, not fixed here (recommend filing as follow-up):**
+    `account::sign_in`/`sign_up`/`verify_email`/`resend_verification`/
+    `request_password_reset`/`reset_password`/`sign_out`/`fetch_current_user`
+    all compute their upstream `origin` from `cookies::request_origin(&headers)`
+    alone — unlike `google_sign_in`, which prefers
+    `native::embedded_origin()` when set. The Tauri **release** desktop
+    window navigates itself to `http://127.0.0.1:<dynamic port>`
+    (`src-tauri/src/lib.rs`), so on that build these calls would carry a
+    `127.0.0.1` `Origin`/`Host` regardless of `TR_EMBEDDED_ORIGIN` — the same
+    "Allow Localhost only matches `localhost`" trap this task fixed for web,
+    just on a different build. The 2026-07-13 desktop spike passed against a
+    then-current Neon Auth config; whether that config still tolerates
+    `127.0.0.1` for release desktop is unverified as of this task (no
+    release `.app` build attempted here — out of scope, and expensive on
+    this host). Worth a maintainer-run smoke test of release-build
+    email/password sign-in, and if it *is* broken, the fix is the same shape
+    as `google_sign_in`'s existing override.
+
+## Open questions (2026-08-15 addendum)
+
+- Whether the desktop-dev Google "Waiting for Google…" dead end is really
+  the stale-dev-server race diagnosed above, or something else — the
+  hypothesis was never exercised against a live `cargo tauri dev` window
+  (see Findings). Confirming it needs an isolated `CARGO_TARGET_DIR` per
+  concurrent server (the shared cache this task was scoped to use serializes
+  builds via cargo's package-cache lock, which made a live two-process
+  repro impractical inside this task).
+- Whether release-build Tauri desktop email/password sign-in still works
+  against the current Neon Auth dev/production config (see the
+  `native::embedded_origin()` asymmetry noted in Findings above) —
+  unverified since the 2026-07-13 spike.

@@ -32,6 +32,31 @@ Rationale: a Linux container cannot build or run a macOS `.app` (WebKit/AppKit +
 
 **Host toolchain relaxation (2026-07-07):** the original "toolchain-free host" goal is relaxed to *"Rust via brew rustup, no ad-hoc curl installs"* — the Android gate needed a host build, and macOS desktop rides the same install. Host carries: brew `rustup` (keg-only) with `aarch64-linux-android`/`wasm32-unknown-unknown` targets, binstalled `cargo-leptos`/`tauri-cli`, plus Android Studio (SDK/NDK/JBR) and Xcode, which were host requirements regardless. The container remains the canonical environment for everyday development and for agents ([delivery-pipeline](delivery-pipeline.md) makes it the self-sufficiency contract).
 
+**Local sign-in: the dev URL is `http://localhost:3000`, not `127.0.0.1:3000`
+(2026-08-15).** The dev server binds `127.0.0.1:3000` (`Cargo.toml`
+`site-addr`), and both `http://localhost:3000` and `http://127.0.0.1:3000`
+reach it in a plain browser — but only `localhost` can sign in. Neon Auth's
+**dev**-branch "Allow Localhost" trusted-origin setting matches the literal
+`localhost` hostname, not `127.0.0.1` ([auth](auth.md) → Findings); every
+Better Auth call the app makes carries the *request's own* `Host` as its
+`Origin`/`callbackURL` (`app/src/auth/cookies.rs` `request_origin`), so a
+browser sitting at `127.0.0.1:3000` gets upstream's literal `"Invalid
+origin"` on email/password sign-in and `INVALID_CALLBACKURL` on Google —
+reproduced live against the dev branch with `curl` (see auth.md Findings).
+Production is unaffected: Render always forwards `x-forwarded-*`, and Allow
+Localhost is off on the production branch regardless.
+
+The app now steers a plain browser hitting `127.0.0.1:3000` onto
+`localhost:3000` automatically — a same-path redirect in `app::build_router`
+(`redirect_localhost_dev`), skipped whenever the request is already behind a
+proxy (`x-forwarded-proto` present) or inside the Tauri embedded server
+(`TR_EMBEDDED_ORIGIN` set), which deliberately keeps its own window on
+`127.0.0.1`. So in practice this only bites a raw API client (`curl`,
+`httpie`, …) or a hand-built URL that never triggers a page load — **always
+develop against `http://localhost:3000`**, which is what
+[`.devcontainer/README.md`](../.devcontainer/README.md) already told
+container users to open.
+
 ## Open questions
 
 - *(resolved 2026-07-07, architecture spike task 4)* ~~Contents of the Android toolchain image layer~~ — **there is no image layer.** Google ships the NDK for linux x86_64 only (arm64 Linux hosts are explicitly off their roadmap), so an Android layer on this arm64 image cannot work with official tooling. The Android build moved to the host: Android Studio's SDK (NDK r27.1, JBR as JAVA_HOME, compileSdk 36/minSdk 24) + brew rustup + binstalled tauri-cli. The APK reaches the emulator via plain `adb install` from the host. Details in architecture-spike.md Findings; delivery builds move to x86_64 CI runners (NDK r28+) in [delivery-pipeline](delivery-pipeline.md).

@@ -2032,6 +2032,142 @@ fn google_error_redirect(clear_challenge: String) -> axum::response::Response {
         .expect("static redirect construction cannot fail")
 }
 
+/// Local web dev only: steer a browser reaching the server via the raw bind
+/// address (`http://127.0.0.1:<port>`) onto `http://localhost:<port>`
+/// instead, with a same-path redirect.
+///
+/// Neon Auth's dev-branch "Allow Localhost" trusted-origin check matches the
+/// literal `localhost` hostname, not `127.0.0.1` (specs/dev-environment.md,
+/// specs/auth.md) — every Better Auth call `[crate::auth::upstream]` makes
+/// carries the request's own `Host` as its `Origin`/`callbackURL`
+/// (`cookies::request_origin`), so reaching the app via `127.0.0.1` fails
+/// email/password sign-in with upstream's literal `"Invalid origin"` message
+/// and Google sign-in with `INVALID_CALLBACKURL`, even though the identical
+/// server answers both correctly on `localhost` (confirmed live against the
+/// dev branch: `curl` reproduction in the task history). A redirect at the
+/// page load is enough — every same-origin call the hydrated app makes
+/// afterward already carries the right `Host`.
+///
+/// Scoped narrowly to avoid the two other places a request legitimately
+/// carries a `127.0.0.1` `Host`: behind Render (`x-forwarded-*` is always
+/// present there — production keeps Allow Localhost off and isn't this bug
+/// anyway) and the Tauri embedded server, which deliberately navigates its
+/// *own* window to `127.0.0.1` (`src-tauri/src/lib.rs`) while exporting
+/// `TR_EMBEDDED_ORIGIN=http://localhost:<port>` — detected here via
+/// `native::embedded_origin()` — only for the upstream Origin header, not
+/// the page's own location. Redirecting that window too would fight the
+/// Tauri shell's own navigation instead of the browser's.
+/// The pure decision behind [`redirect_localhost_dev`]: given the request's
+/// method, whether it already arrived through a proxy, whether we're running
+/// inside a Tauri shell, and its `Host` header, what (if anything) to
+/// redirect to. Split out from the middleware — which needs a live
+/// `Request`/`Next` — so the steering logic itself is unit-testable.
+#[cfg(feature = "ssr")]
+fn localhost_redirect_target(
+    is_get: bool,
+    forwarded: bool,
+    native: bool,
+    host: Option<&str>,
+    path_and_query: &str,
+) -> Option<String> {
+    if !is_get || forwarded || native {
+        return None;
+    }
+    let port = host?.strip_prefix("127.0.0.1:")?;
+    Some(format!("http://localhost:{port}{path_and_query}"))
+}
+
+#[cfg(feature = "ssr")]
+async fn redirect_localhost_dev(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+
+    let is_get = req.method() == axum::http::Method::GET;
+    let forwarded = req.headers().get("x-forwarded-proto").is_some();
+    let native = crate::auth::native::embedded_origin().is_some();
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok());
+    let path = req.uri().path_and_query().map_or("/", |pq| pq.as_str());
+
+    match localhost_redirect_target(is_get, forwarded, native, host, path) {
+        Some(location) => axum::http::Response::builder()
+            .status(StatusCode::TEMPORARY_REDIRECT)
+            .header(header::LOCATION, location)
+            .body(axum::body::Body::empty())
+            .expect("static redirect construction cannot fail"),
+        None => next.run(req).await,
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod redirect_localhost_dev_tests {
+    use super::localhost_redirect_target;
+
+    #[test]
+    fn steers_a_bare_127_0_0_1_get_preserving_path_and_query() {
+        assert_eq!(
+            localhost_redirect_target(
+                true,
+                false,
+                false,
+                Some("127.0.0.1:3000"),
+                "/login?next=%2Fmy"
+            ),
+            Some("http://localhost:3000/login?next=%2Fmy".to_string())
+        );
+    }
+
+    #[test]
+    fn leaves_a_localhost_host_alone() {
+        assert_eq!(
+            localhost_redirect_target(true, false, false, Some("localhost:3000"), "/"),
+            None
+        );
+    }
+
+    #[test]
+    fn skips_requests_already_behind_a_proxy() {
+        // Render always sets x-forwarded-proto; Host is never 127.0.0.1
+        // there anyway, but the proxy check stands on its own.
+        assert_eq!(
+            localhost_redirect_target(true, true, false, Some("127.0.0.1:3000"), "/"),
+            None
+        );
+    }
+
+    #[test]
+    fn skips_the_tauri_embedded_server() {
+        // The desktop shell deliberately navigates its own window to
+        // 127.0.0.1 — this redirect must not fight that.
+        assert_eq!(
+            localhost_redirect_target(true, false, true, Some("127.0.0.1:54321"), "/"),
+            None
+        );
+    }
+
+    #[test]
+    fn only_steers_get_requests() {
+        // Server-fn POSTs hit this on a Host the *page* already carries;
+        // steering the page load once is enough.
+        assert_eq!(
+            localhost_redirect_target(false, false, false, Some("127.0.0.1:3000"), "/api/sign_in"),
+            None
+        );
+    }
+
+    #[test]
+    fn no_host_header_is_a_no_op() {
+        assert_eq!(
+            localhost_redirect_target(true, false, false, None, "/"),
+            None
+        );
+    }
+}
+
 #[cfg(feature = "ssr")]
 pub fn build_router(leptos_options: LeptosOptions) -> axum::Router {
     use axum::routing::get;
@@ -2068,6 +2204,7 @@ pub fn build_router(leptos_options: LeptosOptions) -> axum::Router {
             move || shell(leptos_options.clone())
         })
         .layer(cors)
+        .layer(axum::middleware::from_fn(redirect_localhost_dev))
         .fallback(leptos_axum::file_and_error_handler(shell))
         .with_state(leptos_options)
 }
