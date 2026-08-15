@@ -17,9 +17,11 @@
 //!   [`catalog_url`]. `?page=` is a *second*, independent primitive
 //!   (maintainer ruling, 2026-08-15, specs/catalog-search.md "Numbered page
 //!   links, round 2"): an explicit page-N jump, turned server-side into an
-//!   `OFFSET` under the same sort the cursor uses — see [`PAGE_PARAM`]. A
-//!   `?cursor=` still wins when both are present (a legacy shared link
-//!   carries only a cursor, never a page).
+//!   `OFFSET` under the same sort the cursor uses — see [`PAGE_PARAM`]. When a
+//!   URL carries both, the *client* forwards only the cursor (the fetch
+//!   closure drops `page`; a legacy shared link carries only a cursor, never
+//!   a page) — at the [`CatalogStore::search`] level itself a `page_number`,
+//!   when sent, wins over any cursor.
 //! - **What is *displayed* comes from the payload, not the URL.** The two
 //!   disagree for the whole of every search — `<Transition>` holds the previous
 //!   page on screen while the next resolves — so which page this is, how many
@@ -78,9 +80,11 @@ const CURSOR_PARAM: &str = "cursor";
 /// the maintainer's round-2 ruling (2026-08-15)** — `results` keys on it and,
 /// when there is no `?cursor=` riding along, sends it to `search_catalog` as
 /// an explicit page-N jump, turned server-side into an `OFFSET` under the same
-/// sort the keyset cursor uses. A `?cursor=` still wins when both are present
-/// (legacy/shared links from before this ruling carry only a cursor, never a
-/// page). Omitted for page one, same as `cursor`.
+/// sort the keyset cursor uses. When both are present the client sends only
+/// the cursor — the guard lives in `results`' fetch closure, not the store,
+/// where a sent `page_number` wins over any cursor (legacy/shared links from
+/// before this ruling carry only a cursor, never a page). Omitted for page
+/// one, same as `cursor`.
 const PAGE_PARAM: &str = "page";
 
 /// A hard ceiling on the page number this screen will ever parse out of the
