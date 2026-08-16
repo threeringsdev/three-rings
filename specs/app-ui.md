@@ -7393,3 +7393,147 @@ this diff is assertable by `@fast` chromium today — a real gap, not a "later"
 placeholder); macOS fullscreen behavior around the notch (default window
 decorations make this low-risk, left unverified); status-bar tap-through
 semantics (moot now that the close button itself moved off the inset).
+### Desktop WKWebView popover misposition: the JS anchor fallback rebuilt to mirror the CSS path (2026-08-16, WB-01M05K42G96ZSGHEBHKQ47CBDV)
+
+`app/src/components/ui/popover.rs` (`fallback_position`, `apply_fallback_position`,
+`watch_panel_resize`, `PopoverContext.align`); `end2end/force-fallback-probe.mjs`
+(new, one-off).
+
+**The bug.** Maintainer screenshots of the release desktop `.app` on macOS
+showed both original popover symptoms reproduce on the DESKTOP app: the
+tray's `End`-aligned "Move to…" picker rendered below the window (a sliver at
+the bottom edge), and the catalog's `Center`-aligned "Adding to" picker
+showed a thin gray bar instead of its content. Both were fixed by `#148` and
+verified green on chromium and Playwright's webkit 26.5 — engines *with* CSS
+anchor positioning. The system WKWebView the Tauri shell embeds evidently
+lacks it on this macOS build, so `position_below_trigger` (the JS fallback
+`#148`'s own adversarial review flagged as carrying two "consciously dropped"
+flaws on the assumption it was dead code) is live there: it always placed
+the panel BELOW the trigger, left-aligned to the trigger regardless of
+`PopoverAlign`, and never clamped to the viewport — exactly wrong for a
+bottom-docked, `End`-aligned trigger like the tray's.
+
+**The fix.** The fallback is now pure rect math
+(`fallback_position(trigger: Rect, panel: Size, viewport: Size, align:
+PopoverAlign) -> (f64, f64)`, no DOM — compiles and unit-tests on every host,
+gated `#[cfg(any(test, feature = "hydrate"))]` so it isn't dead code outside
+a `hydrate` build) behind a thin DOM shim (`apply_fallback_position`). It
+mirrors the CSS anchor path's own semantics instead of inventing new ones:
+
+- **Vertical**: defaults to ABOVE the trigger (`position-area: block-start` /
+  `bottom: anchor(top)`, the CSS path's own default), flipping below only
+  when there isn't room above but there is below (mirroring
+  `@position-try(flip-block)`) — and picking whichever side has more room
+  when neither fits. This is the piece that mattered for the tray: a
+  bottom-docked trigger has ~0px below, so it now always resolves above.
+- **Horizontal**: honors `PopoverAlign` per the CSS path's own per-align
+  block — `Start`/`End` align an edge with the trigger, `Center` centers
+  over it, `StartOuter`/`EndOuter` sit beside it (unused today, but the
+  fallback shouldn't silently ignore two of five variants either).
+- **Clamping**: the result is clamped inside the viewport with an 8px margin
+  on every side — flaw #148's review flagged as dropped
+  ("never clamps to viewport edges").
+- `PopoverContext` gained an `align: PopoverAlign` field so the fallback can
+  learn what the CSS path already knew; `watch_panel_resize`'s
+  `ResizeObserver` (unchanged in mechanism) now threads `align` through too.
+
+**A second, subtler bug found only by driving it live.** The very first
+version measured the panel's size via `panel.get_bounding_client_rect()` —
+correct for the trigger (never transformed) but wrong for the panel: this
+function's caller runs synchronously in the same tick as `show_popover()`,
+right as the panel's `@starting-style` open transition (`transform:
+scale(0.95) translateY(...)`) may still be in effect.
+`getBoundingClientRect()` returns the *painted, transformed* box — a
+`scale(0.95)` on a 280px-wide panel measures as ~266px at that instant — and
+because a pure CSS `transform` never fires `ResizeObserver` (paint-only, not
+layout), a `Center`-aligned panel caught mid-transition this way had no
+second chance to self-correct the way a genuine content-driven size change
+does. Caught by the forced-fallback probe (below): the catalog's `Center`
+picker centered ~5-7px off, consistently, while the tray's `End`-aligned
+picker (this bug's original, more severe report) stayed exact — an edge
+alignment error from the same width slip is smaller and further diluted by
+the clamp, so the more embarrassing bug accidentally didn't surface it.
+Fixed by measuring the panel's size via `offsetWidth`/`offsetHeight` instead
+(untouched by `transform`, exactly the settled layout size) while keeping
+`getBoundingClientRect()` for the trigger's position.
+
+**hover_card.rs finding — no code change.** `hover_card.rs`'s own module doc
+already states the platform caveat explicitly and by design: "the
+anchor-positioning platform caveat is the same as popover; the card is a
+hover preview (never the sole affordance), so no JS fallback is needed — a
+mispositioned preview on a non-anchor engine is cosmetic." Confirmed:
+`HoverCardContent` carries no fallback of any kind, shared or its own — a
+deliberate, already-documented decision from whoever vendored it, not dead
+code or an oversight. Out of this task's scope to revisit (the fix here is
+popover's own regression), but flagged here since the gap-analysis caveat
+this task investigated names both components together — hover-card previews
+on WKWebView will still render at the browser's UA default position, just
+with no user-facing consequence beyond a preview since it's never the sole
+way to reach that content.
+
+**Verification.**
+- Unit (pure geometry, `app/src/components/ui/popover.rs::fallback_position_tests`,
+  12 new): `end_aligned_bottom_docked_trigger_opens_above` (the tray, verbatim),
+  `center_align_near_right_edge_clamps_left` (the catalog's default align near
+  a viewport edge), `tall_panel_short_viewport_clamps_top`, all four overflow
+  directions individually forced (`overflow_{left,right,top,bottom}_is_clamped`),
+  `prefers_above_when_both_sides_fit`, `flips_below_when_above_is_insufficient`,
+  plus one sanity test per align variant. `cargo test --workspace --exclude
+  frontend --exclude three_rings`: 432 passed, 5 ignored (pre-existing), 0
+  failed. `cargo fmt --all --check` clean; all five clippy lines clean at `-D
+  warnings` (workspace excl. frontend/three_rings, `-p frontend` wasm, `-p app
+  --features native`, `-p app --features hosted,component-bench`, `-p app
+  --features hydrate,component-bench` wasm); `cargo build -p three_rings`
+  succeeds.
+- **Forced-fallback probe** (`end2end/force-fallback-probe.mjs`, one-off —
+  the chromium tier this suite runs cannot exercise the fallback at all,
+  chromium has native anchor positioning; precedent: `#148`'s own isolated
+  repro with anchor CSS stripped): `page.addInitScript` overrides
+  `CSS.supports` so `anchor_positioning_supported()`'s own probe string reads
+  false, plus an injected `[popover] { position-anchor: none !important; }`
+  rule so every `anchor()`/`position-area` reference in the per-align CSS
+  goes invalid-at-computed-value-time — exactly what a genuinely
+  non-supporting engine's parser would already have discarded. (An earlier
+  version of this override also forced `inset: auto !important`, which
+  backfired: an `!important` stylesheet declaration beats a non-important
+  inline one *regardless of origin*, so it silently defeated the JS
+  fallback's own inline `left`/`top` right along with the anchor CSS —
+  documented in the probe script's own header so nobody re-discovers it.)
+  Against the real dev server (real login, real `/my/all` selection, real
+  `/catalog`): **ALL PASS** — the tray's picker opens fully in-viewport
+  ABOVE its bottom-docked trigger with its right edge exactly flush with the
+  trigger's (`panelRight=1098` = `triggerRight=1098`), and the catalog's
+  picker centers over its trigger to within floating-point rounding
+  (`triggerCenter=1103.4921875`, `panelCenter=1103.484375`). Screenshots
+  confirm visually: the tray panel sits directly above "Move to…" with the
+  collection list fully rendered; the catalog panel is centered under
+  "Adding to: 📥 Inbox ▾" with the full collection list visible.
+- **Anchor-path regression, chromium** (native anchor positioning; the JS
+  fallback never runs here regardless of this fix): `npx playwright test
+  --project=chromium --grep @fast selection-tray.spec.ts
+  destination-picker.spec.ts` — **19/19 passed**, including `#148`'s own two
+  in-viewport assertions for the tray picker at desktop and mobile
+  viewports. Zero behavior change on anchor-capable engines, as required.
+- **Not run in this task**: the full chromium `@fast` suite and the serial
+  full pass (ui-task-loop step 4's normal once-per-task run) — this task's
+  surface (`popover.rs`) is exercised by the two spec files above plus
+  every other `Popover` consumer (shell user menu, tree-manage delete
+  pickers), none of which changed observable behavior on chromium since the
+  CSS path is untouched; deferred to whoever runs the task's final gate pass.
+  A fresh desktop `.app` build from this branch (CI `workflow_dispatch`,
+  `macos: true`) is the maintainer's own final click-through step, unchanged
+  by this task.
+
+**Environment note for whoever picks up this worktree next**: this worktree
+was missing both root `.env` (DATABASE_URL, etc.) and `end2end/.env`
+(E2E_EMAIL/PASSWORD) — both gitignored, per-checkout files copied in from the
+main checkout to unblock this task's own verification, not committed.
+Separately, `end2end/node_modules` is a **git-tracked symlink whose committed
+target is its own absolute path** (`git ls-tree HEAD end2end/` shows mode
+`120000`, blob content exactly `/Users/dylan.goings/source/three-rings/end2end/node_modules`)
+— self-referential, so resolving it from the *main* checkout (not a
+worktree) is an immediate `ELOOP`. `npm install` in `end2end/` locally
+replaces it with a real directory (gitignored, not committed) and fixes
+this, but the underlying tracked blob is still broken for the next person —
+worth a real fix (untrack the symlink, or make worktrees create their own
+via a setup script) filed as its own follow-up.
