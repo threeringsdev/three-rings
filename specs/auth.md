@@ -708,13 +708,17 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
   because that branch trusts no loopback origin at all, not a spelling bug —
   see the 2026-08-16 Findings entry.
 
-## Open questions (2026-08-16 addendum)
+## Resolved question (2026-08-16 addendum)
 
-- Whether the maintainer wants `allow_localhost=true` enabled on the
-  **production** Neon Auth branch (mirroring `dev`), or a narrower
-  trusted-origins allowance, to let a default-launched (no env override)
-  release desktop build authenticate — currently neither is done, so release
-  desktop sign-in against production still fails exactly as originally
-  reported even after WB-01M036CA3M185WM4WGS5SDC161's code fix. Tracked as
-  WB-01M05GMSBW1HAXWXV8X57X93RY; needs a maintainer call since it's a Neon
-  Auth console change, not a code change.
+- **Ruling (maintainer, 2026-08-16): production Neon Auth trusts localhost
+  origins** (`allow_localhost=true`, mirroring `dev`), so a default-launched
+  release desktop/mobile build — whose embedded server lives on localhost by
+  design — can authenticate. This deliberately supersedes the 2026-08-11
+  ruling recorded in the e2e-suite skill ("prod keeps Allow Localhost
+  **OFF**"), which predates native release builds being a real client; the
+  accepted tradeoff is the standard native-app one (any local process can
+  present a localhost origin to prod auth endpoints), judged negligible at
+  alpha scale and irrelevant to the deployed web app's own origin checks.
+  The e2e rule is unchanged in substance: tests still never target prod.
+  Applied via the Neon console/API alongside WB-01M036CA3M185WM4WGS5SDC161's
+  code fix; tracked in WB-01M05GMSBW1HAXWXV8X57X93RY.
