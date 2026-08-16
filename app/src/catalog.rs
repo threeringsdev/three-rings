@@ -74,7 +74,8 @@ const LIST_VIEW: &str = "list";
 /// The catalog's own default page size (WB-01M033AFA0VSCGB8Z3HTYPFZVD,
 /// maintainer report): 60, not [`shared::Page`]'s generic default of 50.
 /// 60 has far more useful divisors than 50 across the grid's column
-/// breakpoints (2, 3, 4, 5, 6 all divide it evenly, vs. only 2, 5, 10 for 50),
+/// breakpoints (2, 3, 4, 6, and 10 — every tier `GRID_CLASS` actually renders
+/// — divide it evenly, vs. only 2 and 10 among those for 50),
 /// so a full page tiles cleanly no matter which of [`GRID_CLASS`]'s tiers is
 /// showing — the maintainer's own complaint was that 50 "doesn't divide
 /// evenly unless you happen to have rows of 5, which the breakpoints never

@@ -84,9 +84,13 @@ rewrite their term, recognized terms reflect into widgets, unrecognized terms
 preserved verbatim (catalog-search contract). Live typing: ~250 ms debounce, one
 in-flight request, stale-response discard, first page SSR when the URL carries
 `q`. Grid/list toggle; tiles lead with the image (lazy-loaded, skeleton
-placeholder). The grid caps at `max-w-7xl`, left-flush (no `mx-auto`) — the
-same cap `Table` already carries for the list view, so neither surface grows
-past it on a wide monitor (P6-098). Every result carries `+ Want` / `+ Have` and the sticky
+placeholder). The grid is uncapped and fills the viewport, left-flush — the
+P6-098 `max-w-7xl` cap was removed by maintainer report (2026-08-16, a 2560px
+monitor read the 1280px cap as "half the screen"): columns run 2/3/4/6 and
+jump to 10 at the custom `3xl` (137.5rem) breakpoint, page size 60 so every
+tier divides evenly. `Table` still carries the old cap, so the LIST view
+remains ~1280px on a wide monitor — tracked as its own follow-up task. Every
+result carries `+ Want` / `+ Have` and the sticky
 destination picker (`Adding to: 📥 Inbox ▾`, persists across searches).
 Logged-out: quick actions prompt sign-in. Mobile: filter rail becomes a
 slide-over sheet with an active-filter badge count.
