@@ -99,11 +99,45 @@ pub struct OwnershipEntry {
     pub collection_name: String,
     pub printing_id: Id,
     pub quantity: i32,
+    /// The one `holdings` row behind this cell — the card-detail in-place
+    /// count stepper's write target (`set_holding_quantity`), mirroring
+    /// [`crate::CardRow::holding_id`].
+    ///
+    /// `None` when this (collection, printing) cell sums more than one
+    /// `holdings` row — different finish, condition, language, *or board*
+    /// (this projection, unlike `CardRow`, does not split by board, so two
+    /// boards of the same printing land in the same cell too). A lone number
+    /// cannot say which grain a typed edit meant, so the stepper refuses
+    /// instead of guessing. `#[serde(default)]` so an older hosted API
+    /// answering a newer native client degrades to "no stepper" rather than a
+    /// decode error (`PrintingSummary::face_image_uris`'s own precedent).
+    #[serde(default)]
+    pub holding_id: Option<Id>,
+}
+
+/// One line of the "your wants" block (authed only) — desired copies of this
+/// card, by collection. The wants counterpart of [`OwnershipEntry`]; desires
+/// are oracle-grained (not printing-addressed), so this groups by collection
+/// alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WantEntry {
+    pub collection_id: Id,
+    pub collection_name: String,
+    pub quantity: i32,
+    /// The one `desires` row behind this cell — the write target for
+    /// `set_desire_quantity`. `None` when this collection's want for the card
+    /// sums more than one `desires` row (different boards, or a
+    /// printing-pinned row alongside an unpinned one) — same rule as
+    /// [`OwnershipEntry::holding_id`]. `#[serde(default)]` for the same
+    /// forward-compat reason.
+    #[serde(default)]
+    pub desire_id: Option<Id>,
 }
 
 /// Full card page (`/cards/:id`): oracle data + printings + rulings + related
-/// parts, plus an ownership block present only when the caller is signed in
-/// (specs/collection-api.md → CardDetail). jsonb columns pass through verbatim.
+/// parts, plus ownership/wants blocks present only when the caller is signed
+/// in (specs/collection-api.md → CardDetail). jsonb columns pass through
+/// verbatim.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CardDetail {
     pub oracle_id: Id,
@@ -126,6 +160,11 @@ pub struct CardDetail {
     pub rulings: Vec<Ruling>,
     /// Present only when authed: the caller's copies & where they are.
     pub ownership: Option<Vec<OwnershipEntry>>,
+    /// Present only when authed: the caller's wants & where they are.
+    /// `#[serde(default)]`: additive since this field's own task, same
+    /// forward-compat reason as [`OwnershipEntry::holding_id`].
+    #[serde(default)]
+    pub wants: Option<Vec<WantEntry>>,
 }
 
 impl CardDetail {
@@ -361,6 +400,7 @@ mod tests {
             printings: vec![],
             rulings: vec![],
             ownership: None,
+            wants: None,
         }
     }
 
@@ -455,5 +495,46 @@ mod tests {
         assert!(CardFaceSummary::build(Some("split"), Some(&faces_json()), &imgs).is_empty());
         assert!(CardFaceSummary::build(None, Some(&faces_json()), &imgs).is_empty());
         assert!(CardFaceSummary::build(Some("transform"), None, &imgs).is_empty());
+    }
+
+    /// `OwnershipEntry::holding_id` and `WantEntry::desire_id` are additive
+    /// (the card-quantities-on-detail-page task): a payload encoded before
+    /// they existed must still decode, as `None` — same forward-compat
+    /// contract `PrintingSummary::face_image_uris` and
+    /// `DeleteCollectionReceipt::desires` already carry, and the same reason
+    /// (a native client can be a version ahead or behind the hosted API it
+    /// talks to).
+    #[test]
+    fn ownership_and_want_entries_decode_without_their_stepper_ids() {
+        let old_ownership: OwnershipEntry = serde_json::from_str(
+            r#"{"collection_id":"00000000-0000-0000-0000-000000000001",
+                "collection_name":"Inbox",
+                "printing_id":"00000000-0000-0000-0000-000000000002",
+                "quantity":3}"#,
+        )
+        .expect("old ownership entry, no holding_id");
+        assert_eq!(old_ownership.holding_id, None);
+
+        let old_want: WantEntry = serde_json::from_str(
+            r#"{"collection_id":"00000000-0000-0000-0000-000000000001",
+                "collection_name":"Commander deck",
+                "quantity":2}"#,
+        )
+        .expect("old want entry, no desire_id");
+        assert_eq!(old_want.desire_id, None);
+
+        // …and a `CardDetail` encoded before `wants` existed still decodes,
+        // as `None` — not "signed in with zero wants" (`Some(vec![])`), the
+        // same distinction `ownership: None` already draws against
+        // anonymous.
+        let old_detail = detail(None, None);
+        let wire = serde_json::to_string(&old_detail).expect("serializes");
+        let stripped = wire.replace(r#","wants":null"#, "");
+        assert_ne!(
+            stripped, wire,
+            "sanity: the field was actually present to strip"
+        );
+        let back: CardDetail = serde_json::from_str(&stripped).expect("decodes without `wants`");
+        assert_eq!(back.wants, None);
     }
 }

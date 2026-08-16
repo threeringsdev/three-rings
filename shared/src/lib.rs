@@ -29,6 +29,7 @@ pub mod tags;
 pub use catalog::{
     has_back_face, CardDetail, CardFace, CardFaceSummary, CardSummary, CatalogCount,
     OwnershipEntry, PrintingSummary, Ruling, SearchQuery, SearchResults, SetQuery, SetSummary,
+    WantEntry,
 };
 pub use collection::{
     batch_item_error, batch_item_index, default_language, AddHave, AddLine, AddWant, AllCardsRow,

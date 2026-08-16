@@ -13,7 +13,7 @@ use shared::{
     MoveRequest, NeedRow, NeedsView, NewCollection, NewTag, OwnershipEntry, Page, PrintingSummary,
     RelocatedDesire, Rename, RenameTag, Reorder, Reparent, Ruling, SearchQuery, SearchResults,
     SetBoard, SetQuantity, SetQuery, SetSummary, ShoppingList, ShoppingRow, SuggestedDestination,
-    Tag, TagAssignment, TagScope, TaggedCard, Teardown, TeardownReceipt, UndoReceipt,
+    Tag, TagAssignment, TagScope, TaggedCard, Teardown, TeardownReceipt, UndoReceipt, WantEntry,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::HashMap;
@@ -125,9 +125,16 @@ impl HostedBackend {
         // card page is a per-collection breakdown, so a soft-deleted
         // collection's copies must drop out of it exactly as they drop out
         // of `owned` (specs/collection-deletion.md).
+        //
+        // `holding_id` is deliberately NULL unless exactly one `holdings` row
+        // backs the (collection, printing) cell — the same rule
+        // `collection_view`'s `present` CTE applies to `CardRow::holding_id`:
+        // a lone number cannot say which finish/condition/language/board grain
+        // a typed edit meant.
         let rows: Vec<OwnershipSql> = sqlx::query_as(
             "SELECT h.collection_id, c.name AS collection_name, h.printing_id, \
-                    sum(h.quantity)::int AS quantity \
+                    sum(h.quantity)::int AS quantity, \
+                    CASE WHEN count(*) = 1 THEN (array_agg(h.id))[1] END AS holding_id \
              FROM holdings h JOIN printings p ON p.id = h.printing_id \
              JOIN collections c ON c.id = h.collection_id \
              WHERE p.oracle_id = $1 AND c.deleted_at IS NULL \
@@ -145,6 +152,40 @@ impl HostedBackend {
                 collection_name: o.collection_name,
                 printing_id: o.printing_id,
                 quantity: o.quantity,
+                holding_id: o.holding_id,
+            })
+            .collect())
+    }
+
+    /// The card page's "you want N copies, here" per-collection breakdown for
+    /// one oracle id — the wants counterpart of [`Self::ownership_entries`].
+    /// Callers must already know `self.session.is_some()`.
+    async fn want_entries(&self, oracle_id: Uuid) -> ApiResult<Vec<WantEntry>> {
+        let mut tx = self.scoped_tx().await?;
+        // Desires are oracle-grained (no printing column to group by); a
+        // collection's want for this card sums every board and printing-pin
+        // row, and `desire_id` is `None` when more than one such row exists —
+        // same rule as `ownership_entries`'s `holding_id`.
+        let rows: Vec<WantSql> = sqlx::query_as(
+            "SELECT d.collection_id, c.name AS collection_name, \
+                    sum(d.quantity)::int AS quantity, \
+                    CASE WHEN count(*) = 1 THEN (array_agg(d.id))[1] END AS desire_id \
+             FROM desires d JOIN collections c ON c.id = d.collection_id \
+             WHERE d.oracle_id = $1 AND c.deleted_at IS NULL \
+             GROUP BY d.collection_id, c.name",
+        )
+        .bind(oracle_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        tx.commit().await.map_err(upstream)?;
+        Ok(rows
+            .into_iter()
+            .map(|w| WantEntry {
+                collection_id: w.collection_id,
+                collection_name: w.collection_name,
+                quantity: w.quantity,
+                desire_id: w.desire_id,
             })
             .collect())
     }
@@ -290,6 +331,21 @@ impl CatalogStore for HostedBackend {
         } else {
             None
         };
+        // Same degrade-not-500 contract, independently of `ownership` above:
+        // a failed wants read must not blank out a working haves block (or
+        // vice versa) — the two sections are separate reads and fail
+        // separately.
+        let wants = if self.session.is_some() {
+            let (entries, err) = degrade_or(self.want_entries(oracle_id).await);
+            if let Some(e) = &err {
+                leptos::logging::error!(
+                    "card_detail: wants read failed, degrading to anonymous view: {e}"
+                );
+            }
+            entries
+        } else {
+            None
+        };
 
         Ok(CardDetail {
             oracle_id: card.oracle_id,
@@ -330,6 +386,7 @@ impl CatalogStore for HostedBackend {
                 })
                 .collect(),
             ownership,
+            wants,
         })
     }
 
@@ -1391,6 +1448,46 @@ impl CollectionStore for HostedBackend {
                 Ok(Some(r.into_line()?))
             }
             None => Err(ApiError::NotFound("holding".into())),
+        }
+    }
+
+    async fn set_desire_quantity(
+        &self,
+        desire_id: Id,
+        req: SetQuantity,
+    ) -> ApiResult<Option<DesireLine>> {
+        let mut tx = self.scoped_tx().await?;
+        // Same rule as `set_holding_quantity`: the stepper addresses a desire
+        // by id, so the live-collection guard rides on the row itself.
+        let live = in_live_collection("desires.collection_id");
+        if req.quantity <= 0 {
+            let affected = sqlx::query(&format!("DELETE FROM desires WHERE id = $1 AND {live}"))
+                .bind(desire_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(upstream)?
+                .rows_affected();
+            if affected == 0 {
+                return Err(ApiError::NotFound("desire".into()));
+            }
+            tx.commit().await.map_err(upstream)?;
+            return Ok(None);
+        }
+        let row: Option<DesireRow> = sqlx::query_as(&format!(
+            "UPDATE desires SET quantity = $2 WHERE id = $1 AND {live} \
+             RETURNING {DESIRE_COLS}"
+        ))
+        .bind(desire_id)
+        .bind(req.quantity)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(upstream)?;
+        match row {
+            Some(r) => {
+                tx.commit().await.map_err(upstream)?;
+                Ok(Some(r.into_line()?))
+            }
+            None => Err(ApiError::NotFound("desire".into())),
         }
     }
 
@@ -3320,6 +3417,15 @@ struct OwnershipSql {
     collection_name: String,
     printing_id: Uuid,
     quantity: i32,
+    holding_id: Option<Uuid>,
+}
+
+#[derive(sqlx::FromRow)]
+struct WantSql {
+    collection_id: Uuid,
+    collection_name: String,
+    quantity: i32,
+    desire_id: Option<Uuid>,
 }
 
 #[derive(sqlx::FromRow)]

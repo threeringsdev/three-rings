@@ -74,6 +74,7 @@ where
         .route(&paths::collection_op_route(op::VIEW), get(collection_view))
         .route(&paths::collection_op_route(op::TEARDOWN), post(teardown))
         .route(paths::HOLDING_QUANTITY_ROUTE, post(set_holding_quantity))
+        .route(paths::DESIRE_QUANTITY_ROUTE, post(set_desire_quantity))
         .route(paths::HOLDING_MOVE_ROUTE, post(move_holding))
         .route(paths::MOVES, post(move_cards))
         .route(paths::MOVES_BATCH, post(move_batch))
@@ -419,6 +420,23 @@ async fn set_holding_quantity(
             HostedBackend::for_user(user.user_id)
                 .await?
                 .set_holding_quantity(id, req)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/desires/{id}/quantity` — set a desire's quantity (0 deletes).
+async fn set_desire_quantity(
+    user: AuthUser,
+    Path(id): Path<Id>,
+    Json(req): Json<SetQuantity>,
+) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .set_desire_quantity(id, req)
                 .await
         }
         .await,
