@@ -201,9 +201,15 @@ pub fn MyRootNav() -> impl IntoView {
     // Carry `?q=`/`?cursor=` down to the table: see `root_rows`.
     let all_cards_href = Memo::new(move |_| {
         let q = query.read();
+        // The layout carries down too, same as `q`/`cursor`: a grid-mode
+        // `/my?view=grid` link opened on a phone should drill into `/my/all`
+        // already in grid, not silently reset to the table.
+        let list_view =
+            !super::all_cards::is_grid_view(q.get(super::all_cards::VIEW_PARAM).as_deref());
         super::all_cards::my_url(
             ALL_CARDS_PATH,
             &q.get("q").unwrap_or_default(),
+            list_view,
             q.get("cursor").as_deref(),
         )
     });

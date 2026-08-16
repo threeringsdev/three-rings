@@ -96,7 +96,8 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use leptos_router::hooks::{use_params_map, use_query_map};
+use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
+use leptos_router::NavigateOptions;
 use shared::{Board, CardRow, CardSummary, CollectionKind, CollectionView, Id, QuickAddKind};
 use std::collections::HashSet;
 
@@ -104,6 +105,7 @@ use super::tree::{assemble, element_anchor, CollectionTreeResource, TreeNode};
 use super::tree_manage::{MenuTarget, TreeManage, TreeMenu};
 use crate::cards::CardPreview;
 use crate::catalog::destination::Destination;
+use crate::catalog::GRID_CLASS;
 use crate::components::quick_add::{present_matches, PresentMatch, QuickAddPanel};
 use crate::components::states::ErrorNote;
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
@@ -125,20 +127,42 @@ use crate::components::ui::sonner::{ToastHandle, ToastKind, ToastOptions};
 use crate::components::ui::table::{
     Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableWrapper,
 };
+use crate::components::view_switch::ViewSwitch;
 
 /// The keyset page cursor, in the URL beside `?q=`.
 const CURSOR_PARAM: &str = "cursor";
 
-/// Build `/my/collections/{id}?q=…&cursor=…`, omitting empty parts — the single
-/// place such a URL is constructed, so the query bar, the clear button and the
-/// pager cannot drift on its canonical form.
-fn collection_url(id: &str, q: &str, cursor: Option<&str>) -> String {
+/// `?view=grid` renders the tile grid; anything else (including absent) is the
+/// table — same opposite-of-Catalog polarity as `crate::my::all_cards`'s
+/// `VIEW_PARAM`/`GRID_VIEW` (see that doc comment): this route shipped
+/// table-only long before the grid task, and a bare `/my/collections/:id`
+/// link must keep rendering exactly what it always has.
+const VIEW_PARAM: &str = "view";
+const GRID_VIEW: &str = "grid";
+
+/// Is `?view=` asking for the grid? Pure so it is unit-testable without a
+/// query map.
+fn is_grid_view(raw: Option<&str>) -> bool {
+    raw == Some(GRID_VIEW)
+}
+
+/// Build `/my/collections/{id}?q=…&view=…&cursor=…`, omitting empty parts —
+/// the single place such a URL is constructed, so the query bar, the clear
+/// button, the view switch and the pager cannot drift on its canonical form.
+fn collection_url(id: &str, q: &str, list_view: bool, cursor: Option<&str>) -> String {
     let mut url = format!("/my/collections/{id}");
     let mut sep = '?';
     if !q.is_empty() {
         url.push(sep);
         url.push_str("q=");
         url.push_str(&crate::catalog::encode_query_value(q));
+        sep = '&';
+    }
+    if !list_view {
+        url.push(sep);
+        url.push_str(VIEW_PARAM);
+        url.push('=');
+        url.push_str(GRID_VIEW);
         sep = '&';
     }
     if let Some(c) = cursor.filter(|c| !c.is_empty()) {
@@ -280,6 +304,10 @@ pub fn CollectionPage() -> impl IntoView {
     let url_id = Memo::new(move |_| params.read().get("id").unwrap_or_default());
     let url_q = Memo::new(move |_| query_map.read().get("q").unwrap_or_default());
     let url_cursor = Memo::new(move |_| query_map.read().get(CURSOR_PARAM).unwrap_or_default());
+    // "Is the table showing right now" — table stays the default (see
+    // `VIEW_PARAM`'s doc comment on why this route's polarity is the opposite
+    // of `/catalog`'s own `list_view`).
+    let list_view = Memo::new(move |_| !is_grid_view(query_map.read().get(VIEW_PARAM).as_deref()));
 
     let query_text = RwSignal::new(url_q.get_untracked());
     let tree = expect_context::<CollectionTreeResource>().0;
@@ -382,6 +410,25 @@ pub fn CollectionPage() -> impl IntoView {
     let paged = Memo::new(move |_| !url_cursor.read().is_empty());
     let teardown_open = RwSignal::new(false);
 
+    // The view switch's own navigation: relayouting the page you are on is not
+    // a query edit, so the cursor rides along (same rule `/catalog`'s and
+    // `/my`'s switches follow).
+    let navigate = use_navigate();
+    let go = move |list: bool| {
+        let id = url_id.get_untracked();
+        let q = url_q.get_untracked();
+        let cursor = url_cursor.get_untracked();
+        navigate(
+            &collection_url(
+                &id,
+                &q,
+                list,
+                (!cursor.is_empty()).then_some(cursor.as_str()),
+            ),
+            NavigateOptions::default(),
+        );
+    };
+
     // Memos, not raw reads: the panel re-renders on every keystroke.
     // The name comes from the tree when it has one: the toast this destination
     // titles ("Added X to Y") must not still say the old Y after a rename, and
@@ -465,7 +512,8 @@ pub fn CollectionPage() -> impl IntoView {
                             // loading" rather than adding into a payload the
                             // page is showing an error instead of.
                             facts.set(None);
-                            view! { <LoadError e view_res paged url_id url_q /> }.into_any()
+                            view! { <LoadError e view_res paged url_id url_q list_view /> }
+                                .into_any()
                         }
                     }
                 })}
@@ -484,8 +532,10 @@ pub fn CollectionPage() -> impl IntoView {
                         url_q
                         // A new search starts at page one: carrying the old
                         // cursor forward pages into a set that no longer exists.
+                        // The current layout rides along untracked, same as
+                        // `/catalog`'s and `/my`'s own `QueryBar`/`QuickAddPanel`.
                         to_url=Callback::new(move |q: String| {
-                            collection_url(&url_id.get_untracked(), &q, None)
+                            collection_url(&url_id.get_untracked(), &q, list_view.get_untracked(), None)
                         })
                         placeholder="Add or find cards…"
                         aria_label="Search this collection or add cards"
@@ -496,12 +546,19 @@ pub fn CollectionPage() -> impl IntoView {
                     />
                 </div>
                 <SlashHint />
+                <ViewSwitch list_view on_change=Callback::new(go) />
             </div>
 
             <Transition fallback=|| {
                 view! { <RowsSkeleton /> }
             }>
                 {move || {
+                    // `list_view` deliberately not read here — this closure is
+                    // the `Transition`'s child, and reading it would re-await
+                    // `view_res` on a pure layout toggle. `CollectionBody` and
+                    // `Pager` take the `Memo` itself and read it in their own
+                    // scope instead (same split as `crate::my::all_cards`'s
+                    // `AllCardsBody` — see its comment for the fuller account).
                     let q = url_q.get();
                     let id = url_id.get();
                     Suspend::new(async move {
@@ -517,8 +574,9 @@ pub fn CollectionPage() -> impl IntoView {
                                         here_delta
                                         tree
                                         tree_facts
+                                        list_view
                                     />
-                                    <Pager next paged q id />
+                                    <Pager next paged q id list_view />
                                 }
                                     .into_any()
                             }
@@ -618,6 +676,7 @@ fn LoadError(
     paged: Memo<bool>,
     url_id: Memo<String>,
     url_q: Memo<String>,
+    list_view: Memo<bool>,
 ) -> impl IntoView {
     view! {
         <ErrorNote
@@ -628,7 +687,9 @@ fn LoadError(
         >
             <Show when=move || paged.get()>
                 <a
-                    href=move || collection_url(&url_id.get(), &url_q.get(), None)
+                    href=move || {
+                        collection_url(&url_id.get(), &url_q.get(), list_view.get(), None)
+                    }
                     class="text-destructive text-sm font-medium underline"
                     data-testid="page-first"
                 >
@@ -1562,6 +1623,12 @@ fn CollectionBody(
     here_delta: RwSignal<i32>,
     tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
     tree_facts: RwSignal<Option<TreeFacts>>,
+    /// Table or grid — read *inside* the closure below, not baked at this
+    /// component's construction, so a pure view-switch click flips the layout
+    /// without needing `view_res` (the resource that resolved `view`) to
+    /// re-await. Same split `crate::my::all_cards::AllCardsBody` uses; see
+    /// its comment for the fuller account of why.
+    list_view: Memo<bool>,
 ) -> impl IntoView {
     let cards_empty = view.cards.is_empty();
     let folders = folder_list(
@@ -1575,8 +1642,10 @@ fn CollectionBody(
     move || {
         if cards_empty && no_folders.get() {
             view! { <EmptyState searching paged /> }.into_any()
-        } else {
+        } else if list_view.get() {
             view! { <CollectionTable view=view.get_value() folders here_delta tree /> }.into_any()
+        } else {
+            view! { <CollectionGrid view=view.get_value() folders tree /> }.into_any()
         }
     }
 }
@@ -2068,26 +2137,323 @@ fn HereCount(
     }
 }
 
+/// The grid layout: folder tiles (when there are any and no search is
+/// running — see [`folder_list`]) above the card tiles, capped by
+/// `crate::catalog::GRID_CLASS` so this grid's columns and breakpoints cannot
+/// drift from Catalog's or `/my`'s.
+///
+/// **Deck sections carry over.** A deck's cards group by board and type in the
+/// table (`group_deck`); the grid keeps the same grouping, one heading plus
+/// one tile grid per section, rather than flattening to a single grid — the
+/// section headers are load-bearing information (slot counts, sideboard vs
+/// main), not a table-only affordance, and losing them on the grid would make
+/// the two layouts describe different decks.
+#[component]
+fn CollectionGrid(
+    view: CollectionView,
+    folders: Memo<Vec<shared::CollectionSummary>>,
+    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
+) -> impl IntoView {
+    let is_deck = view.collection.kind == CollectionKind::Deck;
+    let collection_id = view.collection.id;
+    let rows = view_rows(view.cards);
+
+    view! {
+        <div class="flex flex-col gap-6" data-testid="collection-grid">
+            {move || {
+                let folders = folders.get();
+                (!folders.is_empty())
+                    .then(|| {
+                        view! {
+                            <ul class=GRID_CLASS data-testid="folder-grid">
+                                {folders
+                                    .into_iter()
+                                    .map(|folder| view! { <FolderTile folder tree /> })
+                                    .collect_view()}
+                            </ul>
+                        }
+                    })
+            }}
+            {if is_deck {
+                group_deck(rows)
+                    .into_iter()
+                    .map(|section| {
+                        let label = section.label.clone();
+                        view! {
+                            <div data-testid="deck-grid-section" data-section=label.clone()>
+                                <h3 class="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase">
+                                    {label.clone()} " · " {section.slots.to_string()}
+                                </h3>
+                                <ul class=GRID_CLASS>
+                                    {section
+                                        .rows
+                                        .into_iter()
+                                        .map(|row| view! { <HoldingTile row collection_id /> })
+                                        .collect_view()}
+                                </ul>
+                            </div>
+                        }
+                    })
+                    .collect_view()
+                    .into_any()
+            } else {
+                view! {
+                    <ul class=GRID_CLASS data-testid="collection-cards-grid">
+                        {rows
+                            .into_iter()
+                            .map(|row| view! { <HoldingTile row collection_id /> })
+                            .collect_view()}
+                    </ul>
+                }
+                    .into_any()
+            }}
+        </div>
+    }
+}
+
+/// A child collection's grid tile — the folder row's tile-shaped counterpart.
+/// Its count is the same rolled-up read `FolderTableRow` uses, from the same
+/// tree, in its own `Suspense` for the same reason (a stepper commit refetches
+/// the tree far more often than it should rebuild this grid).
+#[component]
+fn FolderTile(
+    folder: shared::CollectionSummary,
+    tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
+) -> impl IntoView {
+    let id = folder.id;
+    let name = folder.name.clone();
+    view! {
+        <li
+            class="group/tile flex flex-col gap-2"
+            data-testid="folder-tile"
+            data-collection=id.to_string()
+        >
+            <a
+                href=format!("/my/collections/{id}")
+                class="bg-muted/40 hover:bg-muted focus-visible:ring-ring flex aspect-[5/7] w-full flex-col items-center justify-center gap-1 rounded-lg focus-visible:ring-2 focus-visible:outline-none"
+            >
+                <span aria-hidden="true" class="text-3xl">
+                    {if folder.kind == CollectionKind::Deck { "🃏" } else { "📁" }}
+                </span>
+                <Suspense fallback=|| ()>
+                    {move || Suspend::new(async move {
+                        rolled_up_of(&assembled_roots(tree.await), id)
+                            .filter(|n| *n > 0)
+                            .map(|n| {
+                                view! {
+                                    <span
+                                        class="text-muted-foreground text-xs italic"
+                                        data-testid="here-count"
+                                    >
+                                        {n.to_string()} " here"
+                                    </span>
+                                }
+                            })
+                    })}
+                </Suspense>
+            </a>
+            <div class="min-w-0">
+                <p class="truncate text-sm font-medium" title=name.clone()>
+                    {name.clone()}
+                </p>
+            </div>
+        </li>
+    }
+}
+
+/// One card's grid tile: image, name, and the same HERE/WANTED/OWNED badges
+/// the table's cells show — `here_total`/`wanted_cell`/`owned_cell` are the
+/// same pure helpers `CardTableRow` uses, so the two layouts cannot disagree
+/// about what a row's numbers are. No stepper here: HERE is editable in the
+/// table only (the count stepper is a list-only editing surface, not
+/// something the grid — a display mode — reproduces) — see
+/// specs/app-ui.md's Findings entry for the grid-toggle task.
+///
+/// Selection stays reachable: `SelectionCheckbox` is a sibling of the `<a>`,
+/// never nested inside it, for the same reason `AllCardsTile` keeps them
+/// siblings (see that component's doc).
+#[component]
+fn HoldingTile(row: ViewRow, collection_id: Id) -> impl IntoView {
+    let wanted = wanted_cell(&row);
+    let owned = owned_cell(&row.row);
+    let here = here_total(&row.row);
+    let CardRow {
+        oracle_id,
+        printing_id,
+        name,
+        image_uri,
+        mana_cost,
+        type_line,
+        present,
+        owned: owned_total,
+        board,
+        faces,
+        ..
+    } = row.row;
+
+    let selection = use_selection();
+    let key = SelectionKey::Held {
+        collection_id,
+        printing_id,
+        board,
+    };
+    let selected = selection.selected(key);
+    let selectable = (present > 0).then(|| SelectedCard {
+        key,
+        oracle_id,
+        name: name.clone(),
+        image_uri: image_uri.clone(),
+    });
+
+    let preview = CardSummary {
+        oracle_id,
+        name: name.clone(),
+        printing_id: Some(printing_id),
+        image_uri: image_uri.clone(),
+        mana_cost,
+        type_line,
+        owned: Some(owned_total),
+        faces,
+    };
+    let href = format!("/cards/{oracle_id}");
+    let link_name = name.clone();
+
+    view! {
+        <li
+            class="group/tile flex flex-col gap-2"
+            data-testid="collection-tile"
+            data-oracle=oracle_id.to_string()
+            data-printing=printing_id.to_string()
+            data-board=board.to_pg()
+            data-state=move || selected.get().then_some("selected")
+        >
+            <div class="relative">
+                // hover=false: the tile is already the card art — same call
+                // `catalog::CardTile` and `AllCardsTile` make.
+                <CardPreview card=preview hover=false>
+                    <a
+                        href=href
+                        class="focus-visible:ring-ring relative block rounded-lg focus-visible:ring-2 focus-visible:outline-none"
+                    >
+                        <Skeleton class="aspect-[5/7] w-full" />
+                        {image_uri
+                            .map(|src| {
+                                view! {
+                                    <img
+                                        src=src
+                                        alt=name.clone()
+                                        loading="lazy"
+                                        decoding="async"
+                                        class="absolute inset-0 size-full rounded-lg object-cover"
+                                    />
+                                }
+                            })}
+                        <div class="absolute right-1.5 top-1.5 flex flex-col items-end gap-1">
+                            {(here > 0)
+                                .then(|| {
+                                    view! {
+                                        <span data-testid="here-badge">
+                                            <Badge variant=BadgeVariant::Secondary size=BadgeSize::Sm>
+                                                {format!("{here} here")}
+                                            </Badge>
+                                        </span>
+                                    }
+                                })}
+                            {wanted
+                                .map(|n| {
+                                    view! {
+                                        <span data-testid="wanted-badge">
+                                            <Badge variant=BadgeVariant::Default size=BadgeSize::Sm>
+                                                {format!("{n} wanted")}
+                                            </Badge>
+                                        </span>
+                                    }
+                                })}
+                            {owned
+                                .map(|n| {
+                                    view! {
+                                        <span data-testid="owned-badge">
+                                            <Badge variant=BadgeVariant::Muted size=BadgeSize::Sm>
+                                                {format!("{n} owned")}
+                                            </Badge>
+                                        </span>
+                                    }
+                                })}
+                        </div>
+                    </a>
+                </CardPreview>
+                {selectable
+                    .map(|card| {
+                        view! {
+                            <div
+                                class="bg-background/90 absolute left-1.5 top-1.5 z-10 rounded-full shadow"
+                                data-testid="tile-select"
+                            >
+                                <SelectionCheckbox selection card />
+                            </div>
+                        }
+                    })}
+            </div>
+            <div class="min-w-0">
+                <p class="truncate text-sm font-medium" title=link_name.clone()>
+                    {link_name.clone()}
+                </p>
+            </div>
+        </li>
+    }
+}
+
 /// Keyset paging controls — forward-only, for the reason `/my`'s are
 /// (a cursor describes "everything after this row").
+///
+/// **Reactive hrefs, not baked strings** (mirrors `crate::catalog::Pager`'s
+/// and `crate::my::all_cards::Pager`'s own finding): this component is
+/// mounted once per `(id, q, cursor)` resolution and stays mounted across a
+/// pure view-switch click (see `CollectionBody`'s comment on why), so a fixed
+/// `href` computed at construction would still point at the layout that was
+/// current when the page loaded.
 #[component]
-fn Pager(next: Option<String>, paged: Memo<bool>, q: String, id: String) -> impl IntoView {
+fn Pager(
+    next: Option<String>,
+    paged: Memo<bool>,
+    q: String,
+    id: String,
+    list_view: Memo<bool>,
+) -> impl IntoView {
     const LINK: &str =
         "border-input hover:bg-accent hover:text-accent-foreground rounded-md border px-3 py-1.5 text-sm";
-    let start_url = collection_url(&id, &q, None);
-    let next_url = next.as_deref().map(|c| collection_url(&id, &q, Some(c)));
+    let q = StoredValue::new(q);
+    let id = StoredValue::new(id);
 
     view! {
         <nav aria-label="Pagination" class="flex items-center justify-between gap-2">
             <Show when=move || paged.get() fallback=|| view! { <span></span> }>
-                <a href=start_url.clone() class=LINK data-testid="page-first">
+                <a
+                    href=move || {
+                        collection_url(&id.get_value(), &q.get_value(), list_view.get(), None)
+                    }
+                    class=LINK
+                    data-testid="page-first"
+                >
                     "← Back to the start"
                 </a>
             </Show>
-            {next_url
-                .map(|url| {
+            {next
+                .map(|c| {
+                    let c = StoredValue::new(c);
                     view! {
-                        <a href=url class=format!("{LINK} ml-auto") data-testid="page-next">
+                        <a
+                            href=move || {
+                                collection_url(
+                                    &id.get_value(),
+                                    &q.get_value(),
+                                    list_view.get(),
+                                    Some(&c.get_value()),
+                                )
+                            }
+                            class=format!("{LINK} ml-auto")
+                            data-testid="page-next"
+                        >
                             "Next page →"
                         </a>
                     }
@@ -2339,20 +2705,51 @@ mod tests {
 
     #[test]
     fn url_omits_empty_parts_and_encodes() {
-        assert_eq!(collection_url("abc", "", None), "/my/collections/abc");
-        assert_eq!(collection_url("abc", "", Some("")), "/my/collections/abc");
+        assert_eq!(collection_url("abc", "", true, None), "/my/collections/abc");
         assert_eq!(
-            collection_url("abc", "bolt", None),
+            collection_url("abc", "", true, Some("")),
+            "/my/collections/abc"
+        );
+        assert_eq!(
+            collection_url("abc", "bolt", true, None),
             "/my/collections/abc?q=bolt"
         );
         assert_eq!(
-            collection_url("abc", "", Some("cur")),
+            collection_url("abc", "", true, Some("cur")),
             "/my/collections/abc?cursor=cur"
         );
         assert_eq!(
-            collection_url("abc", "fire // ice", Some("c d")),
+            collection_url("abc", "fire // ice", true, Some("c d")),
             "/my/collections/abc?q=fire%20%2F%2F%20ice&cursor=c%20d"
         );
+    }
+
+    #[test]
+    fn grid_is_the_non_default_view_unlike_catalog() {
+        // Same opposite-of-Catalog polarity as `crate::my::all_cards::my_url`
+        // — see `VIEW_PARAM`'s doc comment. A bare URL (list_view = true)
+        // omits the param; choosing grid (list_view = false) spells it out.
+        assert_eq!(
+            collection_url("abc", "", false, None),
+            "/my/collections/abc?view=grid"
+        );
+        assert_eq!(
+            collection_url("abc", "bolt", false, None),
+            "/my/collections/abc?q=bolt&view=grid"
+        );
+        assert_eq!(
+            collection_url("abc", "bolt", false, Some("cur")),
+            "/my/collections/abc?q=bolt&view=grid&cursor=cur"
+        );
+    }
+
+    #[test]
+    fn is_grid_view_reads_only_the_exact_value() {
+        assert!(!is_grid_view(None));
+        assert!(!is_grid_view(Some("")));
+        assert!(!is_grid_view(Some("list")));
+        assert!(!is_grid_view(Some("Grid")));
+        assert!(is_grid_view(Some("grid")));
     }
 
     #[test]

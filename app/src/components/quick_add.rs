@@ -155,7 +155,8 @@ pub(crate) fn decode(key: &str, shift: bool, alt: bool, rows: usize, counting: b
 /// is driven by `focusin` (see `QuickAddSurface`'s wrapper), and a field that
 /// keeps focus after Escape can never fire that event again — reopening then
 /// needed a click away and back. Client-only, same shape as
-/// `catalog::focus_switch_item` (P6-148).
+/// `view_switch::focus_switch_item` (P6-148; moved there from `catalog` when
+/// the grid-toggle task lifted it out for reuse by the My-cards views).
 #[allow(unused_variables)]
 fn blur_field(ev: &KeyboardEvent) {
     #[cfg(feature = "hydrate")]

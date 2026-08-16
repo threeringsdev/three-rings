@@ -61,7 +61,7 @@ use crate::components::ui::sonner::{ToastHandle, ToastKind, ToastOptions};
 use crate::components::ui::table::{
     Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableWrapper,
 };
-use crate::components::ui::toggle_group::{ToggleGroup, ToggleGroupItem, ToggleGroupVariant};
+use crate::components::view_switch::ViewSwitch;
 use crate::shell::CurrentUserResource;
 
 /// `?view=list` renders the table; anything else (including absent) is the grid.
@@ -547,6 +547,35 @@ fn ResultsToolbar(results: Resource<SearchPayload>, list_view: Memo<bool>) -> im
     });
     let result_label: Signal<Option<String>> = count_after_hydrate.into();
 
+    // The view switch's own navigation: relayouting the page you are on is not
+    // a query edit, so the cursor (and its page label) ride along — bouncing a
+    // reader back to page one for choosing list view would lose their place.
+    // Built here, not inside `ViewSwitch` itself (P6-… grid-toggle task): the
+    // widget is now shared with `/my` and every collection view
+    // (`crate::components::view_switch`), each of which builds its own URL
+    // its own way, so the router wiring lives at each call site instead.
+    let navigate = use_navigate();
+    let query_map = use_query_map();
+    let go = move |list: bool| {
+        let params = query_map.read_untracked();
+        let q = params.get("q").unwrap_or_default();
+        let cursor = params.get(CURSOR_PARAM).unwrap_or_default();
+        let page = params
+            .get(PAGE_PARAM)
+            .and_then(|p| p.parse::<usize>().ok())
+            .filter(|p| *p > 0);
+        drop(params);
+        navigate(
+            &catalog_url(
+                &q,
+                list,
+                (!cursor.is_empty()).then_some(cursor.as_str()),
+                page,
+            ),
+            NavigateOptions::default(),
+        );
+    };
+
     view! {
         <div class="flex flex-wrap items-center gap-3">
             <rail::FilterSheet result_label />
@@ -571,127 +600,9 @@ fn ResultsToolbar(results: Resource<SearchPayload>, list_view: Memo<bool>) -> im
             </p>
             <div class="ml-auto flex items-center gap-2">
                 <destination::DestinationPicker />
-                <ViewSwitch list_view />
+                <ViewSwitch list_view on_change=Callback::new(go) />
             </div>
         </div>
-    }
-}
-
-/// Grid / list switch — a `radiogroup`, so it is one tab stop with roving
-/// focus and arrow-key selection (the behavior specs/app-ui.md's V1 vendoring
-/// findings deferred to this screen).
-#[component]
-fn ViewSwitch(list_view: Memo<bool>) -> impl IntoView {
-    let navigate = use_navigate();
-    let query_map = use_query_map();
-    let go = {
-        let navigate = navigate.clone();
-        move |list: bool| {
-            let params = query_map.read_untracked();
-            let q = params.get("q").unwrap_or_default();
-            // The cursor (and its page label) ride along: relayouting the page
-            // you are on is not a query edit, and bouncing a reader back to page
-            // one for choosing list view would lose their place.
-            let cursor = params.get(CURSOR_PARAM).unwrap_or_default();
-            let page = params
-                .get(PAGE_PARAM)
-                .and_then(|p| p.parse::<usize>().ok())
-                .filter(|p| *p > 0);
-            drop(params);
-            navigate(
-                &catalog_url(
-                    &q,
-                    list,
-                    (!cursor.is_empty()).then_some(cursor.as_str()),
-                    page,
-                ),
-                NavigateOptions::default(),
-            );
-        }
-    };
-
-    let on_keydown = {
-        let go = go.clone();
-        move |ev: leptos::ev::KeyboardEvent| {
-            let next = match ev.key().as_str() {
-                "ArrowRight" | "ArrowDown" => Some(true),
-                "ArrowLeft" | "ArrowUp" => Some(false),
-                _ => None,
-            };
-            if let Some(list) = next {
-                ev.prevent_default();
-                go(list);
-                // Roving focus: selection moved, so the tab stop moved with it
-                // and the focus ring has to follow or keyboard users lose their
-                // place. `tabindex` is already reactive on `pressed`.
-                focus_switch_item(&ev, if list { 1 } else { 0 });
-            }
-        }
-    };
-
-    view! {
-        <ToggleGroup
-            variant=ToggleGroupVariant::Outline
-            spacing=0
-            {..}
-            role="radiogroup"
-            aria-label="Result layout"
-            on:keydown=on_keydown
-        >
-            <ToggleGroupItem
-                title="Grid view"
-                pressed=Signal::derive(move || !list_view.get())
-                tabindex=Signal::derive(move || if list_view.get() { -1 } else { 0 })
-                {..}
-                on:click={
-                    let go = go.clone();
-                    move |_| go(false)
-                }
-            >
-                <span aria-hidden="true">"▦"</span>
-                <span class="sr-only">"Grid view"</span>
-            </ToggleGroupItem>
-            <ToggleGroupItem
-                title="List view"
-                pressed=Signal::derive(move || list_view.get())
-                tabindex=Signal::derive(move || if list_view.get() { 0 } else { -1 })
-                {..}
-                on:click={
-                    let go = go.clone();
-                    move |_| go(true)
-                }
-            >
-                <span aria-hidden="true">"☰"</span>
-                <span class="sr-only">"List view"</span>
-            </ToggleGroupItem>
-        </ToggleGroup>
-    }
-}
-
-/// Move focus to the nth item of the group the event fired on. Reads the DOM
-/// rather than holding node refs: the group is the event's `currentTarget`, so
-/// there is nothing to keep in sync. Client-only — event handlers never run
-/// during SSR, so the non-hydrate arm is a stub (same shape as
-/// `shell::hard_navigate`).
-#[allow(unused_variables)]
-fn focus_switch_item(ev: &leptos::ev::KeyboardEvent, index: u32) {
-    #[cfg(feature = "hydrate")]
-    {
-        use wasm_bindgen::JsCast;
-        let Some(group) = ev
-            .current_target()
-            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-        else {
-            return;
-        };
-        if let Ok(items) = group.query_selector_all("button[role='radio']") {
-            if let Some(el) = items
-                .item(index)
-                .and_then(|n| n.dyn_into::<web_sys::HtmlElement>().ok())
-            {
-                let _ = el.focus();
-            }
-        }
     }
 }
 
@@ -1276,7 +1187,12 @@ fn ResultCards(cards: Vec<CardSummary>, list_view: Memo<bool>, stale: bool) -> i
 // had no cap at all and `xl:grid-cols-6` was the last breakpoint, so a card
 // tile kept growing with the window past it — comically large at ultrawide
 // (P6-098).
-const GRID_CLASS: &str =
+//
+// `pub(crate)`: the My-cards grid views (`crate::my::all_cards`,
+// `crate::my::collection`) reuse this literally rather than re-deriving their
+// own breakpoints, so the two-column-at-390px / capped-at-1280px shape stays
+// one decision instead of three that can drift.
+pub(crate) const GRID_CLASS: &str =
     "grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 max-w-7xl";
 
 #[component]
