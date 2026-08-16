@@ -262,7 +262,18 @@ pub fn AppShell() -> impl IntoView {
 
     view! {
         <div class="bg-background text-foreground flex min-h-screen flex-col">
-            <header class="bg-background sticky top-0 z-40 flex h-14 shrink-0 items-center gap-4 border-b px-4">
+            // `min-h-14`, not `h-14` — the Android WebView draws behind the
+            // status bar under enforced edge-to-edge (targetSdk 36; verified
+            // on-device the WebView reports a nonzero `env(safe-area-inset-top)`
+            // even so, WB-01M05F945DBTRS0AQ79Y01EGJ2), and this header was the
+            // maintainer's unreachable top bar. A fixed `h-14` would have the
+            // added `pt-*` eat into the 56px band instead of growing past it
+            // (border-box shrinks the content box by the padding); `min-h-14`
+            // lets the padding add to the total height so the bar's controls
+            // clear the status bar while keeping the original 56px band below
+            // it. `env()` reads 0 on desktop/browsers without an inset, so
+            // this collapses to today's plain 56px header there.
+            <header class="bg-background sticky top-0 z-40 flex min-h-14 shrink-0 items-center gap-4 border-b px-4 pt-[env(safe-area-inset-top)]">
                 // My-cards mode only, and deliberately: Catalog mode already
                 // has its own designed mobile story for the rail — the
                 // `FilterSheet` button in the results toolbar (wireframes →
@@ -313,12 +324,15 @@ pub fn AppShell() -> impl IntoView {
                 // Mobile: pad past the fixed bottom tab bar — and past the
                 // tray too when it is up, since a fixed element cannot push
                 // the page it docks over (the pager is the bottom-most thing
-                // on both selectable views).
+                // on both selectable views). The `+env(safe-area-inset-bottom)`
+                // term matches the tab bar's own growth (see `BottomTabs`) —
+                // without it, content re-hides behind the now-taller bar on a
+                // gesture-nav phone even though the bar itself is clear of it.
                 <main class=move || {
                     if selection.is_empty() {
-                        "min-w-0 flex-1 pb-16 md:pb-0"
+                        "min-w-0 flex-1 pb-[calc(4rem_+_env(safe-area-inset-bottom))] md:pb-0"
                     } else {
-                        "min-w-0 flex-1 pb-32 md:pb-16"
+                        "min-w-0 flex-1 pb-[calc(8rem_+_env(safe-area-inset-bottom))] md:pb-16"
                     }
                 }>
                     <Outlet />
@@ -385,12 +399,19 @@ pub fn AppShell() -> impl IntoView {
 /// the toast's box) and over the bottom tab bar at 390. The e2e asserts the
 /// *relationship* — toaster bottom above tray top — rather than these constants,
 /// so a taller pill fails the test instead of silently re-colliding.
+///
+/// The mobile-width (`md:`-less) arm also adds `env(safe-area-inset-bottom)`:
+/// both chrome pieces it clears (the tab bar, the tray dock) grew by that same
+/// amount once they picked up their own safe-area padding
+/// (WB-01M05F945DBTRS0AQ79Y01EGJ2), and this offset would otherwise fall back
+/// under the gesture-nav bar on a device that reports one. `env()` is 0 on
+/// desktop/browsers without an inset, so the `md:` arms are untouched.
 fn toaster_offset(tray_up: bool) -> &'static str {
     if tray_up {
-        "bottom-[8.5rem] md:bottom-[4.5rem]"
+        "bottom-[calc(8.5rem_+_env(safe-area-inset-bottom))] md:bottom-[4.5rem]"
     } else {
         // Only the tab bar to clear, and only below `md`.
-        "bottom-[5rem] md:bottom-6"
+        "bottom-[calc(5rem_+_env(safe-area-inset-bottom))] md:bottom-6"
     }
 }
 
@@ -411,8 +432,14 @@ fn toaster_offset(tray_up: bool) -> &'static str {
 #[component]
 fn SelectionTrayDock(selection: SelectionState) -> impl IntoView {
     view! {
+        // `bottom-16` (the tab bar's own height) plus
+        // `env(safe-area-inset-bottom)` — the tab bar it docks above grew by
+        // that same inset (see `BottomTabs`), and a plain `bottom-16` would
+        // dock the tray back under the taller bar on a gesture-nav device
+        // (WB-01M05F945DBTRS0AQ79Y01EGJ2). 0 on desktop/browsers without an
+        // inset, so `md:bottom-0` below is unaffected.
         <div
-            class="pointer-events-none fixed inset-x-0 bottom-16 z-50 px-2.5 pb-2.5 md:bottom-0 md:left-60"
+            class="pointer-events-none fixed inset-x-0 bottom-[calc(4rem_+_env(safe-area-inset-bottom))] z-50 px-2.5 pb-2.5 md:bottom-0 md:left-60"
             data-testid="selection-tray-dock"
         >
             <div class="pointer-events-auto mx-auto max-w-3xl">
@@ -491,9 +518,13 @@ fn SidebarRail(my_mode: Memo<bool>, rail_open: RwSignal<bool>) -> impl IntoView 
         // rather than `translate-x` — a transformed ancestor is a containing
         // block, and the tree's context menu is a top-layer popover positioned
         // in viewport coordinates.
+        // `top-14` would leave a gap (or, worse, a seam under the header)
+        // now that the header's own height grows by the status-bar inset —
+        // these two are mobile-only (`md:hidden` / `md:static`), so the
+        // desktop `md:top-14` sibling below is untouched.
         <Show when=move || rail_open.get()>
             <div
-                class="fixed inset-x-0 top-14 bottom-0 z-40 bg-black/50 md:hidden"
+                class="fixed inset-x-0 top-[calc(3.5rem_+_env(safe-area-inset-top))] bottom-0 z-40 bg-black/50 md:hidden"
                 data-testid="rail-scrim"
                 on:click=move |_| rail_open.set(false)
             />
@@ -502,7 +533,7 @@ fn SidebarRail(my_mode: Memo<bool>, rail_open: RwSignal<bool>) -> impl IntoView 
             id="sidebar-rail"
             aria-label="Sidebar"
             data-open=move || rail_open.get().then_some("true")
-            class="bg-background invisible fixed top-14 bottom-0 -left-60 z-50 w-60 shrink-0 overflow-y-auto border-r transition-[left] duration-200 data-[open=true]:visible data-[open=true]:left-0 md:visible md:static md:z-auto md:overflow-visible"
+            class="bg-background invisible fixed top-[calc(3.5rem_+_env(safe-area-inset-top))] bottom-0 -left-60 z-50 w-60 shrink-0 overflow-y-auto border-r transition-[left] duration-200 data-[open=true]:visible data-[open=true]:left-0 md:visible md:static md:z-auto md:overflow-visible"
         >
             <div class="space-y-4 p-4 md:sticky md:top-14">
                 <Show
@@ -525,9 +556,19 @@ fn BottomTabs(my_mode: Memo<bool>) -> impl IntoView {
     const TAB: &str = "flex flex-1 flex-col items-center justify-center gap-0.5 py-2 text-xs";
 
     view! {
+        // `pb-[env(safe-area-inset-bottom)]` — the maintainer's original
+        // report (WB-01M05F945DBTRS0AQ79Y01EGJ2): under Android 15+'s
+        // enforced edge-to-edge (targetSdk 36) the WebView draws behind the
+        // gesture-nav bar and this whole bar sat under it, fully untappable.
+        // `bottom-0` stays flush with the physical viewport floor — the
+        // background still paints all the way down, so the extra padding
+        // pushes the tappable tab content up above the inset rather than
+        // shrinking the bar. `env()` reads 0 on desktop/browsers without an
+        // inset, so this collapses to today's layout there; `<main>` and the
+        // tray dock below add the same amount to stay clear of the taller bar.
         <nav
             aria-label="Primary"
-            class="bg-background fixed inset-x-0 bottom-0 z-40 flex border-t md:hidden"
+            class="bg-background fixed inset-x-0 bottom-0 z-40 flex border-t pb-[env(safe-area-inset-bottom)] md:hidden"
         >
             <a
                 href="/catalog"

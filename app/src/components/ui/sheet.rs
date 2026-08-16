@@ -78,6 +78,25 @@ impl SheetDirection {
             Self::Bottom => "bottom-0 left-0 w-full h-[400px]",
         }
     }
+
+    /// Extra padding for whichever edges this direction actually touches the
+    /// viewport boundary on, stacked on top of `SheetContent`'s base `p-6`
+    /// (WB-01M05F945DBTRS0AQ79Y01EGJ2: `FilterSheet` is `Left`, `top-0
+    /// h-full`, so its content used to start under the Android status bar
+    /// and its "Show N results" footer under the gesture-nav bar).
+    /// `Right`/`Left` are full-height (`h-full`, both edges); `Top`/`Bottom`
+    /// touch only their own edge. `env()` is 0 on desktop/browsers without an
+    /// inset, so this is a no-op there — same reasoning as the shell's fixed
+    /// chrome (`crate::shell`).
+    fn safe_area_padding(self) -> &'static str {
+        match self {
+            Self::Right | Self::Left => {
+                "pt-[calc(1.5rem_+_env(safe-area-inset-top))] pb-[calc(1.5rem_+_env(safe-area-inset-bottom))]"
+            }
+            Self::Top => "pt-[calc(1.5rem_+_env(safe-area-inset-top))]",
+            Self::Bottom => "pb-[calc(1.5rem_+_env(safe-area-inset-bottom))]",
+        }
+    }
 }
 
 #[component]
@@ -165,6 +184,7 @@ pub fn SheetContent(
     let base_class = tw_merge!(
         "fixed z-100 bg-card shadow-lg p-6 transition-transform duration-300 overflow-y-auto overscroll-y-contain data-[state=closed]:pointer-events-none",
         direction.initial_position(),
+        direction.safe_area_padding(),
         class
     );
     // The open/closed transform is reactive — upstream mutated classList

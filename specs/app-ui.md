@@ -7218,3 +7218,140 @@ needed for the login fixture and `DATABASE_URL` respectively) and are
 likewise uncommitted. Flagged here rather than filed as a Workbook follow-up
 per this task's own dispatch instructions; the main-repo symlink itself is
 still broken for whichever worktree looks at it next.
+### Android system-bar overlap fixed with safe-area padding, web-side (2026-08-16, WB-01M05F945DBTRS0AQ79Y01EGJ2)
+
+Maintainer report (release APK, real phone): the top bar (mode switch, user
+menu — where sign-in lives) and bottom tab bar were completely overlapped by
+the Android status/gesture-nav bars, nothing in either tappable.
+
+**Root cause, verified.** `src-tauri/gen/android/app/build.gradle.kts` targets
+SDK 36; Android 15+ enforces edge-to-edge for `targetSdk >= 35` and, critically,
+**the manifest opt-out (`windowOptOutEdgeToEdgeEnforcement`) is removed
+entirely once the *device* is also Android 16** — confirmed against
+[developer.android.com/about/versions/16/behavior-changes-16](https://developer.android.com/about/versions/16/behavior-changes-16),
+not assumed. Tauri's generated `MainActivity.kt` already calls
+`enableEdgeToEdge()` unconditionally (scaffold default, not something this repo
+added). The web shell applied no safe-area insets and the SSR viewport meta
+had no `viewport-fit=cover`.
+
+**Layer decision: web-side, decided empirically, not by preference.** Before
+writing any fix, attached Playwright over CDP to the Android **dev** webview
+(android-smoke skill) and probed `env(safe-area-inset-*)` via a hidden probe
+element + `getComputedStyle` on the emulator's real Chrome WebView (API 37,
+`Samsung_Flip_7` AVD, Android 17) — it reported `top: 24px` / `bottom: 24px`
+**even before `viewport-fit=cover` was added**, unlike WebKit's spec-mandated
+gating on that meta value. That settled it: native-side `WindowInsets`
+plumbing in the generated `MainActivity` (legitimate per the signing-config
+precedent, but a `gen/android` edit to maintain) and the manifest opt-out
+(confirmed non-functional on an Android 16 *device* regardless of `targetSdk`,
+so not even "temporary") were both unnecessary. `viewport-fit=cover` was added
+to the SSR meta anyway (`app/src/lib.rs`) — free on Android, and required for
+the same fix to work at all on iOS/WKWebView later (untested this task, no iOS
+target available; a future iOS pass must re-verify `env()` actually reports
+nonzero under WKWebView before assuming this meta alone carries it there).
+
+**Every fixed-position surface in the mobile shell got `env()` padding**
+(`app/src/shell.rs` unless noted), additive on top of existing layout so it
+collapses to today's behavior wherever `env()` reads 0 (every desktop browser,
+and Android/iOS browsers outside an inset):
+- **Header** (`AppShell`'s `<header>`): `h-14` → `min-h-14` +
+  `pt-[env(safe-area-inset-top)]`. `min-h-14` matters — a fixed `h-14` would
+  have let the added padding *shrink* the content band (border-box) instead of
+  growing the header past the inset.
+- **Bottom tab bar** (`BottomTabs`): `pb-[env(safe-area-inset-bottom)]`,
+  `bottom-0` kept flush so the bar's own background still paints under the
+  gesture-nav area.
+- **`<main>`'s bottom clearance**, the **selection tray dock**
+  (`SelectionTrayDock`), and the **toaster's shell-supplied offset**
+  (`toaster_offset`) all grew by the same inset — each one clears the tab bar
+  and/or tray, both of which are now taller.
+- **Toaster's own default** (`sonner.rs`, for bench pages that mount a bare
+  `<Toaster/>` with no shell offset): same treatment on `bottom-*`, plus
+  `right-*` for completeness (a phone's *side* inset in landscape).
+  `env(safe-area-inset-right)` is 0 in the tested portrait orientation.
+- **Mobile rail drawer + scrim** (`SidebarRail`, below `md`): `top-14` →
+  the same `calc(3.5rem + inset)` as the header, a bonus fix — the header's
+  now-taller box would otherwise have left a seam under it.
+- **`SheetContent`** (`sheet.rs`): a new `SheetDirection::safe_area_padding()`
+  stacks `env()` on top of the base `p-6`, per edge each direction actually
+  touches (`Left`/`Right` are `h-full` → both top and bottom; `Top`/`Bottom`
+  → their own edge only). Fixes `FilterSheet` specifically (`Left`, full
+  height) — its content used to start under the status bar and its "Show N
+  results" footer under the gesture-nav bar; verified via computed style
+  (`padding-top`/`padding-bottom` both `48px` = `24px` base + `24px` inset).
+- **Dialog** (centered, `max-h-[85vh]`, insets from every edge by construction)
+  and the **collection tree's `TableHeader` sticky** (sticks to its own
+  scroll container, not the viewport) were checked and need nothing.
+
+**On-device measurements** (API 37 emulator, 1080×2520 physical /
+540×1260 CSS px, `env()` insets 24px/24px):
+
+| | before | after |
+|---|---|---|
+| bottom tab bar height | 59px (flush to floor, tab content ran into the last 24px) | 83px = 59 + 24; tab content's own bottom edge lands exactly at `y=1236` = the safe boundary, 0px into the inset |
+| header wordmark vertical position | centered in an unpadded 56px band (top ≈ 18px, **6px under** the 24px status-bar inset) | top = 29.5px, comfortably clear |
+| `FilterSheet` computed padding | `24px` (base only) | `48px` top and bottom |
+
+Screenshots (dev webview and, separately, the actual signed release APK) both
+show the header and tab bar fully clear of the status bar / gesture pill.
+
+**A physical Android 16 device (Samsung SM-F766U1 — a Z Flip 7, matching the
+`Samsung_Flip_7` AVD's namesake, almost certainly the maintainer's own phone)
+was briefly attached via `adb` this session** — confirmed SDK 36 / Android 16
+— **but disconnected before a CDP attach could measure it directly.** Every
+quantitative number above is from the API 37 emulator, not that device. The
+maintainer's own phone remains the final check, per this task's own caveat
+that enforcement can differ by API level/OEM.
+
+**Web regression check.** `responsive.spec.ts` (full file, 15/15) +
+`smoke.spec.ts` (full file) run chromium `@fast` in isolation, before any
+other load on the shared dev server: 24/26 on first pass, both failures
+(`page.waitForURL` timeouts) passed on an immediate retry — 31/31 effective.
+A later, much larger run (the full `@fast` tier, 358 tests) was run
+concurrently with this task's own `cargo tauri android build --release`
+eating most of the host's CPU and produced ~200 failures — invalidated by that
+self-inflicted contention, not evidence of anything. Two failures that
+persisted even in a clean, serial, uncontended re-run
+(`filter-rail.spec.ts`'s two debounced set-picker tests, and
+`responsive.spec.ts`'s "Catalog reached by clicking from a collection" —
+tripped by a stale `zz-e2e-move-*` collection left over from this session's
+own repeated runs against the shared seeded account) were confirmed
+**pre-existing** by `git stash`ing this task's five changed files, rebuilding,
+and re-running those exact tests against unmodified `main` — identical
+failures, same error messages. Restored the stash afterward. Neither test's
+file was touched by this task's diff.
+
+**Verification.** `cargo fmt --all -- --check` clean. Targeted `clippy -D
+warnings` clean on the three lines that cover every file touched (`-p app
+--features hosted,component-bench`, `-p app --features
+hydrate,component-bench` wasm, `-p app --features native`) — the full gate
+line set was not re-run given the emulator/build load already on the host;
+CI runs the complete gate on the PR. `cargo test -p app` `shell::` unit
+tests 2/2 (the `toaster_offset` structural assertions still hold under the
+new `env()`-bearing strings). Release smoke
+(`scripts/smoke-android.sh`, API 37 emulator): process alive, no fatal crash,
+webview present — PASS. The release APK
+(`app-universal-release.apk`, arm64-only per `--target aarch64`, ~70MB, signed
+with the persistent CI keystore — its cert's Subject CN reads "Three Rings
+Debug" as a pre-existing naming artifact of
+`scripts/gen-android-keystore.sh`'s `$DNAME`, not an accidental debug-keystore
+fallback) carries this fix **and** #159's embedded-origin auth fix for one
+combined retest.
+
+**`gen/android` untouched.** This fix lives entirely in `app/src/` (web-side);
+no native/manifest edits shipped, so there is no regeneration-survival
+tradeoff to record for this task. (The dev-mode deep-link `<intent-filter>`
+that `cargo tauri android dev` injects into `AndroidManifest.xml` was reverted
+before every commit, per the android-smoke skill's standing gotcha.)
+
+**Not filed as follow-ups, reported here per this task's instructions:**
+`filter-rail.spec.ts`'s two debounced set-picker tests
+("a hand-typed duplicate code renders exactly one chip",
+"Enter in the set picker still activates the highlighted row…") are flaky
+independent of this change (reproduced on unmodified `main`) and are
+candidates for the e2e-suite's `@flaky` quarantine. The shared Neon-dev e2e
+account has accumulated stale `zz-e2e-*` collections from repeated test runs
+across sessions (this task's own heavy verification included) that should be
+swept at some point. iOS/WKWebView's `env()` behavior under this same
+`viewport-fit=cover` change is unverified — no iOS target was available this
+task.
