@@ -36,6 +36,18 @@ use crate::components::ui::toggle_group::{ToggleGroup, ToggleGroupItem, ToggleGr
 #[component]
 pub fn ViewSwitch(list_view: Memo<bool>, on_change: Callback<bool>) -> impl IntoView {
     let on_keydown = move |ev: leptos::ev::KeyboardEvent| {
+        // A modified arrow is never a roving-focus move. Most load-bearing:
+        // `Alt+←` on non-mac is the desktop back/forward shortcut
+        // (`components::back_nav::is_back_chord`) — this handler used to
+        // match bare `ev.key()` and call `prevent_default()` without
+        // `stop_propagation()`, so a focused view switch turned one `Alt+←`
+        // into both "flip to grid" *and* "navigate back" (adversarial
+        // review, round 2). `back_nav`'s listener also now defers to any
+        // `default_prevented()` keydown, but the fix belongs at both ends —
+        // this component has no business claiming a chord it isn't offering.
+        if ev.alt_key() || ev.meta_key() || ev.ctrl_key() {
+            return;
+        }
         let next = match ev.key().as_str() {
             "ArrowRight" | "ArrowDown" => Some(true),
             "ArrowLeft" | "ArrowUp" => Some(false),

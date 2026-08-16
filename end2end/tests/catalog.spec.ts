@@ -196,6 +196,94 @@ test("the view switch is a radiogroup with roving focus @fast", async ({
   await expect(page.getByTestId("results-list")).toBeVisible();
 });
 
+// A modified arrow is never a roving-focus move (adversarial review, round 2
+// of the back-button task): `ViewSwitch`'s keydown handler used to match bare
+// `ev.key()` and call `prevent_default()` without `stop_propagation()`, so a
+// focused view switch on non-mac turned one `Alt+←` into both "flip to grid"
+// *and* — because the event kept bubbling — "navigate back"
+// (`components::back_nav::install_back_shortcut`'s window-level listener).
+// Fixed at both ends (`view_switch.rs` ignores any arrow carrying a modifier;
+// `back_nav.rs` also now defers to any keydown a component upstream already
+// claimed, for every future case like this one, not just this bug).
+//
+// A "does it navigate" assertion cannot tell fixed from broken here on its
+// own — this took a couple of wrong turns to land on, kept as reasoning
+// rather than dropped silently:
+//
+// - A cold `page.goto` load makes `back_nav::has_history()` false, so *even
+//   once `ViewSwitch` is fixed* the chord still reaches `back_nav`'s
+//   listener (that is the point of the fix, not a leak) and it still
+//   navigates — to its own fallback, `/catalog`. Under the old bug the same
+//   keypress drove two navigations (`ViewSwitch`'s own flip, then
+//   `back_nav`'s fallback overwriting it), landing on the exact same URL.
+//   Final state cannot distinguish the two; verified by running a
+//   URL-pathname-only version of this test against a deliberately-reverted
+//   `ViewSwitch` guard and watching it pass anyway.
+// - Giving the page real prior history so `back_nav` lands somewhere else on
+//   a real back doesn't fully resolve it either, for a subtler reason: the
+//   view switch only ever toggles between exactly two states (grid ⇄ list),
+//   so *any* setup built by toggling the switch itself makes "the state
+//   `ViewSwitch`'s own flip would produce" and "the state one real history
+//   entry back actually contains" the same URL by construction — confirmed
+//   the same way, with the same false-pass.
+//
+// What actually distinguishes them: a **third**, unrelated dimension folded
+// into the same entry — the search text. Query-bar behavior is itself
+// load-bearing history state (`components/query_bar.rs`, `catalog/rail.rs`:
+// "History granularity is per search session" — the *first* filter on a bare
+// page pushes; refining an existing one replaces), so the very first `bolt`
+// search is a real, separate history entry from the bare page before it, and
+// `ViewSwitch`'s flip can never reproduce or erase it. If the flip fires (the
+// bug), it lands on `/catalog?q=bolt` — the *pushed* query state, minus the
+// view param it just cleared. If only `back_nav`'s real history walk fires
+// (the fix), it lands on the exact same `/catalog?q=bolt` — because that
+// really is the one entry behind the current one. Both link back to `bolt`;
+// what only the bug produces is *staying on* `?q=bolt&view=list` — the
+// current entry, unmoved, because the flip pushed a new entry that
+// `back_nav`'s now-blocked call would otherwise have popped straight back
+// off. That is the actual assertion below.
+test("Alt+ArrowLeft on a focused view switch does not also flip the view @fast", async ({
+  page,
+}) => {
+  // This suite's own runner is real macOS Chromium, where `back_nav`'s chord
+  // is `⌘[`, not `Alt+←` — spoof `navigator.platform` so `Alt+←` is live as
+  // the desktop chord (same technique `card-detail.spec.ts`'s own
+  // `Alt+ArrowLeft` shortcut test uses).
+  await page.addInitScript(() => {
+    Object.defineProperty(window.navigator, "platform", {
+      get: () => "Linux x86_64",
+    });
+  });
+
+  await page.goto("/catalog");
+  await hydrated(page);
+
+  // Two real, separate pushes: the first search (bare → `?q=bolt`, a genuine
+  // push per the app's own "first filter on a bare page" rule), then the
+  // view toggle (`?q=bolt` → `?q=bolt&view=list`, also a push — clicking, not
+  // the keyboard, so this is unaffected by either fix under test).
+  await page.locator("#catalog-query").fill("bolt");
+  await page.waitForURL((url) => url.searchParams.get("q") === "bolt");
+  await page.getByRole("radio", { name: "List view" }).click();
+  await page.waitForURL((url) => url.searchParams.get("view") === "list");
+
+  await page.getByRole("radio", { name: "List view" }).focus();
+  await page.keyboard.press("Alt+ArrowLeft");
+  await page.waitForTimeout(300);
+
+  // The fixed behavior (a real `history.back()`, landing one entry behind)
+  // and the broken behavior (`ViewSwitch`'s own flip, immediately popped back
+  // off by an unguarded `back_nav`) both resolve `q=bolt` — but only the
+  // fixed path actually *moves*. Landing back on the exact URL just left
+  // (`view=list` still present) is the bug's signature.
+  const url = new URL(page.url());
+  expect(url.searchParams.get("q")).toBe("bolt");
+  expect(
+    url.searchParams.get("view"),
+    "still on ?view=list — Alt+ArrowLeft round-tripped instead of moving, ViewSwitch's own flip claimed the key",
+  ).not.toBe("list");
+});
+
 test("switching view keeps the query @fast", async ({ page }) => {
   await page.goto("/catalog?q=bolt");
   await hydrated(page);

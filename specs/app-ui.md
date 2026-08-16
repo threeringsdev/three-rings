@@ -240,6 +240,238 @@ None — all resolved at spec review (maintainer, 2026-07-17):
 (appended per task by the work loop — decisions, surprises, disputed review
 findings with rationale, deferred items)
 
+### Back-control round 2: the blocker, two majors, and the folds (2026-08-16)
+
+`app/src/components/back_nav.rs`, `app/src/cards.rs`, `app/src/shell.rs`,
+`app/src/components/view_switch.rs`, `app/src/my/collection.rs`,
+`end2end/tests/card-detail.spec.ts`, `end2end/tests/catalog.spec.ts` —
+adversarial review of the entry immediately below. **Read this one first**;
+the round-1 entry's "shell-tracked navigation counter" description of the
+has-history mechanism is superseded by what follows — the counter is gone,
+replaced with history-entry stamping. Everything else in the round-1 entry
+(the fallback rule, the control markup, the app-wide shortcut scope, the
+Chromium-delivers-the-keydown finding) still stands.
+
+**BLOCKER — the counter walked readers out of the app.** Counting client-side
+navigations since `AppShell` mounted cannot tell "a real forward navigation"
+from "the navigation `browser_back()` itself just caused" — a popstate is a
+navigation too — so `/catalog → card → back` left the landed-on `/catalog`
+entry reading `has_history = true` again, and a second back press called
+`history.back()` with nothing real behind it. On the web that overshoots by
+one entry (into an external referrer, say); on the Tauri desktop shell, with
+no address bar to recover with, it can walk the reader out of the app
+entirely. Fixed by replacing the counter with **history-entry stamping**:
+`window.history.pushState`/`replaceState` are wrapped once
+(`back_nav::install_history_stamping`) so every entry a push creates is marked
+`true` (there is always a predecessor) and every replace carries forward
+whatever marker the entry already had (a replace doesn't change depth — the
+same rule `query_bar.rs`/`catalog/rail.rs` already apply when deciding push
+vs. replace: "History granularity is per search session"). `has_history()` is
+now a plain function that reads the *current* entry's own marker, fresh, every
+call — never a value that can go stale between navigations, because there is
+no cached value at all.
+
+**Why not fix it by stamping from a Leptos `Effect` on the router's URL
+signal instead** (the fix that looks obvious, and was checked against the
+`leptos_router` 0.8.10 source rather than assumed workable): `BrowserUrl`'s
+`navigate` closure updates the reactive URL signal *before* it decides whether
+to call the browser's `pushState`. For a same-pathname change that happens
+synchronously right after, but for a real pathname change (catalog → card,
+the common case) the actual `pushState` call is deferred behind
+`ready_to_complete()`, invoked from `flat_router.rs` only after the new
+route's view resolves. An `Effect` reacting to the signal write can run before
+that real push happens, so a stamp attempted from it can land on the wrong
+entry or race the one being created. Wrapping the actual DOM calls sidesteps
+the timing question entirely — full reasoning in `back_nav.rs`'s own module
+doc, which is the source of truth for the mechanism from here on.
+
+**Correction to round 1's "accepted false negative."** A same-tab reload
+mid-history no longer loses `has_history`: `history.state` is preserved
+across a reload by the browser itself, and the stamped marker lives there, not
+in shell-lifetime memory. The false negative described in round 1 does not
+apply to this design.
+
+**MAJOR — `Alt+ArrowLeft` double-fired with `ViewSwitch`'s roving arrows on
+non-mac.** `components::view_switch::ViewSwitch`'s keydown handler matched
+`ev.key()` alone (no modifier check), called `prevent_default()` but never
+`stop_propagation()`, and its items are real `<button>`s — none of which
+`focus_is_editable()` exempts. One `Alt+←` therefore flipped the view *and*
+navigated back. Fixed at both ends: `ViewSwitch` now ignores any arrow key
+carrying Alt/Meta/Ctrl (a modified arrow was never a roving-focus move to
+begin with); `back_nav::install_back_shortcut` separately now defers to any
+keydown where `ev.default_prevented()` is already `true`, so it stays out of
+the way of *any* component that claims a key this way, not only the one bug
+that was actually found. e2e: `catalog.spec.ts`'s
+`"Alt+ArrowLeft on a focused view switch does not also flip the view"` — see
+that test's own comment for why a plain "did it navigate" assertion cannot
+distinguish fixed from broken here (the view switch only ever toggles between
+two states, so `ViewSwitch`'s own deterministic flip target and the real
+history entry one hop back tend to coincide by construction) and what
+actually does: folding a third, unrelated dimension (the search query, a real
+push per the app's own history-granularity rule) into the setup, so the bug's
+signature — landing back on the exact entry just left, because the flip
+pushed a new one that an unguarded `back_nav` then popped straight back off —
+becomes distinguishable from the fix's real single hop. Confirmed both
+directions by deliberately reverting each half of the fix in turn and watching
+the test's assertion flip with it.
+
+**MAJOR — the chord fired straight through an open overlay.** Nothing gated
+`install_back_shortcut` on whether a `Dialog`/`Sheet`/`Popover` was open, so
+`⌘[` over (say) the tree's delete confirm could navigate the page out from
+under it. Fixed the same way `⌘K` already handles this
+(`palette::palette_chord_target`'s "swallow the chord, change nothing" arm):
+gated on `components::ui::overlay_stack::is_empty()`. It does not close the
+overlay (Escape's job) and does not navigate underneath it — it does nothing
+at all. Same known gap the palette's own module doc records, inherited rather
+than re-solved: the quick-add panel isn't built on `Dialog`/`Popover` and is
+invisible to this stack. e2e: `card-detail.spec.ts`'s
+`"does nothing while an overlay is open"` opens the tree's delete confirm
+(route-independent, reachable from `/my` with no card involved) and asserts
+both the URL and the dialog are untouched after the chord.
+
+**Fold — query-only navigations, decided rather than left open.** Under the
+stamping design this resolved itself rather than needing a separate policy
+call: a `?q=` edit that *pushes* (the first filter on a bare page) is a real
+new back-target and gets its own marker like any other push; one that
+*replaces* (refining an existing search) carries the current marker forward
+unchanged. Tracking pathname alone — which is what the round-1 counter did,
+silently — would have missed the first case; wrapping the actual `pushState`/
+`replaceState` calls does not, because they fire for both. See `back_nav.rs`'s
+module doc, "The upshot for query-only navigations."
+
+**Fold — `focus_is_editable` stopped being two copies.** It and
+`my/collection.rs`'s `SlashHint` were byte-for-byte the same predicate for the
+same question ("is the keyboard focus somewhere that owns its own keys");
+`SlashHint` now calls the shared, `pub(crate)` version in `back_nav.rs`
+instead of carrying its own inline copy. `is_back_chord` vs.
+`palette::is_palette_chord` were left as they were — they share a *shape* (a
+pure, platform-aware chord predicate, each with its own unit tests) but not a
+line of logic, since the actual chords differ; there was nothing to merge.
+
+**Evidence.** `cargo test --workspace --exclude frontend --exclude
+three_rings` unchanged at 406 passed (the same three `back_nav` unit tests,
+now exercising the new `is_back_chord` — unchanged signature, only the
+has-history plumbing around it moved); `cargo fmt --all -- --check`, and
+clippy clean on all required feature lines. `card-detail.spec.ts` @fast
+chromium **33/33** serial, including the two new tests above and a rewritten
+"second Back press" regression test (`/catalog → card → back → back` again
+must land on the fallback, not attempt a second `history.back()`).
+`catalog.spec.ts` @fast chromium **44/44** serial (the view-switch fix's own
+surface, plus everything else that shares this file — pagination,
+`page.goBack()`, the query bar — confirming the global `pushState`/
+`replaceState` wrapper doesn't disturb ordinary navigation).
+`all-cards.spec.ts` + `collection-view.spec.ts` @fast chromium serial: every
+grid-toggle/`ViewSwitch` test passed; two unrelated failures
+(`all-cards.spec.ts`'s location-summary and long-name-truncation tests) are
+the pre-existing "owns nowhere" fixture-pool exhaustion class the e2e-suite
+skill already documents, also seen and stash-confirmed pre-existing against
+this same task's round-1 verification.
+
+### `/cards/:id` gains a Back control, and a desktop `⌘[` / `Alt+←` shortcut (2026-08-16)
+
+`app/src/components/back_nav.rs` (new), `app/src/cards.rs`, `app/src/shell.rs`,
+`app/src/components/palette.rs`, `app/Cargo.toml`, `end2end/tests/card-detail.spec.ts`
+— Workbook WB-01M032ZVTNMVZEF5FDKE01Q1H0.
+
+**The problem was real history, not a fixed destination.** `/cards/:id` is
+mode-neutral (information-architecture.md's card-detail section): reachable
+from the catalog, from My cards, from a collection view, and from the mobile
+preview sheet's expand affordance. Unlike the collection view's mobile back
+row (`CollectionPath`/`NeedsHeader`, which walk *up the tree* to a computable
+parent), there is no fixed "parent" screen here — "Back" has to mean real
+browser history when there is any, with a fallback for when there isn't.
+
+**Has-history detection: a shell-tracked navigation counter, not
+`history.length` or `document.referrer`.** Both were considered and rejected.
+`history.length` is well known to be unreliable in a fresh tab (browsers
+disagree on whether/how an `about:blank` entry counts). `document.referrer`
+only describes how the *current* load was reached, which is a different
+question from "does `history.back()` have anywhere to go" — a same-tab reload
+mid-session has an empty referrer but a real history stack behind it. Instead:
+`AppShell` mounts once per document load and stays mounted across every
+client-side route change under it (the route tree nests `/cards/:id` under it
+same as every other page), so a plain counter of "how many times has the
+pathname changed since this shell mounted" answers the question that matters.
+**Accepted false negative:** a same-tab reload resets the counter to 0 even
+though the browser's own stack is intact — the Back control just falls back to
+a fixed destination in that case (never the dangerous direction: stranding the
+reader, or walking `history.back()` out of the app), and the browser's own
+Back button/gesture still works regardless.
+
+**The fallback rule.** `/my` once the shared `CurrentUserResource` says
+signed in, `/catalog` otherwise — including while that resource is still
+pending. Read directly off the resource already in shell context (`user.get()`,
+no `Suspense`), the same "cheap, no extra fetch" shape `AppShell`'s own
+tree-pruning `Effect` already uses; it is also the same universal-safe default
+`cards.rs`'s pre-existing `NotFound`/`LoadFailed` states fall back to.
+
+**The control itself is a real `<a>`, not a JS-only button** — with the
+fallback as its `href`, the Leptos router's own click-delegate turns a plain
+click into an SPA navigation, and with JS entirely absent the browser just
+follows the link (the same "still navigates" contract `CardPreview`'s module
+doc states for the sheet's "Full details →" link). `on:click` only intercepts
+the case JS *can* improve on: real in-app history returns the reader to the
+exact prior page and query string, which no fixed `href` could name. Shown at
+every width, unlike the collection view's mobile-only back row — that one
+hides on desktop because desktop shows a breadcrumb instead, and this page has
+no breadcrumb equivalent to fall back on.
+
+**The `⌘[` / `Alt+←` shortcut is app-wide, not card-detail-scoped** — a
+deliberate scope decision. The task that motivated this is the one page with
+no way out at all (no browser chrome in the Tauri desktop shell), but "browser
+back" is a single always-available affordance in every real browser, and a
+coherent desktop app offers the same reach from anywhere rather than singling
+out one page. It shares `back_nav`'s history-or-fallback mechanism with the
+button, is gated off any element that owns its own keys (`input`/`textarea`/
+`select`/`contenteditable` — same check `my/collection.rs`'s `SlashHint`
+applies for `/`, duplicated rather than imported since one is page-scoped and
+the other shell-level), and every other modifier is required absent (mirrors
+`palette::is_palette_chord`'s rule: an extra modifier is someone else's
+chord).
+
+**No desktop-only gate turned out to be needed, but not for the reason
+originally assumed — this was the task's one real surprise.** Going in, the
+assumption was that a real browser reserves both chords for its own chrome
+(`⌘[`/`⌘]` and `Alt+←`/`Alt+→` are the actual browser back/forward shortcuts on
+mac and elsewhere) and never delivers the keydown to page JS, making an
+explicit web/desktop gate moot either way. **That is unconfirmed for a real,
+interactively-driven browser window** (out of reach for an automated suite to
+check) and measurably **false** for headless Chromium under Playwright: an
+instrumented throwaway probe against the shipped listener showed the keydown
+reaching `window` with `event.defaultPrevented` flipping `true` once the
+handler ran — nothing ate it first. `card-detail.spec.ts`'s `⌘[` and `Alt+←`
+tests rely on exactly that and are genuine end-to-end exercises of the
+handler, not driver no-ops. So the accurate claim is narrower than the
+original one: no gate is needed because running the handler on the web is
+harmless (worst case, on an interactive browser that does reserve the chord,
+it is simply never invoked), not because the keydown is guaranteed unreachable
+there.
+
+**The non-mac chord needed a spoofed `navigator.platform` to test honestly.**
+This suite's own runner is a real macOS Chromium, so `is_mac()` (reused from
+`palette.rs`, made `pub(crate)`) reads mac and the mac branch is what is live
+by default — the `Alt+←` test failed on its first run for exactly that reason
+(correctly: the app ignored `Alt+←` on a mac). Fixed with
+`page.addInitScript` overriding `navigator.platform`, which makes it a genuine
+end-to-end exercise of the other branch rather than leaving it covered only by
+`is_back_chord`'s own Rust unit tests.
+
+**`web-sys`'s `History` feature was missing** (`app/Cargo.toml`) — the crate's
+existing feature list covered `Location` (used by `shell::hard_navigate`) but
+never `History`, since nothing had called `window().history()` before.
+
+**Evidence.** `cargo test --workspace --exclude frontend --exclude three_rings`
+406 passed / 0 failed (`back_nav`'s three chord-predicate unit tests among
+them); `cargo fmt --all -- --check`, and clippy clean on all four required
+feature lines (workspace-minus-tauri, `frontend` wasm, `app --features
+native`, `app --features hosted,component-bench` /
+`hydrate,component-bench` wasm). `card-detail.spec.ts` @fast chromium
+**31/31** including six new tests: prior-page-with-query-string via the
+button, the anonymous and signed-in cold-load fallbacks, the `⌘[` and `Alt+←`
+shortcuts each walking real history, and the shortcut staying inert while a
+field (the catalog's own query bar) holds focus. Full serial chromium run
+recorded separately in the task's own report.
+
 ### The which-copies step became the quantity-and-version picker (P6-150, 2026-08-15)
 
 `app/src/my/move_selection.rs`, `app/src/lib.rs`, `end2end/tests/batch-move.spec.ts`

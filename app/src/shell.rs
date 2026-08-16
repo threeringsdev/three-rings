@@ -243,6 +243,11 @@ pub fn AppShell() -> impl IntoView {
     // Also shell-level, and for the palette specifically: the page that made a
     // move is long gone by the time `Undo last move` runs.
     crate::components::palette::provide_last_move();
+    // `/cards/:id`'s Back control and the app-wide `⌘[`/`Alt+←` shortcut share
+    // one mechanism (see `back_nav`'s module doc): a history-entry-stamping
+    // scheme installed once here, and the shortcut has to work from anywhere.
+    let back_nav = crate::components::back_nav::provide_back_navigation();
+    crate::components::back_nav::install_back_shortcut(back_nav);
 
     // The rail's drawer state below `md` (see `SidebarRail`). Shell-level
     // because the toggle lives in the top bar and the panel is in the body.

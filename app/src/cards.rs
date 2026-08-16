@@ -530,6 +530,7 @@ pub fn CardDetailPage() -> impl IntoView {
 
     view! {
         <div class="space-y-6 p-6" data-testid="card-detail">
+            <BackControl />
             <Transition fallback=|| view! { <CardDetailSkeleton /> }>
                 {move || {
                     Suspend::new(async move {
@@ -562,6 +563,66 @@ pub fn CardDetailPage() -> impl IntoView {
                 }}
             </Transition>
         </div>
+    }
+}
+
+/// The page's own way out (design/information-architecture.md's card-detail
+/// section: `/cards/:id` is mode-neutral, reachable from the catalog, My
+/// cards, a collection view and the mobile sheet's expand affordance — there
+/// is no fixed "parent" screen the way a collection's drill-down breadcrumb
+/// has one). Rendered above the `<Transition>`, not inside it, so it never
+/// waits on the card fetch — the read-failure states need an escape at least
+/// as much as the happy path, and `LoadFailed`'s own doc notes this is the
+/// page people share, so the reader who lands here most often has no history
+/// to go back through at all.
+///
+/// A real `<a>`, not a JS-only control: with the fallback destination as its
+/// `href`, the Leptos router's own click-delegate turns a click into an SPA
+/// navigation automatically, and with JS entirely absent the browser just
+/// follows the link — the same "still navigates" contract `CardPreview`'s
+/// module doc states for the sheet's "Full details →" link. `on:click` only
+/// intercepts the case JS *can* improve on: with real in-app history behind
+/// this page, `history.back()` returns the reader to the exact page (and
+/// query string) they came from, which no fixed `href` could name. See
+/// `components::back_nav` for the shared mechanics behind both this and the
+/// desktop `⌘[` / `Alt+←` shortcut.
+///
+/// Shown at every width, unlike the mobile-only back row the collection view
+/// and needs page use (`my/collection.rs`'s `CollectionPath`,
+/// `my/needs.rs`'s `NeedsHeader`) — those hide on desktop because desktop
+/// shows a breadcrumb instead, and this page has no breadcrumb equivalent to
+/// fall back on.
+#[component]
+fn BackControl() -> impl IntoView {
+    let nav = expect_context::<crate::components::back_nav::BackNavigation>();
+    view! {
+        <a
+            href=nav.fallback_href
+            class="text-muted-foreground hover:text-foreground flex w-fit items-center gap-1 text-sm"
+            data-testid="card-detail-back"
+            on:click=move |ev: leptos::ev::MouseEvent| {
+                // A modified click is a navigation instruction (open in a new
+                // tab/window), not a "take me back" request — same guard
+                // `CardPreview::on_click` applies to the preview trigger.
+                if ev.meta_key() || ev.ctrl_key() || ev.shift_key() || ev.alt_key() {
+                    return;
+                }
+                // Read fresh, not from a stored signal — see
+                // `back_nav::has_history`'s own doc for why it's a plain
+                // function now (round 2: a signal would have papered over
+                // exactly the staleness bug that shipped in round 1).
+                if crate::components::back_nav::has_history() {
+                    ev.prevent_default();
+                    crate::components::back_nav::browser_back();
+                }
+                // Else: let the default anchor click proceed. The router's
+                // click-delegate turns it into an SPA navigation to the
+                // fallback href; with JS absent the browser just follows it.
+            }
+        >
+            <span aria-hidden="true">"‹"</span>
+            "Back"
+        </a>
     }
 }
 
