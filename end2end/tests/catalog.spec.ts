@@ -391,8 +391,9 @@ type Results = {
 
 /// The hosted JSON route behind the page's own adapter. `limit` is the reason
 /// it is used here rather than `/api/search_catalog`: the page always asks for
-/// 50, and a small page is the only way to put a *known* mid-set boundary under
-/// an assertion instead of wherever the 50th card happens to fall.
+/// `CATALOG_PAGE_SIZE` (60, WB-01M033AFA0VSCGB8Z3HTYPFZVD), and a small page
+/// is the only way to put a *known* mid-set boundary under an assertion
+/// instead of wherever the 60th card happens to fall.
 ///
 /// `page` is round 2's explicit-jump parameter (maintainer ruling,
 /// 2026-08-15) — an offset under the same sort `cursor` walks; either names a
@@ -1061,7 +1062,7 @@ test("the true last page of a filtered query disables Next @fast", async ({
   request,
 }) => {
   // `t:planeswalker c:g` is a two-page fixture at today's catalog size (95
-  // rows / 50-row pages) — small enough to walk to its real last page inside
+  // rows / 60-row pages) — small enough to walk to its real last page inside
   // one test. If catalog growth changes that shape, the `expect` below is the
   // signal to pick a new query rather than the test silently testing page one.
   const q = "t:planeswalker c:g";
@@ -1248,6 +1249,137 @@ test.describe("mobile", () => {
       `Show ${rest.cards.length} results on this page`,
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// Wide-viewport grid & page size (WB-01M033AFA0VSCGB8Z3HTYPFZVD, maintainer
+// report from a 2560x1440 monitor). Two paired complaints, one task:
+//
+// - The grid used to freeze at `max-w-7xl` (1280px — exactly half of
+//   2560px) the moment `xl:grid-cols-6` took over, so a wide monitor's
+//   catalog page visibly wasted the right half of the screen. The cap is
+//   gone; `GRID_CLASS` now adds a `3xl:grid-cols-10` tier (custom 2200px
+//   breakpoint, `style/input.css`) instead, so six columns stop growing
+//   before they would look comically oversized.
+// - The page size moved from 50 to 60 for the same "wastes space unevenly"
+//   reason: 50 divides evenly by only 2 and 5 of the grid's column counts;
+//   60 divides evenly by 2, 3, 4, 5, 6 *and* 10 — every full page tiles into
+//   whole rows, at every breakpoint, with nothing left over.
+//
+// Every number below is read from the live API/DOM, never hardcoded — a
+// future page-size or catalog-size change must not need an edit here.
+// ---------------------------------------------------------------------------
+
+/// Distinct `grid-template-columns` track count at whatever viewport is
+/// current — the ground truth for which `GRID_CLASS` tier is active, read
+/// off the resolved computed style rather than re-deriving it from a
+/// Tailwind breakpoint name (which would just be testing the test).
+async function gridColumnCount(
+  page: import("@playwright/test").Page,
+): Promise<number> {
+  const grid = page.getByTestId("results-grid");
+  await expect(grid).toBeVisible();
+  return grid.evaluate(
+    (el) =>
+      getComputedStyle(el).gridTemplateColumns.trim().split(/\s+/).length,
+  );
+}
+
+test("a full page holds 60 results, not 50 @fast", async ({ page }) => {
+  // Browse-all (`/catalog`, no `q`) is far larger than one page at today's
+  // catalog size, so this reads the real full-page tile count straight off
+  // the DOM — the UI's own promise, not just the API's.
+  await page.goto("/catalog");
+  await hydrated(page);
+  await expect(page.locator("[data-testid=results-grid] li")).toHaveCount(
+    60,
+  );
+});
+
+test("the grid fills a 2560px viewport instead of freezing near 1280px, and jumps to 10 columns @fast", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 2560, height: 1440 });
+  await page.goto("/catalog");
+  await hydrated(page);
+  const grid = page.getByTestId("results-grid");
+  const box = await grid.boundingBox();
+  // The retired `max-w-7xl` cap froze this near 1280px regardless of
+  // viewport; a grid still reading near that here is the literal bug
+  // report, not a fluke of the sidebar/padding.
+  expect(
+    box?.width,
+    "grid must not still be capped near the old 1280px max-w-7xl",
+  ).toBeGreaterThan(2000);
+  expect(await gridColumnCount(page)).toBe(10);
+});
+
+test("6 columns hold at an ordinary wide viewport (~1500px) @fast", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1500, height: 900 });
+  await page.goto("/catalog");
+  await hydrated(page);
+  expect(await gridColumnCount(page)).toBe(6);
+});
+
+test("no horizontal overflow at phone width (390px) @fast", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/catalog");
+  await hydrated(page);
+  expect(await gridColumnCount(page)).toBe(2);
+  const overflow = await page.evaluate(
+    () =>
+      document.documentElement.scrollWidth -
+      document.documentElement.clientWidth,
+  );
+  expect(overflow, "the page scrolls sideways at 390px").toBeLessThanOrEqual(
+    0,
+  );
+});
+
+test("the numbered pager's derived last page satisfies last*pageSize >= total @fast", async ({
+  page,
+  request,
+}) => {
+  // Browse-all again: guaranteed enough rows for a real multi-page
+  // last-page computation. This is #151's "page 773 of 38623 at 50/page"
+  // scenario, generalized — the exact page/total numbers move with catalog
+  // growth and the page-size bump, so nothing here is pinned to either.
+  const q = "";
+  const total = await searchCount(request, q);
+  const first = await search(request, { q });
+  const pageSize = first.cards.length;
+  expect(
+    pageSize,
+    "browse-all must return a full page to derive a page size from",
+  ).toBeGreaterThan(0);
+  const lastPage = Math.ceil(total / pageSize);
+  expect(lastPage * pageSize).toBeGreaterThanOrEqual(total);
+  expect((lastPage - 1) * pageSize).toBeLessThan(total);
+
+  // The server agrees: the derived last page is truly last (no further
+  // `next_cursor`), and one page past it is empty.
+  const lastPageResults = await search(request, { q, page: lastPage });
+  expect(
+    lastPageResults.next_cursor,
+    "the derived last page must be the true last page",
+  ).toBeNull();
+  const oneBeyond = await search(request, { q, page: lastPage + 1 });
+  expect(
+    oneBeyond.cards.length,
+    "one page past the derived last must be empty",
+  ).toBe(0);
+
+  // And the live pager agrees too: jumping straight to it disables Next.
+  await page.goto(`/catalog?page=${lastPage}`);
+  await hydrated(page);
+  await expect(page.getByTestId("pager-next")).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
 });
 
 // ---------------------------------------------------------------------------

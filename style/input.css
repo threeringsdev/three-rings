@@ -8,6 +8,27 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* One custom breakpoint past Tailwind's own ladder (sm/md/lg/xl/2xl), for the
+   catalog/`/my` grids' wide-viewport column jump (WB-01M033AFA0VSCGB8Z3HTYPFZVD):
+   `xl:grid-cols-6` (1280px) holds through ordinary wide monitors, then at
+   2200px `3xl:grid-cols-10` takes over rather than growing 6 columns' cards
+   ever wider — 2200px sits comfortably above 2xl (1536px) and below a
+   2560px-class monitor, so the jump lands before the tile grid would otherwise
+   look comically oversized there. See `crate::catalog::GRID_CLASS`.
+
+   **`rem`, not `px` — load-bearing.** Tailwind's own breakpoints
+   (`--breakpoint-sm/md/lg/xl/2xl`) are all declared in `rem` internally, and
+   its cascade-order sort of same-specificity breakpoint utilities apparently
+   keys off that (observed directly: declaring this in `px` emitted
+   `.xl:grid-cols-6` *after* `.\33xl:grid-cols-10` in `app.css`, so at a
+   2560px viewport — where both media queries match — the later rule, `xl`,
+   won and silently pinned the grid at 6 columns forever; switching this to
+   the `rem` equivalent (2200px / 16 = 137.5rem) reordered `3xl` after `xl`,
+   as intended). Keep any further custom breakpoint in `rem` too. */
+@theme {
+    --breakpoint-3xl: 137.5rem;
+}
+
 :root {
     --radius: 0.625rem;
     --background: oklch(1 0 0);

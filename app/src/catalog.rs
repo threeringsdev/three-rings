@@ -71,6 +71,40 @@ use crate::shell::CurrentUserResource;
 const VIEW_PARAM: &str = "view";
 const LIST_VIEW: &str = "list";
 
+/// The catalog's own default page size (WB-01M033AFA0VSCGB8Z3HTYPFZVD,
+/// maintainer report): 60, not [`shared::Page`]'s generic default of 50.
+/// 60 has far more useful divisors than 50 across the grid's column
+/// breakpoints (2, 3, 4, 6, and 10 — every tier `GRID_CLASS` actually renders
+/// — divide it evenly, vs. only 2 and 10 among those for 50),
+/// so a full page tiles cleanly no matter which of [`GRID_CLASS`]'s tiers is
+/// showing — the maintainer's own complaint was that 50 "doesn't divide
+/// evenly unless you happen to have rows of 5, which the breakpoints never
+/// give you."
+///
+/// Wired in at the two SSR call sites that used to hand the generic
+/// [`shared::Page`] default straight through with `limit: None`:
+/// `search_catalog` (`app/src/lib.rs`, both the hosted in-process call and the
+/// native backend's HTTP forward, since [`crate::backend::native::NativeBackend::search`]
+/// echoes whatever `limit` it was given as `?limit=`) and the hosted
+/// `/api/catalog/search` route's own fallback (`app/src/backend/routes.rs`)
+/// for a caller that hits the HTTP route directly without stating one.
+///
+/// **Catalog-only, deliberately** — unlike [`GRID_CLASS`], this does not flow
+/// to `/my`. `all_cards` and `collection_view` (`app/src/lib.rs`) still pass
+/// `limit: None` and get the shared `Page::limit()` default of 50: the
+/// maintainer's report named only the catalog page's *count*, and a page-size
+/// change is a data-fetch behaviour change (offsets, cursor pages, request
+/// volume) for a screen nobody asked to touch — a materially bigger blast
+/// radius than reusing a CSS class, so it does not get the same "let it flow"
+/// treatment `GRID_CLASS` does.
+///
+/// `#[cfg(feature = "ssr")]`: both call sites are themselves `ssr`-only (the
+/// `search_catalog` server fn's body, the hosted-only `routes.rs`), so a
+/// `hydrate`-only build (the wasm client) never references this and would
+/// otherwise fail its `-D warnings` gate on dead code.
+#[cfg(feature = "ssr")]
+pub(crate) const CATALOG_PAGE_SIZE: u32 = 60;
+
 /// The keyset page cursor, in the URL beside `?q=` (specs/catalog-search.md:
 /// `/catalog?q=…&cursor=…`, shareable/restorable/SSR-able).
 const CURSOR_PARAM: &str = "cursor";
@@ -89,8 +123,9 @@ const PAGE_PARAM: &str = "page";
 
 /// A hard ceiling on the page number this screen will ever parse out of the
 /// URL or hand to the server — nowhere close to a claim about the catalog's
-/// real size (at 50 rows/page that's 50 million rows), just large enough to
-/// need no per-request knowledge of the true last page while still bounding
+/// real size (at [`CATALOG_PAGE_SIZE`] rows/page that's 60 million rows), just
+/// large enough to need no per-request knowledge of the true last page while
+/// still bounding
 /// every downstream `usize`/`u32` computation (`page_strip`, `page_offset`)
 /// against an adversarial `?page=` (WB-01M032Q6BX8BM7NPK8H3AQKGWF round 2's
 /// adversarial-review blocker: `GET /catalog?page=18446744073709551615`
@@ -1349,20 +1384,41 @@ fn ResultCards(cards: Vec<CardSummary>, list_view: Memo<bool>, stale: bool) -> i
     }
 }
 
-// `max-w-7xl` caps the grid the same way `Table`'s own `max-w-7xl`
-// (`components/ui/table.rs`) already caps the list view: neither is centered
-// (no `mx-auto`), both just stop stretching past 1280px, so a wide monitor
-// gets a left-flush column instead of runaway growth. Before this the grid
+// `max-w-7xl` used to cap the grid the same way `Table`'s own `max-w-7xl`
+// (`components/ui/table.rs`) caps the list view: neither centered (no
+// `mx-auto`), both just stopped stretching past 1280px. Before P6-098 the grid
 // had no cap at all and `xl:grid-cols-6` was the last breakpoint, so a card
-// tile kept growing with the window past it — comically large at ultrawide
-// (P6-098).
+// tile kept growing with the window past it — comically large at ultrawide;
+// `max-w-7xl` fixed that by freezing the container at 1280px for any viewport
+// xl and up.
+//
+// **The cap is gone (WB-01M033AFA0VSCGB8Z3HTYPFZVD, maintainer report from a
+// 2560px monitor):** 1280px is exactly half of 2560px, so the frozen container
+// read as "the grid only fills about half the available width" there — the
+// literal bug. Removing the cap without another fix would just resurrect
+// P6-098 (six columns stretching wider and wider past 1280px), so the fix
+// pairs the removal with one more breakpoint: `3xl:grid-cols-10` (custom
+// screen, `style/input.css`, 2200px) takes over from six columns before a
+// viewport gets wide enough for them to look comically large, the same
+// problem P6-098 solved, solved the same way — a denser column count instead
+// of a width ceiling. Deliberately no 5- or 7-9-column tier (maintainer
+// ruling): 2, 3, 4, 6 and 10 are the divisors 60-per-page (`CATALOG_PAGE_SIZE`)
+// wants, so every tile row is either full or the grid has moved to a fresh
+// row cleanly, never a lonely 1-2 tile remainder.
 //
 // `pub(crate)`: the My-cards grid views (`crate::my::all_cards`,
 // `crate::my::collection`) reuse this literally rather than re-deriving their
-// own breakpoints, so the two-column-at-390px / capped-at-1280px shape stays
-// one decision instead of three that can drift.
+// own breakpoints, so the two-column-at-390px / now-uncapped shape stays one
+// decision instead of three that can drift — including this fix, which
+// therefore also widens those two grids on a wide viewport. The maintainer's
+// report named only `/catalog`, but the width-waste symptom and its root
+// cause (this shared constant) are identical there; splitting the constant to
+// hold `/my` back at the old capped behaviour would be the one that drifts.
+// (`CATALOG_PAGE_SIZE`, by contrast, stays catalog-only — see its own doc
+// comment for why a fetch-size change doesn't get the same "let it flow"
+// treatment as a layout class.)
 pub(crate) const GRID_CLASS: &str =
-    "grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 max-w-7xl";
+    "grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 3xl:grid-cols-10";
 
 #[component]
 fn ResultsSkeleton() -> impl IntoView {
@@ -2138,5 +2194,61 @@ mod tests {
             .filter(|s| !matches!(s, PageSlot::Ellipsis))
             .count();
         assert!(numbered <= 6, "{numbered} numbered slots: {strip:?}");
+    }
+
+    /// WB-01M033AFA0VSCGB8Z3HTYPFZVD: the whole point of picking 60 over 50 was
+    /// that it divides evenly by every column count [`GRID_CLASS`] actually
+    /// uses (2, 3, 4, 6 — 5 and the 7-9 tier are deliberately skipped, so they
+    /// are not asserted here), so a full page always tiles into whole rows
+    /// with no partial remainder. This pins that property directly against
+    /// the constant rather than trusting the arithmetic never regresses back
+    /// toward 50 (which only divides evenly by 2 and 5 of that set).
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn the_catalog_page_size_divides_evenly_by_every_grid_column_count() {
+        use super::CATALOG_PAGE_SIZE;
+
+        assert_eq!(CATALOG_PAGE_SIZE, 60);
+        for columns in [2, 3, 4, 6] {
+            assert_eq!(
+                CATALOG_PAGE_SIZE % columns,
+                0,
+                "{CATALOG_PAGE_SIZE} does not divide evenly by {columns} columns"
+            );
+        }
+        // The wide-viewport tier: 60 / 10 = 6 whole rows, not a partial one.
+        assert_eq!(CATALOG_PAGE_SIZE % 10, 0);
+    }
+
+    /// [`GRID_CLASS`] must name exactly the column tiers the maintainer asked
+    /// for (2, 3, 4, 6, 10) and nothing in the deliberately-skipped 5/7-9
+    /// range — a typo here (e.g. `grid-cols-5`) would silently reintroduce
+    /// the uneven-row problem this whole task exists to fix.
+    #[test]
+    fn grid_class_names_only_the_approved_column_tiers() {
+        for present in [
+            "grid-cols-2",
+            "sm:grid-cols-3",
+            "lg:grid-cols-4",
+            "xl:grid-cols-6",
+            "3xl:grid-cols-10",
+        ] {
+            assert!(
+                super::GRID_CLASS.contains(present),
+                "GRID_CLASS is missing {present}: {}",
+                super::GRID_CLASS
+            );
+        }
+        for skipped in ["grid-cols-5", "grid-cols-7", "grid-cols-8", "grid-cols-9"] {
+            assert!(
+                !super::GRID_CLASS.contains(skipped),
+                "GRID_CLASS names a deliberately-skipped tier {skipped}: {}",
+                super::GRID_CLASS
+            );
+        }
+        // The old cap that froze the container at 1280px — the literal bug
+        // report ("only fills about half the available width" on a 2560px
+        // monitor) — must not come back.
+        assert!(!super::GRID_CLASS.contains("max-w-7xl"));
     }
 }
