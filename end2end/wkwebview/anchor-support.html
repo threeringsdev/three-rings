@@ -1,0 +1,212 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>anchor probe</title>
+<style>
+  html,body { margin:0; padding:0; height:100%; font: 14px system-ui; }
+  .trigger { position:absolute; width:100px; height:32px; }
+  #t-center-app { left:400px; top:400px; anchor-name: --anchor-center-app; }
+  #t-end-app { left:400px; top:400px; anchor-name: --anchor-end-app; }
+  #t-center-min { left:400px; top:400px; anchor-name: --anchor-center-min; }
+  #t-end-min { left:400px; top:400px; anchor-name: --anchor-end-min; }
+  #t-center-novis { left:400px; top:400px; anchor-name: --anchor-center-novis; }
+  #t-end-novis { left:400px; top:400px; anchor-name: --anchor-end-novis; }
+  #t-control { left:400px; top:400px; anchor-name: --anchor-control; }
+  #t-bottom-end { left:900px; top:760px; anchor-name: --anchor-bottom-end; }
+  /* the app's panel box: PopoverContent's tailwind, flattened */
+  [popover] {
+    box-sizing: border-box;
+    width: 250px; padding: 16px; border: 1px solid #ccc; border-radius: 6px;
+    background: #fff; overflow: visible;
+    margin: 1ch 0;   /* tailwind my-[1ch] */
+    height: 200px;
+  }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script>
+const log = m => { try { window.webkit.messageHandlers.log.postMessage(String(m)); } catch(e){} };
+const out = o => { try { window.webkit.messageHandlers.probe.postMessage(JSON.stringify(o,null,1)); } catch(e){ document.title='NOHANDLER'; console.log(JSON.stringify(o,null,1)); } };
+
+// ---------------------------------------------------------------- CSS.supports
+const SUPPORT_DECLS = [
+  "position-anchor: --x",                 // <- what popover.rs actually evaluates
+  "anchor-name: --x",
+  "position-area: block-start",
+  "position-area: bottom",
+  "bottom: anchor(top)",
+  "left: anchor(left)",
+  "right: anchor(right)",
+  "top: anchor(bottom)",
+  "width: anchor-size(width)",
+  "position-try-fallbacks: flip-block",
+  "position-try-order: most-height",
+  "position-visibility: anchors-visible",
+  "position-visibility: always",
+  "inset: auto",
+  "transition: display 0.2s allow-discrete",
+];
+const supports = {};
+for (const d of SUPPORT_DECLS) { try { supports[d] = CSS.supports(d); } catch(e) { supports[d] = "THREW:"+e; } }
+const supportsAtPositionTry = (() => {
+  // is `@position-try --foo {}` even parsed as a known at-rule?
+  const s = document.createElement('style');
+  s.textContent = "@position-try --probe-pt { top: anchor(bottom); }";
+  document.head.appendChild(s);
+  const n = s.sheet ? s.sheet.cssRules.length : -1;
+  const t = (n>0) ? (s.sheet.cssRules[0].constructor.name + " :: " + s.sheet.cssRules[0].cssText) : "DROPPED";
+  s.remove();
+  return { ruleCount: n, first: t };
+})();
+
+// ------------------------------------------------- the app's real CSS, verbatim
+// mirrors app/src/components/ui/popover.rs `Popover`'s format!() output
+function appCss(id, positionStyles, transformOrigin, opts) {
+  opts = opts || {};
+  return `
+#popover-${id} {
+position-anchor: --anchor-${id};
+inset: auto;
+${positionStyles}
+position-try-fallbacks: flip-block;
+position-try-order: most-height;
+${opts.noVis ? "" : "position-visibility: anchors-visible;"}
+
+/* Open State */
+&:popover-open {
+opacity: 1;
+transform: scale(1) translateY(0px);
+
+@starting-style {
+opacity: 0;
+transform: scale(0.95) translateY(-2px);
+}
+}
+
+/* Closed State */
+& {
+transition:
+display 0.2s allow-discrete,
+overlay 0.2s allow-discrete,
+transform 0.15s cubic-bezier(0.16, 1, 0.3, 1),
+opacity 0.15s ease-out;
+opacity: 0;
+transform: scale(0.95) translateY(-2px);
+transform-origin: var(--popover-transform-origin, ${transformOrigin});
+}
+}
+`;
+}
+
+const STYLES_CENTER = "position-area: block-start;";
+const STYLES_END = `right: anchor(right);
+                bottom: anchor(top);
+                margin-bottom: 8px;
+                @position-try(flip-block) {
+                top: anchor(bottom);
+                bottom: auto;
+                margin-top: 8px;
+                margin-bottom: 0;
+                }`;
+const STYLES_START = `left: anchor(left);
+                bottom: anchor(top);
+                margin-bottom: 8px;
+                @position-try(flip-block) {
+                top: anchor(bottom);
+                bottom: auto;
+                margin-top: 8px;
+                margin-bottom: 0;
+                }`;
+
+// --------------------------------------------------- what survives the parser?
+function parseDump(css) {
+  const s = document.createElement('style');
+  s.textContent = css;
+  document.head.appendChild(s);
+  let dump;
+  try {
+    const rules = [...s.sheet.cssRules];
+    dump = rules.map(r => ({ type: r.constructor.name, cssText: r.cssText }));
+  } catch(e) { dump = "THREW:"+e; }
+  s.remove();
+  return dump;
+}
+
+// ------------------------------------------------------------------- live cases
+const CASES = [
+  { id: "center-app",   styles: STYLES_CENTER, origin: "center top" },
+  { id: "end-app",      styles: STYLES_END,    origin: "right top" },
+  { id: "center-min",   styles: STYLES_CENTER, origin: "center top", minimal: true },
+  { id: "end-min",      styles: "right: anchor(right); bottom: anchor(top); margin-bottom: 8px;", origin: "right top", minimal: true },
+  { id: "center-novis", styles: STYLES_CENTER, origin: "center top", noVis: true },
+  { id: "end-novis",    styles: STYLES_END,    origin: "right top", noVis: true },
+  { id: "bottom-end",   styles: STYLES_END,    origin: "right top" },  // bottom-docked trigger, like the tray
+  { id: "control",      styles: null,          origin: "center top" }, // no anchoring at all
+];
+
+function minimalCss(id, positionStyles) {
+  return `#popover-${id} { position-anchor: --anchor-${id}; inset: auto; ${positionStyles} }`;
+}
+
+const stage = document.getElementById('stage');
+for (const c of CASES) {
+  const btn = document.createElement('button');
+  btn.id = 't-' + c.id; btn.className = 'trigger'; btn.textContent = c.id;
+  btn.setAttribute('popovertarget', 'popover-' + c.id);
+  const pan = document.createElement('div');
+  pan.id = 'popover-' + c.id; pan.setAttribute('popover','auto');
+  pan.textContent = 'panel ' + c.id;
+  stage.appendChild(btn); stage.appendChild(pan);
+  if (c.styles !== null) {
+    const st = document.createElement('style');
+    st.textContent = c.minimal ? minimalCss(c.id, c.styles) : appCss(c.id, c.styles, c.origin, {noVis: c.noVis});
+    document.head.appendChild(st);
+  }
+}
+
+const r = el => { const b = el.getBoundingClientRect(); return { left:+b.left.toFixed(2), top:+b.top.toFixed(2), right:+b.right.toFixed(2), bottom:+b.bottom.toFixed(2), width:+b.width.toFixed(2), height:+b.height.toFixed(2) }; };
+const raf = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function runCase(c) {
+  const btn = document.getElementById('t-' + c.id);
+  const pan = document.getElementById('popover-' + c.id);
+  const res = { id: c.id };
+  try { pan.showPopover(); } catch(e) { res.showPopoverThrew = String(e); }
+  await raf(); await sleep(350); await raf();   // let @starting-style transition settle
+  res.open = pan.matches(':popover-open');
+  res.trigger = r(btn);
+  res.panel = r(pan);
+  res.offsetSize = { w: pan.offsetWidth, h: pan.offsetHeight };
+  const cs = getComputedStyle(pan);
+  res.computed = {
+    position: cs.position, visibility: cs.visibility, display: cs.display, opacity: cs.opacity,
+    top: cs.top, right: cs.right, bottom: cs.bottom, left: cs.left,
+    positionAnchor: cs.positionAnchor, positionArea: cs.positionArea,
+    positionTryFallbacks: cs.positionTryFallbacks, positionVisibility: cs.positionVisibility,
+    marginTop: cs.marginTop, marginBottom: cs.marginBottom, transform: cs.transform,
+  };
+  res.checkVisibility = typeof pan.checkVisibility === 'function'
+    ? pan.checkVisibility({checkOpacity:true, checkVisibilityCSS:true}) : 'n/a';
+  // did anchoring actually MOVE it away from the UA default centering?
+  try { pan.hidePopover(); } catch(e) {}
+  await raf();
+  return res;
+}
+
+(async () => {
+  const results = { ua: navigator.userAgent, viewport: {w: innerWidth, h: innerHeight},
+    detectionExpressionVerbatim: CSS.supports("position-anchor: --x"),
+    supports, supportsAtPositionTry,
+    parse_end_app_rule: parseDump(appCss("PARSE-END", STYLES_END, "right top", {})),
+    parse_start_app_rule: parseDump(appCss("PARSE-START", STYLES_START, "left top", {})),
+    parse_center_app_rule: parseDump(appCss("PARSE-CENTER", STYLES_CENTER, "center top", {})),
+    cases: [] };
+  for (const c of CASES) { results.cases.push(await runCase(c)); }
+  out(results);
+})();
+</script>
+</body>
+</html>

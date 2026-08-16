@@ -9,9 +9,10 @@
 //! - optional **`open` signal**: synced to the native popover both ways
 //!   (`showPopover`/`hidePopover` on signal change, `toggle` events back
 //!   into the signal), so pickers can be driven programmatically
-//! - CSS anchor positioning verified on the Android webview (Chrome 145);
-//!   webkit rides the boundary tier — fallback decision recorded in
-//!   app-ui Findings
+//! - CSS anchor positioning verified on the Android webview (Chrome 145) and,
+//!   by direct probe, on the real macOS WKWebView the desktop `.app` embeds
+//!   (WB-01M064BMRF8QBKAYJ4C9CNGQ0H) — both support it in full; the JS
+//!   fallback below is dead code on every engine this app ships to
 //! - **registers with [`super::overlay_stack`]** (Adversarial review,
 //!   `P6-189`): without this, a popover opened *inside* a `Dialog` (the
 //!   delete confirm's two disposition pickers) was invisible to the app's own
@@ -43,19 +44,25 @@
 //!   of its own fixed below-only, left-only, unclamped placement**
 //!   (WB-01M05K42G96ZSGHEBHKQ47CBDV): `#148`'s adversarial review flagged
 //!   those three as consciously-dropped flaws on the assumption the fallback
-//!   was dead code on every real engine — wrong once a maintainer's desktop
-//!   `.app` screenshots showed the tray's `End`-aligned "Move to…" panel
-//!   rendering below the window and the catalog's `Center`-aligned "Adding
-//!   to" panel reduced to a sliver, proving the system WKWebView the Tauri
-//!   shell embeds has the Popover API but not CSS anchor positioning.
-//!   [`fallback_position`] is now pure rect math (no DOM, unit-tested on
+//!   was dead code on every real engine. Correcting that task's own
+//!   conclusion (WB-01M064BMRF8QBKAYJ4C9CNGQ0H): the desktop `.app`
+//!   screenshots it reasoned from were **not** evidence of a missing anchor
+//!   implementation. Probed directly inside the real macOS WKWebView the
+//!   Tauri shell embeds, that engine supports CSS anchor positioning in full
+//!   and places both panels exactly where this file's CSS asks — the pickers
+//!   looked broken because their `Command` body was collapsing to zero height
+//!   for an unrelated reason (`command.rs`'s own `h-full` note). So the
+//!   fallback below remains genuinely dead code on both engines this app
+//!   ships to; it is kept, and kept faithful to the CSS path, for an engine
+//!   with the Popover API but no anchor positioning — not because either of
+//!   ours is one. [`fallback_position`] is pure rect math (no DOM, unit-tested on
 //!   every host): it honors [`PopoverAlign`] the same way the CSS path's
 //!   per-align block does (`Start`/`End` align an edge, `Center` centers,
 //!   `*Outer` sit beside the trigger), prefers opening ABOVE the trigger by
 //!   default — mirroring `position-area: block-start` / `bottom:
 //!   anchor(top)`, the CSS path's own default — and flips below only when
-//!   there isn't room above (the CSS path's `@position-try(flip-block)`),
-//!   then clamps the result inside the viewport with a small margin on every
+//!   there isn't room above (the CSS path's `position-try-fallbacks:
+//!   flip-block`), then clamps the result inside the viewport with a margin on every
 //!   edge. The DOM shim (`apply_fallback_position`) and the `ResizeObserver`
 //!   wiring are otherwise unchanged in mechanism — they now just pass
 //!   `align` and the panel's width through, alongside the height they
@@ -117,49 +124,44 @@ pub fn Popover(
     let popover_anchor_name = format!("--anchor-{id}");
     let popover_target_id = format!("popover-{id}");
 
+    // Per-align placement, in the rule the `<style>` below emits. Each of these
+    // used to carry a trailing `@position-try(flip-block) { … }` block; that
+    // syntax does not exist in any spec (the real rule is a *top-level*
+    // `@position-try --name { … }`, referenced by name from
+    // `position-try-fallbacks`), so every engine's parser consumed the invalid
+    // at-rule and threw its declarations away. Verified by reading the parsed
+    // rule back out of `document.styleSheets`
+    // (WB-01M064BMRF8QBKAYJ4C9CNGQ0H): real macOS WKWebView and chromium
+    // 151 both serialize this rule *identically*, and neither shows a single
+    // declaration from inside those blocks. They were never the flip mechanism
+    // — `position-try-fallbacks: flip-block` below is, and it is applied (both
+    // engines serialize it, folded with `position-try-order`, as
+    // `position-try: most-height flip-block`). Deleting them is a no-op both
+    // engines can be asked to confirm; keeping them was a comment-level claim
+    // the CSS never backed.
     let (position_styles, transform_origin) = match align {
         PopoverAlign::Start => (
             "left: anchor(left);
                 bottom: anchor(top);
-                margin-bottom: 8px;
-                @position-try(flip-block) {
-                top: anchor(bottom);
-                bottom: auto;
-                margin-top: 8px;
-                margin-bottom: 0;
-                }",
+                margin-bottom: 8px;",
             "left top",
         ),
         PopoverAlign::StartOuter => (
             "right: anchor(left);
                 top: anchor(top);
-                margin-right: 8px;
-                @position-try(flip-block) {
-                top: anchor(bottom);
-                margin-top: 8px;
-                }",
+                margin-right: 8px;",
             "right top",
         ),
         PopoverAlign::End => (
             "right: anchor(right);
                 bottom: anchor(top);
-                margin-bottom: 8px;
-                @position-try(flip-block) {
-                top: anchor(bottom);
-                bottom: auto;
-                margin-top: 8px;
-                margin-bottom: 0;
-                }",
+                margin-bottom: 8px;",
             "right top",
         ),
         PopoverAlign::EndOuter => (
             "left: anchor(right);
                 top: anchor(top);
-                margin-left: 8px;
-                @position-try(flip-block) {
-                top: anchor(bottom);
-                margin-top: 8px;
-                }",
+                margin-left: 8px;",
             "left top",
         ),
         PopoverAlign::Center => ("position-area: block-start;", "center top"),
@@ -309,12 +311,14 @@ pub fn PopoverContent(children: Children, #[prop(optional, into)] class: String)
                 let _ = el.hide_popover();
             }
             // JS positioning fallback (spec: "JS fallback if unsupported"):
-            // WebKit — including, per WB-01M05K42G96ZSGHEBHKQ47CBDV, the
-            // system WKWebView the desktop `.app` embeds — ships the Popover
-            // API but not always CSS anchor positioning, so the panel would
-            // open at the viewport default. When anchors are unsupported and
-            // we're open, position manually with the same semantics the CSS
-            // path would have used (`fallback_position`'s doc comment).
+            // an engine with the Popover API but no CSS anchor positioning
+            // would open the panel at the viewport default. Neither engine
+            // this app ships to is one — chromium and the desktop `.app`'s
+            // system WKWebView both support it (see
+            // `anchor_positioning_supported`) — so this arm is dormant on
+            // both. When anchors *are* unsupported and we're open, position
+            // manually with the same semantics the CSS path would have used
+            // (`fallback_position`'s doc comment).
             // Hydrate-only: the DOM measurement APIs and the mispositioning
             // it corrects both exist only client-side.
             //
@@ -410,10 +414,20 @@ pub fn PopoverContent(children: Children, #[prop(optional, into)] class: String)
     }
 }
 
-/// Whether the engine supports CSS anchor positioning. Chromium (incl. the
-/// Android webview) yes; WebKit not always — there (and, per
-/// WB-01M05K42G96ZSGHEBHKQ47CBDV, the desktop `.app`'s system WKWebView) we
-/// position manually.
+/// Whether the engine supports CSS anchor positioning; when it doesn't, we
+/// position manually ([`fallback_position`]).
+///
+/// **This probe was suspected of lying and does not** (WB-01M064BMRF8QBKAYJ4C9CNGQ0H).
+/// Run verbatim inside the real macOS WKWebView the Tauri shell embeds, it
+/// returns `true` — and that is *correct*: the same probe run reports
+/// `CSS.supports` true for every declaration this component's CSS path uses
+/// (`anchor-name`, `position-anchor`, `position-area: block-start`,
+/// `bottom: anchor(top)`, `position-try-fallbacks: flip-block`,
+/// `position-visibility: anchors-visible`), and a live measurement of a real
+/// anchored `popover` there lands it exactly where the CSS asks. So the CSS
+/// path is the right path on that engine and the fallback correctly stays
+/// dormant. Do not "fix" this into a runtime measurement probe on the theory
+/// that WKWebView parses-but-misbehaves; it doesn't.
 #[cfg(feature = "hydrate")]
 fn anchor_positioning_supported() -> bool {
     web_sys::css::supports("position-anchor: --x").unwrap_or(false)
