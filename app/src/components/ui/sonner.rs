@@ -140,7 +140,13 @@ pub fn Toaster(#[prop(into, optional)] class: Signal<String>) -> impl IntoView {
             aria-live="polite"
             class=move || {
                 tw_merge::tw_merge!(
-                    "fixed bottom-6 right-6 z-[200] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2 pointer-events-none [&>*]:pointer-events-auto",
+                    // `env(safe-area-inset-*)` covers callers that mount a
+                    // bare `<Toaster/>` with no shell offset (the bench
+                    // pages) — 0 on desktop/browsers without an inset, so
+                    // this is a no-op there. The app shell's own offset
+                    // (`crate::shell::toaster_offset`) overrides `bottom-*`
+                    // with its own inset-aware value via `class` below.
+                    "fixed bottom-[calc(1.5rem_+_env(safe-area-inset-bottom))] right-[calc(1.5rem_+_env(safe-area-inset-right))] z-[200] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2 pointer-events-none [&>*]:pointer-events-auto",
                     class.get(),
                 )
             }

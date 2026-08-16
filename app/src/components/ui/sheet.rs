@@ -78,6 +78,44 @@ impl SheetDirection {
             Self::Bottom => "bottom-0 left-0 w-full h-[400px]",
         }
     }
+
+    /// Extra padding for whichever edges this direction actually touches the
+    /// viewport boundary on, stacked on top of `SheetContent`'s base `p-6`
+    /// (WB-01M05F945DBTRS0AQ79Y01EGJ2: `FilterSheet` is `Left`, `top-0
+    /// h-full`, so its content used to start under the Android status bar
+    /// and its "Show N results" footer under the gesture-nav bar).
+    /// `Right`/`Left` are full-height (`h-full`, both edges); `Top`/`Bottom`
+    /// touch only their own edge. `env()` is 0 on desktop/browsers without an
+    /// inset, so this is a no-op there — same reasoning as the shell's fixed
+    /// chrome (`crate::shell`).
+    fn safe_area_padding(self) -> &'static str {
+        match self {
+            Self::Right | Self::Left => {
+                "pt-[calc(1.5rem_+_env(safe-area-inset-top))] pb-[calc(1.5rem_+_env(safe-area-inset-bottom))]"
+            }
+            Self::Top => "pt-[calc(1.5rem_+_env(safe-area-inset-top))]",
+            Self::Bottom => "pb-[calc(1.5rem_+_env(safe-area-inset-bottom))]",
+        }
+    }
+
+    /// The close `<button>` is `absolute`, so its `top` offset resolves
+    /// against the panel's **padding box**, not the content box —
+    /// [`safe_area_padding`]'s `pt-*` shifts where normal-flow children
+    /// (`children()`) start, but does nothing for an absolutely-positioned
+    /// sibling, which stays anchored to the panel's outer edge regardless
+    /// (round-2 review, WB-01M05F945DBTRS0AQ79Y01EGJ2: on `FilterSheet`
+    /// — `Left` — a plain `top-4` put the × at y=[16,40] against a 24px
+    /// status-bar inset, 8px of the control under system chrome — the exact
+    /// defect class this task closes). Every direction whose panel picks up
+    /// `pt-*` above (`Right`/`Left`/`Top`) needs the matching offset here;
+    /// `Bottom`'s panel has no `pt-*` (its top edge doesn't touch the
+    /// viewport top), so its close button is untouched.
+    fn close_button_top(self) -> &'static str {
+        match self {
+            Self::Right | Self::Left | Self::Top => "top-[calc(1rem_+_env(safe-area-inset-top))]",
+            Self::Bottom => "top-4",
+        }
+    }
 }
 
 #[component]
@@ -165,6 +203,7 @@ pub fn SheetContent(
     let base_class = tw_merge!(
         "fixed z-100 bg-card shadow-lg p-6 transition-transform duration-300 overflow-y-auto overscroll-y-contain data-[state=closed]:pointer-events-none",
         direction.initial_position(),
+        direction.safe_area_padding(),
         class
     );
     // The open/closed transform is reactive — upstream mutated classList
@@ -240,7 +279,8 @@ pub fn SheetContent(
             <button
                 type="button"
                 class=format!(
-                    "absolute top-4 right-4 p-1 rounded-sm focus:ring-2 focus:ring-offset-2 focus:outline-none [&_svg:not([class*='size-'])]:size-4 focus:ring-ring{}",
+                    "absolute {} right-4 p-1 rounded-sm focus:ring-2 focus:ring-offset-2 focus:outline-none [&_svg:not([class*='size-'])]:size-4 focus:ring-ring{}",
+                    direction.close_button_top(),
                     if show_close_button { "" } else { " hidden" },
                 )
                 aria-label="Close sheet"

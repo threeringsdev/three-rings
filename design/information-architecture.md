@@ -91,6 +91,16 @@ Two tabs, matching the modes: `[📖 Catalog] [🗂 My cards •7]` (badge = Inb
 - **My cards tab** is a drill-down: the root screen mirrors the sidebar — All cards pinned at top above a delimiter, then Inbox first among the top-level collections, shopping list pinned at bottom; tapping pushes into a collection, back walks up the tree.
 - The selection tray docks above the tab bar and survives tab switches.
 - Same feature surface as desktop — navigation collapses, features don't (per spec).
+- Both bars (and the tray, toasts, and any full-height sheet) carry `env(safe-area-inset-*)`
+  padding on top of their normal layout — ruling 2026-08-16, WB-01M05F945DBTRS0AQ79Y01EGJ2:
+  Android 15+'s enforced edge-to-edge (targetSdk 36) draws the WebView behind the status/
+  gesture-nav bars, and the Android WebView reports nonzero insets for this even without
+  `viewport-fit=cover` (verified via CDP on the Android 17 `Samsung_Flip_7` emulator; a
+  physical Android 16 phone, SDK confirmed via `adb`, disconnected before it could be
+  measured directly — the maintainer's own phone is still the outstanding check). Web-side
+  over the native-side alternative (WindowInsets in the generated
+  `MainActivity`, or the manifest edge-to-edge opt-out) because it also covers iOS/WKWebView
+  for free and needs no `gen/android` edits. Detail in specs/app-ui.md Findings.
 
 ## Route map
 

@@ -39,7 +39,19 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
         <html lang="en" class=if dark { "dark" } else { "" } data-ssr-path=ssr_path>
             <head>
                 <meta charset="utf-8" />
-                <meta name="viewport" content="width=device-width, initial-scale=1" />
+                // `viewport-fit=cover` opts the document into the full display
+                // (status bar + gesture-nav area included) rather than the
+                // OS-safe area alone — WebKit gates `env(safe-area-inset-*)` on
+                // this exact value, so without it every safe-area padding
+                // below would read 0 on iOS/WKWebView. Android's WebView
+                // reports nonzero insets under enforced edge-to-edge even
+                // without this (measured on-device, WB-01M05F945DBTRS0AQ79Y01EGJ2),
+                // but the meta is still required for the iOS half of the same
+                // fix and is harmless there in the meantime.
+                <meta
+                    name="viewport"
+                    content="width=device-width, initial-scale=1, viewport-fit=cover"
+                />
                 <AutoReload options=options.clone() />
                 <HydrationScripts options />
                 <MetaTags />
