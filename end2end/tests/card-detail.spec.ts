@@ -1074,12 +1074,47 @@ test.describe("the printings table", () => {
     await expect(hoverBody).toBeHidden();
     await expect(page.getByText(card.name, { exact: true })).toHaveCount(1);
 
+    // Force the row near the top of the viewport before hovering: the
+    // hover_card's own CSS (`position-try-order: most-height`) opens the
+    // panel on whichever side — above or below the row — has more room, so
+    // a row sitting anywhere past the viewport's vertical midpoint would
+    // legitimately (and correctly) open *above* it. Pinning the row here
+    // guarantees "below" wins, which is what the geometry assertion below
+    // actually needs to be meaningful rather than flaky.
+    const absoluteTop = await row.evaluate(
+      (el) => el.getBoundingClientRect().top + window.scrollY,
+    );
+    await page.evaluate((y) => window.scrollTo(0, Math.max(0, y - 60)), absoluteTop);
+
     await row.hover();
     await expect(hoverBody).toBeVisible(); // 150 ms hover intent
     await expect(hoverBody).toContainText(card.name);
     await expect(hoverBody.locator("img")).toHaveAttribute("src", target!.image_uri!);
     // A preview is not navigation.
     expect(new URL(page.url()).pathname).toBe(`/cards/${card.oracle_id}`);
+
+    // The geometry regression this whole test exists to pin (round-2
+    // adversarial review): `CardPreview`'s trigger used to be given only
+    // the invisible full-row overlay anchor as children, which — being
+    // `position: absolute` — contributes nothing to the trigger's auto
+    // height, so the anchor CSS positioned the panel "below" a *zero-height*
+    // box sitting at the row's top edge, opening the panel over the hovered
+    // row and the next several. The row's real (visible, in-flow) content
+    // now lives inside the trigger too, giving it the row's actual height —
+    // asserted here as "the panel's top is at or below the row's bottom
+    // edge", not merely "the panel is visible" (which the old, broken
+    // geometry would also have satisfied). `toPass`: the CSS anchor
+    // positioning engine's chosen fallback can lag a frame behind the
+    // panel becoming `:popover-open`, so the very first bounding-box read
+    // is occasionally still mid-settle.
+    const EPSILON = 2;
+    await expect(async () => {
+      const rowBox = await row.boundingBox();
+      const panelBox = await hoverBody.boundingBox();
+      expect(rowBox).toBeTruthy();
+      expect(panelBox).toBeTruthy();
+      expect(panelBox!.y).toBeGreaterThanOrEqual(rowBox!.y + rowBox!.height - EPSILON);
+    }).toPass({ timeout: 2000 });
   });
 
   test("a long printings list is capped and scrolls; a short one is not @fast", async ({

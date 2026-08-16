@@ -1239,7 +1239,12 @@ const PRINTINGS_MAX_HEIGHT: &str = "max-h-[67.5rem]";
 /// comes from the caller's `printing_faces` (built with
 /// `CardFaceSummary::build`, the same pure zip the hosted backend uses for a
 /// catalog row's flip data — see `CardDetailBody`'s doc comment on that field
-/// for why it's precomputed there instead of built per row here).
+/// for why it's precomputed there instead of built per row here). `owned` is
+/// always `None` here, deliberately: it drives a per-oracle "N owned" badge
+/// elsewhere, and this page already has its own per-collection ownership
+/// breakdown (`YourCopies`) — a *per-printing* owned count isn't a thing
+/// this projection carries, so the row preview shows none rather than
+/// mislabeling the oracle-level figure as this printing's own.
 ///
 /// The row's whole width is clickable via a "stretched link": `TableRow`
 /// gets `position: relative` and the anchor `absolute inset-0`s inside one
@@ -1247,7 +1252,27 @@ const PRINTINGS_MAX_HEIGHT: &str = "max-h-[67.5rem]";
 /// pattern for a fully-clickable table row without nesting a `<tr>` inside
 /// an `<a>` (invalid HTML; `<a>` is not a permitted `<tbody>`/`<tr>` child).
 /// Nothing else in this row is interactive, so there is no nested-link
-/// hazard to route around.
+/// hazard to route around. Deliberate tradeoff: the overlay sits above the
+/// visible text in paint order (a `position: absolute` box always paints
+/// over non-positioned siblings, regardless of DOM order), so a mouse drag
+/// across the row can't select its text — standard for this pattern, and
+/// accepted the same way a catalog tile's overlay link already is.
+///
+/// **The hover anchor's geometry has to be the row's, not zero.**
+/// `CardPreview`'s own trigger is a plain `<span>` that auto-sizes to its
+/// *in-flow* children — a `position: absolute` child (this row's stretched
+/// link) contributes nothing to that, so a `CardPreview` given only the
+/// overlay anchor as children renders a 0×0px trigger box, and
+/// `HoverCardContent`'s `position-area: block-end` then computes "below"
+/// from that zero-height box — i.e. from the row's *top* edge, opening the
+/// panel over the hovered row and the next several (round-2 adversarial
+/// review, caught by a bounding-box assertion no earlier test had). The fix
+/// is the same shape every other `CardPreview` call site already has: real
+/// visible content as a sibling *inside* the trigger, not floated outside
+/// it as a bare overlay. Here that content is the set name — wrapped in its
+/// own `<span class="block p-4">` carrying the `TableCell`'s padding (moved
+/// off the cell, which is `p-0` now) so the trigger's rendered box is the
+/// full padded row, not just the text's own line box.
 #[component]
 fn Printings(
     oracle_id: shared::Id,
@@ -1301,7 +1326,14 @@ fn Printings(
                                         (None, None) => "Unknown set".to_string(),
                                     };
                                     let href = format!("/cards/{oracle_id}?{PRINTING_PARAM}={id}");
-                                    let link_label = format!("{name} — {set}");
+                                    // Everything a sighted reader sees in the row, not just the
+                                    // set — the label speaks for the row's whole clickable area,
+                                    // and the other three columns are real distinguishing info
+                                    // (adversarial review, round 2).
+                                    let link_label = format!(
+                                        "{name} — {set}, #{collector_number}, {rarity}, {}",
+                                        finishes.join(", "),
+                                    );
                                     let preview = CardSummary {
                                         oracle_id,
                                         name: name.clone(),
@@ -1319,7 +1351,7 @@ fn Printings(
                                             data-testid="printing-row"
                                             data-printing-id=id.to_string()
                                         >
-                                            <TableCell class="font-medium">
+                                            <TableCell class="p-0 font-medium">
                                                 <CardPreview
                                                     card=preview
                                                     id=id.to_string()
@@ -1331,8 +1363,14 @@ fn Printings(
                                                         aria-label=link_label
                                                         data-testid="printing-row-link"
                                                     ></a>
+                                                    // The cell's own `p-4` moved here (the
+                                                    // `TableCell` above is `p-0`): this is real
+                                                    // in-flow content, so it's what gives
+                                                    // `CardPreview`'s trigger its height — see
+                                                    // the module doc's "the hover anchor's
+                                                    // geometry" note for why that has to be true.
+                                                    <span class="block p-4">{set}</span>
                                                 </CardPreview>
-                                                {set}
                                             </TableCell>
                                             <TableCell class="text-muted-foreground hidden sm:table-cell">
                                                 {collector_number}
