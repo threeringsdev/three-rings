@@ -52,6 +52,23 @@ embedded-Axum; only release exercises it.
 
 ## Cleanup / gotchas
 
+- **`JAVA_HOME` must be a JDK the Kotlin compiler can parse (2026-08-15).**
+  Android Studio's bundled JBR is now **25.0.2**, and AGP 8.11's embedded
+  Kotlin throws `IllegalArgumentException: 25.0.2` out of `JavaVersion.parse`
+  while configuring `:buildSrc` — gradle reports it as the cryptic
+  `A problem occurred configuring project ':buildSrc'. > 25.0.2`, with the Rust
+  half already built fine. Run the dev attach with the host's JDK 21 instead:
+  `JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home cargo tauri android dev`.
+- **A non-default `CARGO_TARGET_DIR` needs `mkdir -p target/site` first** — the
+  Tauri build script resolves its `frontendDist` (`../target/site`) against the
+  repo, not against the target dir, and panics with
+  `resource path ../target/site doesn't exist`. Same directory the merge gate
+  creates for the same reason.
+- **Forward the socket that matches the *running* pid.** `head -1`/`tail -1`
+  over `/proc/net/unix` picks a dead app's socket after a relaunch and the
+  forward then lists no targets (curl just hangs):
+  `adb forward tcp:9222 localabstract:webview_devtools_remote_$(adb shell pidof com.three_rings.dev)`.
+
 - The dev build injects a deep-link intent-filter into
   src-tauri/gen/android/.../AndroidManifest.xml — `git checkout` it before
   committing.

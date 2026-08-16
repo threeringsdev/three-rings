@@ -1482,9 +1482,16 @@ pub async fn undo_quick_add(move_id: shared::Id) -> Result<(), ServerFnError<sha
 /// an error naming no card. Every entry is now checked against the real
 /// holdings first and refused individually, so the rest of the batch moves.
 ///
-/// **Quantity is not the caller's** (the `quick_add` precedent): one copy per
-/// selected entry, fixed here. The tray counts entries, not copies, so this is
-/// the only quantity the pill does not lie about.
+/// **Quantity is the caller's, and is validated here** (P6-150, maintainer
+/// ruling 2026-08-15). A plain tray entry still carries none: it moves only
+/// when the stack it resolves to holds exactly one copy, and anything larger is
+/// refused as `SkipReason::Several`, which is what opens the which-copies
+/// picker. An entry that *has* been through the picker carries a
+/// `Pick { grain, quantity }`, and that number is checked against the caller's
+/// real, ungrouped holdings for that stack — over the stack's size is that
+/// entry's own polite refusal (`NotEnough`), never a clamp (a clamp moves a
+/// different number of cards than the dialog said, behind a success toast) and
+/// never a batch failure.
 ///
 /// `input = Json` because the argument is a list of enums — the server-fn POST
 /// default is URL-encoded and flattens nested DTOs to strings
@@ -1501,10 +1508,7 @@ pub async fn move_selection(
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
-        use crate::components::ui::selection_tray::SelectionKey;
-        use crate::my::move_selection::{
-            resolve_card, resolve_held, CardSource, MoveOutcome, Skipped,
-        };
+        use crate::my::move_selection::{resolve_item, CardSource, MoveOutcome, Skipped};
         use std::collections::hash_map::Entry;
         use std::collections::HashMap;
 
@@ -1523,7 +1527,7 @@ pub async fn move_selection(
         // same copies), and both resolve off the same rows.
         let mut owned: HashMap<shared::Id, Vec<shared::HoldingLine>> = HashMap::new();
         for item in items {
-            let token = item.key.token();
+            let token = item.token();
             let holdings = match owned.entry(item.oracle_id) {
                 Entry::Occupied(seen) => seen.into_mut(),
                 Entry::Vacant(slot) => {
@@ -1536,22 +1540,18 @@ pub async fn move_selection(
                     slot.insert(rows)
                 }
             };
-            let source = match item.key {
-                SelectionKey::Held {
-                    collection_id,
-                    printing_id,
-                    board,
-                } => resolve_held(
-                    holdings,
-                    collection_id,
-                    printing_id,
-                    board,
-                    to_collection_id,
-                ),
-                SelectionKey::Card { oracle_id: _ } => resolve_card(holdings, to_collection_id),
-            };
+            // Resolution **spends** the snapshot as the batch consumes it, so a
+            // second entry drawing on the same stack validates against what is
+            // left rather than against the pile both started from. Without that
+            // the two passed individually and the second `holding_take` inside
+            // `move_batch`'s single transaction rolled the *whole* batch back —
+            // the one outcome per-entry refusal exists to prevent.
+            let source = resolve_item(holdings, &item, to_collection_id);
             match source {
-                CardSource::Move(src) => {
+                CardSource::Move {
+                    source: src,
+                    quantity,
+                } => {
                     moved.push(token);
                     lines.push(shared::MoveItem {
                         from_collection_id: Some(src.from),
@@ -1570,7 +1570,10 @@ pub async fn move_selection(
                         // collection are just copies there; re-labelling a board
                         // is card-tagging's separate op.
                         to_board: shared::Board::Main,
-                        quantity: SELECTION_MOVE_QUANTITY,
+                        // Already validated against this stack's real size by
+                        // the resolution above — one copy for a row nobody was
+                        // asked about, the picker's number where there was one.
+                        quantity,
                     });
                 }
                 CardSource::Refuse(reason) => skipped.push(Skipped { token, reason }),
@@ -1618,11 +1621,6 @@ pub async fn move_selection(
         Err(ServerFnError::ServerError("server-only".into()))
     }
 }
-
-/// Copies one selected row contributes to a batch move. Fixed, not the
-/// caller's — see [`move_selection`].
-#[cfg(feature = "ssr")]
-const SELECTION_MOVE_QUANTITY: i32 = 1;
 
 /// The most rows one batch move (or one destination-ranking read) may carry. A
 /// tray selection is a hand of cards, not a shipment; the cap keeps a hostile
@@ -1726,6 +1724,9 @@ pub async fn selection_stacks(
                 stacks: tallies
                     .into_iter()
                     .map(|t| CopyStack {
+                        finish: t.finish,
+                        condition: t.condition,
+                        language: t.language,
                         collection_id: t.collection_id,
                         // Unreachable in practice — `holdings_of_oracle` and
                         // `list_collections` both answer over the caller's live

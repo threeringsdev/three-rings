@@ -53,13 +53,14 @@
 //! straight back into these same functions rather than re-deriving them.
 //!
 //! **A pull is grain-agnostic where the tray's move is not, on purpose.** The
-//! selection tray refuses a stack holding several grains and no default one
-//! ([`SkipReason::Grain`]) because a checkbox on one *row* cannot say which copy
-//! it meant. Here the intent is explicit — "fill this collection's gap from that
-//! collection" — so [`plan_pull`] takes copies across grains, default grain
-//! first and then in a stable order, emitting one `MoveItem` per stack it draws
-//! from. The ledger therefore records exactly which stacks moved and undo is
-//! still exact.
+//! selection tray will not decide *which* copies a row meant: a stack holding
+//! several grains is several rows in its which-copies picker, and the user says
+//! how many of each ([`move_selection`](super::move_selection), P6-150 — the
+//! `SkipReason::Grain` refusal this note used to name is gone with it). Here the
+//! intent is explicit — "fill this collection's gap from that collection" — so
+//! [`plan_pull`] takes copies across grains, default grain first and then in a
+//! stable order, emitting one `MoveItem` per stack it draws from. The ledger
+//! therefore records exactly which stacks moved and undo is still exact.
 //!
 //! **The pick list is a snapshot, and it lives outside the payload it came
 //! from.** Generating it captures the allocation once; the table above it keeps
