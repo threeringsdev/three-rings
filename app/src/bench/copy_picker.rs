@@ -46,9 +46,9 @@ fn stack(collection: u128, name: &str, quantity: i32) -> CopyStack {
 fn card(oracle: u128, name: &str, reason: SkipReason, rows: Vec<CopyStack>) -> CardChoices {
     CardChoices {
         card: AskedCard {
-            key: SelectionKey::Card {
+            keys: vec![SelectionKey::Card {
                 oracle_id: id(oracle),
-            },
+            }],
             oracle_id: id(oracle),
             name: name.to_string(),
             reason,

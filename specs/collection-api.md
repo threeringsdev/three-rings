@@ -836,3 +836,15 @@ resolves.
   the toast says why. Undo is unchanged and still reverses the ledger's own
   recorded quantities in one transaction (`undo_moves`), which is what makes a
   3-copy move undo as 3 copies rather than 1.
+
+  **The validation snapshot is spent as the batch consumes it.** The adapter
+  reads a card's holdings once per *oracle* (the tray can hold one card twice),
+  and validating every entry against that unspent read let two entries over the
+  same stack both pass — after which the second `holding_take` inside
+  `move_batch`'s single transaction returned `Conflict` and rolled back **the
+  whole batch**, which is the per-entry-refusal contract failing from the
+  inside. Each accepted item now decrements the snapshot, so a later item
+  drawing on the same stack is refused individually (`NotEnough` naming what is
+  left, or `NoCopies` once drained) and the rest of the batch still moves. The
+  write path is untouched: this is the pre-check agreeing with what the
+  transaction is going to do, not a second source of truth.

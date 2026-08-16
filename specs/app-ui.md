@@ -254,6 +254,21 @@ chosen at **move time, per entry**; duplicate `/my`-vs-collection entries
 collapse in the move step's stack resolution; and multi-grain rows stay
 selectable, because the step **asks** which grain instead of refusing.
 
+**The duplicate collapse, as shipped.** `/my` and a collection page are two
+views of one shelf, so selecting a card on each makes two tray entries over the
+*same copies*. `split_skips` merges every askable refusal for one oracle into
+one `AskedCard` carrying **both keys**; `card_choices` then offers the union of
+what those keys addressed, with each stack appearing once (the payload is
+already one row per full grain, and it is filtered in a single pass). A
+`StackPick` therefore answers for a *list* of tray tokens, and one moved row
+retires all of them — without that the pill kept counting the duplicate after
+the question it asked had been answered. Two things fall out for free: the
+toast counts **cards by oracle** rather than by tray token, so one card's copies
+can no longer be reported as "2 cards"; and the wire stops carrying two items
+with the same token, which the server's own outcome could not have told apart.
+Merging is per oracle only — nothing merges across cards, and nothing merges
+into a refusal the step cannot ask about.
+
 **What changed, in one sentence.** The which-copies dialog stopped being a
 disambiguation escape hatch and became the move's ordinary second step: its
 rows split to the **full grain** — `(collection, printing, board, finish,
@@ -332,6 +347,38 @@ is the same shape with none of the persistence contract: 44 px targets at phone
 width, `sm:` back to the dense size, and it writes one slot of the dialog's count
 vector. E2E covers it at 390 px (targets, no sideways scroll, a real press).
 
+**Two majors from adversarial review, both about a snapshot being trusted past
+its moment:**
+
+- **The picker claimed the copies were gone while its read was still in
+  flight.** The dialog resolves its rows in an `Effect` rather than awaiting
+  them (that is what lets a stepper's value be a plain `Vec<i32>` beside the
+  rows), and `Resource::get()` hands back the *previously resolved* value
+  during a refetch — where the first value this resource ever resolves is an
+  **empty** payload, because its closure short-circuits while no dialog is
+  open. So every card rendered "No copies left to move — reload the page" with
+  the confirm disabled for the whole round trip, self-correcting when the real
+  read landed. Two states that look alike and mean opposite things. The payload
+  now carries the oracle ids it was produced for, and a payload for another
+  question is treated as "still loading"; the row list carries
+  `data-state=loading|failed|ready` so the distinction is assertable at all.
+  Auto-retrying assertions cannot catch this class — they poll until it heals —
+  so the e2e **stalls the read** with a route handler and asserts the in-flight
+  state while it cannot resolve. Mutation-verified: disabling the check turns
+  the panel `ready` under a stalled read and kills the test.
+- **A batch could draw one stack twice and take the whole batch down with it.**
+  Validation reads a card's holdings once per *oracle* (the tray can hold one
+  card twice) and used to validate every entry against that unspent snapshot —
+  so two entries over the same stack each passed on their own, and the second
+  `holding_take` inside `move_batch`'s single transaction hit `Conflict` and
+  rolled back **every card in the batch**. That is the per-entry-refusal
+  contract failing from the inside. `resolve_item` now spends the snapshot as
+  the batch consumes it, so the later entry validates against what is left and
+  becomes an ordinary `NotEnough`/`NoCopies` refusal while everything else
+  moves. It is also the honest model: inside one transaction the earlier item's
+  copies really are gone. Reachable from the UI through the duplicate-entry
+  case above, and from a hand-rolled POST regardless.
+
 **Two view-macro traps, both silent, both cost real time:**
 
 - **`slot=` on a component makes the node vanish.** leptos reserves it for its
@@ -345,7 +392,7 @@ vector. E2E covers it at 390 px (targets, no sideways scroll, a real press).
 
 **A fixture helper that could not promise what its name said, fixed properly
 this time.** `unownedCards` filtered against the first 200 rows of `/my`, and
-today's bulk-loaded seed parks nearly the whole catalog in the dev user's
+today's bulk-loaded seed parks a large slice of the catalog in the dev user's
 Inbox — so "owned nowhere" cards came back holding 51 copies in the Inbox, and
 every single-place assertion in the file turned into a which-copies dialog.
 (P6-151 recorded this and fixed one *assertion* around it.) It now verifies each
@@ -353,14 +400,50 @@ candidate with `GET /api/cards/{id}/holdings` and takes the first `n` that
 really are held nowhere. This is the file's share of the known
 fixture-pool failure class; the class itself is still owned by its own task.
 
-**Evidence.** `cargo test -p app --features hosted --lib` 384 passed / 0 failed
-(the quantity validation trio — over the stack, zero, a vanished grain — the
+Two follow-on fixture findings, both measured rather than guessed:
+
+- **One search letter is not a fixture.** The helper searched `q=z` alone,
+  picked once because the seed's own cards came from name-ordered searches. Its
+  free pool went to **zero** between two runs of this suite (0 held-nowhere
+  cards in the first 40 hits, against 27-32 for `q`, `x`, `vi`, `un`), which
+  failed six tests at the higher offsets. It now tries several terms in order
+  and says so when they are all exhausted.
+- **Double-faced cards are not a fixture either.** A DFC's catalog name is
+  `Front // Back` while `/cards/:id` heads with the front face alone, so a
+  `toContainText(card.name)` on the detail page failed while showing exactly
+  the right card. Filtered out of the candidate pool; nothing here needs one.
+- The scan is also **windowed** per `skip` now, so verifying candidates cannot
+  converge two concurrent tests onto the same card.
+
+**The same assumption is now failing suite-wide, and it is not this task's to
+fix.** `removal`, `needs`, `command-palette` and `collection-tree-manage` each
+carry their own copy of "a catalog card this account owns nowhere", and in a
+full serial pass **18 of 36 failures were that helper giving up** ("the fixture
+has fewer than 6 catalog cards the dev user owns nowhere"; "every candidate up
+to skip 40 is already held somewhere") — with two more classes behind it: four
+`401`s late in the run (a session expiring around `session-fallback`'s
+cookie-mangling tests) and a residue of timeouts. `batch-move.spec.ts` is green
+throughout because its helper is the verified, multi-term one above; that is the
+pattern the others need. Separately, the shared dev branch had accumulated **51
+leftover `zz-e2e-*` collections** from earlier parallel runs (`w1`…`w16`, plus
+seven from this task's own timed-out runs), which held cards the "owns nowhere"
+scan was looking for and doubled several tree/palette lists; swept with the same
+delete endpoint every test's `finally` calls, leaving the nine seeded
+collections. It accounted for seven of the failures — the pool exhaustion is
+real beyond it.
+
+**Evidence.** `cargo test -p app --features hosted --lib` 389 passed / 0 failed
+— the quantity validation trio (over the stack, zero, a vanished grain), the
 per-grain take, the full-grain split, the `Held`-entry row filter, the
-count-vector→picks mapping, the two-tokens-for-one-row case, and the unified
-toast). Full `batch-move.spec.ts` @fast 12/12 chromium, including the new
-grain-split test (2 foil + 1 etched → two rows → the foils move, the etched
-copy stays, read back by grain through the API) and the phone-width picker
-test. Android webview: see the task report.
+count-vector→picks mapping, the two-tokens-for-one-row case, the unified toast,
+the batch-overdraw pair (one stack drained across entries; spending addresses
+the grain it took from), and the duplicate-collapse set (one question, union of
+rows, both tray tokens retired, no cross-card merge). Full `batch-move.spec.ts`
+@fast **14/14** chromium, including the grain-split test (2 foil + 1 etched →
+two rows → the foils move, the etched copy stays, read back by grain through the
+API), the stalled-read test, the duplicate-entry test and the phone-width picker
+test. Android webview: 16/16 on the emulator via the bench section (see the task
+report).
 
 ### Ambiguous batch-move refusals became a which-copies step (P6-151, 2026-08-13)
 
@@ -514,7 +597,9 @@ still stand.
    drop only what moved (`remove_tokens(&outcome.moved)`), leaving every
    refusal checked "because it is still work to do." That reasoning holds for
    `Grain`/`ManyCollections`/`ManyPrintings`/`ManyBoards`/`AlreadyThere` — each
-   names a real, still-actionable question. It does not hold for `NoCopies`:
+   names a real, still-actionable question. (P6-150 deleted `Grain` and added
+   `Several`/`NotEnough`/`NoneRequested` on the same side of that line; the
+   rule is unchanged.) It does not hold for `NoCopies`:
    the stack is provably gone, and there is no page to open that fixes it. The
    tray now drops `NoCopies` refusals alongside moves, so the pill stops
    counting something the server just proved gone.
@@ -3190,7 +3275,9 @@ exists. It also superseded the `card_detail` call resolution previously made,
 so the path got cheaper while getting correct. New per-entry refusals `Grain`,
 `Board` (now reachable on the `/my` path) and `NoCopies` (the stale-tray gap,
 previously a batch abort) are named in the toast and stay checked in the tray,
-so the rest of the batch still moves. `MoveItem`, `CardRow`, `holding_take` and
+so the rest of the batch still moves. (**`Grain` and `Board` are both gone
+now** — `Board` to the entry above, `Grain` to P6-150, which splits the picker's
+rows to the full grain and asks instead.) `MoveItem`, `CardRow`, `holding_take` and
 the ledger are untouched — the third task's fence held.
 
 **The residual TOCTOU case is deliberate.** If another tab moves the copies

@@ -1508,10 +1508,7 @@ pub async fn move_selection(
     #[cfg(feature = "ssr")]
     {
         use crate::backend::CollectionStore;
-        use crate::components::ui::selection_tray::SelectionKey;
-        use crate::my::move_selection::{
-            resolve_card, resolve_held, CardSource, MoveOutcome, Skipped,
-        };
+        use crate::my::move_selection::{resolve_item, CardSource, MoveOutcome, Skipped};
         use std::collections::hash_map::Entry;
         use std::collections::HashMap;
 
@@ -1543,24 +1540,13 @@ pub async fn move_selection(
                     slot.insert(rows)
                 }
             };
-            let pick = item.pick.as_ref();
-            let source = match item.key {
-                SelectionKey::Held {
-                    collection_id,
-                    printing_id,
-                    board,
-                } => resolve_held(
-                    holdings,
-                    collection_id,
-                    printing_id,
-                    board,
-                    to_collection_id,
-                    pick,
-                ),
-                SelectionKey::Card { oracle_id: _ } => {
-                    resolve_card(holdings, to_collection_id, pick)
-                }
-            };
+            // Resolution **spends** the snapshot as the batch consumes it, so a
+            // second entry drawing on the same stack validates against what is
+            // left rather than against the pile both started from. Without that
+            // the two passed individually and the second `holding_take` inside
+            // `move_batch`'s single transaction rolled the *whole* batch back —
+            // the one outcome per-entry refusal exists to prevent.
+            let source = resolve_item(holdings, &item, to_collection_id);
             match source {
                 CardSource::Move {
                     source: src,

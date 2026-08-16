@@ -63,6 +63,8 @@ const STEP_CANCEL = '[data-testid="which-copies-cancel"]';
 const PICK_VALUE = '[data-testid="pick-value"]';
 const PICK_INC = '[data-testid="pick-inc"]';
 const PICK_DEC = '[data-testid="pick-dec"]';
+const PICK_LABEL = '[data-testid="pick-label"]';
+const PANEL = '[data-testid="which-copies"]';
 
 type Summary = { id: string; name: string };
 type Row = {
@@ -170,7 +172,8 @@ async function present(
 /// fixture is pinned rather than assumed: a card owned nowhere is in exactly one
 /// place after one scratch add.
 ///
-/// "Owned nowhere" is asked of `/my` rather than of the search rows, because
+/// "Owned nowhere" is asked of the holdings endpoint per candidate, with `/my`
+/// as a cheap prefilter, because
 /// `/api/catalog/search` returns `owned: null` even for a signed-in caller
 /// (`into_summary(None)` in the hosted impl) — filtering on it would silently
 /// call every card unowned. `/my` *is* the set of cards the caller owns or
@@ -191,35 +194,67 @@ async function unownedCards(
   const { cards: owned } = (await mine.json()) as { cards: AllCardsRow[] };
   const taken = new Set(owned.map((r) => r.card.oracle_id));
 
-  // `z`, not a vowel: the seed itself picked its cards from name-ordered
-  // searches, so the alphabetically-first slice of the catalog is exactly the
-  // slice the dev user already owns — `q=a` yields zero free cards.
-  const res = await request.get("/api/catalog/search?q=z&limit=120");
-  expect(res.status(), "catalog search").toBe(200);
-  const { cards } = (await res.json()) as { cards: Card[] };
-  const candidates = cards.filter((c) => c.printing_id && !taken.has(c.oracle_id));
-
-  // …and then **verified**, one holdings read each (P6-150). The `/my` filter
-  // above is only "not in the first 200 rows", and today's bulk-loaded seed
-  // parks nearly the whole catalog in the dev user's Inbox — so a candidate
-  // routinely came back "free" while sitting in the Inbox at 51 copies, which
-  // turns every single-place assertion in this file into a which-copies
-  // dialog. `GET /api/cards/{id}/holdings` is the one read that cannot be
-  // wrong about it, and it is cheap enough to ask per candidate because the
-  // loop stops at `n`. `skip` still starts each test at a different offset, so
-  // concurrent workers stay off each other's cards.
-  const free: Card[] = [];
-  for (const card of candidates.slice(skip)) {
-    const held = await request.get(`/api/cards/${card.oracle_id}/holdings`);
-    expect(held.status(), "holdings of oracle").toBe(200);
-    if (((await held.json()) as { quantity: number }[]).some((h) => h.quantity > 0)) {
-      continue;
+  // Every candidate is **verified** held-nowhere, one holdings read each
+  // (P6-150). The `/my` filter above is only "not in the first 200 rows", and
+  // today's bulk-loaded seed parks a large slice of the catalog in the dev
+  // user's Inbox — so a candidate routinely came back "free" while sitting in
+  // the Inbox at 51 copies, which turns every single-place assertion in this
+  // file into a which-copies dialog. `GET /api/cards/{id}/holdings` is the one
+  // read that cannot be wrong about it, and it is cheap enough to ask per
+  // candidate because the scan stops at `n`.
+  const takeFree = async (from: Card[], want: number) => {
+    const out: Card[] = [];
+    for (const card of from) {
+      const held = await request.get(`/api/cards/${card.oracle_id}/holdings`);
+      expect(held.status(), "holdings of oracle").toBe(200);
+      if (((await held.json()) as { quantity: number }[]).some((h) => h.quantity > 0)) {
+        continue;
+      }
+      out.push(card);
+      if (out.length === want) break;
     }
-    free.push(card);
+    return out;
+  };
+
+  // **The scan is windowed, and that is what keeps concurrent tests apart.**
+  // `skip` used to slice a fixed `n` cards, so two tests were disjoint by
+  // construction; verifying each candidate broke that, because a scan that
+  // walks past its own block converges on the same first free card every other
+  // block eventually reaches. Each call searches its own `STRIDE`-wide block
+  // first — the spacing this file's own `skip` values use — and only falls
+  // back to the rest of the list when its block is fully owned.
+  const STRIDE = 5;
+
+  // **Several search terms, tried in order, because one letter's luck is not a
+  // fixture.** This helper searched `q=z` alone, chosen once because the seed
+  // picked its cards from name-ordered searches and the alphabetically-first
+  // slice was the owned one. Measured again for P6-150: `z` now yields **zero**
+  // held-nowhere cards in its first 40 hits (the Inbox has swallowed that
+  // slice too) while `q`, `x`, `vi` and `un` yield 27-32 — and the erosion
+  // happened between two runs of this same suite, so pinning a second letter
+  // would only postpone this. Trying them in order costs one extra search per
+  // exhausted term and nothing at all in the common case.
+  for (const term of ["q", "x", "vi", "un", "z"]) {
+    const res = await request.get(`/api/catalog/search?q=${term}&limit=120`);
+    expect(res.status(), "catalog search").toBe(200);
+    const { cards } = (await res.json()) as { cards: Card[] };
+    // Single-faced only. A double-faced card's catalog name is
+    // `Front // Back` while `/cards/:id` heads with the front face alone, so a
+    // fixture that picked one made `expect(card-name).toContainText(card.name)`
+    // fail on a page that was showing exactly the right card (seen the moment
+    // the search term above changed). Nothing in this file needs a DFC.
+    const candidates = cards.filter(
+      (c) => c.printing_id && !c.name.includes(" // ") && !taken.has(c.oracle_id),
+    );
+    const free = await takeFree(candidates.slice(skip, skip + STRIDE), n);
+    if (free.length < n) {
+      free.push(...(await takeFree(candidates.slice(skip + STRIDE), n - free.length)));
+    }
     if (free.length === n) return free;
   }
   throw new Error(
-    `the fixture has fewer than ${n} catalog cards the dev user owns nowhere past offset ${skip}`,
+    `no search term yielded ${n} catalog cards the dev user owns nowhere past offset ${skip} — ` +
+      "the seed's owned slice has grown; measure a fresh term and add it above",
   );
 }
 
@@ -357,16 +392,22 @@ async function setQuantity(
   throw new Error(`stepper never reached ${want}`);
 }
 
-/// Zero every row of the open picker except the ones naming `keep`.
+/// Zero every row of the open picker except the ones held in `keep`.
 ///
 /// Every row opens at **one copy** (P6-150's default), so a card whose copies
 /// sit in several places would move one from each on a bare confirm. Tests
 /// that care about exactly one stack say so.
+///
+/// Matched on the label's **first segment**, which is the collection name, and
+/// compared exactly: a substring test over the whole row would keep
+/// `zz-…-src-w0-1` when asked for `zz-…-src-w0-1x`, and would also match a
+/// name that happened to appear in the printing chip or the grain.
 async function onlyFrom(page: Page, keep: string) {
   const rows = page.locator(STEP_ROW);
   for (let i = 0; i < (await rows.count()); i++) {
     const row = rows.nth(i);
-    if (!(await row.innerText()).includes(keep)) await setQuantity(row, 0);
+    const place = (await row.locator(PICK_LABEL).innerText()).split(" · ")[0];
+    if (place.trim() !== keep) await setQuantity(row, 0);
   }
 }
 
@@ -749,10 +790,14 @@ test("@fast a /my row scattered over collections asks which copies, and cancelli
 
     // P6-151: the batch no longer dead-ends here — it asks. The step lists one
     // row per **grain** of every place the copies actually sit in, which is the
-    // question the oracle-grained key could not answer on its own. At least one
-    // row per place, and more where a place holds two finishes.
-    await expect(page.locator(STEP_ROW).first()).toBeVisible();
-    expect(await page.locator(STEP_ROW).count()).toBeGreaterThanOrEqual(places);
+    // question the oracle-grained key could not answer on its own. Exact, and
+    // derived from the database rather than from `places`: since P6-150 a place
+    // holding two finishes is two rows, so the row count is the full-grain
+    // stack count (`stackCount`), while `places` is still what the refusal
+    // sentence below counts.
+    await expect(page.locator(STEP_ROW)).toHaveCount(
+      await stackCount(request, scattered.card.oracle_id, dest.id),
+    );
     // Declining is still a refusal, named and reasoned — not a silent drop.
     await page.locator(STEP_CANCEL).click();
     await expect(page.locator(TOAST).first()).toContainText(
@@ -859,6 +904,136 @@ test("@fast an ambiguous /my row asks which copies, and moves exactly the copies
   } finally {
     await deleteCollection(request, here.id);
     await deleteCollection(request, there.id);
+    await deleteCollection(request, dest.id);
+  }
+});
+
+// ------------------- the picker never claims the copies are gone (P6-150) ---
+//
+// "This card has no copies left" and "the read has not come back yet" look
+// alike and mean opposite things, and the dialog resolves its rows in an
+// `Effect` rather than awaiting them — so a payload belonging to a *previous*
+// question (leptos hands the last resolved value back during a refetch, and the
+// first one this resource ever resolves is empty) rendered the
+// nothing-left-to-move sentence for the whole selection until the real read
+// landed, with the confirm disabled.
+//
+// Auto-retrying assertions cannot catch that: they poll until it self-corrects.
+// So the read is **stalled deliberately** and the in-flight state is asserted
+// while it cannot resolve — the only way this is a test rather than a race.
+
+test("@fast while its read is in flight the picker says so, and never that there is nothing to move", async ({
+  page,
+  request,
+}) => {
+  const [card] = await unownedCards(request, 1, 55);
+  const printing = card.printing_id as string;
+  const source = await createCollection(request, "binder", "flightsrc");
+  const dest = await createCollection(request, "binder", "flightdest");
+  try {
+    await addHave(request, source.id, printing, 3);
+
+    await page.goto(`/my/collections/${source.id}`);
+    await hydrated(page);
+    await select(collectionRow(page, printing)).click();
+
+    let release = () => {};
+    const stalled = new Promise<void>((resolve) => (release = resolve));
+    await page.route("**/api/selection_stacks", async (route) => {
+      await stalled;
+      await route.continue();
+    });
+
+    await moveTo(page, dest.name);
+
+    // The dialog is open (the move refused, three copies being a question),
+    // and its row list is honest about not knowing yet.
+    const panel = page.locator(PANEL);
+    await expect(panel).toHaveAttribute("data-state", "loading");
+    await expect(panel).toContainText("Finding your copies…");
+    // The assertion this test exists for — and it holds *while the read cannot
+    // return*, not merely eventually.
+    await expect(panel).not.toContainText("No copies left to move");
+    await expect(page.locator(STEP_CARD)).toHaveCount(0);
+    await expect(page.locator(STEP_CONFIRM)).toBeDisabled();
+
+    release();
+
+    await expect(panel).toHaveAttribute("data-state", "ready");
+    await expect(page.locator(STEP_ROW)).toHaveCount(1);
+    await expect(page.locator(STEP_CONFIRM)).toHaveText("Move 1 copy");
+  } finally {
+    await deleteCollection(request, source.id);
+    await deleteCollection(request, dest.id);
+  }
+});
+
+// ------------------- one card, selected twice, is one question (P6-150) ---
+//
+// The ruling's question 3. `/my` and a collection page are two views of one
+// shelf, so selecting a card on each makes two tray entries over the *same
+// copies*. Two sections would apportion one pile across two identical lists,
+// and — since both address the same `(collection, printing, board)` — would
+// submit two wire items the server cannot tell apart in its own outcome.
+//
+// The second navigation is a **click**, not a `goto`: the tray is in-memory by
+// design, so a document load starts it empty and the duplicate could not exist.
+
+test("@fast the same card selected on /my and in its collection is one question, and answering it clears both", async ({
+  page,
+  request,
+}) => {
+  test.slow();
+  const [card] = await unownedCards(request, 1, 60);
+  const printing = card.printing_id as string;
+  const source = await createCollection(request, "binder", "dupsrc");
+  const dest = await createCollection(request, "binder", "dupdest");
+  try {
+    await addHave(request, source.id, printing, 2);
+
+    // The `/my` row first — an oracle-grained entry naming no place…
+    await page.goto(`/my?q=${encodeURIComponent(card.name)}`);
+    await hydrated(page);
+    await select(myRow(page, card.oracle_id)).click();
+    await expect(page.locator(COUNT)).toHaveText("1 card");
+
+    // …then into the collection through the sidebar (a real SPA navigation, so
+    // the selection rides along) and the row for the very same copies.
+    await page
+      .getByRole("navigation", { name: "Collections" })
+      .getByRole("link", { name: new RegExp(source.name) })
+      .click();
+    await page.waitForURL((url) => url.pathname === `/my/collections/${source.id}`);
+    await expect(page.locator(COUNT)).toHaveText("1 card");
+    await select(collectionRow(page, printing)).click();
+    await expect(page.locator(COUNT), "two entries, one shelf").toHaveText("2 cards");
+
+    await moveTo(page, dest.name);
+
+    // One section, one row — not two lists over the same pile.
+    await expect(page.locator(STEP_CARD)).toHaveCount(1);
+    const rows = page.locator(STEP_ROW);
+    await expect(rows).toHaveCount(1);
+    await expect(rows).toContainText(`${source.name} · 2 copies`);
+    const confirm = page.locator(STEP_CONFIRM);
+    await expect(confirm).toHaveText("Move 1 copy");
+    await confirm.click();
+
+    // One card, one copy — the count the un-merged version got wrong twice
+    // over (two sections defaulting to one copy each, reported as two cards).
+    await expect(page.locator(TOAST, { hasText: /Moved \d+ cop/ })).toContainText(
+      `Moved 1 copy of 1 card → 🗂 ${dest.name}`,
+    );
+    // Both tray entries retire, so the pill goes away: leaving the duplicate
+    // checked would have the tray still asking a question just answered.
+    await expect(page.locator(TRAY)).toHaveCount(0);
+
+    await expect(async () => {
+      expect(await present(request, source.id, [printing])).toEqual([1]);
+      expect(await present(request, dest.id, [printing])).toEqual([1]);
+    }).toPass({ timeout: 5000 });
+  } finally {
+    await deleteCollection(request, source.id);
     await deleteCollection(request, dest.id);
   }
 });
