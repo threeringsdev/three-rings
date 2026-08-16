@@ -18,10 +18,18 @@
 //!   hosted backend (`COALESCE(image_uris, faces->0->image_uris)`); this module
 //!   assumes `image_uri` is populated whenever the printing has any art at all,
 //!   and degrades to a skeleton rather than breaking when it isn't.
+//! - **The printings table picks up the same preview + "current printing"
+//!   contract.** Every row wraps the same `CardPreview` the catalog's list
+//!   view uses (hover/tap for that printing's own art), is a real link back
+//!   to this same page with `?printing=<id>` set, and the table itself caps
+//!   at ~20 rows tall and scrolls inside that cap — see `Printings` and
+//!   `resolve_current_printing` for the mechanics.
 
 use leptos::prelude::*;
-use leptos_router::hooks::use_params_map;
-use shared::{CardDetail, CardSummary, OwnershipEntry, PrintingSummary, Ruling, WantEntry};
+use leptos_router::hooks::{use_params_map, use_query_map};
+use shared::{
+    CardDetail, CardFaceSummary, CardSummary, OwnershipEntry, PrintingSummary, Ruling, WantEntry,
+};
 
 use crate::components::holding_stepper::{HaveStepper, WantStepper};
 use crate::components::states::{self, RetryButton};
@@ -291,10 +299,29 @@ pub fn CardPreview(
     /// regardless, since a tap there still wants an alternative to navigating.
     #[prop(default = true)]
     hover: bool,
+    /// Overrides the default `card-preview-{oracle_id}` / `card-sheet-{oracle_id}`
+    /// DOM ids. Every call site but one mounts at most one `CardPreview` per
+    /// `oracle_id`, so the default (derived from `card.oracle_id`) is unique
+    /// on its own. The exception is the card-detail page's printings table
+    /// (`Printings`, this module): every row's `CardSummary` shares the
+    /// page's one `oracle_id` — only the printing differs — so without an
+    /// override every row would render the *same* hover-card/sheet id,
+    /// duplicate DOM ids that (among other things) break the hover card's
+    /// CSS anchor positioning (`anchor-name` collides). Callers with more
+    /// than one printing on screen pass the printing's own id here instead.
+    #[prop(into, optional)]
+    id: Option<String>,
+    /// Overrides the sheet's "Full details →" destination (default
+    /// `/cards/{oracle_id}`). `Printings` passes the row's own
+    /// `?printing=<id>` link here, so a touch tap's sheet lands on the same
+    /// printing the row itself would have — not this page's default hero.
+    #[prop(into, optional)]
+    detail_href: Option<String>,
     children: Children,
 ) -> impl IntoView {
     let oracle_id = card.oracle_id;
-    let href = format!("/cards/{oracle_id}");
+    let instance_id = id.unwrap_or_else(|| oracle_id.to_string());
+    let href = detail_href.unwrap_or_else(|| format!("/cards/{oracle_id}"));
     let name = card.name.clone();
     // Each affordance's body lands in its own per-node closure, so they each
     // need an owned copy rather than sharing one.
@@ -377,7 +404,7 @@ pub fn CardPreview(
             // hybrid device's touch tap suppresses the hover card too rather
             // than raising one behind the sheet.
             <HoverCard
-                id=format!("card-preview-{oracle_id}")
+                id=format!("card-preview-{instance_id}")
                 disabled=wants_sheet
                 on_open_change=Callback::new(move |v| hover_open.set(v))
             >
@@ -400,7 +427,7 @@ pub fn CardPreview(
         // item inside a grid tile's `<li>`, adding a phantom gap between the
         // art and the caption. Backdrop and panel are both position:fixed, so
         // the wrapper has no layout job to do.
-        <Sheet id=format!("card-sheet-{oracle_id}") open=sheet_open class="contents">
+        <Sheet id=format!("card-sheet-{instance_id}") open=sheet_open class="contents">
             <SheetContent
                 direction=SheetDirection::Bottom
                 aria_label=name
@@ -493,9 +520,19 @@ enum CardIdOutcome {
     Fetched(Box<Result<CardDetail, ServerFnError<shared::ApiError>>>),
 }
 
+/// `?printing=<id>` on `/cards/:id` — which printing the printings table's
+/// row links carry (see [`Printings`] and the "current printing" doc on
+/// [`CardDetailBody`]). Read here rather than folded into the route param
+/// because every printing under one card shares the same `oracle_id`
+/// (Scryfall's model: `oracle_id` is the card, `printings.id` is one
+/// specific art/set/number) — there is no other id `/cards/:id` could carry
+/// to distinguish them.
+const PRINTING_PARAM: &str = "printing";
+
 #[component]
 pub fn CardDetailPage() -> impl IntoView {
     let params = use_params_map();
+    let query_map = use_query_map();
 
     // The param is a Memo so that a navigation which doesn't change the id
     // (a query-string change, say) can't re-fire the fetch.
@@ -503,6 +540,17 @@ pub fn CardDetailPage() -> impl IntoView {
         params
             .read()
             .get("id")
+            .and_then(|raw| raw.parse::<shared::Id>().ok())
+    });
+
+    // Deliberately *not* part of the resource's key: every printing this
+    // card has already arrived in one `card_detail` fetch, so re-selecting
+    // which one is "current" is a client-side reorder, not a re-fetch (same
+    // reasoning `resolve_current_printing`'s doc comment gives).
+    let selected_printing = Memo::new(move |_| {
+        query_map
+            .read()
+            .get(PRINTING_PARAM)
             .and_then(|raw| raw.parse::<shared::Id>().ok())
     });
 
@@ -536,7 +584,10 @@ pub fn CardDetailPage() -> impl IntoView {
                     Suspend::new(async move {
                         match detail_res.await.card {
                             CardIdOutcome::Fetched(res) => match *res {
-                                Ok(card) => view! { <CardDetailBody card=card /> }.into_any(),
+                                Ok(card) => {
+                                    view! { <CardDetailBody card=card selected_printing=selected_printing /> }
+                                        .into_any()
+                                }
                                 Err(e) => match classify(&e) {
                                     Failure::Missing(detail) => {
                                         view! { <NotFound detail=detail /> }.into_any()
@@ -731,12 +782,71 @@ fn CardDetailSkeleton() -> impl IntoView {
     }
 }
 
+/// Picks the printing that represents the card right now — the one the hero
+/// panel's art comes from and the one [`reorder_current_first`] puts at the
+/// top of the printings table.
+///
+/// `selected` (from `?printing=<id>`, [`PRINTING_PARAM`]) wins when it names
+/// a printing this card actually has; a stale or foreign id (a bookmarked
+/// link to a printing since removed, say) falls through rather than 404ing
+/// the whole page. Absent a valid selection, this is the pre-existing
+/// default: the oldest printing with art — searched, not `first()`, because
+/// Scryfall carries artless rows (placeholders, some non-English printings),
+/// and letting one of those sit first would blank the hero while a later
+/// printing has art. The second `find` is the degenerate case of a printing
+/// whose face 0 has no art but a later face does (`image_uri` coalesces face
+/// 0 only).
+fn resolve_current_printing(
+    printings: &[PrintingSummary],
+    selected: Option<shared::Id>,
+) -> Option<PrintingSummary> {
+    selected
+        .and_then(|id| printings.iter().find(|p| p.id == id))
+        .or_else(|| printings.iter().find(|p| p.image_uri.is_some()))
+        .or_else(|| {
+            printings
+                .iter()
+                .find(|p| p.face_image_uris.iter().any(|f| f.is_some()))
+        })
+        .cloned()
+}
+
+/// The printings table's row order: whichever printing [`resolve_current_printing`]
+/// names moves to index 0, everything else keeps its original (release-date)
+/// order behind it. Pure and separable from the hero-art derivation above so
+/// both can share one "which printing is current" answer without agreeing on
+/// it twice.
+fn reorder_current_first(
+    printings: &[PrintingSummary],
+    selected: Option<shared::Id>,
+) -> Vec<PrintingSummary> {
+    let mut printings = printings.to_vec();
+    if let Some(id) = resolve_current_printing(&printings, selected).map(|p| p.id) {
+        if let Some(pos) = printings.iter().position(|p| p.id == id) {
+            let p = printings.remove(pos);
+            printings.insert(0, p);
+        }
+    }
+    printings
+}
+
 #[component]
-fn CardDetailBody(card: CardDetail) -> impl IntoView {
+fn CardDetailBody(
+    card: CardDetail,
+    /// `?printing=<id>` — see [`PRINTING_PARAM`]. A `Signal`, not a plain
+    /// `Option`, because clicking a printings-table row only changes the
+    /// query string (same `oracle_id`, same page): the hero art and table
+    /// order below must re-derive when it changes without this component
+    /// remounting or the card refetching — every printing already arrived in
+    /// the one `card_detail` response `card` carries.
+    #[prop(into)]
+    selected_printing: Signal<Option<shared::Id>>,
+) -> impl IntoView {
     // Parsed before the destructure moves the fields; empty for every layout
     // without a real back face (shared::CardDetail::flip_faces).
     let flip_faces = card.flip_faces();
     let CardDetail {
+        oracle_id,
         name,
         mana_cost,
         type_line,
@@ -745,6 +855,8 @@ fn CardDetailBody(card: CardDetail) -> impl IntoView {
         toughness,
         loyalty,
         keywords,
+        layout,
+        card_faces,
         printings,
         rulings,
         ownership,
@@ -752,25 +864,36 @@ fn CardDetailBody(card: CardDetail) -> impl IntoView {
         ..
     } = card;
 
-    // The oldest printing (the query orders by release date) represents the
-    // card — but searched, not `first()`: Scryfall carries artless rows
-    // (placeholders, some non-English printings), and letting one of those sit
-    // first would blank the hero while every later printing has art. The same
-    // printing supplies the per-face art, so front and back stay one printing;
-    // the second `find` is the degenerate case of a printing whose face 0 has
-    // no art but a later face does (`image_uri` coalesces face 0 only).
-    let hero_printing = printings
+    // Reserved for the printings table below — the panel closures a few
+    // lines down move `name`/`mana_cost`/`type_line` into themselves, and
+    // every printing row's hover preview wants its own copy of the same
+    // card-level fields (see `Printings`'s doc comment).
+    let printings_name = name.clone();
+    let printings_mana_cost = mana_cost.clone();
+    let printings_type_line = type_line.clone();
+
+    // Per-printing flip data for the table's hover previews, built once here
+    // rather than typed as a `Printings` prop: `card_faces` is a raw
+    // `serde_json::Value` (inferred, never named in this crate — `app`'s own
+    // `serde_json` dependency is `ssr`-only, so naming it in a type position
+    // that also compiles under `hydrate` would break the wasm build).
+    // `CardFaceSummary::build` is the same pure zip the hosted backend runs
+    // server-side for a catalog row's flip data (`shared::CardFaceSummary::
+    // build`); run here since every printing already arrived in this page's
+    // one `card_detail` fetch.
+    let printing_faces: std::collections::HashMap<shared::Id, Vec<CardFaceSummary>> = printings
         .iter()
-        .find(|p| p.image_uri.is_some())
-        .or_else(|| {
-            printings
-                .iter()
-                .find(|p| p.face_image_uris.iter().any(|f| f.is_some()))
-        });
-    let hero = hero_printing.and_then(|p| p.image_uri.clone());
-    let hero_face_images = hero_printing
-        .map(|p| p.face_image_uris.clone())
-        .unwrap_or_default();
+        .map(|p| {
+            (
+                p.id,
+                CardFaceSummary::build(layout.as_deref(), card_faces.as_ref(), &p.face_image_uris),
+            )
+        })
+        .collect();
+
+    let printings_for_hero = printings.clone();
+    let current_printing =
+        Memo::new(move |_| resolve_current_printing(&printings_for_hero, selected_printing.get()));
 
     let flippable = flip_faces.len() >= 2;
     let n_faces = flip_faces.len();
@@ -781,10 +904,12 @@ fn CardDetailBody(card: CardDetail) -> impl IntoView {
     let combined_name = flippable.then(|| name.clone());
 
     let panel: Signal<FacePanel> = if flippable {
-        let front_img = hero;
         Signal::derive(move || {
             let i = face.get().min(flip_faces.len() - 1);
             let f = &flip_faces[i];
+            let current = current_printing.get();
+            let front_img = current.as_ref().and_then(|p| p.image_uri.clone());
+            let face_images = current.map(|p| p.face_image_uris).unwrap_or_default();
             FacePanel {
                 name: f.name.clone(),
                 mana_cost: f.mana_cost.clone(),
@@ -796,7 +921,7 @@ fn CardDetailBody(card: CardDetail) -> impl IntoView {
                     f.loyalty.as_deref(),
                     f.defense.as_deref(),
                 ),
-                image_uri: hero_face_images
+                image_uri: face_images
                     .get(i)
                     .cloned()
                     .flatten()
@@ -804,20 +929,25 @@ fn CardDetailBody(card: CardDetail) -> impl IntoView {
             }
         })
     } else {
-        let base = FacePanel {
-            name: name.clone(),
-            mana_cost,
-            type_line,
-            oracle_text,
+        // A dedicated clone, not the outer `name`: the closure below captures
+        // by move, and `name` itself is still needed after this `if/else`
+        // (YourCopies/YourWants, and `Printings`'s own copy above) — moving
+        // it into only one arm of the branch still poisons every later use,
+        // since the borrow checker can't assume which arm ran.
+        let panel_name = name.clone();
+        Signal::derive(move || FacePanel {
+            name: panel_name.clone(),
+            mana_cost: mana_cost.clone(),
+            type_line: type_line.clone(),
+            oracle_text: oracle_text.clone(),
             stats: stats_line(
                 power.as_deref(),
                 toughness.as_deref(),
                 loyalty.as_deref(),
                 None,
             ),
-            image_uri: hero,
-        };
-        Signal::derive(move || base.clone())
+            image_uri: current_printing.get().and_then(|p| p.image_uri),
+        })
     };
 
     view! {
@@ -923,7 +1053,15 @@ fn CardDetailBody(card: CardDetail) -> impl IntoView {
 
                 {ownership.map(|o| view! { <YourCopies entries=o card_name=name.clone() /> })}
                 {wants.map(|w| view! { <YourWants entries=w card_name=name.clone() /> })}
-                <Printings printings=printings />
+                <Printings
+                    oracle_id
+                    name=printings_name
+                    mana_cost=printings_mana_cost
+                    type_line=printings_type_line
+                    printing_faces=printing_faces
+                    printings=printings
+                    selected_printing=selected_printing
+                />
                 <Rulings rulings=rulings />
             </div>
         </div>
@@ -1073,12 +1211,89 @@ fn YourWants(entries: Vec<WantEntry>, card_name: String) -> impl IntoView {
     }
 }
 
+/// The printings table's scroll cap — derived from `Table`'s own row
+/// geometry rather than a hand-picked pixel value. `TableHeader`'s `th` is
+/// `h-10` (2.5rem); a body row is a `p-4`-padded (1rem top + bottom) cell of
+/// `text-sm` content (1.25rem line-height), so one row stands 1rem + 1rem +
+/// 1.25rem = 3.25rem tall. Twenty of those plus the header:
+/// `2.5rem + 20 * 3.25rem` = `67.5rem`. `TableWrapper`'s own default
+/// (`max-h-96`, ~7 rows) is too short for "approx 20 items", so this
+/// overrides it — same mechanism the old `max-h-none` override used, just
+/// capped instead of uncapped. The header stays pinned over the scrolling
+/// body for free: `TableHeader` is already `sticky top-0` (table.rs).
+const PRINTINGS_MAX_HEIGHT: &str = "max-h-[67.5rem]";
+
+/// The printings table: one row per art/set/number this card was printed
+/// as, capped to roughly twenty rows tall and scrollable inside that cap
+/// ([`PRINTINGS_MAX_HEIGHT`]). Each row is a real link to this same card's
+/// `/cards/:id` page carrying `?printing=<id>` ([`PRINTING_PARAM`]), which
+/// [`CardDetailBody`] reads back to pick that printing's art and float it to
+/// the top of this very list — see `resolve_current_printing`'s doc comment
+/// for why a query param and not a distinct route.
+///
+/// Hovering a row reuses [`CardPreview`] — the same hover-card/touch-sheet
+/// affordance the catalog's list view wraps its rows in — built from a
+/// [`CardSummary`] assembled per row: `name`/`mana_cost`/`type_line` are
+/// card-level (identical for every printing, passed down from
+/// `CardDetailBody`), `image_uri` is this printing's own art, and `faces`
+/// comes from the caller's `printing_faces` (built with
+/// `CardFaceSummary::build`, the same pure zip the hosted backend uses for a
+/// catalog row's flip data — see `CardDetailBody`'s doc comment on that field
+/// for why it's precomputed there instead of built per row here). `owned` is
+/// always `None` here, deliberately: it drives a per-oracle "N owned" badge
+/// elsewhere, and this page already has its own per-collection ownership
+/// breakdown (`YourCopies`) — a *per-printing* owned count isn't a thing
+/// this projection carries, so the row preview shows none rather than
+/// mislabeling the oracle-level figure as this printing's own.
+///
+/// The row's whole width is clickable via a "stretched link": `TableRow`
+/// gets `position: relative` and the anchor `absolute inset-0`s inside one
+/// cell, so its containing block is the row, not that cell — the standard
+/// pattern for a fully-clickable table row without nesting a `<tr>` inside
+/// an `<a>` (invalid HTML; `<a>` is not a permitted `<tbody>`/`<tr>` child).
+/// Nothing else in this row is interactive, so there is no nested-link
+/// hazard to route around. Deliberate tradeoff: the overlay sits above the
+/// visible text in paint order (a `position: absolute` box always paints
+/// over non-positioned siblings, regardless of DOM order), so a mouse drag
+/// across the row can't select its text — standard for this pattern, and
+/// accepted the same way a catalog tile's overlay link already is.
+///
+/// **The hover anchor's geometry has to be the row's, not zero.**
+/// `CardPreview`'s own trigger is a plain `<span>` that auto-sizes to its
+/// *in-flow* children — a `position: absolute` child (this row's stretched
+/// link) contributes nothing to that, so a `CardPreview` given only the
+/// overlay anchor as children renders a 0×0px trigger box, and
+/// `HoverCardContent`'s `position-area: block-end` then computes "below"
+/// from that zero-height box — i.e. from the row's *top* edge, opening the
+/// panel over the hovered row and the next several (round-2 adversarial
+/// review, caught by a bounding-box assertion no earlier test had). The fix
+/// is the same shape every other `CardPreview` call site already has: real
+/// visible content as a sibling *inside* the trigger, not floated outside
+/// it as a bare overlay. Here that content is the set name — wrapped in its
+/// own `<span class="block p-4">` carrying the `TableCell`'s padding (moved
+/// off the cell, which is `p-0` now) so the trigger's rendered box is the
+/// full padded row, not just the text's own line box.
 #[component]
-fn Printings(printings: Vec<PrintingSummary>) -> impl IntoView {
+fn Printings(
+    oracle_id: shared::Id,
+    #[prop(into)] name: String,
+    mana_cost: Option<String>,
+    type_line: Option<String>,
+    /// Every printing's own flip-preview faces, keyed by `PrintingSummary::id`
+    /// — precomputed by the caller (see `CardDetailBody`'s doc comment on
+    /// this field for why: the raw `card_faces` jsonb can't be named as a
+    /// prop type here without breaking the `hydrate`/wasm build).
+    printing_faces: std::collections::HashMap<shared::Id, Vec<CardFaceSummary>>,
+    printings: Vec<PrintingSummary>,
+    #[prop(into)] selected_printing: Signal<Option<shared::Id>>,
+) -> impl IntoView {
+    let count = printings.len();
+    let ordered = Memo::new(move |_| reorder_current_first(&printings, selected_printing.get()));
+
     view! {
         <section class="space-y-2">
-            <h2 class="text-lg font-semibold">{format!("Printings · {}", printings.len())}</h2>
-            <TableWrapper class="max-h-none">
+            <h2 class="text-lg font-semibold">{format!("Printings · {count}")}</h2>
+            <TableWrapper class=PRINTINGS_MAX_HEIGHT>
                 <Table {..} data-testid="card-printings">
                     <TableHeader>
                         <TableRow>
@@ -1089,37 +1304,86 @@ fn Printings(printings: Vec<PrintingSummary>) -> impl IntoView {
                         </TableRow>
                     </TableHeader>
                     <TableBody>
-                        {printings
-                            .into_iter()
-                            .map(|p| {
-                                let PrintingSummary {
-                                    set_code,
-                                    set_name,
-                                    collector_number,
-                                    rarity,
-                                    finishes,
-                                    ..
-                                } = p;
-                                let set = match (set_name, set_code) {
-                                    (Some(n), Some(c)) => format!("{n} ({})", c.to_uppercase()),
-                                    (Some(n), None) => n,
-                                    (None, Some(c)) => c.to_uppercase(),
-                                    (None, None) => "Unknown set".to_string(),
-                                };
-                                view! {
-                                    <TableRow>
-                                        <TableCell class="font-medium">{set}</TableCell>
-                                        <TableCell class="text-muted-foreground hidden sm:table-cell">
-                                            {collector_number}
-                                        </TableCell>
-                                        <TableCell class="capitalize">{rarity}</TableCell>
-                                        <TableCell class="text-muted-foreground hidden capitalize sm:table-cell">
-                                            {finishes.join(", ")}
-                                        </TableCell>
-                                    </TableRow>
-                                }
-                            })
-                            .collect_view()}
+                        {move || {
+                            ordered
+                                .get()
+                                .into_iter()
+                                .map(|p| {
+                                    let PrintingSummary {
+                                        id,
+                                        set_code,
+                                        set_name,
+                                        collector_number,
+                                        rarity,
+                                        image_uri,
+                                        finishes,
+                                        face_image_uris: _,
+                                    } = p;
+                                    let set = match (set_name, set_code) {
+                                        (Some(n), Some(c)) => format!("{n} ({})", c.to_uppercase()),
+                                        (Some(n), None) => n,
+                                        (None, Some(c)) => c.to_uppercase(),
+                                        (None, None) => "Unknown set".to_string(),
+                                    };
+                                    let href = format!("/cards/{oracle_id}?{PRINTING_PARAM}={id}");
+                                    // Everything a sighted reader sees in the row, not just the
+                                    // set — the label speaks for the row's whole clickable area,
+                                    // and the other three columns are real distinguishing info
+                                    // (adversarial review, round 2).
+                                    let link_label = format!(
+                                        "{name} — {set}, #{collector_number}, {rarity}, {}",
+                                        finishes.join(", "),
+                                    );
+                                    let preview = CardSummary {
+                                        oracle_id,
+                                        name: name.clone(),
+                                        printing_id: Some(id),
+                                        image_uri: image_uri.clone(),
+                                        mana_cost: mana_cost.clone(),
+                                        type_line: type_line.clone(),
+                                        owned: None,
+                                        faces: printing_faces.get(&id).cloned().unwrap_or_default(),
+                                    };
+                                    view! {
+                                        <TableRow
+                                            class="relative"
+                                            {..}
+                                            data-testid="printing-row"
+                                            data-printing-id=id.to_string()
+                                        >
+                                            <TableCell class="p-0 font-medium">
+                                                <CardPreview
+                                                    card=preview
+                                                    id=id.to_string()
+                                                    detail_href=href.clone()
+                                                >
+                                                    <a
+                                                        href=href
+                                                        class="absolute inset-0"
+                                                        aria-label=link_label
+                                                        data-testid="printing-row-link"
+                                                    ></a>
+                                                    // The cell's own `p-4` moved here (the
+                                                    // `TableCell` above is `p-0`): this is real
+                                                    // in-flow content, so it's what gives
+                                                    // `CardPreview`'s trigger its height — see
+                                                    // the module doc's "the hover anchor's
+                                                    // geometry" note for why that has to be true.
+                                                    <span class="block p-4">{set}</span>
+                                                </CardPreview>
+                                            </TableCell>
+                                            <TableCell class="text-muted-foreground hidden sm:table-cell">
+                                                {collector_number}
+                                            </TableCell>
+                                            <TableCell class="capitalize">{rarity}</TableCell>
+                                            <TableCell class="text-muted-foreground hidden capitalize sm:table-cell">
+                                                {finishes.join(", ")}
+                                            </TableCell>
+                                        </TableRow>
+                                    }
+                                })
+                                .collect_view()
+                        }}
                     </TableBody>
                 </Table>
             </TableWrapper>
@@ -1153,4 +1417,85 @@ fn Rulings(rulings: Vec<Ruling>) -> impl IntoView {
         </section>
     }
     .into_any()
+}
+
+#[cfg(test)]
+mod tests {
+    use shared::PrintingSummary;
+    use uuid::Uuid;
+
+    use super::{reorder_current_first, resolve_current_printing};
+
+    fn printing(n: u128, image: bool) -> PrintingSummary {
+        PrintingSummary {
+            id: Uuid::from_u128(n),
+            set_code: Some(format!("s{n}")),
+            set_name: Some(format!("Set {n}")),
+            collector_number: n.to_string(),
+            rarity: "common".into(),
+            image_uri: image.then(|| format!("https://example.test/{n}.jpg")),
+            finishes: vec!["nonfoil".into()],
+            face_image_uris: vec![],
+        }
+    }
+
+    #[test]
+    fn resolve_current_printing_prefers_a_valid_selection() {
+        let printings = vec![printing(1, true), printing(2, true)];
+        let current = resolve_current_printing(&printings, Some(Uuid::from_u128(2)));
+        assert_eq!(current.map(|p| p.id), Some(Uuid::from_u128(2)));
+    }
+
+    #[test]
+    fn resolve_current_printing_falls_back_on_a_stale_selection() {
+        // A selection naming a printing this card doesn't have (a bookmarked
+        // link to one since removed, say) must not blank the page — it falls
+        // through to the ordinary default instead.
+        let printings = vec![printing(1, false), printing(2, true)];
+        let current = resolve_current_printing(&printings, Some(Uuid::from_u128(99)));
+        assert_eq!(current.map(|p| p.id), Some(Uuid::from_u128(2)));
+    }
+
+    #[test]
+    fn resolve_current_printing_defaults_to_the_first_printing_with_art() {
+        // Oldest-first order is assumed (the query orders by release date);
+        // the artless first printing must not blank the hero.
+        let printings = vec![printing(1, false), printing(2, true), printing(3, true)];
+        let current = resolve_current_printing(&printings, None);
+        assert_eq!(current.map(|p| p.id), Some(Uuid::from_u128(2)));
+    }
+
+    #[test]
+    fn resolve_current_printing_none_when_nothing_has_art() {
+        let printings = vec![printing(1, false), printing(2, false)];
+        assert!(resolve_current_printing(&printings, None).is_none());
+    }
+
+    #[test]
+    fn reorder_current_first_moves_the_selection_to_the_front() {
+        let printings = vec![printing(1, true), printing(2, true), printing(3, true)];
+        let ordered = reorder_current_first(&printings, Some(Uuid::from_u128(3)));
+        let ids: Vec<_> = ordered.iter().map(|p| p.id).collect();
+        assert_eq!(
+            ids,
+            vec![Uuid::from_u128(3), Uuid::from_u128(1), Uuid::from_u128(2)]
+        );
+    }
+
+    #[test]
+    fn reorder_current_first_leaves_the_default_hero_already_first() {
+        // No explicit selection: the default hero (first with art) should
+        // land at the top even when it isn't already the list's first entry.
+        let printings = vec![printing(1, false), printing(2, true), printing(3, true)];
+        let ordered = reorder_current_first(&printings, None);
+        assert_eq!(ordered[0].id, Uuid::from_u128(2));
+        // The rest keep their original relative order behind it.
+        let rest: Vec<_> = ordered[1..].iter().map(|p| p.id).collect();
+        assert_eq!(rest, vec![Uuid::from_u128(1), Uuid::from_u128(3)]);
+    }
+
+    #[test]
+    fn reorder_current_first_is_a_no_op_on_empty_printings() {
+        assert!(reorder_current_first(&[], Some(Uuid::from_u128(1))).is_empty());
+    }
 }
