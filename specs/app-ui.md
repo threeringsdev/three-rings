@@ -7101,3 +7101,120 @@ link, never through a direct tap-to-navigate the way a fine-pointer click
 gets — identical to how `CardTile`/`ResultsList` already behave everywhere
 else in the app, so this is the existing contract, not a new hole this task
 opened.
+
+### Card-detail Back walks printing flips instead of leaving the page — fixed with a `replace_history` flag on `CardPreview` (2026-08-16, WB-01M05K6EEJZDXMZ57MHGD5DGYX)
+
+`app/src/cards.rs` only (`CardPreview` gains `replace_history: bool`, wired
+`true` only by `Printings`'s row); `back_nav.rs` untouched, `end2end/tests/
+card-detail.spec.ts` gains two tests.
+
+**The diagnosis, confirmed.** #158 made every printings-table row a plain
+`<a href="/cards/:id?printing=<id>">`; with no `on:click` intercept, a click
+falls through to `leptos_router`'s own global click-delegate
+(`location/mod.rs::handle_anchor_click`), which — verified against the
+vendored crate source, not assumed — **pushes** by default (`replace` comes
+only from a `replace` DOM property the app never sets on these anchors).
+#156's Back is `history.back()`. So every printing flip added its own
+back-target, and Back walked them one at a time before the page was ever
+left — the maintainer's exact report. Audited whether anything also *pushes*
+a `?printing=` on initial load (a redirect/normalize): no — `CardDetailPage`
+reads the param passively into a `Memo` via `use_query_map()` and never
+calls `navigate()` on mount; `grep -rn "printing="` across `app/src` turns up
+no source of this query param outside `cards.rs`'s own row link and
+`CardPreview`'s `detail_href` override. So the fix's surface is exactly the
+two navigation paths `CardPreview` itself owns for a printings-table row: the
+plain click (desktop, falls through when the touch sheet doesn't claim it)
+and the sheet's own "Full details →" link (the only navigation touch gets,
+per the known/accepted gap #158's Findings entry above already records).
+
+**Fix: a `replace_history: bool` prop on `CardPreview`, not a change to
+`back_nav.rs`.** `CardPreview` is shared (catalog, `/my`'s collection views,
+the palette, `all_cards`) — every one of those call sites opens a card for
+the *first* time and must keep pushing. Only `Printings` (this module) is
+flipping between printings of the page the reader is already on, so only its
+`<CardPreview replace_history=true>` call opts in; every other call site
+keeps the prop's default `false` and is behaviorally unchanged (confirmed by
+the full-workspace clippy pass below covering all of them unmodified).
+Inside `CardPreview`, `replace_history=true` makes both navigation paths call
+`use_navigate()` with `NavigateOptions { replace: true, ..Default::default() }`
+after `ev.prevent_default()` — `scroll`/`resolve` left at the same defaults
+the router's own delegate already used, so the only behavior change is
+`replace` (verified by reading `handle_anchor_click`'s own `LocationChange`
+construction: `scroll: !a.has_attribute("noscroll")`, i.e. `true` here,
+matching `NavigateOptions::default()`). Modifier-clicks and middle-clicks are
+untouched by construction: the existing `ev.meta_key() || ev.ctrl_key() ||
+ev.shift_key() || ev.alt_key()` guard (already there for "open in a new tab")
+returns before either path's new branch runs, and a middle click never fires
+`click` at all (Chromium dispatches `auxclick` for the middle button), so it
+never reaches this handler regardless.
+
+**`back_nav.rs` needed no change, and its own module doc already says why.**
+The wrapped `history.replaceState` "keeps the current entry's own marker" —
+`history.state` at the moment a wrapped `replaceState` runs is still the
+*pre-replace* entry's, read and carried forward untouched. So a printing flip
+(a replace) never touches the `has_history` marker the catalog→card push
+stamped when the visit began; however many printings get flipped, the entry
+never stops naming that same catalog page as its own back-target. This is
+exactly the behavior the module doc already generalized from `?q=` edits —
+this task is the second, not the first, caller to lean on it, and it held
+without modification.
+
+**Verification.** Unit: no new pure-Rust logic (view-wiring only); the 7
+pre-existing `cards::tests` pass unchanged. `cargo fmt --all --check` clean;
+`cargo clippy` clean at `-D warnings` on the native-backend, hosted+bench,
+and hydrate+bench(wasm) lines, plus the full workspace line (excl.
+frontend/three_rings) — the last one is what proves every other
+`CardPreview` call site still compiles unchanged with the new prop defaulted
+off. `cargo test --workspace --exclude frontend --exclude three_rings`:
+418 passed, 5 ignored (pre-existing), 0 failed.
+
+e2e (chromium `@fast`), two new tests in `card-detail.spec.ts`'s "the
+printings table" describe: (b) flipping two printings then one Back returns
+to the catalog URL the visit started from; (e) a `Meta`-modified click on a
+row opens a new tab (`context.waitForEvent("page")`) carrying the row's own
+`?printing=` URL, while the original tab never navigates. (a) and (d) — the
+plain catalog→card→Back round trip, and the double-Back-from-the-landed-on-
+entry case — are #156's own existing tests and needed no change; both stayed
+green. (c) — #158's "clicking a row navigates and lists it first" test —
+asserts only the resulting URL/hero/order, never push-vs-replace, so it
+needed no change either. Full `card-detail.spec.ts` `@fast`, serial
+(`--workers=1`, the file's own verification mode): **39/39** (37 pre-existing
++ 2 new).
+
+**Before/after, captured directly (not inferred from the failing test
+alone).** A standalone script drove the exact repro — catalog search "Sol
+Ring" → click into the card → click printing row A → click printing row B →
+one Back press — and printed `page.url()` at each step, run twice against
+the same dev server: once with `app/src/cards.rs` `git stash`ed back to this
+task's parent commit (rebuilt, confirmed serving), once restored (rebuilt
+again). Unfixed: `.../cards/<id>` → `?printing=<A>` → `?printing=<B>` → one
+Back → **`?printing=<A>`** (still on the card; a second Back only reaches
+`?printing` unset, a third would reach `/catalog`) — and the new e2e test
+independently timed out waiting for `/catalog` against this same unfixed
+build, for the same reason. Fixed: identical walk, one Back →
+**`/catalog?q=Sol%20Ring&view=list`** — the exact search the visit began
+from, in one press.
+
+**Infra found broken, fixed as a prerequisite, not part of this task's
+diff.** `end2end/node_modules` is a *tracked* symlink (`git ls-files` shows
+it as a single committed path) pointing at an absolute, machine-specific
+location — the main checkout's own `end2end/node_modules` — so every
+worktree shares one real install. Found that shared target itself replaced
+by a self-referential symlink (`node_modules -> node_modules`, an ELOOP,
+dated the same day as this task), breaking Playwright for this worktree and
+the two sibling worktrees running in parallel (`wt-android-bars`,
+`wt-wkwebview-fallback` — same dangling symlink target, confirmed by
+listing all three). Editing the shared main-repo path was refused by the
+auto-mode classifier, so the fix stayed local: this worktree's own
+`node_modules` symlink was replaced with a real `npm install` (the
+committed `package-lock.json` predates recent `package.json` bumps —
+`playwright`/`typescript` — so `npm ci` alone 422s on the mismatch; `npm
+install` both installs and updates the lock). The resulting local
+`package-lock.json` diff and the real `node_modules` directory are
+deliberately **not** part of this task's commit (git-add by explicit
+filename only, per the repo's own commit protocol) — `end2end/.env` and the
+repo-root `.env` were also copied in from the main checkout (gitignored,
+needed for the login fixture and `DATABASE_URL` respectively) and are
+likewise uncommitted. Flagged here rather than filed as a Workbook follow-up
+per this task's own dispatch instructions; the main-repo symlink itself is
+still broken for whichever worktree looks at it next.
