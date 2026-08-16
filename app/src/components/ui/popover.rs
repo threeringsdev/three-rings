@@ -488,9 +488,12 @@ const VIEWPORT_MARGIN: f64 = 8.0;
 /// - **Horizontal placement** honors `align` the same way the CSS path's
 ///   per-align block does: `Start`/`End` align the panel's left/right edge
 ///   with the trigger's, `Center` centers it over the trigger, and
-///   `StartOuter`/`EndOuter` sit the panel beside the trigger (used for
-///   flyout-style menus; no current caller uses them, but the fallback
-///   should not silently ignore them either).
+///   `StartOuter`/`EndOuter` sit the panel beside the trigger horizontally.
+///   For those two the VERTICAL placement still stacks above/below rather
+///   than sitting level with the trigger the way the CSS path's
+///   `top: anchor(top)` does — a known, deliberate simplification while no
+///   caller uses them (review 2026-08-16); level them before adopting them
+///   for a real flyout.
 /// - **Clamping**: the result is then clamped inside the viewport with
 ///   [`VIEWPORT_MARGIN`] of breathing room on every side — the flaw #148's
 ///   review flagged as dropped ("never clamps to viewport edges"). A panel
@@ -610,6 +613,10 @@ fn apply_fallback_position(panel: &web_sys::HtmlElement, target_id: &str, align:
             height: t.height(),
         },
         Size {
+            // `offset_*` are integer-rounded where the trigger's rect is
+            // sub-pixel — worth up to ~1px of alignment slack, accepted in
+            // trade for being immune to the `@starting-style` transform
+            // (see above).
             width: f64::from(panel.offset_width()),
             height: f64::from(panel.offset_height()),
         },

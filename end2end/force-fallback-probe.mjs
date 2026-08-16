@@ -27,7 +27,7 @@
 //   - the catalog's Center-aligned "Adding to" picker (must center over its
 //     trigger, fully inside the viewport)
 //
-// Screenshots land in end2end/.probe-screenshots/ (gitignored scratch dir).
+// Screenshots land in end2end/.probe-screenshots/ (ignored via end2end/.gitignore).
 //
 // **Tuning note, recorded so nobody re-discovers this the hard way**: the
 // override below sets ONLY `position-anchor: none !important` — nothing

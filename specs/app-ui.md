@@ -7534,6 +7534,7 @@ target is its own absolute path** (`git ls-tree HEAD end2end/` shows mode
 — self-referential, so resolving it from the *main* checkout (not a
 worktree) is an immediate `ELOOP`. `npm install` in `end2end/` locally
 replaces it with a real directory (gitignored, not committed) and fixes
-this, but the underlying tracked blob is still broken for the next person —
-worth a real fix (untrack the symlink, or make worktrees create their own
-via a setup script) filed as its own follow-up.
+this. The underlying tracked blob was fixed for good the same day by PR
+#160 (chore(e2e): the symlink is untracked and the drifted lockfile
+refreshed), which merged while this branch was in flight — no follow-up
+task remains.
