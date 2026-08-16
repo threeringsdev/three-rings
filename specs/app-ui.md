@@ -99,7 +99,23 @@ slide-over sheet with an active-filter badge count.
 when authed. Desktop hover on any row/tile opens a lightweight `hover_card`
 preview (no URL change); touch tap opens a bottom `sheet` with a "Full
 details →" expansion. Multi-face printings must render an image (see the
-projection fix below).
+projection fix below). **The printings table** (card-detail printings-list
+task, 2026-08-16): every row reuses the same `CardPreview` hover/tap
+affordance (art scoped to *that* printing — `CardPreview` grew an `id`
+override so N rows sharing one `oracle_id` don't collide on one DOM id, and a
+`detail_href` override so the touch sheet's "Full details →" lands on the
+same printing as the row). A row is a real `<a>` back to this same page
+carrying `?printing=<id>`; `CardDetailBody` reads it to pick that printing's
+art as the hero and float it to the top of the table — a query param, not a
+distinct route, because every printing shares its card's one `oracle_id`
+(Scryfall's model: `oracle_id` is the card, a printing's own `id` is one
+specific art/set/number). The row's whole width is clickable via a
+"stretched link" (`TableRow` `position: relative`, the anchor `absolute
+inset-0`d inside one cell) since nesting an `<a>` around a `<tr>` is invalid
+HTML. The table caps at ~20 rows tall and scrolls inside that cap
+(`TableWrapper`'s own sticky header carries over for free); a plain load
+(no `?printing=`) already floats the default hero (oldest printing with art)
+to the top of the table too, not just as the art.
 
 **`/my`** — everything-view aggregating all collections incl. Inbox; same row
 treatment as collection view but the HERE column is replaced by an expandable
@@ -6970,3 +6986,118 @@ appeared after a tile-select click but not that the click *stayed on the
 page* — since the tray is shell-level, that assertion alone would pass even
 if the click had also navigated. Both now capture `page.url()` before the
 click and assert it is unchanged after.
+
+### Card-detail printings-list updates: hover, cap, and "click a row" on an oracle-keyed route (2026-08-16)
+
+`app/src/cards.rs` (`Printings`, `resolve_current_printing`,
+`reorder_current_first`, `PRINTING_PARAM`, `PRINTINGS_MAX_HEIGHT`;
+`CardPreview` gains `id`/`detail_href` overrides; `CardDetailBody`/
+`CardDetailPage` gain the `?printing=` query-param plumbing).
+
+**The load-bearing finding.** "Clicking a printing navigates to that
+printing's own card detail" cannot mean a distinct route: `/cards/:id` has
+always been keyed on `oracle_id` (`card_detail(oracle_id: Id)`, both the
+Axum route and the `#[server]` fn), and every printing under one card's
+table shares that *same* `oracle_id` — Scryfall's model is `oracle_id` names
+the card, a printing's own `id` names one specific art/set/number. So every
+row's "correct" href is the page you're already on. The fix is a
+`?printing=<id>` query param (`PRINTING_PARAM`): `CardDetailPage` reads it
+into a `Memo<Option<Id>>` and threads it into `CardDetailBody` as a
+`Signal`, which is *not* part of the `card_detail` `Resource`'s key — every
+printing already arrived in that one fetch, so re-selecting which one is
+"current" is a client-side reorder (`resolve_current_printing`,
+`reorder_current_first`), not a re-fetch. Verified server-side (not just
+reasoned about): `curl`ing `/cards/<oracle_id>?printing=<a non-hero printing
+id>` on the dev catalog (a real DFC, "Kruin Outlaw") returns HTML whose hero
+`<img>` is that printing's own art *and* whose first `printing-row` carries
+that printing's id — the whole mechanism works on a cold SSR load, not only
+after hydration.
+
+**"Current printing first" was only accidentally true before this task.**
+The printings table rendered in the SQL's own order (release date
+ascending); the hero was picked separately via `.find(image_uri.is_some())`
+over that same order. The two agreed only because the common case has the
+oldest printing carrying art — a card whose *oldest* printing is artless
+(Scryfall's placeholder/non-English rows, called out in the pre-existing
+`hero_printing` doc comment this task's `resolve_current_printing` absorbs)
+would show hero art from a printing sitting lower in the table. Now the
+list order and the hero selection are the same function's output
+(`reorder_current_first` moves whatever `resolve_current_printing` names to
+index 0), so this holds unconditionally, not just in the common case.
+
+**Reusing `CardPreview` exposed a real duplicate-DOM-id bug in the reuse
+itself, not just a missing feature.** `CardPreview`'s hover-card/sheet ids
+were always derived from `card.oracle_id` (`card-preview-{oracle_id}`,
+`card-sheet-{oracle_id}`) — safe everywhere else, where a page never mounts
+two `CardPreview`s for the same oracle at once. The printings table is
+exactly that case: N rows, one shared `oracle_id`, N distinct printings. An
+unmodified reuse would have rendered N identical `id`/`anchor-name` pairs —
+invalid HTML and, concretely, N hover cards racing to anchor against
+whichever trigger the browser resolves the duplicate custom-ident to.
+Caught before shipping (not by a test — by re-reading `CardPreview`'s own
+`id=format!("card-preview-{oracle_id}")` line while wiring the table) and
+fixed with two new optional props, both defaulting to the exact prior
+behavior so every other call site (`catalog.rs`'s `CardTile`/`ResultsList`)
+is unchanged: `id` overrides the DOM-id suffix (the printings table passes
+the printing's own id), and `detail_href` overrides the sheet's "Full
+details →" destination (the table passes the row's own `?printing=` link,
+so a touch tap's sheet lands on the same printing the row itself would
+have, not this page's default hero).
+
+**The cap.** `TableWrapper`'s existing default (`max-h-96`, `overflow-auto`)
+caps at ~7 rows — too short for "approx 20". `PRINTINGS_MAX_HEIGHT` derives
+`max-h-[67.5rem]` from the table's own geometry rather than a guessed pixel
+value: `TableHeader`'s `th` is `h-10` (2.5rem), a body row is a `p-4`-padded
+`text-sm` cell (1rem + 1rem + 1.25rem = 3.25rem), so twenty rows plus the
+header is `2.5rem + 20 × 3.25rem`. `TableHeader` was already `sticky
+top-0` (table.rs, predates this task), so the pinned-header-while-scrolling
+half came for free once the cap was reinstated — no new wiring needed
+there. The row's own full-width clickability is a "stretched link"
+(`TableRow` gets `class="relative"`, the anchor `absolute inset-0`s inside
+one cell) rather than nesting an `<a>` around the `<tr>`, which is invalid
+HTML (`<a>`/`<span>` are not permitted `<tbody>`/`<tr>` children — verified
+by trying it in `CardPreview`'s existing `span`-wrapped trigger and reading
+the table content model, not by observing a browser silently "fixing" it).
+
+**Verification.** Unit (pure helpers, `app/src/cards.rs::tests`, 7 new):
+`resolve_current_printing_{prefers_a_valid_selection, falls_back_on_a_stale_
+selection, defaults_to_the_first_printing_with_art, none_when_nothing_has_
+art}`, `reorder_current_first_{moves_the_selection_to_the_front, leaves_the_
+default_hero_already_first, is_a_no_op_on_empty_printings}` — `cargo test
+--workspace --exclude frontend --exclude three_rings`: 415 passed, 5
+ignored (pre-existing), 0 failed. `cargo fmt --all --check` clean; `cargo
+clippy` clean at `-D warnings` on all five gate lines (workspace excl.
+frontend/three_rings, `-p frontend` wasm, `-p app --features native`,
+`-p app --features hosted,component-bench`, `-p app --features
+hydrate,component-bench` wasm); `cargo build -p three_rings` (native
+codegen coverage) and a full `cargo leptos build --release` under an
+isolated `CARGO_TARGET_DIR` both succeed. e2e (chromium `@fast`): a new
+`test.describe("the printings table")` in `card-detail.spec.ts`, 5 tests —
+hovering a non-hero row shows *that* printing's own art (scoped by the
+printing-id-keyed hover-card id); a heavily-reprinted fixture ("Sol Ring",
+137 printings on the dev catalog) is capped and its `TableWrapper` scrolls
+(`scrollHeight > clientHeight`) while a 3-printing fixture ("Kruin Outlaw",
+already used elsewhere in this file) is not; clicking a non-hero row
+navigates to `?printing=<that id>`, swaps the hero art, and lists it first;
+a `hasTouch`/390px variant scrolls the table's own container without
+moving `window.scrollY`. Full `card-detail.spec.ts` `@fast`: 37/37, twice
+(parallel default workers and serial `--workers=1`). Full `catalog.spec.ts`
+`@fast` (unrelated to this task's own files, run because `CardPreview` is
+shared): 43/49 parallel, 6 failures; re-run serially, 5 of the 6 pass
+(parallel-worker contention, matching this suite's documented "~29
+failures/run, disjoint subsets, all green solo" class) and the sixth
+("the pager walks to a second page of different cards") still fails
+serially — **stash-confirmed pre-existing**: `git stash`ed this task's two
+changed files, rebuilt, re-ran that one test against unmodified `main` code,
+same failure; restored the stash afterward. Not this task's regression.
+
+**Known, accepted gap — not fixed, not filed.** `CardPreview`'s touch sheet
+always exposes "Full details →" as its only way to navigate (the row's own
+click is intercepted into the sheet on touch, matching every other
+`CardPreview` call site's contract). `detail_href` closes the sheet-lands-
+on-the-wrong-printing gap for that link specifically, but a coarse-pointer
+reader on this page still reaches a printing exclusively through that one
+link, never through a direct tap-to-navigate the way a fine-pointer click
+gets — identical to how `CardTile`/`ResultsList` already behave everywhere
+else in the app, so this is the existing contract, not a new hole this task
+opened.

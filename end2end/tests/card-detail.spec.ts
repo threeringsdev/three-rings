@@ -1002,6 +1002,183 @@ test.describe("DFC flip", () => {
   });
 });
 
+// -------------------------------------------------------- the printings table ---
+//
+// cards.rs's `Printings`: every row reuses `CardPreview` (hover-card on
+// desktop, same as the catalog list view's rows), the table caps at ~20 rows
+// and scrolls inside that cap, and a row is a real link back to this same
+// page with `?printing=<id>` set — which `CardDetailBody` reads to pick that
+// printing's own art and float it to the top of this very list.
+
+/// Heavily reprinted — well over the ~20-row cap, so the cap/scroll
+/// assertions have real overflow to measure. Any card with 2+ distinct
+/// printings works for the hover/click tests; this one also fixes the
+/// "long list" fixture so one card serves every test in this section.
+const LONG_PRINTINGS_QUERY = "Sol Ring";
+
+type Printing = {
+  id: string;
+  set_code: string | null;
+  set_name: string | null;
+  image_uri: string | null;
+};
+
+async function cardPrintings(
+  request: APIRequestContext,
+  oracleId: string,
+): Promise<Printing[]> {
+  const res = await request.get(`/api/cards/${oracleId}`);
+  expect(res.status()).toBe(200);
+  const body = (await res.json()) as { printings: Printing[] };
+  return body.printings;
+}
+
+/// The table's own scroll container — `TableWrapper`, the immediate parent
+/// of the `card-printings` table — not the document (e2e-suite skill: an
+/// `overflow-auto` wrapper absorbs the overflow, so `document.documentElement`
+/// never moves and would make a document-level assertion vacuous).
+const printingsWrapper = (page: import("@playwright/test").Page) =>
+  page.locator('[data-testid="card-printings"]').locator("xpath=..");
+
+const printingRow = (page: import("@playwright/test").Page, printingId: string) =>
+  page.locator(`[data-testid="printing-row"][data-printing-id="${printingId}"]`);
+
+test.describe("the printings table", () => {
+  test("hovering a row opens a preview with that printing's own art @fast", async ({
+    page,
+    request,
+  }) => {
+    const card = await exactCard(request, LONG_PRINTINGS_QUERY);
+    const printings = await cardPrintings(request, card.oracle_id);
+    // Not index 0 — the page's default hero is *already* that printing's
+    // art before anything is hovered, so a passing assertion there couldn't
+    // tell "the row's own art" apart from "whatever the page shows anyway".
+    const target = printings.find((p, i) => i > 0 && p.image_uri);
+    expect(
+      target,
+      "no second printing with art in the fixture — need a different query",
+    ).toBeTruthy();
+
+    await page.goto(`/cards/${card.oracle_id}`);
+    await hydrated(page);
+
+    const row = printingRow(page, target!.id);
+    await expect(row).toBeVisible();
+    // Scoped by the hover card's own id (now the *printing* id, not the
+    // shared oracle_id — see `CardPreview`'s `id` prop doc comment): every
+    // row on this page shares one oracle_id, so without that override every
+    // row's hover card would collide on the same DOM id.
+    const hoverBody = page.locator(
+      `[data-testid=card-preview-hover]#hc-content-card-preview-${target!.id}`,
+    );
+    await expect(hoverBody).toBeHidden();
+    await expect(page.getByText(card.name, { exact: true })).toHaveCount(1);
+
+    await row.hover();
+    await expect(hoverBody).toBeVisible(); // 150 ms hover intent
+    await expect(hoverBody).toContainText(card.name);
+    await expect(hoverBody.locator("img")).toHaveAttribute("src", target!.image_uri!);
+    // A preview is not navigation.
+    expect(new URL(page.url()).pathname).toBe(`/cards/${card.oracle_id}`);
+  });
+
+  test("a long printings list is capped and scrolls; a short one is not @fast", async ({
+    page,
+    request,
+  }) => {
+    const long = await exactCard(request, LONG_PRINTINGS_QUERY);
+    await page.goto(`/cards/${long.oracle_id}`);
+    await hydrated(page);
+
+    const longDims = await printingsWrapper(page).evaluate((el) => ({
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+    }));
+    // Bounded (the ~20-row cap, not "however tall 137 rows happen to be")
+    // *and* actually scrollable inside that bound.
+    expect(longDims.scrollHeight).toBeGreaterThan(longDims.clientHeight);
+
+    // `DFC_KEYWORDS_QUERY` ("Kruin Outlaw") has 3 printings — comfortably
+    // under the cap, so its table should show every row uncapped.
+    const short = await firstCard(request, DFC_KEYWORDS_QUERY);
+    await page.goto(`/cards/${short.oracle_id}`);
+    await hydrated(page);
+
+    const shortDims = await printingsWrapper(page).evaluate((el) => ({
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+    }));
+    expect(shortDims.scrollHeight).toBeLessThanOrEqual(shortDims.clientHeight);
+  });
+
+  test("clicking a row navigates to that printing and lists it first @fast", async ({
+    page,
+    request,
+  }) => {
+    const card = await exactCard(request, LONG_PRINTINGS_QUERY);
+    const printings = await cardPrintings(request, card.oracle_id);
+    const target = printings.find((p, i) => i > 0 && p.image_uri);
+    expect(
+      target,
+      "no second printing with art in the fixture — need a different query",
+    ).toBeTruthy();
+
+    await page.goto(`/cards/${card.oracle_id}`);
+    await hydrated(page);
+    // The hero art before the click — proof the assertion below is a real
+    // change, not the page having shown this printing's art all along.
+    const heroBefore = await page.locator("img").first().getAttribute("src");
+    expect(heroBefore).not.toBe(target!.image_uri);
+
+    const row = printingRow(page, target!.id);
+    await row.scrollIntoViewIfNeeded();
+    await row.click();
+
+    await page.waitForURL(
+      (url) =>
+        url.pathname === `/cards/${card.oracle_id}` &&
+        url.searchParams.get("printing") === target!.id,
+    );
+    // Same route, no remount (query-only navigation) — the hero art and the
+    // table order both re-derive from the new `?printing=` without a second
+    // page load.
+    await expect(page.locator("img").first()).toHaveAttribute(
+      "src",
+      target!.image_uri!,
+    );
+    await expect(page.getByTestId("printing-row").first()).toHaveAttribute(
+      "data-printing-id",
+      target!.id,
+    );
+  });
+
+  test.describe("touch", () => {
+    test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+
+    test("the table scrolls inside its own cap without moving the page @fast", async ({
+      page,
+      request,
+    }) => {
+      const card = await exactCard(request, LONG_PRINTINGS_QUERY);
+      await page.goto(`/cards/${card.oracle_id}`);
+      await hydrated(page);
+
+      const wrapper = printingsWrapper(page);
+      await expect(wrapper).toBeVisible();
+      const before = await wrapper.evaluate((el) => el.scrollTop);
+      await wrapper.evaluate((el) => {
+        el.scrollTop = 400;
+      });
+      const after = await wrapper.evaluate((el) => el.scrollTop);
+      // The container itself absorbed the scroll...
+      expect(after).toBeGreaterThan(before);
+      // ...and the page underneath did not move — a scrollable region inside
+      // the page, not a hijack of the page's own scroll.
+      expect(await page.evaluate(() => window.scrollY)).toBe(0);
+    });
+  });
+});
+
 test("hovering a list row opens a preview without changing the URL @fast", async ({
   page,
   request,
