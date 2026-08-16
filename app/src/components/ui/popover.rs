@@ -39,6 +39,27 @@
 //!   made for its much-shorter "Loading…" placeholder as it grows underneath
 //!   that stale position — the second contributor to the same bug, on an
 //!   engine without CSS anchor positioning.
+//! - **the JS fallback now mirrors the CSS anchor path's semantics instead
+//!   of its own fixed below-only, left-only, unclamped placement**
+//!   (WB-01M05K42G96ZSGHEBHKQ47CBDV): `#148`'s adversarial review flagged
+//!   those three as consciously-dropped flaws on the assumption the fallback
+//!   was dead code on every real engine — wrong once a maintainer's desktop
+//!   `.app` screenshots showed the tray's `End`-aligned "Move to…" panel
+//!   rendering below the window and the catalog's `Center`-aligned "Adding
+//!   to" panel reduced to a sliver, proving the system WKWebView the Tauri
+//!   shell embeds has the Popover API but not CSS anchor positioning.
+//!   [`fallback_position`] is now pure rect math (no DOM, unit-tested on
+//!   every host): it honors [`PopoverAlign`] the same way the CSS path's
+//!   per-align block does (`Start`/`End` align an edge, `Center` centers,
+//!   `*Outer` sit beside the trigger), prefers opening ABOVE the trigger by
+//!   default — mirroring `position-area: block-start` / `bottom:
+//!   anchor(top)`, the CSS path's own default — and flips below only when
+//!   there isn't room above (the CSS path's `@position-try(flip-block)`),
+//!   then clamps the result inside the viewport with a small margin on every
+//!   edge. The DOM shim (`apply_fallback_position`) and the `ResizeObserver`
+//!   wiring are otherwise unchanged in mechanism — they now just pass
+//!   `align` and the panel's width through, alongside the height they
+//!   already measured.
 
 use leptos::prelude::*;
 use tw_merge::tw_merge;
@@ -68,6 +89,11 @@ struct PopoverContext {
     anchor_name: String,
     target_id: String,
     open: RwSignal<bool>,
+    /// Threaded through to the JS fallback (`fallback_position`) so it can
+    /// mirror the same per-align rule the CSS path's `position_styles` match
+    /// above encodes — the fallback has no other way to learn which align
+    /// the caller chose.
+    align: PopoverAlign,
 }
 
 /// The popover's open signal, for closing from composed content (e.g. a
@@ -143,6 +169,7 @@ pub fn Popover(
         anchor_name: popover_anchor_name.clone(),
         target_id: popover_target_id.clone(),
         open,
+        align,
     };
 
     view! {
@@ -253,8 +280,9 @@ pub fn PopoverContent(children: Children, #[prop(optional, into)] class: String)
 
     let node_ref: NodeRef<leptos::html::Div> = NodeRef::new();
     let target_id = ctx.target_id.clone();
+    let align = ctx.align;
 
-    // Re-runs `position_below_trigger` whenever the panel's own size changes
+    // Re-runs `apply_fallback_position` whenever the panel's own size changes
     // while it is open on a no-anchor-positioning engine — see that function's
     // caller below for why this exists. `new_local`, exactly `viewport.rs`'s
     // `media_signal` watch: neither a `ResizeObserver` nor a `Closure` is
@@ -281,39 +309,41 @@ pub fn PopoverContent(children: Children, #[prop(optional, into)] class: String)
                 let _ = el.hide_popover();
             }
             // JS positioning fallback (spec: "JS fallback if unsupported"):
-            // WebKit ships the Popover API but NOT CSS anchor positioning, so
-            // the panel would open at the viewport default. When anchors are
-            // unsupported and we're open, position manually under the trigger
-            // (flipping above if it would overflow the viewport bottom).
+            // WebKit — including, per WB-01M05K42G96ZSGHEBHKQ47CBDV, the
+            // system WKWebView the desktop `.app` embeds — ships the Popover
+            // API but not always CSS anchor positioning, so the panel would
+            // open at the viewport default. When anchors are unsupported and
+            // we're open, position manually with the same semantics the CSS
+            // path would have used (`fallback_position`'s doc comment).
             // Hydrate-only: the DOM measurement APIs and the mispositioning
             // it corrects both exist only client-side.
             //
             // **Also kept in sync with a `ResizeObserver`, not just this one
-            // call.** `position_below_trigger` measures the panel's *current*
-            // height to decide whether to flip above the trigger — but this
-            // Effect fires once per `open` toggle, right when `show_popover()`
-            // runs, which on a picker whose rows come from a `Resource` (every
+            // call.** `apply_fallback_position` measures the panel's *current*
+            // size to decide where it fits — but this Effect fires once per
+            // `open` toggle, right when `show_popover()` runs, which on a
+            // picker whose rows come from a `Resource` (every
             // `DestinationList` consumer: the catalog toolbar, the tray's own
             // "Move to…") is *before* the real rows have arrived. The first
             // measurement catches the much shorter "Loading collections…"
-            // placeholder, pins `top` to a flip decision made for that height,
-            // and then never revisits it as the real rows land and the panel
-            // grows underneath that stale `top` — parking the now-taller
-            // bottom edge off the target device's screen with no way to
+            // placeholder, pins the position to a decision made for that
+            // size, and then never revisits it as the real rows land and the
+            // panel grows underneath that stale position — parking the
+            // now-taller edge off the target device's screen with no way to
             // scroll to it. A fixed delay cannot promise the fetch has landed
             // by then; a `ResizeObserver` reacts to the panel's real size
             // settling, however long that takes.
             #[cfg(feature = "hydrate")]
             {
                 if want_open && !anchor_positioning_supported() {
-                    position_below_trigger(&el, &target_id);
-                    watch_panel_resize(&el, &target_id, resize_watch);
+                    apply_fallback_position(&el, &target_id, align);
+                    watch_panel_resize(&el, &target_id, align, resize_watch);
                 } else {
                     stop_watching_resize(resize_watch);
                 }
             }
             #[cfg(not(feature = "hydrate"))]
-            let _ = &target_id;
+            let _ = (&target_id, align);
         }
     });
 
@@ -381,17 +411,171 @@ pub fn PopoverContent(children: Children, #[prop(optional, into)] class: String)
 }
 
 /// Whether the engine supports CSS anchor positioning. Chromium (incl. the
-/// Android webview) yes; WebKit not yet — there we position manually.
+/// Android webview) yes; WebKit not always — there (and, per
+/// WB-01M05K42G96ZSGHEBHKQ47CBDV, the desktop `.app`'s system WKWebView) we
+/// position manually.
 #[cfg(feature = "hydrate")]
 fn anchor_positioning_supported() -> bool {
     web_sys::css::supports("position-anchor: --x").unwrap_or(false)
 }
 
-/// JS positioning fallback: fixed-position the panel just below its trigger,
-/// flipping above when it would overflow the viewport bottom. Only used when
-/// CSS anchor positioning is unavailable.
+/// A plain rectangle — mirrors the handful of [`web_sys::DomRect`] fields
+/// [`fallback_position`] needs, without depending on `web_sys`. Keeping the
+/// geometry free of DOM types is what lets [`fallback_position`] (and its
+/// tests) compile and run on every host, including a bare `cargo test` with
+/// no `hydrate` feature and no wasm target. `cfg`-gated on `test` as well as
+/// `hydrate`: the only non-test caller (`apply_fallback_position`, the DOM
+/// shim) lives behind `hydrate`, so without this the whole module is
+/// legitimately dead code — and therefore clippy-denied — in a build that
+/// carries neither.
+#[cfg(any(test, feature = "hydrate"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Rect {
+    left: f64,
+    top: f64,
+    width: f64,
+    height: f64,
+}
+
+#[cfg(any(test, feature = "hydrate"))]
+impl Rect {
+    fn right(&self) -> f64 {
+        self.left + self.width
+    }
+
+    fn bottom(&self) -> f64 {
+        self.top + self.height
+    }
+}
+
+/// A width/height pair — used for the panel (whose position isn't known yet,
+/// only its current size) and the viewport (whose origin is always `0, 0`).
+#[cfg(any(test, feature = "hydrate"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Size {
+    width: f64,
+    height: f64,
+}
+
+/// Gap kept between the trigger and the panel — mirrors the CSS path's own
+/// `margin-bottom: 8px` / `margin-top: 8px` (declared per-align in
+/// `Popover`'s `position_styles` match).
+#[cfg(any(test, feature = "hydrate"))]
+const FALLBACK_GAP: f64 = 8.0;
+
+/// Minimum breathing room kept against every viewport edge once the panel is
+/// clamped inside it. Independent of `FALLBACK_GAP`: this is the edge the CSS
+/// path never had to think about because `position-visibility:
+/// anchors-visible` plus its `@position-try` fallbacks were doing the
+/// clamping natively — the JS path has to do it by hand.
+#[cfg(any(test, feature = "hydrate"))]
+const VIEWPORT_MARGIN: f64 = 8.0;
+
+/// Pure geometry for the JS positioning fallback: given the trigger's rect,
+/// the panel's own size, the viewport's size, and the popover's
+/// [`PopoverAlign`], returns the `(left, top)` fixed-position coordinates
+/// that mirror the CSS anchor path's own semantics.
+///
+/// - **Vertical placement** defaults to ABOVE the trigger — the CSS path's
+///   own default (`position-area: block-start` for `Center`, `bottom:
+///   anchor(top)` for `Start`/`End`) — and flips below only when there isn't
+///   room above but there is below, mirroring the CSS path's
+///   `@position-try(flip-block)` fallback. When *neither* side has room (a
+///   short viewport under a tall panel), it picks whichever side has more
+///   space, so the clamp below has the least work left to do. This is the
+///   piece that matters for a bottom-docked trigger (the selection tray's
+///   "Move to…"): space below is ~0, so it always resolves to ABOVE.
+/// - **Horizontal placement** honors `align` the same way the CSS path's
+///   per-align block does: `Start`/`End` align the panel's left/right edge
+///   with the trigger's, `Center` centers it over the trigger, and
+///   `StartOuter`/`EndOuter` sit the panel beside the trigger horizontally.
+///   For those two the VERTICAL placement still stacks above/below rather
+///   than sitting level with the trigger the way the CSS path's
+///   `top: anchor(top)` does — a known, deliberate simplification while no
+///   caller uses them (review 2026-08-16); level them before adopting them
+///   for a real flyout.
+/// - **Clamping**: the result is then clamped inside the viewport with
+///   [`VIEWPORT_MARGIN`] of breathing room on every side — the flaw #148's
+///   review flagged as dropped ("never clamps to viewport edges"). A panel
+///   larger than the viewport minus its margins clamps to the margin itself
+///   rather than overflowing, which is the best any positioning can do for a
+///   panel that structurally cannot fit.
+#[cfg(any(test, feature = "hydrate"))]
+fn fallback_position(
+    trigger: Rect,
+    panel: Size,
+    viewport: Size,
+    align: PopoverAlign,
+) -> (f64, f64) {
+    let space_above = trigger.top;
+    let space_below = viewport.height - trigger.bottom();
+    let needed = panel.height + FALLBACK_GAP;
+    let fits_above = space_above >= needed;
+    let fits_below = space_below >= needed;
+    let top = if fits_above || (!fits_below && space_above >= space_below) {
+        trigger.top - FALLBACK_GAP - panel.height
+    } else {
+        trigger.bottom() + FALLBACK_GAP
+    };
+
+    let left = match align {
+        PopoverAlign::Start => trigger.left,
+        PopoverAlign::End => trigger.right() - panel.width,
+        PopoverAlign::Center => trigger.left + trigger.width / 2.0 - panel.width / 2.0,
+        PopoverAlign::StartOuter => trigger.left - FALLBACK_GAP - panel.width,
+        PopoverAlign::EndOuter => trigger.right() + FALLBACK_GAP,
+    };
+
+    (
+        clamp_within(left, panel.width, viewport.width),
+        clamp_within(top, panel.height, viewport.height),
+    )
+}
+
+/// Clamps a single axis (`pos`, sized `size`) inside `[0, viewport]` with
+/// [`VIEWPORT_MARGIN`] of breathing room on both ends. When `size` alone
+/// (plus both margins) exceeds `viewport`, the upper bound would fall below
+/// the lower one — `.max(VIEWPORT_MARGIN)` on the upper bound keeps the
+/// panel pinned to the margin instead of the clamp inverting and producing a
+/// position further off-screen than the unclamped one was.
+#[cfg(any(test, feature = "hydrate"))]
+fn clamp_within(pos: f64, size: f64, viewport: f64) -> f64 {
+    let max = (viewport - size - VIEWPORT_MARGIN).max(VIEWPORT_MARGIN);
+    pos.max(VIEWPORT_MARGIN).min(max)
+}
+
+/// DOM shim over [`fallback_position`]: measures the trigger's position via
+/// `getBoundingClientRect`, the panel's size via `offsetWidth`/`offsetHeight`
+/// (see the note below on why, not `getBoundingClientRect` there too), the
+/// viewport via `window.inner{Width,Height}`, and writes the resulting
+/// `position: fixed; left; top` onto the panel. Only used when CSS anchor
+/// positioning is unavailable.
+///
+/// **`offsetWidth`/`offsetHeight` for the panel, not `getBoundingClientRect`
+/// — found empirically, not by inspection.** This function's caller (the
+/// `Effect` in `PopoverContent`) runs synchronously inside the SAME tick as
+/// `show_popover()`, right as the panel's `@starting-style` transition
+/// (`transform: scale(0.95) translateY(...)`) is (or may still be) in
+/// effect. `getBoundingClientRect()` returns the *painted, transformed* box
+/// — a `scale(0.95)` on a 280px-wide panel reads as a ~266px-wide box at
+/// that instant — and unlike a genuine layout-affecting size change (new
+/// `DestinationList` rows arriving, or the internal scrollbar their
+/// overflow introduces), a pure CSS `transform` never fires
+/// [`watch_panel_resize`]'s `ResizeObserver` (transforms are paint-only, not
+/// layout), so a `Center`-aligned panel caught mid-transition this way had
+/// no second chance to correct itself: verified live (a forced-fallback
+/// chromium probe against a real dev server, `end2end/
+/// force-fallback-probe.mjs`) — the catalog's `Center`-aligned "Adding to"
+/// picker centered ~5px off depending on exactly when the effect ran,
+/// while the tray's `End`-aligned picker (this bug's original report)
+/// stayed exact, because an edge-alignment error from the same width slip
+/// is smaller and further diluted by the clamp. `offsetWidth`/`offsetHeight`
+/// report the element's *layout* border-box size — untouched by `transform`
+/// — so they read the panel's true, settled 280px width even mid-animation,
+/// making the very first synchronous placement correct instead of relying
+/// on an incidental later `ResizeObserver` firing to paper over it.
 #[cfg(feature = "hydrate")]
-fn position_below_trigger(panel: &web_sys::HtmlElement, target_id: &str) {
+fn apply_fallback_position(panel: &web_sys::HtmlElement, target_id: &str, align: PopoverAlign) {
     use leptos::wasm_bindgen::JsCast;
     let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
         return;
@@ -405,34 +589,62 @@ fn position_below_trigger(panel: &web_sys::HtmlElement, target_id: &str) {
         return;
     };
     let t = trigger.get_bounding_client_rect();
-    let p = panel.get_bounding_client_rect();
-    let viewport_h = web_sys::window()
-        .and_then(|w| w.inner_height().ok())
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-
-    let below = t.bottom() + 8.0;
-    let top = if below + p.height() > viewport_h && t.top() - 8.0 - p.height() > 0.0 {
-        t.top() - 8.0 - p.height()
-    } else {
-        below
+    let Some(window) = web_sys::window() else {
+        return;
     };
+    let viewport = Size {
+        width: window
+            .inner_width()
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        height: window
+            .inner_height()
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+    };
+
+    let (left, top) = fallback_position(
+        Rect {
+            left: t.left(),
+            top: t.top(),
+            width: t.width(),
+            height: t.height(),
+        },
+        Size {
+            // `offset_*` are integer-rounded where the trigger's rect is
+            // sub-pixel — worth up to ~1px of alignment slack, accepted in
+            // trade for being immune to the `@starting-style` transform
+            // (see above).
+            width: f64::from(panel.offset_width()),
+            height: f64::from(panel.offset_height()),
+        },
+        viewport,
+        align,
+    );
+
     let style = panel.style();
     let _ = style.set_property("position", "fixed");
     let _ = style.set_property("margin", "0");
-    let _ = style.set_property("left", &format!("{}px", t.left()));
+    let _ = style.set_property("left", &format!("{left}px"));
     let _ = style.set_property("top", &format!("{top}px"));
 }
 
 /// Start (or resume) watching `panel` for size changes, re-running
-/// [`position_below_trigger`] on every one — the fix for the stale-height race
-/// documented at this function's one call site. Idempotent: a panel already
-/// being watched just gets `observe`d again (a no-op per the
+/// [`apply_fallback_position`] on every one — the fix for the stale-height
+/// race documented at this function's one call site. Idempotent: a panel
+/// already being watched just gets `observe`d again (a no-op per the
 /// `ResizeObserver` spec for a target already under observation) rather than
 /// growing a second observer, so re-opening the same popover cannot leak one
 /// per open.
 #[cfg(feature = "hydrate")]
-fn watch_panel_resize(panel: &web_sys::HtmlElement, target_id: &str, watch: ResizeWatch) {
+fn watch_panel_resize(
+    panel: &web_sys::HtmlElement,
+    target_id: &str,
+    align: PopoverAlign,
+    watch: ResizeWatch,
+) {
     use leptos::wasm_bindgen::closure::Closure;
     use leptos::wasm_bindgen::JsCast;
 
@@ -448,19 +660,223 @@ fn watch_panel_resize(panel: &web_sys::HtmlElement, target_id: &str, watch: Resi
     }
 
     // The observer fires on the panel's own content-box size changing —
-    // never on `position_below_trigger`'s own writes below, which only touch
-    // `position`/`left`/`top` and never the panel's size — so this cannot
-    // re-trigger itself.
+    // never on `apply_fallback_position`'s own writes below, which only
+    // touch `position`/`left`/`top` and never the panel's size — so this
+    // cannot re-trigger itself.
     let watched_panel = panel.clone();
     let watched_target = target_id.to_string();
     let handler = Closure::wrap(Box::new(move || {
-        position_below_trigger(&watched_panel, &watched_target);
+        apply_fallback_position(&watched_panel, &watched_target, align);
     }) as Box<dyn FnMut()>);
     let Ok(observer) = web_sys::ResizeObserver::new(handler.as_ref().unchecked_ref()) else {
         return;
     };
     observer.observe(panel);
     watch.set_value(Some((observer, handler)));
+}
+
+#[cfg(test)]
+mod fallback_position_tests {
+    use super::*;
+
+    /// A generously-sized viewport used by tests that aren't exercising the
+    /// clamp itself.
+    const ROOMY_VIEWPORT: Size = Size {
+        width: 1200.0,
+        height: 900.0,
+    };
+
+    fn trigger(left: f64, top: f64, width: f64, height: f64) -> Rect {
+        Rect {
+            left,
+            top,
+            width,
+            height,
+        }
+    }
+
+    fn panel(width: f64, height: f64) -> Size {
+        Size { width, height }
+    }
+
+    // The reported bug, reproduced directly: the selection tray's "Move
+    // to…" trigger docks at the very bottom of the window (`align =
+    // PopoverAlign::End`, per `move_selection.rs`'s own "opening upward"
+    // comment). With almost no room below and plenty above, the fallback
+    // MUST resolve above the trigger — the flaw (WB-01M05K42G96ZSGHEBHKQ47CBDV)
+    // was that the old fallback always went below regardless.
+    #[test]
+    fn end_aligned_bottom_docked_trigger_opens_above() {
+        let t = trigger(700.0, 860.0, 80.0, 32.0); // bottom = 892, 8px from the 900px viewport floor
+        let p = panel(280.0, 240.0);
+        let (left, top) = fallback_position(t, p, ROOMY_VIEWPORT, PopoverAlign::End);
+
+        assert!(
+            top + p.height <= t.top,
+            "panel bottom ({}) must clear the trigger's top ({}) — it opened above",
+            top + p.height,
+            t.top,
+        );
+        // Trailing edges align: the panel's right edge meets the trigger's.
+        assert_eq!(left + p.width, t.right());
+        // Comfortably inside the viewport (this scenario doesn't need the clamp).
+        assert!(top >= VIEWPORT_MARGIN);
+        assert!(left >= VIEWPORT_MARGIN);
+        assert!(left + p.width <= ROOMY_VIEWPORT.width - VIEWPORT_MARGIN);
+    }
+
+    // The catalog's "Adding to" picker has no explicit `align`, so it uses
+    // the `Center` default. Placed near the right edge, the naive centered
+    // left would run the panel off the right of the viewport — the clamp
+    // must pull it back in.
+    #[test]
+    fn center_align_near_right_edge_clamps_left() {
+        let t = trigger(1150.0, 400.0, 60.0, 32.0); // center x = 1180, near the 1200px right edge
+        let p = panel(280.0, 200.0);
+        let (left, top) = fallback_position(t, p, ROOMY_VIEWPORT, PopoverAlign::Center);
+
+        assert!(
+            left + p.width <= ROOMY_VIEWPORT.width - VIEWPORT_MARGIN,
+            "panel right ({}) must not run past the viewport",
+            left + p.width
+        );
+        assert!(left >= VIEWPORT_MARGIN);
+        // Still opens above by default (plenty of room at top=400 on a 900px
+        // viewport).
+        assert!(top + p.height <= t.top);
+    }
+
+    // Neither above nor below has room for a panel taller than the whole
+    // viewport. The clamp must still produce an in-bounds (if imperfect)
+    // position rather than a negative or off-screen one.
+    #[test]
+    fn tall_panel_short_viewport_clamps_top() {
+        let viewport = Size {
+            width: 400.0,
+            height: 300.0,
+        };
+        let t = trigger(150.0, 140.0, 60.0, 20.0);
+        let p = panel(200.0, 500.0); // taller than the entire viewport
+        let (_left, top) = fallback_position(t, p, viewport, PopoverAlign::Center);
+
+        assert!(top >= VIEWPORT_MARGIN, "top ({top}) must not go negative");
+        // Can't fully fit — but must not compute a position further off the
+        // bottom than the margin-pinned one the clamp settles on.
+        assert_eq!(top, VIEWPORT_MARGIN);
+    }
+
+    // All four overflow directions, each forced independently.
+    #[test]
+    fn overflow_left_is_clamped() {
+        // End-aligned against a narrow, near-left trigger: right-edge align
+        // pushes the wide panel's left past 0.
+        let t = trigger(0.0, 400.0, 20.0, 20.0);
+        let p = panel(300.0, 100.0);
+        let (left, _top) = fallback_position(t, p, ROOMY_VIEWPORT, PopoverAlign::End);
+        assert_eq!(left, VIEWPORT_MARGIN);
+    }
+
+    #[test]
+    fn overflow_right_is_clamped() {
+        // Start-aligned against a trigger near the right edge: left-edge
+        // align pushes the wide panel's right past the viewport.
+        let t = trigger(ROOMY_VIEWPORT.width - 20.0, 400.0, 20.0, 20.0);
+        let p = panel(300.0, 100.0);
+        let (left, _top) = fallback_position(t, p, ROOMY_VIEWPORT, PopoverAlign::Start);
+        assert_eq!(left, ROOMY_VIEWPORT.width - p.width - VIEWPORT_MARGIN);
+    }
+
+    #[test]
+    fn overflow_top_is_clamped() {
+        // Both sides are short of the panel's height, but `space_above`
+        // (50) still ties-or-beats `space_below` (40 on this short
+        // viewport), so "above" is picked — landing the RAW top at -58 (50 -
+        // 8 - 100). The clamp must pull it back to the margin, not leave it
+        // negative.
+        let viewport = Size {
+            width: 800.0,
+            height: 100.0,
+        };
+        let t = trigger(300.0, 50.0, 60.0, 10.0); // space_above=50, space_below=40
+        let p = panel(200.0, 100.0); // needed = 108, neither side fits
+        let (_left, top) = fallback_position(t, p, viewport, PopoverAlign::Center);
+        assert_eq!(
+            top, VIEWPORT_MARGIN,
+            "unclamped top would be negative (50 - 8 - 100); clamp must pin it to the margin"
+        );
+    }
+
+    #[test]
+    fn overflow_bottom_is_clamped() {
+        // Both sides are short of the panel's height, but `space_below`
+        // (180) beats `space_above` (100), so "below" is picked — landing
+        // the RAW bottom at 128 + 175 = 303 on a 300px-tall viewport. The
+        // clamp must pull the top back up so the panel's bottom stops at the
+        // floor's margin instead of running past it.
+        let viewport = Size {
+            width: 800.0,
+            height: 300.0,
+        };
+        let t = trigger(300.0, 100.0, 60.0, 20.0); // space_above=100, space_below=180
+        let p = panel(200.0, 175.0); // needed = 183, neither side fits
+        let (_left, top) = fallback_position(t, p, viewport, PopoverAlign::Center);
+        assert!(
+            top + p.height <= viewport.height - VIEWPORT_MARGIN,
+            "panel bottom ({}) must not run past the viewport floor",
+            top + p.height
+        );
+        assert!(
+            top < t.bottom() + FALLBACK_GAP,
+            "clamp must have pulled the naive below-placement back up"
+        );
+    }
+
+    #[test]
+    fn prefers_above_when_both_sides_fit() {
+        let t = trigger(400.0, 400.0, 80.0, 32.0);
+        let p = panel(200.0, 120.0);
+        let (_left, top) = fallback_position(t, p, ROOMY_VIEWPORT, PopoverAlign::Start);
+        assert_eq!(top, t.top - FALLBACK_GAP - p.height);
+    }
+
+    #[test]
+    fn flips_below_when_above_is_insufficient() {
+        // Only 20px above the trigger — nowhere near enough for a 120px panel
+        // — but the viewport below has plenty of room.
+        let t = trigger(400.0, 20.0, 80.0, 32.0);
+        let p = panel(200.0, 120.0);
+        let (_left, top) = fallback_position(t, p, ROOMY_VIEWPORT, PopoverAlign::Start);
+        assert_eq!(top, t.bottom() + FALLBACK_GAP);
+    }
+
+    #[test]
+    fn start_align_sets_left_edges_equal() {
+        let t = trigger(400.0, 400.0, 80.0, 32.0);
+        let p = panel(200.0, 120.0);
+        let (left, _top) = fallback_position(t, p, ROOMY_VIEWPORT, PopoverAlign::Start);
+        assert_eq!(left, t.left);
+    }
+
+    #[test]
+    fn center_align_centers_over_trigger_when_unclamped() {
+        let t = trigger(500.0, 400.0, 100.0, 32.0);
+        let p = panel(200.0, 120.0);
+        let (left, _top) = fallback_position(t, p, ROOMY_VIEWPORT, PopoverAlign::Center);
+        assert_eq!(left, t.left + t.width / 2.0 - p.width / 2.0);
+    }
+
+    #[test]
+    fn outer_aligns_sit_beside_the_trigger() {
+        let t = trigger(500.0, 400.0, 100.0, 32.0);
+        let p = panel(200.0, 120.0);
+
+        let (left_start_outer, _) =
+            fallback_position(t, p, ROOMY_VIEWPORT, PopoverAlign::StartOuter);
+        assert_eq!(left_start_outer, t.left - FALLBACK_GAP - p.width);
+
+        let (left_end_outer, _) = fallback_position(t, p, ROOMY_VIEWPORT, PopoverAlign::EndOuter);
+        assert_eq!(left_end_outer, t.right() + FALLBACK_GAP);
+    }
 }
 
 /// Stop the [`ResizeObserver`](web_sys::ResizeObserver) [`watch_panel_resize`]
