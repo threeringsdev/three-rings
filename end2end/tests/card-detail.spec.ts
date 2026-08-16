@@ -1086,7 +1086,13 @@ test.describe("the printings table", () => {
     );
     await page.evaluate((y) => window.scrollTo(0, Math.max(0, y - 60)), absoluteTop);
 
-    await row.hover();
+    // The row's own link (cell 1, "Set"), not the row's bounding-box center:
+    // the row is whole-width clickable via a real anchor in *every* cell now
+    // (WKWebView doesn't honor `position` on `<tr>`, so the row can no
+    // longer be one stretched overlay — see cards.rs's `Printings` module
+    // doc), but only cell 1 is wired to `CardPreview`'s hover affordance.
+    // Cells 2–4 are plain duplicate navigation links.
+    await row.getByTestId("printing-row-link").hover();
     await expect(hoverBody).toBeVisible(); // 150 ms hover intent
     await expect(hoverBody).toContainText(card.name);
     await expect(hoverBody.locator("img")).toHaveAttribute("src", target!.image_uri!);
