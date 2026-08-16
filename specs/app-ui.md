@@ -254,15 +254,33 @@ chosen at **move time, per entry**; duplicate `/my`-vs-collection entries
 collapse in the move step's stack resolution; and multi-grain rows stay
 selectable, because the step **asks** which grain instead of refusing.
 
-**The duplicate collapse, as shipped.** `/my` and a collection page are two
-views of one shelf, so selecting a card on each makes two tray entries over the
-*same copies*. `split_skips` merges every askable refusal for one oracle into
-one `AskedCard` carrying **both keys**; `card_choices` then offers the union of
-what those keys addressed, with each stack appearing once (the payload is
-already one row per full grain, and it is filtered in a single pass). A
-`StackPick` therefore answers for a *list* of tray tokens, and one moved row
-retires all of them — without that the pill kept counting the duplicate after
-the question it asked had been answered. Two things fall out for free: the
+**The duplicate collapse, as shipped: a display merge with per-row
+attribution.** `/my` and a collection page are two views of one shelf, so
+selecting a card on each makes two tray entries over the *same copies*.
+`split_skips` merges every askable refusal for one oracle into one `AskedCard`
+holding **one `AskedEntry` per tray entry** (its key and its own refusal);
+`card_choices` offers the union of what those keys addressed, each stack
+appearing once (the payload is already one row per full grain, filtered in a
+single pass). A `StackPick` then answers for **the entries whose copies that row
+actually is** — `addressed_by`, the same containment the rows were selected with
+— so a row shared by a `/my` entry and a collection entry retires both, and a
+row belonging to only one of them retires only that one.
+
+**Merging on the card and attributing on the row is the whole design, and the
+first attempt got it wrong.** Retiring every entry in a section was right for
+the case the ruling named (two views of one shelf) and silently wrong for the
+one it did not: two `Held` entries of one card — a deck's mainboard and
+sideboard rows, two binders, two printings — are *different copies*. A user who
+zeroed one entry's rows and confirmed another's watched the zeroed entry leave
+the tray having moved nothing and said nothing, which is the silent drop this
+file's whole reporting path exists to prevent. Splitting them back into two
+sections would have been honest too, but worse to use: one card should be one
+question with one list. So the section stayed merged and the *bookkeeping* went
+per row — and `unanswered` went per entry with it, so an entry nothing came out
+of is still named with its own reason (which also means cancelling a merged
+section now says both sentences instead of only the first). Mutation-verified:
+attributing a pick to its whole section again makes the tray pill vanish
+entirely in the two-board e2e. Two things fall out for free: the
 toast counts **cards by oracle** rather than by tray token, so one card's copies
 can no longer be reported as "2 cards"; and the wire stops carrying two items
 with the same token, which the server's own outcome could not have told apart.
@@ -422,9 +440,10 @@ full serial pass **18 of 36 failures were that helper giving up** ("the fixture
 has fewer than 6 catalog cards the dev user owns nowhere"; "every candidate up
 to skip 40 is already held somewhere") — with two more classes behind it: four
 `401`s late in the run (a session expiring around `session-fallback`'s
-cookie-mangling tests) and a residue of timeouts. `batch-move.spec.ts` is green
-throughout because its helper is the verified, multi-term one above; that is the
-pattern the others need. Separately, the shared dev branch had accumulated **51
+cookie-mangling tests) and a residue of timeouts. `batch-move.spec.ts` carried
+no failures in that run — measured **after** the sweep below and on the pool it
+left, which is the only pool these numbers describe — because its helper is the
+verified, multi-term one above; that is the pattern the others need. Separately, the shared dev branch had accumulated **51
 leftover `zz-e2e-*` collections** from earlier parallel runs (`w1`…`w16`, plus
 seven from this task's own timed-out runs), which held cards the "owns nowhere"
 scan was looking for and doubled several tree/palette lists; swept with the same
@@ -432,17 +451,19 @@ delete endpoint every test's `finally` calls, leaving the nine seeded
 collections. It accounted for seven of the failures — the pool exhaustion is
 real beyond it.
 
-**Evidence.** `cargo test -p app --features hosted --lib` 389 passed / 0 failed
+**Evidence.** `cargo test -p app --features hosted --lib` 392 passed / 0 failed
 — the quantity validation trio (over the stack, zero, a vanished grain), the
 per-grain take, the full-grain split, the `Held`-entry row filter, the
 count-vector→picks mapping, the two-tokens-for-one-row case, the unified toast,
 the batch-overdraw pair (one stack drained across entries; spending addresses
-the grain it took from), and the duplicate-collapse set (one question, union of
-rows, both tray tokens retired, no cross-card merge). Full `batch-move.spec.ts`
-@fast **14/14** chromium, including the grain-split test (2 foil + 1 etched →
+the grain it took from), and the collapse-and-attribution set (one question,
+union of rows, a shared row retiring both entries, two board rows retiring only
+their own with the other still named, the `/my`-plus-two-boards composite, and
+no cross-card merge). Full `batch-move.spec.ts`
+@fast **16/16** chromium, including the grain-split test (2 foil + 1 etched →
 two rows → the foils move, the etched copy stays, read back by grain through the
-API), the stalled-read test, the duplicate-entry test and the phone-width picker
-test. Android webview: 16/16 on the emulator via the bench section (see the task
+API), the stalled-read test, the duplicate-entry test, the two-board attribution test
+and the phone-width picker test. Android webview: 16/16 on the emulator via the bench section (see the task
 report).
 
 ### Ambiguous batch-move refusals became a which-copies step (P6-151, 2026-08-13)

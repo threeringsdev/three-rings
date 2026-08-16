@@ -1038,6 +1038,87 @@ test("@fast the same card selected on /my and in its collection is one question,
   }
 });
 
+// --------- two rows of one card are two entries, however they are shown ---
+//
+// The other half of the collapse, and the case that makes it a *display* merge
+// rather than an identity one: a deck's mainboard and sideboard rows are one
+// card and two tray entries over copies that are not each other's. They are one
+// section (one card, one list to choose from), but each row still answers only
+// for the entry whose copies it is — so taking the sideboard copy must leave the
+// mainboard entry checked *and* say why it did not move. Retiring it silently
+// is the exact failure the whole reporting path exists to prevent.
+
+test("@fast two board rows of one card are one section, and answering one leaves the other checked and named", async ({
+  page,
+  request,
+}) => {
+  test.slow();
+  const [card] = await unownedCards(request, 1, 65);
+  const printing = card.printing_id as string;
+  const deck = await createCollection(request, "deck", "boardsrc");
+  const dest = await createCollection(request, "binder", "boarddest");
+  try {
+    await addHave(request, deck.id, printing, 2);
+    await addHave(request, deck.id, printing, 2, { board: "side" });
+
+    await page.goto(`/my/collections/${deck.id}`);
+    await hydrated(page);
+    const boardRow = (board: string) =>
+      page.locator(
+        `[data-testid="collection-row"][data-printing="${printing}"][data-board="${board}"]`,
+      );
+    await select(boardRow("main")).click();
+    await select(boardRow("side")).click();
+    await expect(page.locator(COUNT)).toHaveText("2 cards");
+
+    await moveTo(page, dest.name);
+
+    // One card, one section — and both stacks offered, because two entries
+    // asked about them.
+    await expect(page.locator(STEP_CARD)).toHaveCount(1);
+    const rows = page.locator(STEP_ROW);
+    await expect(rows).toHaveCount(2);
+    const sideRow = rows.filter({ hasText: "sideboard" });
+    const mainRow = rows.filter({ hasNotText: "sideboard" });
+    await expect(sideRow).toHaveCount(1);
+    await expect(mainRow).toHaveCount(1);
+
+    // Take the sideboard copy, leave the mainboard stack alone.
+    await setQuantity(mainRow, 0);
+    await expect(page.locator(STEP_CONFIRM)).toHaveText("Move 1 copy");
+    await page.locator(STEP_CONFIRM).click();
+
+    await expect(page.locator(TOAST, { hasText: /Moved \d+ cop/ })).toContainText(
+      `Moved 1 copy of 1 card → 🗂 ${dest.name}`,
+    );
+    // The mainboard entry moved nothing — so it is still checked, and it is
+    // told why rather than disappearing.
+    await expect(page.locator(COUNT)).toHaveText("1 card");
+    await expect(page.locator(TOAST, { hasText: "wasn't moved" })).toContainText(
+      `${card.name} has 2 copies`,
+    );
+
+    // And the database agrees about which copies left.
+    await expect(async () => {
+      const res = await request.get(`/api/cards/${card.oracle_id}/holdings`);
+      const held = (await res.json()) as {
+        collection_id: string;
+        board: string;
+        quantity: number;
+      }[];
+      expect(
+        held
+          .filter((h) => h.collection_id === deck.id || h.collection_id === dest.id)
+          .map((h) => `${h.collection_id === deck.id ? "deck" : "dest"}/${h.board} x${h.quantity}`)
+          .sort(),
+      ).toEqual(["deck/main x2", "deck/side x1", "dest/main x1"]);
+    }).toPass({ timeout: 5000 });
+  } finally {
+    await deleteCollection(request, deck.id);
+    await deleteCollection(request, dest.id);
+  }
+});
+
 // ------------------------------------------------- the picker on a phone ---
 //
 // P6-150 is a mobile-relevant story: the tray docks above the bottom tab bar,

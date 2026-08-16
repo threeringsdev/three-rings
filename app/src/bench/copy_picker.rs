@@ -19,7 +19,9 @@ use leptos::prelude::*;
 use shared::{Board, Condition, Finish, Id};
 
 use crate::components::ui::selection_tray::SelectionKey;
-use crate::my::move_selection::{AskedCard, CardChoices, CopyStack, PickerRows, SkipReason};
+use crate::my::move_selection::{
+    AskedCard, AskedEntry, CardChoices, CopyStack, PickerRows, SkipReason,
+};
 
 pub fn demo() -> AnyView {
     view! { <CopyPickerDemo /> }.into_any()
@@ -46,12 +48,14 @@ fn stack(collection: u128, name: &str, quantity: i32) -> CopyStack {
 fn card(oracle: u128, name: &str, reason: SkipReason, rows: Vec<CopyStack>) -> CardChoices {
     CardChoices {
         card: AskedCard {
-            keys: vec![SelectionKey::Card {
-                oracle_id: id(oracle),
+            entries: vec![AskedEntry {
+                key: SelectionKey::Card {
+                    oracle_id: id(oracle),
+                },
+                reason,
             }],
             oracle_id: id(oracle),
             name: name.to_string(),
-            reason,
         },
         rows,
     }

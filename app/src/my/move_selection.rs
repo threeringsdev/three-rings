@@ -548,6 +548,16 @@ pub fn resolve_item(holdings: &mut [HoldingLine], item: &SelectionItem, to: Id) 
 /// somehow exceeds it clamps to zero here (the write would refuse it first;
 /// this is a snapshot, and a negative count in it would make the *next* entry's
 /// refusal a lie).
+///
+/// **Spending the *first* match is correct because the database says there is
+/// only one.** `holdings_uniq` makes
+/// `(collection_id, printing_id, finish, condition, language, board)` unique,
+/// so the six fields matched here identify at most one row of
+/// `holdings_of_oracle`'s output; the read itself neither groups nor filters on
+/// quantity (`movable` does that, downstream), so a second matching row would
+/// mean the constraint is gone — and this would then spend one of two rows the
+/// write is about to treat as one. If that constraint is ever relaxed, this
+/// must fold the matches instead of taking the first.
 fn spend(holdings: &mut [HoldingLine], source: &MoveSource, quantity: i32) {
     if let Some(h) = holdings.iter_mut().find(|h| {
         h.collection_id == source.from
@@ -706,28 +716,42 @@ pub fn printing_label(set_code: Option<&str>, collector_number: &str) -> String 
 /// the only place that knows both entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AskedCard {
-    /// The **original** tray keys this section answers for — one per merged
-    /// entry, in tray order. The picks made against this card submit
-    /// grain-suffixed `held:` tokens, so these are the only thing that can put
-    /// the answer back on the rows the user actually checked
-    /// ([`answered_tokens`]), and *all* of them retire when a row moves: the
-    /// question every one of them asked has been answered.
-    ///
-    /// They are also what keeps a collection-page row honest: a `Held` entry
-    /// means "these copies, here", so the step offers that stack's grains and
-    /// not every place the card sits — unless a `/my` entry for the same card
-    /// is merged in, which addresses everywhere by construction
-    /// ([`card_choices`]).
-    pub keys: Vec<SelectionKey>,
+    /// The **original** tray entries this section answers for, in tray order —
+    /// each with the refusal it earned, because two entries for one card can be
+    /// refused for different reasons and each one's sentence is owed to the
+    /// user if it goes unanswered.
+    pub entries: Vec<AskedEntry>,
     pub oracle_id: Id,
     pub name: String,
+}
+
+/// One tray entry inside a merged section: what it addressed, and why the batch
+/// refused it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AskedEntry {
+    /// The tray key. It is what the step offers rows for — a `Held` entry means
+    /// "these copies, here", a `Card` entry names no place and so reaches every
+    /// stack of its oracle ([`card_choices`]) — and it is what a moved row is
+    /// attributed back to ([`StackPick::of`]).
+    pub key: SelectionKey,
     pub reason: SkipReason,
 }
 
 impl AskedCard {
     /// Every tray token this section answers for.
     pub fn tokens(&self) -> Vec<String> {
-        self.keys.iter().map(SelectionKey::token).collect()
+        self.entries.iter().map(|e| e.key.token()).collect()
+    }
+
+    /// The entries whose copies include this row — the ones a pick on it
+    /// answers for. See [`StackPick::of`] for why this is per row and not per
+    /// section.
+    fn covering(&self, row: &CopyStack) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|e| addressed_by(&e.key, row))
+            .map(|e| e.key.token())
+            .collect()
     }
 }
 
@@ -745,11 +769,17 @@ impl AskedCard {
 /// **Askable refusals for the same card merge into one question** (the ruling's
 /// question 3). Two tray entries over the same copies — the `/my` row and the
 /// collection row — are two refusals here, and asking twice would be asking the
-/// user to apportion one pile across two identical lists. The first refusal's
-/// reason is the one the card keeps: it is the sentence the cancel toast
-/// raises, and a card that "is in 2 collections" *and* "has 3 copies" is
-/// answered by the same rows either way. Nothing merges across cards, and
-/// nothing merges into a refusal the step cannot ask about.
+/// user to apportion one pile across two identical lists.
+///
+/// **The merge is a display merge only, and every entry keeps its own
+/// identity.** Two `Held` entries of one card are *not* the same copies — a
+/// deck's mainboard and sideboard rows, or two binders — and the union of their
+/// stacks is one honest list to choose from, but retiring one because the other
+/// moved would drop a tray entry that gave up nothing, silently. So each entry
+/// keeps its key and its reason here, a pick is attributed to the entries whose
+/// copies it actually came from ([`StackPick::of`]), and an entry nothing came
+/// out of is reported like any other refusal ([`unanswered`]). Nothing merges
+/// across cards, and nothing merges into a refusal the step cannot ask about.
 pub fn split_skips(
     skipped: &[Skipped],
     entries: &[SelectedCard],
@@ -759,19 +789,24 @@ pub fn split_skips(
     for s in skipped {
         let entry = entries.iter().find(|c| c.key.token() == s.token);
         match (s.reason.is_askable(), entry) {
-            (true, Some(c)) => match ask.iter_mut().find(|a| a.oracle_id == c.oracle_id) {
-                Some(a) => {
-                    if !a.keys.contains(&c.key) {
-                        a.keys.push(c.key);
-                    }
-                }
-                None => ask.push(AskedCard {
-                    keys: vec![c.key],
-                    oracle_id: c.oracle_id,
-                    name: c.name.clone(),
+            (true, Some(c)) => {
+                let asked = AskedEntry {
+                    key: c.key,
                     reason: s.reason,
-                }),
-            },
+                };
+                match ask.iter_mut().find(|a| a.oracle_id == c.oracle_id) {
+                    Some(a) => {
+                        if !a.entries.iter().any(|e| e.key == c.key) {
+                            a.entries.push(asked);
+                        }
+                    }
+                    None => ask.push(AskedCard {
+                        entries: vec![asked],
+                        oracle_id: c.oracle_id,
+                        name: c.name.clone(),
+                    }),
+                }
+            }
             _ => tell.push(s.clone()),
         }
     }
@@ -829,7 +864,7 @@ pub fn card_choices(cards: Vec<AskedCard>, stacks: &[CardStacks], to: Id) -> Vec
                         .filter(|r| {
                             r.collection_id != to
                                 && r.quantity > 0
-                                && card.keys.iter().any(|k| addressed_by(k, r))
+                                && card.entries.iter().any(|e| addressed_by(&e.key, r))
                         })
                         .cloned()
                         .collect()
@@ -860,8 +895,8 @@ fn addressed_by(key: &SelectionKey, row: &CopyStack) -> bool {
 /// entry and name it answers for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackPick {
-    /// The original tray tokens this answers — every entry merged into the
-    /// section it came from ([`AskedCard::keys`]), because one row can be the
+    /// The original tray tokens this answers — the merged entries whose copies
+    /// this row actually is ([`StackPick::of`]), because one row can be the
     /// answer to a `/my` entry and a collection entry at once, and both stop
     /// being questions when it moves.
     pub tokens: Vec<String>,
@@ -899,9 +934,20 @@ impl StackPick {
         self.item().token()
     }
 
+    /// A pick, attributed to **the entries whose copies it is** — not to every
+    /// entry in its section.
+    ///
+    /// The section is a display merge over one card, and two `Held` entries in
+    /// it (a deck's mainboard and sideboard rows; two binders) address
+    /// genuinely different copies. Attributing a row to all of them let a user
+    /// who zeroed one entry's rows and confirmed another's watch the zeroed
+    /// entry leave the tray having moved nothing and said nothing — the silent
+    /// drop this file exists to prevent. `addressed_by` is the same containment
+    /// the rows were selected with: a `Card` entry contains every stack of its
+    /// oracle, a `Held` entry exactly its own.
     fn of(card: &AskedCard, row: &CopyStack, quantity: i32) -> Self {
         Self {
-            tokens: card.tokens(),
+            tokens: card.covering(row),
             name: card.name.clone(),
             oracle_id: card.oracle_id,
             row: row.clone(),
@@ -998,11 +1044,12 @@ pub fn moved_cards(picks: &[StackPick], moved: &[String]) -> usize {
 /// answered it, and what did not move is named in its own refusal toast. An
 /// entry left checked after that would be inviting the same question again.
 ///
-/// **And it retires every entry the section was merged from.** A `/my` row and
-/// a collection row over the same copies are one question here
-/// ([`AskedCard::keys`]); answering it and then leaving one of them checked
-/// would have the pill still counting a card the user just dealt with — the
-/// same "did that land?" state the whole reporting path refuses.
+/// **It retires every entry the moved copies belonged to, and only those.** A
+/// `/my` row and a collection row over the same copies are one question here,
+/// so a row that answers both retires both — leaving one checked would have the
+/// pill still counting a card the user just dealt with. But two `Held` entries
+/// in one section are *different* copies, and the one that gave nothing up
+/// stays checked and is reported ([`StackPick::of`], [`unanswered`]).
 pub fn answered_tokens(picks: &[StackPick], moved: &[String]) -> Vec<String> {
     let mut tokens: Vec<String> = Vec::new();
     for p in picks.iter().filter(|p| moved.contains(&p.item_token())) {
@@ -1015,7 +1062,7 @@ pub fn answered_tokens(picks: &[StackPick], moved: &[String]) -> Vec<String> {
     tokens
 }
 
-/// The cards the step asked about that the user left untouched.
+/// The **tray entries** the step asked about that nothing came out of.
 ///
 /// Two callers, one sentence: **cancelling** is this with no picks at all, and
 /// **submitting a partial answer** is this with the picks that were made. The
@@ -1024,15 +1071,28 @@ pub fn answered_tokens(picks: &[StackPick], moved: &[String]) -> Vec<String> {
 /// would get a confirmation for the one and nothing whatsoever about the other
 /// two, which is the "did that land?" state every toast in this file exists to
 /// refuse.
-/// Matched by oracle, which is the section's identity: [`split_skips`] merges
-/// every askable refusal for one card into one question, so a card is
-/// unanswered exactly when no pick came out of its section.
+///
+/// **Per entry, not per section, and each with its own reason.** A section can
+/// stand for several tray entries, and an entry whose rows were all left at
+/// zero is still checked in the tray afterwards — so it is owed the sentence
+/// the batch refused it with, even when a sibling entry of the same card moved.
+/// Identical (name, reason) pairs collapse: two entries refused the same way
+/// for the same card say it once.
 pub fn unanswered(cards: &[AskedCard], picks: &[StackPick]) -> Vec<(String, SkipReason)> {
-    cards
-        .iter()
-        .filter(|c| !picks.iter().any(|p| p.oracle_id == c.oracle_id))
-        .map(|c| (c.name.clone(), c.reason))
-        .collect()
+    let mut out: Vec<(String, SkipReason)> = Vec::new();
+    for card in cards {
+        for entry in &card.entries {
+            let token = entry.key.token();
+            if picks.iter().any(|p| p.tokens.contains(&token)) {
+                continue;
+            }
+            let line = (card.name.clone(), entry.reason);
+            if !out.contains(&line) {
+                out.push(line);
+            }
+        }
+    }
+    out
 }
 
 /// Put a card's name on a whole-batch failure the server attributed to one item.
@@ -1624,6 +1684,30 @@ impl RowState {
     }
 }
 
+/// The row list and the state it is in, in **one** signal.
+///
+/// Two signals written back to back are two notifications, and a render between
+/// them sees a pair that never existed — populated rows under "Finding your
+/// copies…", or (worse, and the shape of the bug this state exists to prevent)
+/// `ready` over an empty list. One value cannot be observed half-written,
+/// whatever the scheduler does. The stepper counts stay outside it on purpose:
+/// they change on every press, and folding them in here would re-render the
+/// whole list each time.
+#[derive(Clone, PartialEq)]
+struct RowsView {
+    state: RowState,
+    sections: Vec<CardChoices>,
+}
+
+impl RowsView {
+    fn waiting() -> Self {
+        Self {
+            state: RowState::Loading,
+            sections: Vec::new(),
+        }
+    }
+}
+
 /// The step itself: one section per unresolved card, one row per stack its
 /// copies actually sit in **at full grain**, a quantity stepper on each, and a
 /// submit that goes back through the ordinary batch move.
@@ -1652,9 +1736,8 @@ fn WhichCopiesDialog(
     // The rows, and the stepper value standing against each of them in row
     // order. Written together, always — `picks_of` is the one place that knows
     // they line up.
-    let sections = RwSignal::new(Vec::<CardChoices>::new());
+    let rows = RwSignal::new(RowsView::waiting());
     let counts = RwSignal::new(Vec::<i32>::new());
-    let state = RwSignal::new(RowState::Loading);
 
     // The stacks behind the question. A read of its own, deliberately: the
     // batch's own resolution had these rows in hand but shipping them back
@@ -1701,10 +1784,11 @@ fn WhichCopiesDialog(
     Effect::new(move |_| {
         let asked = step.get();
         let loaded = stacks.get();
+        // Counts first, then the rows-and-state pair: the steppers a row reads
+        // are already in place the moment that row can be rendered.
         let waiting = || {
-            sections.set(Vec::new());
             counts.set(Vec::new());
-            state.set(RowState::Loading);
+            rows.set(RowsView::waiting());
         };
         let Some(WhichCopies { dest, cards }) = asked else {
             waiting();
@@ -1720,15 +1804,19 @@ fn WhichCopiesDialog(
             // Not an empty list: that would read as "you hold none of these",
             // which is the opposite of what the batch just refused for.
             Some((_, Err(_))) => {
-                sections.set(Vec::new());
                 counts.set(Vec::new());
-                state.set(RowState::Failed);
+                rows.set(RowsView {
+                    state: RowState::Failed,
+                    sections: Vec::new(),
+                });
             }
             Some((_, Ok(payload))) => {
-                let rows = card_choices(cards, &payload.cards, dest.id);
-                counts.set(vec![1; rows.iter().map(|c| c.rows.len()).sum()]);
-                sections.set(rows);
-                state.set(RowState::Ready);
+                let sections = card_choices(cards, &payload.cards, dest.id);
+                counts.set(vec![1; sections.iter().map(|c| c.rows.len()).sum()]);
+                rows.set(RowsView {
+                    state: RowState::Ready,
+                    sections,
+                });
             }
         }
     });
@@ -1736,7 +1824,7 @@ fn WhichCopiesDialog(
     let total = Memo::new(move |_| counts.with(|v| v.iter().sum::<i32>()));
 
     let submit = move || {
-        let chosen = picks_of(&sections.get_untracked(), &counts.get_untracked());
+        let chosen = picks_of(&rows.get_untracked().sections, &counts.get_untracked());
         if chosen.is_empty() {
             return;
         }
@@ -1779,12 +1867,12 @@ fn WhichCopiesDialog(
                         <div
                             class="max-h-[45vh] space-y-4 overflow-y-auto"
                             data-testid="which-copies"
-                            data-state=move || state.get().as_str()
+                            data-state=move || rows.get().state.as_str()
                         >
-                            <Show when=move || state.get() == RowState::Loading>
+                            <Show when=move || rows.get().state == RowState::Loading>
                                 <p class="text-muted-foreground text-sm">"Finding your copies…"</p>
                             </Show>
-                            <Show when=move || state.get() == RowState::Failed>
+                            <Show when=move || rows.get().state == RowState::Failed>
                                 <p
                                     role="alert"
                                     class="text-destructive text-sm"
@@ -1793,7 +1881,7 @@ fn WhichCopiesDialog(
                                     "Couldn't load your copies. Close this and try the move again."
                                 </p>
                             </Show>
-                            <PickerRows sections counts />
+                            <PickerRows sections=Signal::derive(move || rows.get().sections) counts />
                         </div>
                     </Show>
                     <DialogFooter>
@@ -1830,7 +1918,7 @@ fn WhichCopiesDialog(
 /// behavior is reachable on a real phone engine.
 #[component]
 pub fn PickerRows(
-    sections: RwSignal<Vec<CardChoices>>,
+    #[prop(into)] sections: Signal<Vec<CardChoices>>,
     counts: RwSignal<Vec<i32>>,
 ) -> impl IntoView {
     view! {
@@ -2832,7 +2920,7 @@ mod tests {
         assert_eq!(ask.len(), 1);
         assert_eq!(ask[0].name, "Bolt");
         assert_eq!(ask[0].oracle_id, id(1));
-        assert_eq!(ask[0].reason, SkipReason::ManyCollections(2));
+        assert_eq!(ask[0].entries[0].reason, SkipReason::ManyCollections(2));
         assert_eq!(tell, vec![skipped[1].clone()]);
     }
 
@@ -2864,11 +2952,16 @@ mod tests {
             vec![entries[0].key.token(), entries[1].key.token()],
             "…answering for both tray entries"
         );
-        // The first refusal's sentence is the one the cancel toast raises, and
-        // it is raised once rather than twice for the same card.
+        // Cancelling says **both** sentences: two entries are still checked
+        // afterwards, and each was refused for its own reason. Reporting only
+        // the first would leave the second entry sitting in the tray with
+        // nothing ever said about it.
         assert_eq!(
             unanswered(&ask, &[]),
-            vec![("Bolt".to_string(), SkipReason::ManyCollections(2))]
+            vec![
+                ("Bolt".to_string(), SkipReason::ManyCollections(2)),
+                ("Bolt".to_string(), SkipReason::Several(3)),
+            ]
         );
 
         // The merged section offers the **union** of what the two entries
@@ -2933,6 +3026,152 @@ mod tests {
     }
 
     #[test]
+    fn two_collection_rows_of_one_card_are_different_copies() {
+        // The merge is a *display* merge, and this is the case that proves the
+        // difference. A deck's mainboard and sideboard rows are one card and
+        // two tray entries over copies that are not each other's. Answering one
+        // and zeroing the other used to retire **both** — the zeroed entry left
+        // the tray having moved nothing and said nothing, which is the silent
+        // drop every toast in this file exists to prevent.
+        let main = held(1, 100);
+        let side = SelectionKey::Held {
+            collection_id: id(1),
+            printing_id: id(100),
+            board: Board::Side,
+        };
+        let card = asked_over(1, "Bolt", &[main, side], SkipReason::Several(2));
+        let stacks = [CardStacks {
+            oracle_id: id(1),
+            stacks: vec![
+                stack(1, 100, 2),
+                CopyStack {
+                    board: Board::Side,
+                    ..stack(1, 100, 2)
+                },
+            ],
+        }];
+        let sections = card_choices(vec![card], &stacks, id(9));
+        assert_eq!(sections.len(), 1, "one card is still one section");
+        assert_eq!(sections[0].rows.len(), 2, "…listing both entries' stacks");
+
+        // Zero the mainboard row, take one off the sideboard.
+        let picks = picks_of(&sections, &[0, 1]);
+        assert_eq!(picks.len(), 1);
+        assert_eq!(
+            picks[0].tokens,
+            vec![side.token()],
+            "a pick answers only for the entries whose copies it is"
+        );
+        let landed = [picks[0].item_token()];
+        assert_eq!(
+            answered_tokens(&picks, &landed),
+            vec![side.token()],
+            "the mainboard entry is still checked"
+        );
+        assert_eq!(
+            unanswered(
+                &sections.iter().map(|s| s.card.clone()).collect::<Vec<_>>(),
+                &picks
+            ),
+            vec![("Bolt".to_string(), SkipReason::Several(2))],
+            "…and it is told why, rather than vanishing"
+        );
+    }
+
+    #[test]
+    fn a_card_entry_answers_for_the_stacks_it_contains() {
+        // The intended collapse, and its edge: a `/my` entry contains every
+        // stack of its oracle, so a row in the binder the `Held` entry named
+        // answers for both — while a row *elsewhere* answers only for the `/my`
+        // entry, and the collection entry stays checked with its own sentence.
+        let card = AskedCard {
+            entries: vec![
+                AskedEntry {
+                    key: SelectionKey::Card { oracle_id: id(1) },
+                    reason: SkipReason::ManyCollections(2),
+                },
+                AskedEntry {
+                    key: held(1, 100),
+                    reason: SkipReason::Several(3),
+                },
+            ],
+            oracle_id: id(1),
+            name: "Bolt".to_string(),
+        };
+        let stacks = [CardStacks {
+            oracle_id: id(1),
+            stacks: vec![stack(1, 100, 3), stack(2, 100, 1)],
+        }];
+        let sections = card_choices(vec![card], &stacks, id(9));
+        let cards: Vec<AskedCard> = sections.iter().map(|s| s.card.clone()).collect();
+
+        // The shared stack: both entries retire, nothing is left unsaid.
+        let both = picks_of(&sections, &[1, 0]);
+        assert_eq!(both[0].tokens.len(), 2);
+        assert_eq!(
+            answered_tokens(&both, &[both[0].item_token()]).len(),
+            2,
+            "the /my entry and the collection row both had this stack answered"
+        );
+        assert!(unanswered(&cards, &both).is_empty());
+
+        // The other binder: only the `/my` entry contains it.
+        let elsewhere = picks_of(&sections, &[0, 1]);
+        assert_eq!(
+            elsewhere[0].tokens,
+            vec![SelectionKey::Card { oracle_id: id(1) }.token()]
+        );
+        assert_eq!(
+            unanswered(&cards, &elsewhere),
+            vec![("Bolt".to_string(), SkipReason::Several(3))],
+            "the collection row gave up nothing and says so"
+        );
+    }
+
+    #[test]
+    fn a_card_entry_beside_two_collection_rows_attributes_each_stack_once() {
+        // The composite: `/my` plus both of a deck's board rows. Every row
+        // retires the `/my` entry and exactly the board entry it came from, so
+        // no entry is ever retired for copies it did not give up.
+        let main = held(1, 100);
+        let side = SelectionKey::Held {
+            collection_id: id(1),
+            printing_id: id(100),
+            board: Board::Side,
+        };
+        let anywhere = SelectionKey::Card { oracle_id: id(1) };
+        let card = asked_over(1, "Bolt", &[anywhere, main, side], SkipReason::Several(2));
+        let stacks = [CardStacks {
+            oracle_id: id(1),
+            stacks: vec![
+                stack(1, 100, 2),
+                CopyStack {
+                    board: Board::Side,
+                    ..stack(1, 100, 2)
+                },
+            ],
+        }];
+        let sections = card_choices(vec![card], &stacks, id(9));
+        let cards: Vec<AskedCard> = sections.iter().map(|s| s.card.clone()).collect();
+        let picks = picks_of(&sections, &[1, 0]);
+        assert_eq!(
+            picks[0].tokens,
+            vec![anywhere.token(), main.token()],
+            "the mainboard row answers for /my and the mainboard entry"
+        );
+        assert_eq!(
+            unanswered(&cards, &picks),
+            vec![("Bolt".to_string(), SkipReason::Several(2))],
+            "the sideboard entry is still a question, said once"
+        );
+        // Both rows taken: nothing is left unanswered, and all three retire.
+        let all = picks_of(&sections, &[1, 1]);
+        let landed: Vec<String> = all.iter().map(|p| p.item_token()).collect();
+        assert_eq!(answered_tokens(&all, &landed).len(), 3);
+        assert!(unanswered(&cards, &all).is_empty());
+    }
+
+    #[test]
     fn two_different_cards_never_merge() {
         let entries = [my_row(1, "Bolt"), my_row(2, "Brainstorm")];
         let skipped = [
@@ -2941,7 +3180,7 @@ mod tests {
         ];
         let (ask, _) = split_skips(&skipped, &entries);
         assert_eq!(ask.len(), 2);
-        assert!(ask.iter().all(|c| c.keys.len() == 1));
+        assert!(ask.iter().all(|c| c.entries.len() == 1));
     }
 
     #[test]
@@ -2957,12 +3196,28 @@ mod tests {
 
     fn asked(oracle: u128, name: &str) -> AskedCard {
         AskedCard {
-            keys: vec![SelectionKey::Card {
-                oracle_id: id(oracle),
+            entries: vec![AskedEntry {
+                key: SelectionKey::Card {
+                    oracle_id: id(oracle),
+                },
+                reason: SkipReason::ManyCollections(2),
             }],
             oracle_id: id(oracle),
             name: name.to_string(),
-            reason: SkipReason::ManyCollections(2),
+        }
+    }
+
+    /// A section standing for the tray entries `keys` addressed, each refused
+    /// with `reason`.
+    fn asked_over(
+        oracle: u128,
+        name: &str,
+        keys: &[SelectionKey],
+        reason: SkipReason,
+    ) -> AskedCard {
+        AskedCard {
+            entries: keys.iter().map(|&key| AskedEntry { key, reason }).collect(),
+            ..asked(oracle, name)
         }
     }
 
@@ -3010,15 +3265,7 @@ mod tests {
                 },
             ],
         }];
-        let here = AskedCard {
-            keys: vec![SelectionKey::Held {
-                collection_id: id(1),
-                printing_id: id(100),
-                board: Board::Main,
-            }],
-            reason: SkipReason::Several(3),
-            ..asked(1, "Bolt")
-        };
+        let here = asked_over(1, "Bolt", &[held(1, 100)], SkipReason::Several(3));
         let rows = card_choices(vec![here], &stacks, id(9));
         assert_eq!(
             rows[0]
