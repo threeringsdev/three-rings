@@ -1200,3 +1200,292 @@ test("emptying a deck moves its cards to the chosen destination", async ({
     await deleteCollection(request, dest);
   }
 });
+
+// ------------------------------------------------------------ grid view ----
+// The grid/list toggle Catalog already had, applied here
+// (WB-01M031Z4MN401FTKNKPE1RZE2E). Table stays the *default* on this route
+// (opposite of Catalog's own default — see `collection_url`'s doc comment in
+// `app/src/my/collection.rs`), so a bare `/my/collections/:id` load is
+// unaffected; `?view=grid` is what opts in.
+
+test.describe("grid view (grid-toggle task)", () => {
+  test("the switch renders a grid on a binder, and list stays the default @fast", async ({
+    page,
+    request,
+  }) => {
+    const trade = await collectionNamed(request, "Trade Binder");
+
+    await page.goto(`/my/collections/${trade.summary.id}`);
+    await hydrated(page);
+    await expect(page.getByTestId("collection-table")).toBeVisible();
+    await expect(page.getByTestId("collection-grid")).toHaveCount(0);
+
+    const group = page.getByRole("radiogroup", { name: "Result layout" });
+    await group.getByRole("radio", { name: "Grid view" }).click();
+
+    await page.waitForURL((url) => url.searchParams.get("view") === "grid");
+    await expect(page.getByTestId("collection-grid")).toBeVisible();
+    await expect(page.getByTestId("collection-table")).toHaveCount(0);
+
+    // The layout choice is in the URL, so it survives a reload.
+    await page.reload();
+    await expect(page.getByTestId("collection-grid")).toBeVisible();
+  });
+
+  test("a deck's grid keeps its section groupings @fast", async ({
+    page,
+    request,
+  }) => {
+    const deck = await collectionNamed(request, "Commander Deck");
+
+    await page.goto(`/my/collections/${deck.summary.id}`);
+    await hydrated(page);
+
+    // List mode's own sections — the same locator the plain grouping test
+    // above reads, cross-checked against the API there. Read here rather than
+    // re-derived, so this test only has to prove the grid *agrees with the
+    // table*, not re-implement the bucketing rules a second time.
+    const listSections = await page.$$eval("[data-section]", (els) =>
+      els
+        .map((e) => (e.textContent ?? "").replace(/\s+/g, " ").trim())
+        .sort(),
+    );
+    expect(listSections.length, "dev seed's deck should have sections").toBeGreaterThan(0);
+
+    await page.getByRole("radio", { name: "Grid view" }).click();
+    await page.waitForURL((url) => url.searchParams.get("view") === "grid");
+
+    // Only the section heading's own text, not the whole section (which also
+    // contains every tile's name, badges and hidden touch-sheet content) —
+    // the grid's heading is a sibling `<h3>`, not the `data-section` element's
+    // own `textContent` the way the table's single-cell section row is.
+    const gridSections = await page.$$eval(
+      '[data-testid="deck-grid-section"] > h3',
+      (els) => els.map((e) => (e.textContent ?? "").replace(/\s+/g, " ").trim()).sort(),
+    );
+    expect(gridSections).toEqual(listSections);
+
+    // Sideboard last, same as the table (`app/src/my/collection.rs`'s
+    // `BOARD_ORDER`): every mainboard section precedes every "Sideboard · "
+    // one in document order.
+    const order = await page.$$eval('[data-testid="deck-grid-section"]', (els) =>
+      els.map((e) => e.getAttribute("data-section") ?? ""),
+    );
+    const firstOther = order.findIndex((s) => s.includes(" · "));
+    if (firstOther >= 0) {
+      expect(order.slice(firstOther).every((s) => s.includes(" · "))).toBe(true);
+    }
+
+    // Every card tile still shows the essentials, grouped inside its section.
+    const tiles = page.locator('[data-testid="deck-grid-section"] [data-testid="collection-tile"]');
+    await expect(tiles.first()).toBeVisible();
+  });
+
+  test("child collections render as folder tiles, carrying the sidebar rollup @fast", async ({
+    page,
+    request,
+  }) => {
+    const parent = await collectionNamed(request, "Depth Box");
+    const rows = await tree(request);
+    const kids = rows.filter((r) => r.summary.parent_id === parent.summary.id);
+    expect(kids.length, "dev seed should nest a collection under Depth Box").toBeGreaterThan(0);
+
+    await page.goto(`/my/collections/${parent.summary.id}?view=grid`);
+    await hydrated(page);
+    await expect(page.getByTestId("collection-grid")).toBeVisible();
+
+    for (const kid of kids) {
+      const tile = page.locator(
+        `[data-testid="folder-tile"][data-collection="${kid.summary.id}"]`,
+      );
+      await quick(tile).toHaveCount(1);
+      await quick(tile.locator("a")).toHaveAttribute(
+        "href",
+        `/my/collections/${kid.summary.id}`,
+      );
+      const rolled = rolledUp(rows, kid.summary.id);
+      if (rolled > 0) {
+        await quick(tile.locator('[data-testid="here-count"]')).toContainText(
+          String(rolled),
+        );
+      }
+    }
+  });
+
+  test("a grid tile links to the card, shows HERE, and stays selectable @fast", async ({
+    page,
+    request,
+  }) => {
+    const trade = await collectionNamed(request, "Trade Binder");
+    const view = await viewOf(request, trade.summary.id);
+    const held = view.cards.find((r) => r.present > 0);
+    test.skip(!held, "dev seed's Trade Binder should hold at least one card");
+
+    await page.goto(`/my/collections/${trade.summary.id}?view=grid`);
+    await hydrated(page);
+    const tile = page.locator(
+      `[data-testid="collection-tile"][data-oracle="${held!.oracle_id}"][data-printing="${held!.printing_id}"]`,
+    );
+    await expect(tile).toBeVisible();
+    await expect(tile.locator("a").first()).toHaveAttribute(
+      "href",
+      `/cards/${held!.oracle_id}`,
+    );
+    await expect(tile.getByTestId("here-badge")).toContainText(
+      `${held!.present} here`,
+    );
+
+    // No stepper on the tile — the count stepper is a list-only editing
+    // surface; the grid is a display mode (specs/app-ui.md's Findings entry
+    // for the grid-toggle task states this plainly).
+    await expect(tile.getByTestId("count-stepper")).toHaveCount(0);
+
+    // Selection stays reachable in grid mode (a deliberate choice — see the
+    // same Findings entry): the tile's own select control toggles the shared
+    // tray same as a row's `SelectionCheckbox` does.
+    const before = page.url();
+    await tile.getByTestId("tile-select").click();
+    await expect(page.getByTestId("selection-tray")).toBeVisible();
+    await expect(page.getByTestId("tray-count")).toContainText("1 card");
+    // The tray lives in the shell, not the tile — so on its own, the tray
+    // appearing does not prove the click was a *select*, not a navigation
+    // that happened to land somewhere the tray also renders. Assert the URL
+    // never moved: the click stayed on this page.
+    expect(page.url()).toBe(before);
+  });
+
+  test("390px: a collection's grid renders without page overflow @fast", async ({
+    page,
+    request,
+  }) => {
+    const trade = await collectionNamed(request, "Trade Binder");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`/my/collections/${trade.summary.id}?view=grid`);
+    await hydrated(page);
+    await expect(page.getByTestId("collection-grid")).toBeVisible();
+    await expect(page.getByTestId("collection-tile").first()).toBeVisible();
+
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow, "the grid should not widen the page at 390px").toBeLessThanOrEqual(1);
+  });
+
+  // -------------------------------------------------------- live HERE ----
+  // Round-2 review finding: `CollectionBody` freezes the collection's
+  // `CollectionView` into a snapshot the moment it resolves, and a stepper
+  // commit deliberately never refetches it (the table tolerates this because
+  // `HaveStepper` owns its own live displayed value). A `HoldingTile` had
+  // nothing of the kind, so a same-session HERE edit was invisible on the
+  // tile after switching to grid — stale at best, a ghost tile (rendering
+  // for a holding a commit-to-zero just deleted) at worst. Fixed by
+  // `RowDeltas` (`app/src/my/collection.rs`): a page-level per-row delta map
+  // `HereCount` writes and `CollectionGrid` reads once, on entry.
+
+  test("editing HERE in list mode shows the new count once you switch to grid @fast", async ({
+    page,
+    request,
+  }) => {
+    const card = await somePrinting(request);
+    const scratch = await createCollection(
+      request,
+      "binder",
+      scratchName("grid-live"),
+    );
+    try {
+      await addHave(request, scratch, card.printing_id, 2);
+      await page.goto(`/my/collections/${scratch}`);
+      await hydrated(page);
+
+      // Edit while list mode is showing — the only mode with a stepper at all.
+      const tr = rowFor(page, card.oracle_id);
+      await tr.locator('[data-testid="count-stepper-inc"]').click();
+      await page.locator('[data-testid="collection-title"]').click();
+      await expect(
+        tr.locator('[data-testid="count-stepper-value"]'),
+      ).toHaveText("3");
+      await expect(
+        page.locator('[data-testid="collection-counts"]'),
+      ).toHaveText("3 here");
+
+      // Toggle to grid *in the same session*, with no reload and no
+      // navigation away — the exact window `view_res` never refetches for.
+      await page.getByRole("radio", { name: "Grid view" }).click();
+      await page.waitForURL((url) => url.searchParams.get("view") === "grid");
+
+      const tile = page.locator(
+        `[data-testid="collection-tile"][data-oracle="${card.oracle_id}"][data-printing="${card.printing_id}"]`,
+      );
+      await expect(tile).toBeVisible();
+      // The new count (3), not the payload's original snapshot (2).
+      await expect(tile.getByTestId("here-badge")).toContainText("3 here");
+    } finally {
+      await deleteCollection(request, scratch);
+    }
+  });
+
+  test("zeroing a row in list mode leaves no tile for it once you switch to grid @fast", async ({
+    page,
+    request,
+  }) => {
+    // Two distinct held printings, not one: emptying the *whole* collection
+    // collapses the grid to a genuinely empty (zero-height) container, which
+    // would make `toBeVisible()` on the grid itself meaningless. A survivor
+    // also doubles as the positive control — proving the fix drops exactly
+    // the zeroed row's tile, not the grid's rendering entirely.
+    const trade = await collectionNamed(request, "Trade Binder");
+    const tradeView = await viewOf(request, trade.summary.id);
+    test.skip(
+      tradeView.cards.length < 2,
+      "dev seed's Trade Binder should hold two distinct printings",
+    );
+    const zeroed = tradeView.cards[0];
+    const survivor = tradeView.cards[1];
+    const scratch = await createCollection(
+      request,
+      "binder",
+      scratchName("grid-ghost"),
+    );
+    try {
+      await addHave(request, scratch, zeroed.printing_id, 1);
+      await addHave(request, scratch, survivor.printing_id, 2);
+      await page.goto(`/my/collections/${scratch}`);
+      await hydrated(page);
+
+      // Step the zeroed row's one copy down to zero — a commit-to-zero,
+      // which removes the holding server-side (undoable, but not undone
+      // here).
+      const tr = rowFor(page, zeroed.oracle_id);
+      await tr.locator('[data-testid="count-stepper-dec"]').click();
+      await page.locator('[data-testid="collection-title"]').click();
+      await expect(
+        page.locator('[data-name="Toast"]', { hasText: "Removed" }),
+      ).toBeVisible();
+      await expect(async () => {
+        const rows = (await viewOf(request, scratch)).cards;
+        expect(rows.some((r) => r.oracle_id === zeroed.oracle_id)).toBe(false);
+        expect(rows.some((r) => r.oracle_id === survivor.oracle_id)).toBe(true);
+      }).toPass({ timeout: 10_000 });
+
+      // Toggle to grid in the same session. The payload's `view` snapshot
+      // still names the zeroed holding (it was never refetched) — the
+      // ghost-tile case the fix exists for.
+      await page.getByRole("radio", { name: "Grid view" }).click();
+      await page.waitForURL((url) => url.searchParams.get("view") === "grid");
+
+      await expect(page.getByTestId("collection-grid")).toBeVisible();
+      await expect(
+        page.locator(
+          `[data-testid="collection-tile"][data-oracle="${zeroed.oracle_id}"][data-printing="${zeroed.printing_id}"]`,
+        ),
+      ).toHaveCount(0);
+      await expect(
+        page.locator(
+          `[data-testid="collection-tile"][data-oracle="${survivor.oracle_id}"][data-printing="${survivor.printing_id}"]`,
+        ),
+      ).toBeVisible();
+    } finally {
+      await deleteCollection(request, scratch);
+    }
+  });
+});

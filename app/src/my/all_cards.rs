@@ -42,13 +42,16 @@
 //! search drops the cursor — a new filter has no page two yet.
 
 use leptos::prelude::*;
-use leptos_router::hooks::use_query_map;
+use leptos_router::hooks::{use_navigate, use_query_map};
+use leptos_router::NavigateOptions;
 use shared::{AllCardsRow, CardLocation};
 
 use super::tree_manage::TreeManage;
 use crate::cards::CardPreview;
+use crate::catalog::GRID_CLASS;
 use crate::components::query_bar::QueryBar;
 use crate::components::states::ErrorNote;
+use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::collapsible::{Collapsible, CollapsibleContent, CollapsibleTrigger};
 use crate::components::ui::selection_tray::{
     use_selection, SelectedCard, SelectionCheckbox, SelectionKey,
@@ -57,25 +60,54 @@ use crate::components::ui::skeleton::Skeleton;
 use crate::components::ui::table::{
     Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableWrapper,
 };
+use crate::components::view_switch::ViewSwitch;
 use crate::components::viewport::{media_signal, MD_UP};
 
 /// The keyset page cursor, in the URL beside `?q=`.
 const CURSOR_PARAM: &str = "cursor";
 
+/// `?view=grid` renders the tile grid; anything else (including absent) is
+/// the table — the **opposite** default from `/catalog` (`?view=list` opts
+/// into the table there, grid is what a bare URL shows). `/my` and
+/// `/my/all` shipped table-only for a long time before the grid task
+/// (WB-01M031Z4MN401FTKNKPE1RZE2E) added the toggle; flipping the *bare*-URL
+/// default to match Catalog would have silently changed what every existing
+/// bookmark, deep link, and e2e assertion against these two routes renders.
+/// The rule that *is* shared with Catalog: the URL only ever spells out the
+/// **non-default** view for that surface — see `catalog_url`'s own doc.
+pub(crate) const VIEW_PARAM: &str = "view";
+const GRID_VIEW: &str = "grid";
+
 pub use super::root::ALL_CARDS_PATH;
 
-/// Build `<base>?q=…&cursor=…`, omitting empty parts — the single place an
-/// All-cards URL is constructed, so the query bar, the clear button, the pager
-/// and the mobile root list's `All cards` row cannot drift on its canonical
-/// form. `base` is `/my` or [`ALL_CARDS_PATH`]; the two routes render the same
-/// body and must each keep their own URLs.
-pub(crate) fn my_url(base: &str, q: &str, cursor: Option<&str>) -> String {
+/// Is `?view=` asking for the grid? Pure so it is unit-testable without a
+/// query map. `pub(crate)`: `super::root::MyRootNav`'s "All cards" row link
+/// forwards the bare `/my`'s own `?view=` down into `/my/all` alongside
+/// `?q=`/`?cursor=`, so a grid-mode link opened on a phone lands the reader on
+/// the same layout once the drill-down target renders it.
+pub(crate) fn is_grid_view(raw: Option<&str>) -> bool {
+    raw == Some(GRID_VIEW)
+}
+
+/// Build `<base>?q=…&view=…&cursor=…`, omitting empty parts — the single place
+/// an All-cards URL is constructed, so the query bar, the clear button, the
+/// view switch, the pager and the mobile root list's `All cards` row cannot
+/// drift on its canonical form. `base` is `/my` or [`ALL_CARDS_PATH`]; the two
+/// routes render the same body and must each keep their own URLs.
+pub(crate) fn my_url(base: &str, q: &str, list_view: bool, cursor: Option<&str>) -> String {
     let mut url = String::from(base);
     let mut sep = '?';
     if !q.is_empty() {
         url.push(sep);
         url.push_str("q=");
         url.push_str(&crate::catalog::encode_query_value(q));
+        sep = '&';
+    }
+    if !list_view {
+        url.push(sep);
+        url.push_str(VIEW_PARAM);
+        url.push('=');
+        url.push_str(GRID_VIEW);
         sep = '&';
     }
     if let Some(c) = cursor.filter(|c| !c.is_empty()) {
@@ -222,6 +254,10 @@ fn AllCardsBody(base: &'static str, class: &'static str, back: bool) -> impl Int
     // notification when the value is unchanged.
     let url_q = Memo::new(move |_| query_map.read().get("q").unwrap_or_default());
     let url_cursor = Memo::new(move |_| query_map.read().get(CURSOR_PARAM).unwrap_or_default());
+    // "Is the table the one showing right now" — the same name and the same
+    // sense `/catalog` uses, even though the two surfaces default in opposite
+    // directions (see `VIEW_PARAM`'s doc comment).
+    let list_view = Memo::new(move |_| !is_grid_view(query_map.read().get(VIEW_PARAM).as_deref()));
 
     // The text in the box; the URL⇄field sync lives inside `QueryBar`.
     let query_text = RwSignal::new(url_q.get_untracked());
@@ -259,6 +295,24 @@ fn AllCardsBody(base: &'static str, class: &'static str, back: bool) -> impl Int
     // empty collection.
     let paged = Memo::new(move |_| !url_cursor.read().is_empty());
 
+    // The view switch's own navigation: relayouting the page you are on is not
+    // a query edit, so the cursor rides along (same rule `/catalog`'s switch
+    // follows — see `catalog::ResultsToolbar`'s `go`).
+    let navigate = use_navigate();
+    let go = move |list: bool| {
+        let q = url_q.get_untracked();
+        let cursor = url_cursor.get_untracked();
+        navigate(
+            &my_url(
+                base,
+                &q,
+                list,
+                (!cursor.is_empty()).then_some(cursor.as_str()),
+            ),
+            NavigateOptions::default(),
+        );
+    };
+
     view! {
         <div class=format!("min-w-0 flex-col gap-4 p-4 md:p-6 {class}")>
             // The mobile drill-down's up-link: back walks *up*, to the root
@@ -278,16 +332,25 @@ fn AllCardsBody(base: &'static str, class: &'static str, back: bool) -> impl Int
                     }
                 })}
             <AllCardsHeading />
-            <QueryBar
-                text=query_text
-                url_q
-                // A new search starts at page one: carrying the old cursor
-                // forward would page into a result set that no longer exists.
-                to_url=Callback::new(move |q: String| my_url(base, &q, None))
-                id="my-query"
-                placeholder="Search your cards by name"
-                aria_label="Search your cards"
-            />
+            <div class="flex flex-wrap items-center gap-2">
+                <div class="min-w-0 flex-1">
+                    <QueryBar
+                        text=query_text
+                        url_q
+                        // A new search starts at page one: carrying the old cursor
+                        // forward would page into a result set that no longer
+                        // exists. The current layout rides along untracked, same
+                        // reasoning as `/catalog`'s own `QueryBar`.
+                        to_url=Callback::new(move |q: String| {
+                            my_url(base, &q, list_view.get_untracked(), None)
+                        })
+                        id="my-query"
+                        placeholder="Search your cards by name"
+                        aria_label="Search your cards"
+                    />
+                </div>
+                <ViewSwitch list_view on_change=Callback::new(go) />
+            </div>
             // Transition, not Suspense: re-searching keeps the previous rows on
             // screen instead of collapsing the table on every keystroke.
             <Transition fallback=|| {
@@ -297,22 +360,28 @@ fn AllCardsBody(base: &'static str, class: &'static str, back: bool) -> impl Int
                     // Read the URL state *here*, in the tracked render scope —
                     // not inside the async block, where the read lands after
                     // the await and outside this effect's dependency set.
+                    //
+                    // `list_view` is deliberately *not* read here: this closure
+                    // is the `Transition`'s child, and reading it here would
+                    // re-run this whole match (and re-await `rows`) on a pure
+                    // layout toggle. `CardsView`/`Pager`/`EmptyState` below each
+                    // take the `Memo` itself and read it in their own reactive
+                    // scope instead — the same split `crate::catalog::ResultCards`
+                    // uses, and its own doc explains why (a fixed href/branch
+                    // baked at this level would need the next search to notice a
+                    // switch made in between).
                     let q = url_q.get();
                     let searching = !q.is_empty();
-                    // The way home keeps the search and drops only the cursor —
-                    // `/catalog` learned this one: a stale cursor must not cost
-                    // the user the query they typed. `base` alone did.
-                    let home = my_url(base, &q, None);
                     Suspend::new(async move {
                     match rows.await.all_cards {
                         Ok(view) if view.cards.is_empty() => {
-                            view! { <EmptyState searching paged home=home.clone() /> }.into_any()
+                            view! { <EmptyState searching paged base q list_view /> }.into_any()
                         }
                         Ok(view) => {
                             let next = view.next_cursor.clone();
                             view! {
-                                <CardsTable rows=view.cards />
-                                <Pager next paged q base />
+                                <CardsView rows=view.cards list_view />
+                                <Pager next paged q base list_view />
                             }
                                 .into_any()
                         }
@@ -325,6 +394,7 @@ fn AllCardsBody(base: &'static str, class: &'static str, back: bool) -> impl Int
                         // `/catalog`'s own error arm was given a way home for; it
                         // is the same defect and this is the same fix.
                         Err(e) => {
+                            let q = StoredValue::new(q);
                             view! {
                                 <ErrorNote
                                     what="Couldn't load your cards"
@@ -334,7 +404,9 @@ fn AllCardsBody(base: &'static str, class: &'static str, back: bool) -> impl Int
                                 >
                                     <Show when=move || paged.get()>
                                         <a
-                                            href=home.clone()
+                                            href=move || {
+                                                my_url(base, &q.get_value(), list_view.get(), None)
+                                            }
                                             class="text-destructive text-sm font-medium underline"
                                             data-testid="page-first"
                                         >
@@ -366,11 +438,23 @@ fn RowsSkeleton() -> impl IntoView {
 /// collection wants a pointer at the catalog, a filtered-out search wants its
 /// term blamed, and a walked-past-the-end page wants a way back.
 ///
-/// `home` is page one *of the current search* — see the caller: dropping the
-/// query along with the cursor made the way out cost the user their search.
+/// `q` is the current search and `base` the route (`/my` or [`ALL_CARDS_PATH`])
+/// — together with `list_view` they build page one *of the current search, in
+/// the current layout*: dropping the query along with the cursor made the way
+/// out cost the user their search, and baking the layout at construction made
+/// it cost them their grid/list choice the moment they toggled it after this
+/// state was already on screen (`list_view` is read reactively inside the
+/// `href` closure for exactly that reason — see `AllCardsBody`'s comment on
+/// why the layout Memo is threaded down rather than read at the call site).
 #[component]
-fn EmptyState(searching: bool, paged: Memo<bool>, home: String) -> impl IntoView {
-    let home = StoredValue::new(home);
+fn EmptyState(
+    searching: bool,
+    paged: Memo<bool>,
+    base: &'static str,
+    q: String,
+    list_view: Memo<bool>,
+) -> impl IntoView {
+    let q = StoredValue::new(q);
     view! {
         <div class="text-muted-foreground py-12 text-center text-sm" data-testid="all-cards-empty">
             <Show
@@ -393,12 +477,157 @@ fn EmptyState(searching: bool, paged: Memo<bool>, home: String) -> impl IntoView
             >
                 <p>
                     "Nothing on this page. "
-                    <a href=move || home.get_value() class="underline">
+                    <a
+                        href=move || my_url(base, &q.get_value(), list_view.get(), None)
+                        class="underline"
+                    >
                         "Back to the start"
                     </a> "."
                 </p>
             </Show>
         </div>
+    }
+}
+
+/// One resolved keyset page in whichever layout is selected — the table or the
+/// tile grid. Mirrors `crate::catalog::ResultCards`: the layout read lives in
+/// this closure, not in the caller that resolved `rows`, so a pure view-switch
+/// click does not need to re-await the `all_cards` resource (see
+/// `AllCardsBody`'s comment on the same split).
+#[component]
+fn CardsView(rows: Vec<AllCardsRow>, list_view: Memo<bool>) -> impl IntoView {
+    let rows = StoredValue::new(rows);
+    view! {
+        {move || {
+            let rows = rows.get_value();
+            if list_view.get() {
+                view! { <CardsTable rows /> }.into_any()
+            } else {
+                view! { <AllCardsGrid rows /> }.into_any()
+            }
+        }}
+    }
+}
+
+/// The grid layout's tiles, capped the same way `/catalog`'s own grid is
+/// (`crate::catalog::GRID_CLASS`) so the two column/breakpoint schemes cannot
+/// drift apart.
+#[component]
+fn AllCardsGrid(rows: Vec<AllCardsRow>) -> impl IntoView {
+    view! {
+        <ul class=GRID_CLASS data-testid="all-cards-grid">
+            {rows.into_iter().map(|row| view! { <AllCardsTile row /> }).collect_view()}
+        </ul>
+    }
+}
+
+/// One tile: image, name, and the ownership badges the table's OWNED/WANTED
+/// cells carry — the essentials the task called for. The WHERE column's
+/// per-collection breakdown is deliberately left off the tile (it is the one
+/// column with no fixed-width home on a card-sized tile — see the module doc
+/// on `LocationSummary`'s three shapes); a reader who wants it switches to
+/// list, which is one click away in the same control.
+///
+/// Selection stays reachable here: `SelectionCheckbox` is a sibling of the
+/// `<a>`, not nested inside it (nesting it would let a tap both toggle the
+/// selection *and* follow the card link, since a click on a descendant
+/// bubbles to the anchor's own click). Whether that reach is the right call is
+/// a real design decision, not an oversight — see specs/app-ui.md's Findings
+/// entry for the grid-toggle task for the alternative considered and why this
+/// one was picked.
+#[component]
+fn AllCardsTile(row: AllCardsRow) -> impl IntoView {
+    let owned = row.owned();
+    let AllCardsRow { card, wanted, .. } = row;
+    let preview = card.clone();
+    let oracle_id = card.oracle_id;
+    let href = format!("/cards/{oracle_id}");
+    let alt_name = card.name.clone();
+    let link_name = card.name.clone();
+    let image_uri = card.image_uri.clone();
+
+    let selection = use_selection();
+    let key = SelectionKey::Card { oracle_id };
+    let selected = selection.selected(key);
+    let selectable = (owned > 0).then(|| SelectedCard {
+        key,
+        oracle_id,
+        name: card.name.clone(),
+        image_uri: card.image_uri.clone(),
+    });
+
+    view! {
+        <li
+            class="group/tile flex flex-col gap-2"
+            data-testid="all-cards-tile"
+            data-oracle=oracle_id.to_string()
+            data-state=move || selected.get().then_some("selected")
+        >
+            <div class="relative">
+                // hover=false: the tile is already the card art, same call
+                // `catalog::CardTile` makes — a hover card over it would be a
+                // smaller copy of the image already on screen. The touch sheet
+                // (and its DFC flip) stays on regardless.
+                <CardPreview card=preview hover=false>
+                    <a
+                        href=href
+                        class="focus-visible:ring-ring relative block rounded-lg focus-visible:ring-2 focus-visible:outline-none"
+                    >
+                        <Skeleton class="aspect-[5/7] w-full" />
+                        {image_uri
+                            .map(|src| {
+                                view! {
+                                    <img
+                                        src=src
+                                        alt=alt_name
+                                        loading="lazy"
+                                        decoding="async"
+                                        class="absolute inset-0 size-full rounded-lg object-cover"
+                                    />
+                                }
+                            })}
+                        <div class="absolute right-1.5 top-1.5 flex flex-col items-end gap-1">
+                            {(owned > 0)
+                                .then(|| {
+                                    view! {
+                                        <span data-testid="owned-badge">
+                                            <Badge variant=BadgeVariant::Secondary size=BadgeSize::Sm>
+                                                {format!("{owned} owned")}
+                                            </Badge>
+                                        </span>
+                                    }
+                                })}
+                            {(wanted > 0)
+                                .then(|| {
+                                    view! {
+                                        <span data-testid="wanted-badge">
+                                            <Badge variant=BadgeVariant::Default size=BadgeSize::Sm>
+                                                {format!("{wanted} wanted")}
+                                            </Badge>
+                                        </span>
+                                    }
+                                })}
+                        </div>
+                    </a>
+                </CardPreview>
+                {selectable
+                    .map(|card| {
+                        view! {
+                            <div
+                                class="bg-background/90 absolute left-1.5 top-1.5 z-10 rounded-full shadow"
+                                data-testid="tile-select"
+                            >
+                                <SelectionCheckbox selection card />
+                            </div>
+                        }
+                    })}
+            </div>
+            <div class="min-w-0">
+                <p class="truncate text-sm font-medium" title=link_name.clone()>
+                    {link_name.clone()}
+                </p>
+            </div>
+        </li>
     }
 }
 
@@ -649,15 +878,18 @@ fn LocationSummary(
 
 #[cfg(test)]
 mod tests {
-    use super::{count_or_dash, my_url};
+    use super::{count_or_dash, is_grid_view, my_url};
 
     #[test]
     fn url_omits_empty_parts() {
-        assert_eq!(my_url("/my", "", None), "/my");
-        assert_eq!(my_url("/my", "", Some("")), "/my");
-        assert_eq!(my_url("/my", "bolt", None), "/my?q=bolt");
-        assert_eq!(my_url("/my", "", Some("abc")), "/my?cursor=abc");
-        assert_eq!(my_url("/my", "bolt", Some("abc")), "/my?q=bolt&cursor=abc");
+        assert_eq!(my_url("/my", "", true, None), "/my");
+        assert_eq!(my_url("/my", "", true, Some("")), "/my");
+        assert_eq!(my_url("/my", "bolt", true, None), "/my?q=bolt");
+        assert_eq!(my_url("/my", "", true, Some("abc")), "/my?cursor=abc");
+        assert_eq!(
+            my_url("/my", "bolt", true, Some("abc")),
+            "/my?q=bolt&cursor=abc"
+        );
     }
 
     #[test]
@@ -665,11 +897,11 @@ mod tests {
         // A card name can carry `&`, `+`, `/` and spaces (`Fire // Ice`,
         // `Borrowing 100,000 Arrows`); none may be read as URL structure.
         assert_eq!(
-            my_url("/my", "fire // ice", None),
+            my_url("/my", "fire // ice", true, None),
             "/my?q=fire%20%2F%2F%20ice"
         );
         assert_eq!(
-            my_url("/my", "a&b", Some("c d")),
+            my_url("/my", "a&b", true, Some("c d")),
             "/my?q=a%26b&cursor=c%20d"
         );
     }
@@ -679,15 +911,42 @@ mod tests {
         // The mobile drill-down target keeps its own base: a search or a page
         // taken there must not bounce the reader back to `/my`, which on a
         // phone is the collection list rather than this table.
-        assert_eq!(my_url(super::ALL_CARDS_PATH, "", None), "/my/all");
+        assert_eq!(my_url(super::ALL_CARDS_PATH, "", true, None), "/my/all");
         assert_eq!(
-            my_url(super::ALL_CARDS_PATH, "bolt", None),
+            my_url(super::ALL_CARDS_PATH, "bolt", true, None),
             "/my/all?q=bolt"
         );
         assert_eq!(
-            my_url(super::ALL_CARDS_PATH, "bolt", Some("abc")),
+            my_url(super::ALL_CARDS_PATH, "bolt", true, Some("abc")),
             "/my/all?q=bolt&cursor=abc"
         );
+    }
+
+    #[test]
+    fn grid_is_the_non_default_view_unlike_catalog() {
+        // The opposite polarity from `/catalog`'s `?view=list`, on purpose —
+        // see `VIEW_PARAM`'s doc comment. A bare URL (list_view = true) omits
+        // the param entirely; choosing grid (list_view = false) is what gets
+        // spelled out.
+        assert_eq!(my_url("/my", "", false, None), "/my?view=grid");
+        assert_eq!(my_url("/my", "bolt", false, None), "/my?q=bolt&view=grid");
+        assert_eq!(
+            my_url("/my", "bolt", false, Some("abc")),
+            "/my?q=bolt&view=grid&cursor=abc"
+        );
+        assert_eq!(
+            my_url(super::ALL_CARDS_PATH, "", false, None),
+            "/my/all?view=grid"
+        );
+    }
+
+    #[test]
+    fn is_grid_view_reads_only_the_exact_value() {
+        assert!(!is_grid_view(None));
+        assert!(!is_grid_view(Some("")));
+        assert!(!is_grid_view(Some("list")));
+        assert!(!is_grid_view(Some("Grid")));
+        assert!(is_grid_view(Some("grid")));
     }
 
     #[test]
@@ -705,24 +964,48 @@ mod tests {
 /// `before` cursor. Browser Back already walks the pages you came through
 /// (each Next is a real history entry), so the only thing missing was a way to
 /// jump home — which is what "Back to the start" is.
+///
+/// **Reactive hrefs, not baked strings** (mirrors `crate::catalog::Pager`'s
+/// own finding, specs/app-ui.md → "Catalog paging via `?cursor=`"): this
+/// component is mounted once per `(q, cursor)` resolution and stays mounted
+/// across a pure view-switch click (see `AllCardsBody`'s comment on why), so a
+/// fixed `href` computed at construction would still point at the layout that
+/// was current when the page loaded — paging a grid reader back into the
+/// table.
 #[component]
-fn Pager(next: Option<String>, paged: Memo<bool>, q: String, base: &'static str) -> impl IntoView {
+fn Pager(
+    next: Option<String>,
+    paged: Memo<bool>,
+    q: String,
+    base: &'static str,
+    list_view: Memo<bool>,
+) -> impl IntoView {
     const LINK: &str =
         "border-input hover:bg-accent hover:text-accent-foreground rounded-md border px-3 py-1.5 text-sm";
-    let start_url = my_url(base, &q, None);
-    let next_url = next.as_deref().map(|c| my_url(base, &q, Some(c)));
+    let q = StoredValue::new(q);
 
     view! {
         <nav aria-label="Pagination" class="flex items-center justify-between gap-2">
             <Show when=move || paged.get() fallback=|| view! { <span></span> }>
-                <a href=start_url.clone() class=LINK data-testid="page-first">
+                <a
+                    href=move || my_url(base, &q.get_value(), list_view.get(), None)
+                    class=LINK
+                    data-testid="page-first"
+                >
                     "← Back to the start"
                 </a>
             </Show>
-            {next_url
-                .map(|url| {
+            {next
+                .map(|c| {
+                    let c = StoredValue::new(c);
                     view! {
-                        <a href=url class=format!("{LINK} ml-auto") data-testid="page-next">
+                        <a
+                            href=move || {
+                                my_url(base, &q.get_value(), list_view.get(), Some(&c.get_value()))
+                            }
+                            class=format!("{LINK} ml-auto")
+                            data-testid="page-next"
+                        >
                             "Next page →"
                         </a>
                     }

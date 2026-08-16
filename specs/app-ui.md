@@ -6530,3 +6530,207 @@ gap (e2e-suite skill), not a regression. `cargo fmt --all --check` clean;
 `cargo clippy -p app --features hydrate,component-bench --target
 wasm32-unknown-unknown`, `--features hosted,component-bench --all-targets`, and
 `--features native --all-targets` all clean.
+
+### My-cards grid view (grid toggle, 2026-08-15, WB-01M031Z4MN401FTKNKPE1RZE2E)
+
+`app/src/components/view_switch.rs` (new — the shared `ViewSwitch` widget),
+`app/src/catalog.rs` (`ViewSwitch`/`focus_switch_item` moved out; `GRID_CLASS`
+now `pub(crate)`), `app/src/my/all_cards.rs` (`AllCardsGrid`/`AllCardsTile`,
+`CardsView`, `my_url`/`Pager`/`EmptyState` gain a layout param), `app/src/my/
+collection.rs` (`CollectionGrid`/`HoldingTile`/`FolderTile`, `collection_url`/
+`Pager`/`LoadError` gain a layout param), `app/src/my/root.rs` (the root list's
+`All cards` link forwards `?view=` too). Maintainer ruling the same day: the
+grid/list toggle Catalog already had applies to **`/my` (All cards) and every
+`/my/collections/:id`** (binder and deck), "same control, same feel."
+
+**The widget is shared; the URL convention is not.** `ViewSwitch` (the
+`radiogroup`, roving `tabindex`, arrow-key handling) moved out of `catalog.rs`
+into `app/src/components/view_switch.rs` — a plain `(list_view: Memo<bool>,
+on_change: Callback<bool>)` component with no router state of its own — so
+Catalog and both My-cards surfaces mount the literal same control rather than
+three components that could drift. Each page still owns its own URL builder
+(`catalog_url`/`my_url`/`collection_url`) and calls `ViewSwitch` with its own
+`go` closure, because the three disagree on what else rides in the URL
+(Catalog carries `page`, the others don't) and — the real decision — on
+**which view is the default**.
+
+**List stays the default on `/my` and every collection view; grid is the
+opt-in `?view=grid` (Catalog's own default is the opposite: `?view=list` opts
+into its table).** These two routes shipped table-only for the whole of Phase
+5 before this task; flipping the bare-URL default to match Catalog would have
+silently changed what every existing bookmark, deep link and e2e assertion
+against `/my`, `/my/all` and `/my/collections/:id` renders. The rule that *is*
+shared across all three surfaces: the URL only ever spells out the
+**non-default** view for that surface, never both values. Confirmed cheaply —
+this is exactly why every pre-existing test in `all-cards.spec.ts` and
+`collection-view.spec.ts` needed zero changes beyond a new required-but-unused
+parameter on the two `my_url`/`collection_url` test call sites.
+
+**Deck sections carry over into the grid, one heading plus one tile grid per
+section**, not a single flattened grid — `group_deck`'s output feeds
+`CollectionGrid` exactly as it feeds `CollectionTable`, so a section's slot
+count and board/type grouping cannot read differently between layouts. Proven
+by `collection-view.spec.ts`'s new "a deck's grid keeps its section groupings"
+test, which reads the table's own `[data-section]` text as the expectation
+rather than re-deriving the bucketing rules a second time in TypeScript — the
+grid is only asserted to *agree with the table*, which is the actual contract.
+
+**Selection stays reachable in grid mode — a deliberate choice, not a gap.**
+Catalog has no precedent to mirror here (it has no ownership selection at
+all), so this was decided fresh: `SelectionCheckbox` renders as an absolutely-
+positioned sibling of each tile's `<a>` (never nested inside it — a click on a
+descendant bubbles to the anchor, which would both toggle the selection *and*
+navigate away), same mechanism on `AllCardsTile` and `HoldingTile`. The count
+stepper stays list-only, per the task's own ruling: a tile shows `present`/
+`here`/`wanted`/`owned` as read-only badges (`HereCount`'s edit machinery is
+not reproduced), so grid remains a display mode and list remains the one
+editing surface. `collection-view.spec.ts`'s new tile test asserts both halves
+in one place — `[data-testid=count-stepper]` has zero count on a tile, and
+clicking `[data-testid=tile-select]` puts the card in the shared tray exactly
+as a row's checkbox would.
+
+**Folder rows get a tile too.** `/my/collections/:id`'s child collections are
+folder rows sharing the table's columns; in grid they render as a small
+`FolderTile` (folder/deck glyph, the same rolled-up count `FolderTableRow`
+reads from the shared collection tree, in its own `Suspense` for the same
+reason). `/my`'s grid has no folder-equivalent to carry (its rows are already
+flat, cross-collection oracle cards), so `AllCardsGrid` has no such component.
+
+**Reactive hrefs, not baked strings, on every control that survives a pure
+layout toggle.** Both `CardsView`/`CollectionBody`'s table-vs-grid branch and
+every `Pager`/`EmptyState`/`LoadError` link read `list_view: Memo<bool>`
+inside their own `move ||` closure rather than at the call site that resolved
+their data — mirroring `crate::catalog::ResultCards`/`Pager`'s own established
+fix (see "Catalog paging via `?cursor=`" above) for the identical reason: the
+`<Transition>`/`<Suspense>` body that resolves a page's rows deliberately does
+**not** re-run on a pure view-switch click (baking `list_view.get()` into that
+body's own tracked reads would make the resource re-await on every toggle), so
+anything mounted from inside it that needs to react to the switch has to read
+the `Memo` itself, in its own scope, after mounting.
+
+**WHERE/location summary deliberately left off the `/my` tile.** The task
+asked for "the essentials (image, name, count badge(s))"; the per-collection
+breakdown (`LocationSummary`'s three shapes: dash, one link, or a disclosure)
+has no fixed-width home on a card-sized tile the way it does in a table
+column, and a reader who wants it is one click away from list in the same
+control. Not evaluated as a gap — recorded here so nobody "fixes" it as an
+oversight.
+
+**View state does not carry across `/my` ↔ collection navigation** —
+URL-per-page, not a persisted preference (out of scope per the task). One
+exception, deliberately: the mobile root drill-down's `All cards` row
+(`app/src/my/root.rs`) forwards the bare `/my`'s own `?view=` down into
+`/my/all` alongside `?q=`/`?cursor=`, so a grid-mode link opened on a phone
+lands the reader on the same layout at the drill-down target — the same
+treatment `?q=`/`?cursor=` already got there, extended to the new param rather
+than left out.
+
+**Verification.** `cargo fmt --all --check` clean. `cargo clippy --workspace
+--exclude frontend --exclude three_rings --all-targets`, `-p frontend --target
+wasm32-unknown-unknown`, `-p app --features native --all-targets`, `-p app
+--features hosted,component-bench --all-targets`, and `-p app --features
+hydrate,component-bench --target wasm32-unknown-unknown` all clean, `-D
+warnings`. `cargo test --workspace --exclude frontend --exclude three_rings`:
+440 passed (397 app + 43 shared), 0 failed — includes new unit tests for
+`is_grid_view` and the opposite-of-Catalog URL polarity in both
+`my/all_cards.rs` and `my/collection.rs`. e2e, chromium `@fast`: 10 new tests
+across `all-cards.spec.ts`/`collection-view.spec.ts` (grid renders on `/my`,
+`/my/all`, a binder and a deck; URL carries `?view=grid`; sections preserved;
+selection reachable; 390px no-overflow) all green. Full `catalog.spec.ts`,
+`all-cards.spec.ts`, `collection-view.spec.ts`, `my-root.spec.ts` `@fast` tier
+run serially (`--workers=1`, low contention): 95/97 — the 2 failures are
+`all-cards.spec.ts`'s "the location summary expands to the collections it
+names" and the WHERE-truncation mobile test, both failing on a fixture-data
+precondition ("dev seed should hold a card in two collections" / "…a card
+this account owns nowhere") rather than on any assertion this task's code
+touches; the first of the two was already confirmed pre-existing via `git
+stash` against an unmodified branch in the hover-preview task above, and
+`removal.spec.ts`'s "owns-nowhere pool exhaustion" growing over time is
+called out by name in `.claude/skills/e2e-suite/SKILL.md`'s known state —
+not re-filed here. A parallel (9-worker) run of `catalog.spec.ts` alone
+surfaced a *different* subset of failures on each of two runs (all traced to
+Catalog controls this task never touched: the pager, the filter rail's
+debounce, the back-button session test), and every one of them passed
+individually and in the serial run — the documented post-bulk-load
+contention class, not a regression from moving `ViewSwitch`.
+
+### Grid-toggle round 2: the grid's frozen snapshot vs. a live stepper edit (2026-08-15)
+
+`app/src/my/collection.rs` (`RowDeltas`, `live_present`, `accumulate_row_delta`;
+`HereCount`/`CardTableRow`/`CollectionTable`/`CollectionBody`/`CollectionGrid`/
+`HoldingTile` each gain a `row_deltas` parameter). Adversarial review, major:
+`CollectionBody` freezes `view: CollectionView` into a `StoredValue` the
+moment it resolves (see this file's own module doc, "A commit does not
+refetch the view"), and `HoldingTile` read straight from that frozen
+snapshot with nothing overlaying it. The table tolerates the same freeze
+because `CardTableRow`'s `HaveStepper` owns its own live displayed value —
+but that value lives inside a component the table/grid switch itself
+unmounts the moment you leave list mode, so a HERE edit made in list mode
+was invisible on the tile after switching to grid (stale: a tile reading 2
+when the header already said 3), and a commit-to-zero left a **ghost tile**
+rendering for a holding a `remove_holding` call had already deleted
+server-side — persisting until an unrelated revision bump.
+
+**Fix shape: (a), a page-level per-row delta map** (the reviewer's preferred
+option over refetching `view_res` on grid entry, which would race a
+commit-in-flight against the toggle). `RowDeltas` is a third aggregate
+alongside `here_delta`/`section_delta`, keyed by `holding_id` — the one
+identifier a `HereCount` commit and a `HoldingTile` read can agree names the
+same row without a second resource read. `HereCount::on_change` pushes every
+commit's `(to - from)` into it, in *addition to* (never instead of) the two
+existing aggregates; `CollectionGrid` reads it exactly once, **untracked**,
+at its own construction — correct and sufficient because `CollectionBody`'s
+table/grid branch is itself the reactive boundary (a fresh `CollectionGrid`
+instance is built every time the switch is clicked into grid), and nothing
+can edit HERE while grid is showing (no stepper there). Reset alongside
+`here_delta.set(0)` the instant a fresh payload lands, for the identical
+reason that reset already documents.
+
+**The removal/Undo pair nets out correctly for free.** A commit-to-zero
+pushes `(0 - present)`; Undo pushes `(copies - 0)` back — both keyed by the
+*same* captured `holding_id` prop value, even though `HaveStepper::undo_removal`
+rewires its own internal `holding_id` signal to the id the server
+re-inserted under. Neither `HereCount` nor `RowDeltas` ever sees that
+rewiring (it's a plain, un-reactive prop, read once at construction), so
+both halves of a remove/undo pair always key against the value the row was
+built with — which is also what `HoldingTile`'s own `holding_id` prop reads,
+since both come from the same frozen snapshot. Pinned by a unit test
+(`a_removal_and_its_undo_net_back_to_the_snapshot`).
+
+**Deliberately out of scope, stated so it isn't mistaken for an oversight
+later:** the deck section header's own slot count in the grid stays exactly
+what `group_deck` computed from the frozen snapshot — unlike the table's
+`section_slots_live`, it does not get a live overlay. Deriving one correctly
+needs both the old and new present per `(oracle, board)` group at commit time
+(`section_slot_delta`'s own formula, `max(held, desired)`, is not a linear
+accumulation the way a plain present-count delta is), which the reviewer's
+two concrete repro cases — a stale tile count, a ghost tile — did not ask
+for. WANTED/OWNED badges on the tile are equally frozen, but that introduces
+no *new* disagreement: the table's own WANTED/OWNED cells are exactly as
+static already.
+
+**Verification.** Unit: `app/src/my/collection.rs` gained 5 tests
+(`live_present_applies_the_delta`, `live_present_never_goes_negative`,
+`accumulate_row_delta_sums_repeated_commits_to_the_same_holding`,
+`accumulate_row_delta_tracks_each_holding_independently`,
+`a_removal_and_its_undo_net_back_to_the_snapshot`) — `cargo test -p app
+--features hosted my::collection::`: 26/26. Full workspace:
+`cargo test --workspace --exclude frontend --exclude three_rings`: 402
+app + 43 shared, 0 failed. `cargo fmt --all --check`, `cargo clippy -p app
+--features hosted,component-bench --all-targets`, and `cargo clippy -p app
+--features hydrate,component-bench --target wasm32-unknown-unknown` all
+clean at `-D warnings`. e2e (chromium `@fast`, `--workers=1`): two new
+`collection-view.spec.ts` tests — edit HERE in list mode then switch to
+grid (tile shows the new count, not the snapshot's), and zero a row in list
+mode then switch to grid (its tile is gone; a second, un-edited card's tile
+survives as the positive control) — plus the full `collection-view.spec.ts`
+(30/30) and `all-cards.spec.ts` (19/21, the same 2 pre-existing
+fixture-pool failures already on record above, unrelated to this fix) `@fast`
+tiers, serially.
+
+**The e2e fold, same round.** The two tile-selection tests
+(`all-cards.spec.ts`, `collection-view.spec.ts`) asserted the selection tray
+appeared after a tile-select click but not that the click *stayed on the
+page* — since the tray is shell-level, that assertion alone would pass even
+if the click had also navigated. Both now capture `page.url()` before the
+click and assert it is unchanged after.

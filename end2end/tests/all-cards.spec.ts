@@ -821,3 +821,99 @@ test.describe("mobile — a long collection name does not widen the table (P6-02
     }
   });
 });
+
+// ------------------------------------------------------------ grid view ----
+// The grid/list toggle Catalog already had, applied here
+// (WB-01M031Z4MN401FTKNKPE1RZE2E). List stays the *default* on this route
+// (opposite of Catalog's own default — see `my_url`'s doc comment in
+// `app/src/my/all_cards.rs`), so a bare `/my`/`/my/all` load is unaffected;
+// `?view=grid` is what opts in.
+
+test.describe("grid view (grid-toggle task)", () => {
+  test("the switch renders a grid on /my/all, and the URL carries it @fast", async ({
+    page,
+  }) => {
+    await page.goto("/my/all");
+    await hydrated(page);
+    await expect(page.getByTestId("all-cards-table")).toBeVisible();
+    await expect(page.getByTestId("all-cards-grid")).toHaveCount(0);
+
+    const group = page.getByRole("radiogroup", { name: "Result layout" });
+    await group.getByRole("radio", { name: "Grid view" }).click();
+
+    await page.waitForURL((url) => url.searchParams.get("view") === "grid");
+    await expect(page.getByTestId("all-cards-grid")).toBeVisible();
+    await expect(page.getByTestId("all-cards-table")).toHaveCount(0);
+
+    // The layout choice is in the URL, so it survives a reload — same
+    // contract Catalog's own switch carries (catalog.spec.ts).
+    await page.reload();
+    await expect(page.getByTestId("all-cards-grid")).toBeVisible();
+  });
+
+  test("switching to grid keeps the query, on /my @fast", async ({
+    page,
+    request,
+  }) => {
+    const view = await allCards(request);
+    const needle = view.cards[0].card.name.slice(0, 6);
+
+    await page.goto(`/my?q=${encodeURIComponent(needle)}`);
+    await hydrated(page);
+    await page.getByRole("radio", { name: "Grid view" }).click();
+    await page.waitForURL((url) => url.searchParams.get("view") === "grid");
+    expect(new URL(page.url()).searchParams.get("q")).toBe(needle);
+    await expect(page.getByTestId("all-cards-grid")).toBeVisible();
+  });
+
+  test("a grid tile links to the card and carries its ownership badge @fast", async ({
+    page,
+    request,
+  }) => {
+    const view = await allCards(request);
+    const owned = view.cards.find((c) => (c.card.owned ?? 0) > 0);
+    test.skip(!owned, "dev seed should own at least one all-cards row");
+
+    await page.goto("/my/all?view=grid");
+    await hydrated(page);
+    const tile = page.locator(
+      `[data-testid="all-cards-tile"][data-oracle="${owned!.card.oracle_id}"]`,
+    );
+    await expect(tile).toBeVisible();
+    await expect(tile.locator("a").first()).toHaveAttribute(
+      "href",
+      `/cards/${owned!.card.oracle_id}`,
+    );
+    await expect(tile.getByTestId("owned-badge")).toContainText(
+      `${owned!.card.owned} owned`,
+    );
+
+    // Selection stays reachable in grid mode (a deliberate choice, not an
+    // oversight — see specs/app-ui.md's Findings for the grid-toggle task):
+    // the tile's own select control toggles the shared tray same as a row's.
+    const before = page.url();
+    await tile.getByTestId("tile-select").click();
+    await expect(page.getByTestId("selection-tray")).toBeVisible();
+    await expect(page.getByTestId("tray-count")).toContainText("1 card");
+    // The tray lives in the shell, not the tile — so on its own, the tray
+    // appearing does not prove the click was a *select*, not a navigation
+    // that happened to land somewhere the tray also renders. Assert the URL
+    // never moved: the click stayed on this page.
+    expect(page.url()).toBe(before);
+  });
+
+  test("390px: the grid renders without page overflow on /my/all @fast", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/my/all?view=grid");
+    await hydrated(page);
+    await expect(page.getByTestId("all-cards-grid")).toBeVisible();
+    await expect(page.getByTestId("all-cards-tile").first()).toBeVisible();
+
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow, "the grid should not widen the page at 390px").toBeLessThanOrEqual(1);
+  });
+});
