@@ -49,6 +49,7 @@ type Summary = {
   image_uri: string | null;
   owned: number | null;
   faces: FaceSummary[];
+  printing_id: string | null;
 };
 
 async function search(
@@ -154,7 +155,7 @@ test("a malformed card id renders not-found rather than failing @fast", async ({
   await expect(page.getByRole("heading", { name: "Card not found" })).toBeVisible();
 });
 
-test("an anonymous visitor gets no your-copies section @fast", async ({
+test("an anonymous visitor gets no your-copies section, no wants section, and no steppers @fast", async ({
   page,
   request,
 }) => {
@@ -162,8 +163,16 @@ test("an anonymous visitor gets no your-copies section @fast", async ({
   await page.goto(`/cards/${card.oracle_id}`);
   await hydrated(page);
   await expect(page.getByTestId("card-name")).toContainText(card.name);
-  // `ownership` is None for anonymous callers — the section is absent, not empty.
+  // `ownership`/`wants` are both None for anonymous callers — the sections
+  // are absent, not empty (an authed reader who owns/wants nothing still gets
+  // the section, with its own empty-state sentence).
   await expect(page.getByTestId("your-copies")).toHaveCount(0);
+  await expect(page.getByTestId("your-wants")).toHaveCount(0);
+  // Not just the sections: no stepper of either shape renders anywhere on
+  // the page for an anonymous reader — inert, not merely hidden.
+  await expect(page.locator('[data-testid="count-stepper"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="ownership-row"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="want-row"]')).toHaveCount(0);
 });
 
 test.describe("authed", () => {
@@ -217,6 +226,320 @@ test.describe("authed", () => {
     expect(counts.length).toBeGreaterThan(0);
     expect(counts.every((n) => Number.isInteger(n) && n > 0)).toBe(true);
     expect(counts.reduce((a, b) => a + b, 0)).toBe(card!.owned);
+  });
+});
+
+// ----------------------------------------------------------------- writes ---
+//
+// The have/want steppers (P6-054's semantics, lifted to
+// `app/src/components/holding_stepper.rs` and reused here from the
+// `/my/collections/:id` HERE-cell precedent). Isolation follows
+// `collection-view.spec.ts`'s own convention: every write happens inside a
+// `zz-e2e-…` scratch collection created via the API and deleted in a
+// `finally`, so these tests never touch the shared dev-seed tree other specs
+// (and other parallel workers) are reading at the same time.
+
+let scratchSeq = 0;
+function scratchName(prefix: string): string {
+  return `zz-e2e-cd-${prefix}-w${test.info().workerIndex}-${++scratchSeq}`;
+}
+
+async function createCollection(
+  request: APIRequestContext,
+  name: string,
+): Promise<string> {
+  const res = await request.post("/api/collections", {
+    data: { parent_id: null, kind: "binder", name, format: null },
+  });
+  expect(res.status(), `create ${name}`).toBe(200);
+  return ((await res.json()) as { id: string }).id;
+}
+
+async function deleteCollection(request: APIRequestContext, id: string) {
+  await request.post(`/api/collections/${id}/delete`, { data: {} });
+}
+
+async function addHave(
+  request: APIRequestContext,
+  collectionId: string,
+  printingId: string,
+  quantity: number,
+  finish?: "nonfoil" | "foil" | "etched",
+) {
+  const res = await request.post(`/api/collections/${collectionId}/have`, {
+    data: { printing_id: printingId, quantity, finish },
+  });
+  expect(res.status(), "add have").toBe(200);
+}
+
+async function addWant(
+  request: APIRequestContext,
+  collectionId: string,
+  oracleId: string,
+  quantity: number,
+) {
+  const res = await request.post(`/api/collections/${collectionId}/want`, {
+    data: { oracle_id: oracleId, quantity },
+  });
+  expect(res.status(), "add want").toBe(200);
+}
+
+type OwnershipEntry = {
+  collection_id: string;
+  collection_name: string;
+  printing_id: string;
+  quantity: number;
+  holding_id: string | null;
+};
+type WantEntry = {
+  collection_id: string;
+  collection_name: string;
+  quantity: number;
+  desire_id: string | null;
+};
+type Detail = { ownership: OwnershipEntry[] | null; wants: WantEntry[] | null };
+
+async function cardDetail(
+  request: APIRequestContext,
+  oracleId: string,
+): Promise<Detail> {
+  const res = await request.get(`/api/cards/${oracleId}`);
+  expect(res.status()).toBe(200);
+  return (await res.json()) as Detail;
+}
+
+/// The header total sums *every* collection holding/wanting this card, not
+/// just the scratch collection a test creates — the dev-seed tree and other
+/// specs' own scratch collections (this suite's fixture-pool contention,
+/// e2e-suite skill's own "KNOWN SUITE STATE" note) can already hold real
+/// copies/wants of a well-known card like Lightning Bolt. So the header
+/// assertions below compare against a **baseline read taken immediately
+/// before this test's own write**, not a hardcoded absolute number — the
+/// same reasoning `all-cards.spec.ts` applies to its own cross-checks.
+function ownedSum(d: Detail): number {
+  return (d.ownership ?? []).reduce((s, o) => s + o.quantity, 0);
+}
+function wantedSum(d: Detail): number {
+  return (d.wants ?? []).reduce((s, w) => s + w.quantity, 0);
+}
+
+const ownershipRow = (page: import("@playwright/test").Page, collectionId: string) =>
+  page.locator(
+    `[data-testid="ownership-row"][data-collection-id="${collectionId}"]`,
+  );
+const wantRow = (page: import("@playwright/test").Page, collectionId: string) =>
+  page.locator(`[data-testid="want-row"][data-collection-id="${collectionId}"]`);
+
+test.describe("the ownership + wants steppers", () => {
+  test.use({ storageState: AUTH_STATE });
+
+  test("the have stepper edits Your copies in place, and a reload agrees @fast", async ({
+    page,
+    request,
+  }) => {
+    const card = await exactCard(request, SINGLE_FACE_QUERY);
+    const baseline = ownedSum(await cardDetail(request, card.oracle_id));
+    const scratch = await createCollection(request, scratchName("have"));
+    try {
+      await addHave(request, scratch, card.printing_id!, 2);
+      await page.goto(`/cards/${card.oracle_id}`);
+      await hydrated(page);
+
+      const section = page.getByTestId("your-copies");
+      await expect(section).toContainText(`Your copies · ${baseline + 2}`);
+      const row = ownershipRow(page, scratch);
+      await expect(row).toBeVisible();
+      await expect(row.getByTestId("count-stepper-value")).toHaveText("2");
+
+      await row.getByTestId("count-stepper-inc").click();
+      await page.locator('[data-testid="card-name"]').click();
+
+      await expect(row.getByTestId("count-stepper-value")).toHaveText("3");
+      // The header total follows the same commit — a local delta, not a
+      // refetch (a refetch here would remount every row mid-toast).
+      await expect(section).toContainText(`Your copies · ${baseline + 3}`);
+      await expect(async () => {
+        const after = await cardDetail(request, card.oracle_id);
+        const line = after.ownership!.find((o) => o.collection_id === scratch);
+        expect(line?.quantity).toBe(3);
+      }).toPass({ timeout: 10_000 });
+
+      // Persisted, not just optimistic.
+      await page.reload();
+      await hydrated(page);
+      await expect(page.getByTestId("your-copies")).toContainText(
+        `Your copies · ${baseline + 3}`,
+      );
+      await expect(
+        ownershipRow(page, scratch).getByTestId("count-stepper-value"),
+      ).toHaveText("3");
+    } finally {
+      await deleteCollection(request, scratch);
+    }
+  });
+
+  test("committing a have to zero removes it, and Undo restores it @fast", async ({
+    page,
+    request,
+  }) => {
+    // A card none of this file's *total*-asserting tests touch (see
+    // `ownedSum`'s doc) — this test's own assertions are all row/API-scoped
+    // by `scratch`, so sharing a card with `multigrain` below is fine, but
+    // it must not be `SINGLE_FACE_QUERY`/`ADVENTURE_QUERY`, which the
+    // have/want-adjust tests read a header *total* off of concurrently.
+    const card = await firstCard(request, DFC_KEYWORDS_QUERY);
+    const scratch = await createCollection(request, scratchName("zero"));
+    try {
+      await addHave(request, scratch, card.printing_id!, 1);
+      await page.goto(`/cards/${card.oracle_id}`);
+      await hydrated(page);
+
+      const row = ownershipRow(page, scratch);
+      await row.getByTestId("count-stepper-dec").click();
+      await page.locator('[data-testid="card-name"]').click();
+
+      // The stepper is withdrawn — a plain dash, not a live 0 a further +/-
+      // could post against a row `remove_holding` already deleted.
+      await expect(row.getByTestId("here-count")).toHaveText("—");
+      await expect(row.locator('[data-testid="count-stepper"]')).toHaveCount(0);
+
+      const toast = page.locator('[data-name="Toast"]', { hasText: "Removed" });
+      await expect(toast).toContainText(`Removed ${card.name} (1 copy)`);
+      await expect(async () => {
+        const after = await cardDetail(request, card.oracle_id);
+        expect(after.ownership!.find((o) => o.collection_id === scratch)).toBeUndefined();
+      }).toPass({ timeout: 10_000 });
+
+      // Undo reverses it through the same move ledger the collection view's
+      // HERE cell uses — a real ledger undo, not a client-side re-add.
+      await toast.getByRole("button", { name: "Undo" }).click();
+      await expect(row.getByTestId("count-stepper-value")).toHaveText("1");
+      await expect(async () => {
+        const after = await cardDetail(request, card.oracle_id);
+        const line = after.ownership!.find((o) => o.collection_id === scratch);
+        expect(line?.quantity).toBe(1);
+      }).toPass({ timeout: 10_000 });
+    } finally {
+      await deleteCollection(request, scratch);
+    }
+  });
+
+  test("the want stepper edits Your wants in place, and a reload agrees @fast", async ({
+    page,
+    request,
+  }) => {
+    // Exclusive to this test within the file (see `ownedSum`'s doc) — the
+    // header total this test reads must not be perturbed by another test's
+    // concurrent write to the same card.
+    const card = await firstCard(request, ADVENTURE_QUERY);
+    const baseline = wantedSum(await cardDetail(request, card.oracle_id));
+    const scratch = await createCollection(request, scratchName("want"));
+    try {
+      await addWant(request, scratch, card.oracle_id, 2);
+      await page.goto(`/cards/${card.oracle_id}`);
+      await hydrated(page);
+
+      const section = page.getByTestId("your-wants");
+      await expect(section).toContainText(`Your wants · ${baseline + 2}`);
+      const row = wantRow(page, scratch);
+      await expect(row.getByTestId("count-stepper-value")).toHaveText("2");
+
+      await row.getByTestId("count-stepper-inc").click();
+      await page.locator('[data-testid="card-name"]').click();
+
+      await expect(row.getByTestId("count-stepper-value")).toHaveText("3");
+      await expect(section).toContainText(`Your wants · ${baseline + 3}`);
+      await expect(async () => {
+        const after = await cardDetail(request, card.oracle_id);
+        const line = after.wants!.find((w) => w.collection_id === scratch);
+        expect(line?.quantity).toBe(3);
+      }).toPass({ timeout: 10_000 });
+
+      await page.reload();
+      await hydrated(page);
+      await expect(page.getByTestId("your-wants")).toContainText(
+        `Your wants · ${baseline + 3}`,
+      );
+    } finally {
+      await deleteCollection(request, scratch);
+    }
+  });
+
+  test("committing a want to zero removes it politely, with no Undo offered @fast", async ({
+    page,
+    request,
+  }) => {
+    // Desires carry no ledger (`shared::QuickAddReceipt`'s own doc: a `+
+    // Want` is confirmed but never undoable) — a committed zero here is a
+    // direct delete, unlike the have stepper's reversible move.
+    //
+    // `DFC_QUERY`, not `SINGLE_FACE_QUERY`/`ADVENTURE_QUERY`: this test's own
+    // assertions are row/API-scoped, but a shared card must still avoid the
+    // two header-*total*-asserting tests above (see `ownedSum`'s doc).
+    const card = await firstCard(request, DFC_QUERY);
+    const scratch = await createCollection(request, scratchName("wantzero"));
+    try {
+      await addWant(request, scratch, card.oracle_id, 1);
+      await page.goto(`/cards/${card.oracle_id}`);
+      await hydrated(page);
+
+      const row = wantRow(page, scratch);
+      await row.getByTestId("count-stepper-dec").click();
+      await page.locator('[data-testid="card-name"]').click();
+
+      await expect(row.getByTestId("here-count")).toHaveText("—");
+      const toast = page.locator('[data-name="Toast"]', {
+        hasText: `Removed ${card.name} from wants`,
+      });
+      await expect(toast).toBeVisible();
+      // No Undo action — the whole point of "politely": a confirmation, not
+      // a promise this operation cannot keep.
+      await expect(toast.getByRole("button", { name: "Undo" })).toHaveCount(0);
+
+      await expect(async () => {
+        const after = await cardDetail(request, card.oracle_id);
+        expect(after.wants!.find((w) => w.collection_id === scratch)).toBeUndefined();
+      }).toPass({ timeout: 10_000 });
+    } finally {
+      await deleteCollection(request, scratch);
+    }
+  });
+
+  test("a have cell spanning more than one finish refuses the stepper, with the standard message @fast", async ({
+    page,
+    request,
+  }) => {
+    // This test's own assertions are row/API-scoped (see `ownedSum`'s doc);
+    // shares `DFC_KEYWORDS_QUERY` with `zero` above rather than a header-
+    // total-asserting test's card.
+    const card = await firstCard(request, DFC_KEYWORDS_QUERY);
+    const scratch = await createCollection(request, scratchName("multigrain"));
+    try {
+      // Two `holdings` rows behind one (collection, printing) cell — same
+      // printing, different finish — so `holding_id` comes back `None` and
+      // the cell cannot say which grain a typed number would mean.
+      await addHave(request, scratch, card.printing_id!, 2, "nonfoil");
+      await addHave(request, scratch, card.printing_id!, 1, "foil");
+
+      const before = await cardDetail(request, card.oracle_id);
+      const line = before.ownership!.find((o) => o.collection_id === scratch);
+      expect(line?.holding_id, "sanity: the fixture is genuinely multi-grain").toBeNull();
+      expect(line?.quantity).toBe(3);
+
+      await page.goto(`/cards/${card.oracle_id}`);
+      await hydrated(page);
+
+      const row = ownershipRow(page, scratch);
+      await expect(row.locator('[data-testid="count-stepper"]')).toHaveCount(0);
+      const cell = row.getByTestId("here-count");
+      await expect(cell).toHaveText("3");
+      await expect(cell).toHaveAttribute(
+        "title",
+        "several finishes or conditions here — edit them individually",
+      );
+    } finally {
+      await deleteCollection(request, scratch);
+    }
   });
 });
 

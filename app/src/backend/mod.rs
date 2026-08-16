@@ -226,6 +226,12 @@ pub mod paths {
         format!("/api/holdings/{holding_id}/quantity")
     }
 
+    /// Set a desire's quantity. Route template (`{id}` = desire id) / client path.
+    pub const DESIRE_QUANTITY_ROUTE: &str = "/api/desires/{id}/quantity";
+    pub fn desire_quantity(desire_id: Id) -> String {
+        format!("/api/desires/{desire_id}/quantity")
+    }
+
     /// Move (or remove) a named holding stack — the grain-addressed write.
     pub const HOLDING_MOVE_ROUTE: &str = "/api/holdings/{id}/move";
     pub fn holding_move(holding_id: Id) -> String {
@@ -613,4 +619,21 @@ pub trait CollectionStore {
     /// Re-label part or all of a **desire** stack onto another board (as
     /// [`set_holding_board`](Self::set_holding_board), for desired copies).
     async fn set_desire_board(&self, desire_id: Id, req: SetBoard) -> ApiResult<()>;
+
+    /// Set a desire's absolute quantity — the wants counterpart of
+    /// [`Self::set_holding_quantity`] (the card-detail page's want stepper;
+    /// specs/app-ui.md). `0` deletes the desire row and returns `None`;
+    /// otherwise the updated desire. Desires carry no ledger, so unlike a
+    /// holding's commit-to-zero this is a direct write, never undoable — the
+    /// same rule [`shared::QuickAddReceipt`]'s doc states for `+ Want`.
+    ///
+    /// Addressed by **desire id**, not by (collection, oracle, board): a cell
+    /// that sums several board/printing-pin grains has no single row a lone
+    /// number could mean, so [`shared::WantEntry::desire_id`] is `None` there
+    /// and the stepper is not offered.
+    async fn set_desire_quantity(
+        &self,
+        desire_id: Id,
+        req: SetQuantity,
+    ) -> ApiResult<Option<DesireLine>>;
 }

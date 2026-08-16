@@ -400,6 +400,16 @@ impl CollectionStore for NativeBackend {
             .await
     }
 
+    async fn set_desire_quantity(
+        &self,
+        desire_id: Id,
+        req: SetQuantity,
+    ) -> ApiResult<Option<DesireLine>> {
+        self.require_session()?;
+        self.post(&super::paths::desire_quantity(desire_id), &req)
+            .await
+    }
+
     async fn batch_add(
         &self,
         collection_id: Id,

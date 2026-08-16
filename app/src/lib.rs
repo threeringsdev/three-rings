@@ -673,6 +673,39 @@ pub async fn set_holding_quantity(
     }
 }
 
+/// Set a desire's absolute quantity — the wants counterpart of
+/// [`set_holding_quantity`] (specs/app-ui.md → the card-detail want stepper).
+/// `0` deletes the desire row, same documented meaning for a committed zero.
+///
+/// Desires carry no ledger, so unlike [`remove_holding`] a committed zero here
+/// is a direct, non-undoable delete — there is nothing to reverse it into.
+///
+/// Addressed by **desire id**: a cell that sums several board/printing-pin
+/// grains has no single row a lone number could mean, so
+/// `shared::WantEntry::desire_id` is `None` there and the stepper is not
+/// offered.
+#[server(prefix = "/api", endpoint = "set_desire_quantity")]
+pub async fn set_desire_quantity(
+    desire_id: shared::Id,
+    quantity: i32,
+) -> Result<(), ServerFnError<shared::ApiError>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .set_desire_quantity(desire_id, shared::SetQuantity { quantity })
+            .await
+            .map(|_| ())
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (desire_id, quantity);
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
 /// Remove a holding's copies from its collection — the collection view's
 /// committed **0** (specs/app-ui.md → `/my/collections/:id`;
 /// specs/collection-api.md → Move, `to = None`).

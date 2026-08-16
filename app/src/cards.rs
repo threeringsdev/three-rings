@@ -21,12 +21,14 @@
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
-use shared::{CardDetail, CardSummary, OwnershipEntry, PrintingSummary, Ruling};
+use shared::{CardDetail, CardSummary, OwnershipEntry, PrintingSummary, Ruling, WantEntry};
 
+use crate::components::holding_stepper::{HaveStepper, WantStepper};
 use crate::components::states::{self, RetryButton};
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::ui::card::{Card, CardContent, CardHeader, CardTitle};
+use crate::components::ui::count_stepper::StepperCommit;
 use crate::components::ui::hover_card::{HoverCard, HoverCardContent, HoverCardTrigger};
 use crate::components::ui::separator::Separator;
 use crate::components::ui::sheet::{Sheet, SheetContent, SheetDirection};
@@ -34,6 +36,7 @@ use crate::components::ui::skeleton::Skeleton;
 use crate::components::ui::table::{
     Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableWrapper,
 };
+use crate::my::tree::CollectionTreeResource;
 
 /// A card's art, with the skeleton behind rather than swapped out on load: no
 /// JS, no layout shift, and it is what shows through for a printing whose
@@ -684,6 +687,7 @@ fn CardDetailBody(card: CardDetail) -> impl IntoView {
         printings,
         rulings,
         ownership,
+        wants,
         ..
     } = card;
 
@@ -856,7 +860,8 @@ fn CardDetailBody(card: CardDetail) -> impl IntoView {
 
                 <Separator />
 
-                {ownership.map(|o| view! { <YourCopies entries=o /> })}
+                {ownership.map(|o| view! { <YourCopies entries=o card_name=name.clone() /> })}
+                {wants.map(|w| view! { <YourWants entries=w card_name=name.clone() /> })}
                 <Printings printings=printings />
                 <Rulings rulings=rulings />
             </div>
@@ -867,15 +872,30 @@ fn CardDetailBody(card: CardDetail) -> impl IntoView {
 /// Rendered only when the caller is signed in — `ownership` is `None` for
 /// anonymous readers, which is a different thing from "signed in with no
 /// copies" (an empty list, which still shows the section and says so).
+///
+/// Each row carries [`HaveStepper`] — the same write semantics
+/// `/my/collections/:id`'s HERE cell uses (maintainer ruling P6-054: an
+/// optimistic set, a committed zero routed through `remove_holding` so it
+/// stays undoable, and a refusal on a cell that sums more than one grain),
+/// lifted to `crate::components::holding_stepper` for exactly this reuse. The
+/// header total tracks a local delta rather than refetching the page's own
+/// resource: doing that here would remount every row mid-toast, the same trap
+/// `crate::my::collection`'s module doc warns `HereCount` away from.
 #[component]
-fn YourCopies(entries: Vec<OwnershipEntry>) -> impl IntoView {
-    let total: i32 = entries.iter().map(|e| e.quantity).sum();
+fn YourCopies(entries: Vec<OwnershipEntry>, card_name: String) -> impl IntoView {
+    let base_total: i32 = entries.iter().map(|e| e.quantity).sum();
+    let total_delta = RwSignal::new(0);
+    // Shell-provided (AppShell wraps this public route too), same as
+    // `HereCount`'s own `tree` — refetched after a settled write so the
+    // sidebar's badges stay in step with the count this block just changed.
+    let tree = expect_context::<CollectionTreeResource>().0;
+    let on_settled = Callback::new(move |()| tree.refetch());
 
     view! {
         <Card {..} data-testid="your-copies">
             <CardHeader>
                 <CardTitle class="text-base">
-                    {format!("Your copies · {total}")}
+                    {move || format!("Your copies · {}", base_total + total_delta.get())}
                 </CardTitle>
             </CardHeader>
             <CardContent>
@@ -893,14 +913,92 @@ fn YourCopies(entries: Vec<OwnershipEntry>) -> impl IntoView {
                                 .into_iter()
                                 .map(|e| {
                                     let href = format!("/my/collections/{}", e.collection_id);
+                                    let on_change = Callback::new(move |c: StepperCommit| {
+                                        total_delta.update(|d| *d += c.to - c.from);
+                                    });
                                     view! {
-                                        <li class="flex items-center justify-between gap-4">
+                                        <li
+                                            class="flex items-center justify-between gap-4"
+                                            data-testid="ownership-row"
+                                            data-collection-id=e.collection_id.to_string()
+                                        >
                                             <a href=href class="truncate hover:underline">
                                                 {e.collection_name}
                                             </a>
-                                            <span class="text-muted-foreground tabular-nums">
-                                                {e.quantity}
-                                            </span>
+                                            <HaveStepper
+                                                name=card_name.clone()
+                                                present=e.quantity
+                                                holding_id=e.holding_id
+                                                on_change
+                                                on_settled
+                                            />
+                                        </li>
+                                    }
+                                })
+                                .collect_view()}
+                        </ul>
+                    }
+                        .into_any()
+                }}
+            </CardContent>
+        </Card>
+    }
+}
+
+/// The wants counterpart of [`YourCopies`] — desired copies of this card, by
+/// collection. Same authed-only gating (`wants` is `None` for anonymous
+/// readers), same always-shown-once-authed shape (an empty list still shows
+/// the section and says so), and each row carries [`WantStepper`] — the
+/// wants write semantics (no ledger, so a committed zero is a direct,
+/// non-undoable delete; see that component's doc).
+#[component]
+fn YourWants(entries: Vec<WantEntry>, card_name: String) -> impl IntoView {
+    let base_total: i32 = entries.iter().map(|e| e.quantity).sum();
+    let total_delta = RwSignal::new(0);
+    let tree = expect_context::<CollectionTreeResource>().0;
+    let on_settled = Callback::new(move |()| tree.refetch());
+
+    view! {
+        <Card {..} data-testid="your-wants">
+            <CardHeader>
+                <CardTitle class="text-base">
+                    {move || format!("Your wants · {}", base_total + total_delta.get())}
+                </CardTitle>
+            </CardHeader>
+            <CardContent>
+                {if entries.is_empty() {
+                    view! {
+                        <p class="text-muted-foreground text-sm">
+                            "You don't want this card anywhere yet."
+                        </p>
+                    }
+                        .into_any()
+                } else {
+                    view! {
+                        <ul class="space-y-1 text-sm">
+                            {entries
+                                .into_iter()
+                                .map(|e| {
+                                    let href = format!("/my/collections/{}", e.collection_id);
+                                    let on_change = Callback::new(move |c: StepperCommit| {
+                                        total_delta.update(|d| *d += c.to - c.from);
+                                    });
+                                    view! {
+                                        <li
+                                            class="flex items-center justify-between gap-4"
+                                            data-testid="want-row"
+                                            data-collection-id=e.collection_id.to_string()
+                                        >
+                                            <a href=href class="truncate hover:underline">
+                                                {e.collection_name}
+                                            </a>
+                                            <WantStepper
+                                                name=card_name.clone()
+                                                desired=e.quantity
+                                                desire_id=e.desire_id
+                                                on_change
+                                                on_settled
+                                            />
                                         </li>
                                     }
                                 })
