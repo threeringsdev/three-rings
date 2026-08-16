@@ -486,6 +486,47 @@ link and zero `aria-disabled` anywhere on the strip; clicking the true last
 page directly from page one (no intermediate clicks) lands there in one
 navigation.
 
+### Filtered header counts, closing the loop (2026-08-15, WB-01M0324HQ12B590CZ0YXJPB5T6)
+
+The "N cards in the catalog." line under the `Catalog` header only ever
+rendered for browse-all — as soon as a query filtered the results, the line
+disappeared with no replacement. This was pure render work: `search_count`
+above already supplies the exact total for *any* query, filtered or not, and
+`CatalogPage` was already firing it unconditionally. No new resource, no new
+server fn, no new route — the header just wasn't reading the one that
+existed.
+
+**Wording:** the unfiltered sentence is untouched. Filtered gets its own,
+`"{n} cards match."` — no `+` qualifier the way `count_label`'s per-page
+phrase needs one, because `search_count` is a real `count(*)`, exact
+regardless of how many pages the search runs to (`filtered_count_label`,
+`app/src/catalog.rs`, unit-tested).
+
+**Zero results are silent, not `"0 cards match."`** `NoResults` already
+renders "No cards match that search." in the body for the zero case; the
+header repeating the same verdict a second time above the grid would be the
+same fact stated twice, not two facts.
+
+**Pending/staleness: a second `<Transition>`, deliberately its own boundary.**
+The filtered line lives in its own `<Transition fallback=|| ()>` — reserving
+nothing before the first resolve (matching the unfiltered line's existing
+behaviour) and, on every later query change, keeping the *previous* query's
+label on screen until the new one lands rather than collapsing to blank.
+That is a direct mirror of `Pager`'s already-accepted staleness story from
+the round-2 finding above (shows the previous query's stale last page
+immediately, swaps once the new count resolves) — and it is honest for the
+same reason: the reactive graph's per-resource version stamp guarantees
+`search_count.get()`/`.await` can never surface a torn value from an
+in-flight fetch that has since been superseded, only a real number that was
+once current. Kept as its **own** `<Transition>`, separate from `Results`':
+awaiting `search_count` here never gates the cards or the pager on this
+line's slower, independent request.
+
+**Anonymous vs signed-in:** `search_catalog_count` (like `search_catalog`)
+answers from `HostedBackend::anonymous()`/`NativeBackend::anonymous()` —
+catalog-wide, no ownership filter — so the line renders identically for both;
+nothing here is session-gated.
+
 ## Open questions
 
 - ~~Which Scryfall syntax subset ships in v1?~~ **Proposed above** (the

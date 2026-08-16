@@ -439,6 +439,53 @@ pub fn CatalogPage() -> impl IntoView {
                             })
                     })}
                 </Transition>
+                // The filtered counterpart to the line above — same data source
+                // `Pager` already reads for its true-last-page number
+                // (`search_count`, specs/catalog-search.md "Numbered page
+                // links, round 2"), no second request. Read synchronously
+                // *outside* `Suspend::new`'s async block, matching this file's
+                // established rule for tracked reads under a Suspend boundary
+                // (`displaced_by`'s doc comment) — a `url_q.get()` inside the
+                // async body would not reliably re-run this child when the
+                // query changes.
+                <Transition fallback=|| ()>
+                    {move || {
+                        let filtered = !url_q.get().is_empty();
+                        Suspend::new(async move {
+                            if !filtered {
+                                return None;
+                            }
+                            // Deliberately the same non-blocking relationship
+                            // `Pager` has with this resource: this `Transition`
+                            // is its own boundary, entirely separate from
+                            // `Results`' — so a slow count never holds up the
+                            // cards rendering, only this line's own text. Once
+                            // `search_count` resolves, `Transition` (not
+                            // `Suspense`) upgrades the label in place rather
+                            // than collapsing back to the fallback — mirroring
+                            // the pager's own accepted "previous query's stale
+                            // number, then the fresh one" honesty, which the
+                            // reactive graph's per-resource version stamp
+                            // already guarantees can never show a torn or
+                            // corrupted value (specs/catalog-search.md, Open
+                            // questions: "no stale results ever render over
+                            // newer input").
+                            search_count
+                                .await
+                                .and_then(filtered_count_label)
+                                .map(|label| {
+                                    view! {
+                                        <p
+                                            class="text-muted-foreground text-sm"
+                                            data-testid="catalog-count"
+                                        >
+                                            {label}
+                                        </p>
+                                    }
+                                })
+                        })
+                    }}
+                </Transition>
             </div>
             <QueryBar
                 text=query_text
@@ -487,6 +534,27 @@ pub(crate) fn count_label(n: usize, has_more: bool, paged: bool) -> String {
         (false, true) => format!("{n}+ results"),
         (false, false) => format!("{n} results"),
     }
+}
+
+/// The header's count line for a **filtered** query — `search_count`'s
+/// unqualified counterpart to the unfiltered "N cards in the catalog." line
+/// above it. Unlike [`count_label`], no `+` qualifier is ever needed here:
+/// `search_count` runs a real `count(*)` (specs/catalog-search.md "Numbered
+/// page links, round 2"), so the number is exact regardless of how many pages
+/// the search runs to — `count_label`'s qualifier exists only because a page
+/// of *results* can't see past its own `next_cursor`, a limitation this
+/// number doesn't have.
+///
+/// **`None` for zero, on purpose — not `"0 cards match."`.** `NoResults`
+/// already renders "No cards match that search." in the body for exactly
+/// this case; the header repeating the same verdict a second time above the
+/// grid would be noise stacked on the one true message, not a second fact.
+///
+/// **No singular/plural agreement** (`"1 cards match."`), matching
+/// `count_label`'s own precedent (`"1 results"`) — this app's tone has never
+/// special-cased `n == 1` for a count line, so this doesn't start now.
+pub(crate) fn filtered_count_label(n: i64) -> Option<String> {
+    (n > 0).then(|| format!("{n} cards match."))
 }
 
 /// Is the query now in the box an edit of the one `kept` answered — the same
@@ -1656,8 +1724,8 @@ pub(crate) fn raise_add_toast(t: AddToast) {
 #[cfg(test)]
 mod tests {
     use super::{
-        catalog_url, count_label, encode_query_value, page_strip, pager_is_needed, parse_page,
-        same_search, PageSlot, MAX_PAGE,
+        catalog_url, count_label, encode_query_value, filtered_count_label, page_strip,
+        pager_is_needed, parse_page, same_search, PageSlot, MAX_PAGE,
     };
 
     #[test]
@@ -1683,6 +1751,25 @@ mod tests {
         // ...and no `+` there: 50 is exactly what the page holds; the "more"
         // claim is already refused by the qualifier.
         assert_eq!(count_label(50, true, true), "50 results on this page");
+    }
+
+    #[test]
+    fn the_filtered_header_line_is_exact_no_plus_and_silent_at_zero() {
+        // Unlike `count_label`, this is a real `count(*)` — no "+" qualifier,
+        // ever, regardless of how many pages the search runs to.
+        assert_eq!(filtered_count_label(1), Some("1 cards match.".to_string()));
+        assert_eq!(
+            filtered_count_label(38_623),
+            Some("38623 cards match.".to_string())
+        );
+        // Zero is `None`, not `"0 cards match."` — `NoResults` already owns
+        // that verdict in the body, and the header repeating it would be
+        // stacked noise, not a second fact.
+        assert_eq!(filtered_count_label(0), None);
+        // Defensive: a `count(*)` cannot go negative, but the check is `n >
+        // 0`, not `n != 0`, so a negative value degrades the same way zero
+        // does rather than rendering a nonsense sentence.
+        assert_eq!(filtered_count_label(-1), None);
     }
 
     #[test]

@@ -1002,6 +1002,97 @@ test("the true last page of a filtered query disables Next @fast", async ({
   await expect(page.getByTestId("pager-page-3")).toHaveCount(0);
 });
 
+// ---------------------------------------------------------------------------
+// The header's filtered count (WB-01M0324HQ12B590CZ0YXJPB5T6) — the
+// browse-all "N cards in the catalog." line's counterpart once a query
+// applies. Reuses `search_count` (round 2's own resource, above), so these
+// tests are mostly about *rendering* honesty: matches the true total, stays
+// off the critical path, and doesn't repeat the empty state's own verdict.
+// ---------------------------------------------------------------------------
+
+test("a filtered query's header count matches the true total and survives a reload @fast", async ({
+  page,
+  request,
+}) => {
+  const total = await searchCount(request, "bolt");
+  expect(total, "fixture must have real hits for this probe query").toBeGreaterThan(0);
+
+  await page.goto("/catalog?q=bolt");
+  await hydrated(page);
+  const count = page.getByTestId("catalog-count");
+  await expect(count).toHaveText(`${total} cards match.`);
+  // The unfiltered sentence is a different element and must not also render.
+  await expect(page.getByText(/cards in the catalog/)).toHaveCount(0);
+
+  // The number survives a fresh SSR too, not just the client-side upgrade.
+  await page.reload();
+  await expect(page.getByTestId("catalog-count")).toHaveText(
+    `${total} cards match.`,
+  );
+});
+
+test("the header count reserves nothing before it resolves, then upgrades in place @fast", async ({
+  page,
+}) => {
+  // Mirrors "the strip shows a short form immediately..." above:
+  // `search_count` is a second, independent request, and the header's own
+  // `<Transition>` is a separate boundary from `Results`' — a held count must
+  // not hold up the cards, and must not show a stale/wrong number meanwhile
+  // (here: no number at all, since this is the query's first-ever resolve).
+  await page.goto("/catalog");
+  await hydrated(page);
+
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  await page.route("**/api/search_catalog_count*", async (route) => {
+    await gate;
+    await route.continue();
+  });
+
+  await page.fill("#catalog-query", "bolt");
+  await page.waitForURL((url) => url.searchParams.get("q") === "bolt");
+  await expect(page.getByTestId("results-grid")).toBeVisible();
+  // No reserved space and nothing rendered while the count is still in flight.
+  await expect(page.getByTestId("catalog-count")).toHaveCount(0);
+
+  release();
+  await expect(page.getByTestId("catalog-count")).toHaveText(/cards match\./);
+});
+
+test("a zero-hit query suppresses the header count; the empty state carries the message @fast", async ({
+  page,
+}) => {
+  // `NoResults` already says "No cards match that search." in the body; the
+  // header repeating the same verdict a second time above the grid would be
+  // one fact stated twice, not two facts.
+  const q = "zzznonexistentcardnamequery12345";
+  await page.goto(`/catalog?q=${q}`);
+  await hydrated(page);
+  await expect(page.getByTestId("no-results")).toContainText(
+    "No cards match that search.",
+  );
+  await expect(page.getByTestId("catalog-count")).toHaveCount(0);
+});
+
+test.describe("authed", () => {
+  test.use({ storageState: AUTH_STATE });
+
+  test("a signed-in visitor sees the same catalog-wide filtered count @fast", async ({
+    page,
+    request,
+  }) => {
+    // `search_catalog_count` answers from `*Backend::anonymous()` regardless
+    // of session — catalog-wide, not ownership-scoped — so the number must
+    // match what an anonymous request gets for the same query.
+    const total = await searchCount(request, "bolt");
+    await page.goto("/catalog?q=bolt");
+    await hydrated(page);
+    await expect(page.getByTestId("catalog-count")).toHaveText(
+      `${total} cards match.`,
+    );
+  });
+});
+
 test.describe("mobile", () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
