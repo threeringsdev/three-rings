@@ -97,6 +97,25 @@ impl SheetDirection {
             Self::Bottom => "pb-[calc(1.5rem_+_env(safe-area-inset-bottom))]",
         }
     }
+
+    /// The close `<button>` is `absolute`, so its `top` offset resolves
+    /// against the panel's **padding box**, not the content box —
+    /// [`safe_area_padding`]'s `pt-*` shifts where normal-flow children
+    /// (`children()`) start, but does nothing for an absolutely-positioned
+    /// sibling, which stays anchored to the panel's outer edge regardless
+    /// (round-2 review, WB-01M05F945DBTRS0AQ79Y01EGJ2: on `FilterSheet`
+    /// — `Left` — a plain `top-4` put the × at y=[16,40] against a 24px
+    /// status-bar inset, 8px of the control under system chrome — the exact
+    /// defect class this task closes). Every direction whose panel picks up
+    /// `pt-*` above (`Right`/`Left`/`Top`) needs the matching offset here;
+    /// `Bottom`'s panel has no `pt-*` (its top edge doesn't touch the
+    /// viewport top), so its close button is untouched.
+    fn close_button_top(self) -> &'static str {
+        match self {
+            Self::Right | Self::Left | Self::Top => "top-[calc(1rem_+_env(safe-area-inset-top))]",
+            Self::Bottom => "top-4",
+        }
+    }
 }
 
 #[component]
@@ -260,7 +279,8 @@ pub fn SheetContent(
             <button
                 type="button"
                 class=format!(
-                    "absolute top-4 right-4 p-1 rounded-sm focus:ring-2 focus:ring-offset-2 focus:outline-none [&_svg:not([class*='size-'])]:size-4 focus:ring-ring{}",
+                    "absolute {} right-4 p-1 rounded-sm focus:ring-2 focus:ring-offset-2 focus:outline-none [&_svg:not([class*='size-'])]:size-4 focus:ring-ring{}",
+                    direction.close_button_top(),
                     if show_close_button { "" } else { " hidden" },
                 )
                 aria-label="Close sheet"

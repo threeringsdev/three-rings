@@ -7254,10 +7254,27 @@ nonzero under WKWebView before assuming this meta alone carries it there).
 (`app/src/shell.rs` unless noted), additive on top of existing layout so it
 collapses to today's behavior wherever `env()` reads 0 (every desktop browser,
 and Android/iOS browsers outside an inset):
-- **Header** (`AppShell`'s `<header>`): `h-14` → `min-h-14` +
-  `pt-[env(safe-area-inset-top)]`. `min-h-14` matters — a fixed `h-14` would
-  have let the added padding *shrink* the content band (border-box) instead of
-  growing the header past the inset.
+- **Header** (`AppShell`'s `<header>`): `h-14` →
+  `h-[calc(3.5rem_+_env(safe-area-inset-top))]` + `pt-[env(safe-area-inset-top)]`
+  — **fixed** height, not `min-h-14` (round-2 review caught the first cut: a
+  `min-h-14` makes the header's total height content-dependent, e.g. 68px on
+  Android My-cards mode where the tallest child is the 44px rail-toggle
+  button, which no longer matched `SidebarRail`'s hardcoded
+  `top-[calc(3.5rem+inset)]` drawer/scrim offset, 80px — a ~12px seam). The
+  fixed-height formula forces the content box to exactly `3.5rem` regardless
+  of what's inside (border-box: total − padding), which both fits every
+  child and matches the drawer offset **by construction**, not coincidence —
+  same formula, both places.
+- **`SheetContent`'s close button** (`sheet.rs`): also missed in the first
+  cut (round-2 review) — it's `absolute`, so its `top-4` resolved against the
+  panel's padding box and ignored `safe_area_padding`'s new `pt-*` entirely;
+  on `FilterSheet` (`Left`) the × sat at y=[16,40] against a 24px inset, 8px
+  under system chrome — the exact defect class this task closes, reintroduced
+  in the one place a plain top-offset (not a padding) carried the position.
+  Fixed with a matching `SheetDirection::close_button_top()`: the same
+  `calc(1rem + inset)` for `Right`/`Left`/`Top` (whichever picks up `pt-*`
+  from `safe_area_padding`), plain `top-4` for `Bottom` (whose panel has no
+  `pt-*` — its top edge never touches the viewport top).
 - **Bottom tab bar** (`BottomTabs`): `pb-[env(safe-area-inset-bottom)]`,
   `bottom-0` kept flush so the bar's own background still paints under the
   gesture-nav area.
@@ -7291,9 +7308,14 @@ and Android/iOS browsers outside an inset):
 | bottom tab bar height | 59px (flush to floor, tab content ran into the last 24px) | 83px = 59 + 24; tab content's own bottom edge lands exactly at `y=1236` = the safe boundary, 0px into the inset |
 | header wordmark vertical position | centered in an unpadded 56px band (top ≈ 18px, **6px under** the 24px status-bar inset) | top = 29.5px, comfortably clear |
 | `FilterSheet` computed padding | `24px` (base only) | `48px` top and bottom |
+| header computed height (round 2: fixed height, not `min-h-14`) | — | `getComputedStyle(header).height` = `80px` = `56 + 24` |
+| `SidebarRail` drawer/scrim computed `top` (round 2) | — | `getComputedStyle(aside).top` = `80px` — **exactly** the header's own height, confirmed equal by direct comparison in the same probe, not just by matching formulas |
+| `FilterSheet` close button (round 2: was missed in round 1 — `absolute`, ignored the panel's `pt-*`) | `top-4` only: y=[16,40], 8px inside the 24px status-bar inset | `getComputedStyle` `top` = `40px` (`16 + 24`); bounding box y=[40,64] — fully clear, 16px of margin below the inset boundary |
 
 Screenshots (dev webview and, separately, the actual signed release APK) both
-show the header and tab bar fully clear of the status bar / gesture pill.
+show the header and tab bar fully clear of the status bar / gesture pill; a
+third (dev webview, round 2) shows the open `FilterSheet` with its × sitting
+level with the "Filters" heading, well below the status bar's clock/icons.
 
 **A physical Android 16 device (Samsung SM-F766U1 — a Z Flip 7, matching the
 `Samsung_Flip_7` AVD's namesake, almost certainly the maintainer's own phone)
@@ -7355,3 +7377,19 @@ across sessions (this task's own heavy verification included) that should be
 swept at some point. iOS/WKWebView's `env()` behavior under this same
 `viewport-fit=cover` change is unverified — no iOS target was available this
 task.
+
+**Round 2 (adversarial review).** One major, two folds, all addressed —
+detail folded into the bullets above rather than duplicated here: the header
+went from `min-h-14` to a fixed `h-[calc(3.5rem+inset)]` (determinism vs. the
+drawer/scrim's hardcoded offset), `SheetContent`'s `absolute`-positioned
+close button picked up its own matching inset (missed in round 1 because
+`safe_area_padding` only ever touched the panel's own padding, not an
+absolutely-positioned sibling's offset), and `design/information-architecture.md`'s
+"Mobile shell" bullet was corrected to the honest emulator-only account (it
+had drifted into claiming phone verification this section never claimed).
+Explicitly dropped, not worked, per the review's own disposition: automated
+`env()` regression coverage (desktop test engines report `0`, so nothing in
+this diff is assertable by `@fast` chromium today — a real gap, not a "later"
+placeholder); macOS fullscreen behavior around the notch (default window
+decorations make this low-risk, left unverified); status-bar tap-through
+semantics (moot now that the close button itself moved off the inset).

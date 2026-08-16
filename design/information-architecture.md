@@ -95,8 +95,10 @@ Two tabs, matching the modes: `[📖 Catalog] [🗂 My cards •7]` (badge = Inb
   padding on top of their normal layout — ruling 2026-08-16, WB-01M05F945DBTRS0AQ79Y01EGJ2:
   Android 15+'s enforced edge-to-edge (targetSdk 36) draws the WebView behind the status/
   gesture-nav bars, and the Android WebView reports nonzero insets for this even without
-  `viewport-fit=cover` (verified on-device, both a real Android 16 phone and an Android 17
-  emulator). Web-side over the native-side alternative (WindowInsets in the generated
+  `viewport-fit=cover` (verified via CDP on the Android 17 `Samsung_Flip_7` emulator; a
+  physical Android 16 phone, SDK confirmed via `adb`, disconnected before it could be
+  measured directly — the maintainer's own phone is still the outstanding check). Web-side
+  over the native-side alternative (WindowInsets in the generated
   `MainActivity`, or the manifest edge-to-edge opt-out) because it also covers iOS/WKWebView
   for free and needs no `gen/android` edits. Detail in specs/app-ui.md Findings.
 

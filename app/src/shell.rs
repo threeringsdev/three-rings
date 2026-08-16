@@ -262,18 +262,27 @@ pub fn AppShell() -> impl IntoView {
 
     view! {
         <div class="bg-background text-foreground flex min-h-screen flex-col">
-            // `min-h-14`, not `h-14` — the Android WebView draws behind the
-            // status bar under enforced edge-to-edge (targetSdk 36; verified
-            // on-device the WebView reports a nonzero `env(safe-area-inset-top)`
-            // even so, WB-01M05F945DBTRS0AQ79Y01EGJ2), and this header was the
-            // maintainer's unreachable top bar. A fixed `h-14` would have the
-            // added `pt-*` eat into the 56px band instead of growing past it
-            // (border-box shrinks the content box by the padding); `min-h-14`
-            // lets the padding add to the total height so the bar's controls
-            // clear the status bar while keeping the original 56px band below
-            // it. `env()` reads 0 on desktop/browsers without an inset, so
-            // this collapses to today's plain 56px header there.
-            <header class="bg-background sticky top-0 z-40 flex min-h-14 shrink-0 items-center gap-4 border-b px-4 pt-[env(safe-area-inset-top)]">
+            // `h-[calc(3.5rem+inset)]`, not `h-14` — the Android WebView draws
+            // behind the status bar under enforced edge-to-edge (targetSdk 36;
+            // verified on-device the WebView reports a nonzero
+            // `env(safe-area-inset-top)` even so, WB-01M05F945DBTRS0AQ79Y01EGJ2),
+            // and this header was the maintainer's unreachable top bar.
+            // **Fixed height, not `min-h-14`** (round-2 review): a `min-h-14`
+            // makes the header's total height content-dependent — on Android
+            // the tallest child (the `size-11` rail toggle, My-cards mode) is
+            // 44px, so `min-h-14` + `pt-[inset]` (24px) computes to 68px total,
+            // not the 80px `SidebarRail`'s drawer/scrim hardcodes as
+            // `top-[calc(3.5rem+inset)]` — a ~12px seam. A *fixed* height of
+            // `3.5rem + inset` combined with `pt-[inset]` instead forces the
+            // content box to exactly `3.5rem` (56px) regardless of what's
+            // inside (border-box: total − padding-top − padding-bottom), which
+            // both fits every child (the widest, that same 44px button, still
+            // has 12px of headroom) and makes the header's own total height
+            // match the drawer/scrim's offset **by construction**, not by
+            // coincidence — same formula, both places. `env()` reads 0 on
+            // desktop/browsers without an inset, so this collapses to today's
+            // plain 56px header there, byte-identical.
+            <header class="bg-background sticky top-0 z-40 flex h-[calc(3.5rem_+_env(safe-area-inset-top))] shrink-0 items-center gap-4 border-b px-4 pt-[env(safe-area-inset-top)]">
                 // My-cards mode only, and deliberately: Catalog mode already
                 // has its own designed mobile story for the rail — the
                 // `FilterSheet` button in the results toolbar (wireframes →
