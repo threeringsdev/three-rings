@@ -7694,3 +7694,60 @@ height miscalculation into "the component vanishes" rather than "it overflows"
 — the reason this bug read as a rendering failure instead of a layout one. Not
 changed here (it is what gives `CommandList` its own scroller), but worth
 knowing when the next picker looks blank.
+
+**Round-3 addendum — the verification that "failed" was measuring a different
+app.** A visual check of a `.app` built from this branch reported the original
+symptom intact: no visible picker, and an accessibility read putting the
+search combo box (278×40) hard against the tray at the window's bottom edge.
+The harness said the opposite. The isolated variable was **not** anything
+about WebKit, wry's `WKWebViewConfiguration`, release assets, or the native
+backend — it was **which process was being driven**.
+
+Every bundle this repo produces carries `CFBundleIdentifier
+com.three-rings.dev` and the executable name `three_rings`. The maintainer's
+installed `/Applications/three-rings.app` (built 16:23, **pre-fix**) was
+running alongside the worktree build, and **System Events resolves a process
+by that identity rather than by pid**. Reproduced deliberately: an
+AppleScript `first process whose unix id is <worktree pid>` reported success
+and read back `{80, 60} 1700×1050`, while `CGWindowListCopyWindowInfo` —
+which is pid-keyed and cannot alias — showed that geometry had been applied
+to the *`/Applications`* process, with the worktree build still at its
+default `800×600`. The intermittent `-25208` from `set frontmost` is the same
+collision. Both windows then sat at identical geometry, so every subsequent
+click, a11y query and screenshot went to the older, unfixed app.
+
+Settled without any GUI, by asking each running instance what it serves —
+each `.app` runs its embedded Axum on a dynamic port (`lsof -nP -iTCP
+-sTCP:LISTEN -a -p <pid>`):
+
+| instance | built | `data-name="Command"` class it serves |
+|---|---|---|
+| `/Applications` (the one measured) | 16:23, pre-fix | `… w-full **h-full** bg-transparent …` |
+| worktree bundle, this branch | 17:33, `0af380f` | `… w-full bg-transparent …` |
+
+and confirmed statically: the `/Applications` binary contains only the old
+class literal, the worktree bundle's binary and `app.wasm` only the new one.
+
+Independently, the fix was re-verified **against the `.app`'s own release
+assets**: a plain `WKWebView` pointed at the bundle's embedded server (its
+Tailwind `app.css`, not the dev server's), building the tray picker's exact
+DOM, measured `Command` at **0px / panel 2px** with `h-full` and **297px /
+panel 299px** without it, placed above the bottom-docked trigger with the
+right edges flush. Release CSS, release engine, same verdict as the dev
+server — which also rules out the release build and the native backend as
+variables.
+
+`end2end/wkwebview/axdrive.swift` (+ `winid.swift`) exist so this cannot
+recur: `AXUIElementCreateApplication` takes a pid, so resizing, raising and
+pressing are pid-exact, and `winid` reports CoreGraphics' own truth for the
+window bounds. The harness README's "Verifying against the built `.app`"
+section is the procedure.
+
+**Still owed, and blocked**: the click-through screenshot of the *actual*
+built `.app` window (tray `Move to…` and catalog `Adding to` visibly open at
+1700×1050). The correct instance was launched, resized pid-exactly to
+1700×1050, confirmed frontmost, and screenshot-confirmed signed in on
+`/my/all` — then the Mac's display locked, and a locked screen cannot be
+driven or captured. Everything up to the final click is done; the remaining
+step needs an unlocked machine, with every other `three-rings` instance
+quit first (or driven strictly by pid).
