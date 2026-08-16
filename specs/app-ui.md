@@ -7395,6 +7395,16 @@ decorations make this low-risk, left unverified); status-bar tap-through
 semantics (moot now that the close button itself moved off the inset).
 ### Desktop WKWebView popover misposition: the JS anchor fallback rebuilt to mirror the CSS path (2026-08-16, WB-01M05K42G96ZSGHEBHKQ47CBDV)
 
+> **Superseded on the diagnosis, kept for the fallback work** (same day,
+> WB-01M064BMRF8QBKAYJ4C9CNGQ0H below): the real-engine probe DISPROVED this
+> entry's premise — the system WKWebView fully supports CSS anchor
+> positioning and positioned the panel correctly all along; the invisibility
+> was `Command`'s `h-full` resolving to zero height there. Also,
+> `@position-try(flip-block)` inline blocks were never the flip mechanism in
+> any engine (always-invalid syntax; `position-try-fallbacks: flip-block`
+> does the flipping). The rebuilt JS fallback below remains correct and
+> shipped — it just wasn't what this bug needed.
+
 `app/src/components/ui/popover.rs` (`fallback_position`, `apply_fallback_position`,
 `watch_panel_resize`, `PopoverContext.align`); `end2end/force-fallback-probe.mjs`
 (new, one-off).
