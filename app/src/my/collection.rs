@@ -744,18 +744,10 @@ fn SlashHint() -> impl IntoView {
             if ev.key() != "/" || ev.meta_key() || ev.ctrl_key() || ev.alt_key() {
                 return;
             }
-            let typing = leptos::prelude::document()
-                .active_element()
-                .is_some_and(|el| {
-                    let tag = el.tag_name().to_ascii_lowercase();
-                    tag == "input"
-                        || tag == "textarea"
-                        || tag == "select"
-                        || el
-                            .dyn_ref::<leptos::web_sys::HtmlElement>()
-                            .is_some_and(|h| h.is_content_editable())
-                });
-            if typing {
+            // Shared with `back_nav::install_back_shortcut`'s identical
+            // guard — see that module's doc, last paragraph, for why this
+            // stopped being two independent copies of the same check.
+            if crate::components::back_nav::focus_is_editable() {
                 return;
             }
             if let Some(el) = leptos::prelude::document().get_element_by_id("collection-query") {

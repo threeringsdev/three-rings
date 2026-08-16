@@ -595,7 +595,6 @@ pub fn CardDetailPage() -> impl IntoView {
 #[component]
 fn BackControl() -> impl IntoView {
     let nav = expect_context::<crate::components::back_nav::BackNavigation>();
-    let has_history = nav.has_history;
     view! {
         <a
             href=nav.fallback_href
@@ -608,7 +607,11 @@ fn BackControl() -> impl IntoView {
                 if ev.meta_key() || ev.ctrl_key() || ev.shift_key() || ev.alt_key() {
                     return;
                 }
-                if has_history.get_untracked() {
+                // Read fresh, not from a stored signal — see
+                // `back_nav::has_history`'s own doc for why it's a plain
+                // function now (round 2: a signal would have papered over
+                // exactly the staleness bug that shipped in round 1).
+                if crate::components::back_nav::has_history() {
                     ev.prevent_default();
                     crate::components::back_nav::browser_back();
                 }
