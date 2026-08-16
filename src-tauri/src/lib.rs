@@ -188,10 +188,16 @@ pub fn run() {
 
                 // Tell the app crate it runs as a single-user embedded server:
                 // enables the system-browser Google flow (localhost callback +
-                // in-memory challenge/session handoff — app/src/auth/native.rs).
+                // in-memory challenge/session handoff — app/src/auth/native.rs)
+                // and, since WB-01M036CA3M185WM4WGS5SDC161, is what
+                // `cookies::request_origin` presents to Neon Auth for *every*
+                // account:: call (sign-in/up, OTP, reset, …), not just Google.
                 // `localhost`, not `127.0.0.1`: the auth service only trusts
-                // the former in callback URLs.
-                std::env::set_var("TR_EMBEDDED_ORIGIN", format!("http://localhost:{}", port));
+                // the former, never the latter, in either an `Origin` header
+                // or a callback URL (verified live against both Neon Auth
+                // branches — specs/auth.md).
+                let embedded_origin = format!("http://localhost:{}", port);
+                std::env::set_var("TR_EMBEDDED_ORIGIN", &embedded_origin);
 
                 let server_task = tauri::async_runtime::spawn(async move {
                     let _ = axum::serve(listener, router.into_make_service()).await;
@@ -254,16 +260,28 @@ pub fn run() {
 
                 #[cfg(not(target_os = "android"))]
                 {
+                    // Navigate the *window itself* to the same loopback origin
+                    // just exported as `TR_EMBEDDED_ORIGIN`, not the raw
+                    // `127.0.0.1` bind address: the webview's `Host` header is
+                    // what `cookies::request_origin` reads for every
+                    // account:: call, and Neon Auth trusts `localhost`, never
+                    // `127.0.0.1` (WB-01M036CA3M185WM4WGS5SDC161 — the release
+                    // window used to navigate to the raw bind address, so
+                    // password/OTP/reset calls carried an untrusted Origin
+                    // even though `TR_EMBEDDED_ORIGIN` already claimed
+                    // `localhost`). `localhost` resolves straight back to the
+                    // `127.0.0.1` listener — the same resolution `cargo tauri
+                    // dev`'s `devUrl` already relies on — so this changes only
+                    // which `Host`/`Origin` requests carry, not where they land.
                     let window = app.get_webview_window("main").ok_or_else(|| {
                         Box::<dyn std::error::Error>::from("Failed to get main window")
                     })?;
-                    let url =
-                        tauri::Url::parse(&format!("http://127.0.0.1:{}", port)).map_err(|e| {
-                            Box::<dyn std::error::Error>::from(format!(
-                                "Failed to parse URL: {}",
-                                e
-                            ))
-                        })?;
+                    let url = tauri::Url::parse(&embedded_origin).map_err(|e| {
+                        Box::<dyn std::error::Error>::from(format!(
+                            "Failed to parse URL: {}",
+                            e
+                        ))
+                    })?;
                     window.navigate(url).map_err(|e| {
                         Box::<dyn std::error::Error>::from(format!(
                             "Failed to navigate window: {}",

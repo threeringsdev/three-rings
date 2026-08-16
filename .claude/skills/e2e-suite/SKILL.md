@@ -70,10 +70,13 @@ either 403 on its own sign-in or, if it reuses the login fixture's
 `storageState`, silently send no cookie at all (cookies are host-scoped, and
 the fixture's cookies are now scoped to `localhost`, not `127.0.0.1`). New
 probes must use `localhost:3000`, never `127.0.0.1:3000`.
-**Caveat, so nobody "fixes" this backward:** prod (Render, Neon's main
-branch) keeps Allow Localhost **OFF**. This is irrelevant to e2e, which never
-targets prod (never point tests at prod, above) — recorded only so the
-distinction doesn't get "corrected" into matching prod's setting.
+**Caveat, updated 2026-08-16:** prod (Render, Neon's main branch) now keeps
+Allow Localhost **ON** too — a maintainer ruling superseding the 2026-08-11
+one, because native release builds (desktop/Android embedded server) live on
+localhost by design and are real prod clients now (specs/auth.md, "Resolved
+question (2026-08-16 addendum)"). Irrelevant to e2e either way: tests never
+target prod (never point tests at prod, above). The rule that matters here
+is unchanged — dev-server tests must use `localhost`, never `127.0.0.1`.
 
 **Release-build clobber trap (isolated for the gate):** a `cargo leptos build
 --release` that writes to the default `target/site` overwrites `target/site/pkg`

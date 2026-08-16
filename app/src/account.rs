@@ -381,13 +381,14 @@ pub async fn google_sign_in() -> Result<String, ServerFnError<String>> {
         use crate::auth::{cookies, native, upstream};
         let headers = ssr::request_headers().await?;
         let secure = cookies::request_is_secure(&headers);
-        // Under Tauri, use the shell-exported loopback origin for both the
-        // upstream Origin header and the callback: the auth service trusts
-        // `localhost` but rejects the `127.0.0.1` spelling the webview uses.
+        // Under Tauri, `cookies::request_origin` itself now prefers the
+        // shell-exported loopback origin for both the upstream Origin header
+        // and the callback: the auth service trusts `localhost` but rejects
+        // the `127.0.0.1` spelling a release-desktop webview could present.
+        // `native_origin` stays a plain flag here for the two branches below
+        // that need to know *whether* we're embedded, not what the origin is.
         let native_origin = native::embedded_origin();
-        let origin = native_origin
-            .clone()
-            .unwrap_or_else(|| cookies::request_origin(&headers));
+        let origin = cookies::request_origin(&headers);
         // Where Google sends the browser back. Web and desktop take this
         // origin directly (a desktop browser can reach the embedded loopback
         // server). Android cannot: the OS freezes the backgrounded app, so
