@@ -175,6 +175,187 @@ test("an anonymous visitor gets no your-copies section, no wants section, and no
   await expect(page.locator('[data-testid="want-row"]')).toHaveCount(0);
 });
 
+// -------------------------------------------------------- the back control ---
+//
+// components::back_nav (app/src/components/back_nav.rs): real in-app history
+// when there is any, a fixed fallback otherwise — `/catalog` for anonymous
+// readers, `/my` once signed in. Shared by the on-page control
+// (`data-testid=card-detail-back`) and the app-wide `⌘[` / `Alt+←` desktop
+// shortcut, so both are exercised here against the same fixture.
+
+test.describe("the back control", () => {
+  test("returns to the prior in-app page, query string included @fast", async ({
+    page,
+    request,
+  }) => {
+    const card = await exactCard(request, SINGLE_FACE_QUERY);
+    const catalogUrl = `/catalog?q=${encodeURIComponent(SINGLE_FACE_QUERY)}&view=list`;
+    await page.goto(catalogUrl);
+    await hydrated(page);
+
+    // A real client-side navigation (the router's click-delegate intercepts
+    // the tile's own `<a href>`), not `page.goto` — this is what has to leave
+    // a `history.back()` target behind for the shell's navigation counter to
+    // see (back_nav's module doc: a cold load intentionally does not).
+    await page.locator(`a[href="/cards/${card.oracle_id}"]`).first().click();
+    await page.waitForURL((url) => url.pathname === `/cards/${card.oracle_id}`);
+    await hydrated(page);
+
+    const back = page.getByTestId("card-detail-back");
+    await expect(back).toBeVisible();
+    await back.click();
+
+    // The exact prior URL, query string and all — a fixed fallback could only
+    // ever guess `/catalog`, never the `q=`/`view=` this test started from.
+    await page.waitForURL(
+      (url) => url.pathname === "/catalog" && url.search === new URL(catalogUrl, page.url()).search,
+    );
+  });
+
+  test("a cold direct load offers the anonymous fallback, and it works @fast", async ({
+    page,
+    request,
+  }) => {
+    const card = await firstCard(request, SINGLE_FACE_QUERY);
+    // `page.goto`, not a click-through: this is the cold-deep-link case the
+    // fallback exists for — a fresh load with nothing for `history.back()` to
+    // return to.
+    await page.goto(`/cards/${card.oracle_id}`);
+    await hydrated(page);
+
+    const back = page.getByTestId("card-detail-back");
+    await expect(back).toHaveAttribute("href", "/catalog");
+    await back.click();
+    await page.waitForURL("/catalog");
+  });
+
+  test.describe("authed", () => {
+    test.use({ storageState: AUTH_STATE });
+
+    test("a cold direct load offers the signed-in fallback, and it works @fast", async ({
+      page,
+      request,
+    }) => {
+      const card = await firstCard(request, SINGLE_FACE_QUERY);
+      await page.goto(`/cards/${card.oracle_id}`);
+      await hydrated(page);
+
+      const back = page.getByTestId("card-detail-back");
+      await expect(back).toHaveAttribute("href", "/my");
+      await back.click();
+      await page.waitForURL("/my");
+    });
+  });
+
+  test.describe("the ⌘[ / Alt+← shortcut", () => {
+    // `page.keyboard.press` genuinely reaches the page here — measured, not
+    // assumed: a throwaway instrumented probe against this same dev server
+    // confirmed the keydown arrives at `window` with `defaultPrevented` false
+    // beforehand and true after the app's own handler runs, so this is a real
+    // exercise of `back_nav::install_back_shortcut`, not a driver no-op. Real
+    // desktop browsers may never deliver this keydown to page JS at all
+    // (`back_nav`'s module doc) — that is *why* the shortcut has to exist for
+    // the Tauri WebView, and it is a claim about interactive browser chrome
+    // that a headless, CDP-driven Chromium does not have, so it is out of
+    // reach for this suite to confirm either way. What this suite CAN and
+    // does confirm is the handler itself: the chord is recognized, it walks
+    // real history the same way the button does, and it stays out of the way
+    // of a focused field.
+
+    test("Cmd+[ walks back through real in-app history @fast", async ({
+      page,
+      request,
+    }) => {
+      const card = await exactCard(request, SINGLE_FACE_QUERY);
+      const catalogUrl = `/catalog?q=${encodeURIComponent(SINGLE_FACE_QUERY)}&view=list`;
+      await page.goto(catalogUrl);
+      await hydrated(page);
+
+      await page.locator(`a[href="/cards/${card.oracle_id}"]`).first().click();
+      await page.waitForURL((url) => url.pathname === `/cards/${card.oracle_id}`);
+      await hydrated(page);
+
+      await page.keyboard.press("Meta+BracketLeft");
+      await page.waitForURL(
+        (url) => url.pathname === "/catalog" && url.search === new URL(catalogUrl, page.url()).search,
+      );
+    });
+
+    test("Alt+ArrowLeft (the non-mac spelling) does the same @fast", async ({
+      page,
+      request,
+    }) => {
+      // `is_back_chord`'s platform split reads `navigator.platform`
+      // (`palette::is_mac`), and this suite's own runner is a real macOS
+      // Chromium — so without this override the mac branch is what is live
+      // and Alt+ArrowLeft is correctly ignored (that failure mode was
+      // caught running this test the first time). Spoofing the platform is
+      // what makes this a genuine exercise of the *other* branch end to end
+      // (chord parsing through to `history.back()`) rather than leaving it
+      // covered only by `is_back_chord`'s own Rust unit tests.
+      await page.addInitScript(() => {
+        Object.defineProperty(window.navigator, "platform", {
+          get: () => "Linux x86_64",
+        });
+      });
+
+      const card = await exactCard(request, SINGLE_FACE_QUERY);
+      const catalogUrl = `/catalog?q=${encodeURIComponent(SINGLE_FACE_QUERY)}&view=list`;
+      await page.goto(catalogUrl);
+      await hydrated(page);
+
+      await page.locator(`a[href="/cards/${card.oracle_id}"]`).first().click();
+      await page.waitForURL((url) => url.pathname === `/cards/${card.oracle_id}`);
+      await hydrated(page);
+
+      await page.keyboard.press("Alt+ArrowLeft");
+      await page.waitForURL(
+        (url) => url.pathname === "/catalog" && url.search === new URL(catalogUrl, page.url()).search,
+      );
+    });
+
+    test("stays out of the way of a focused field @fast", async ({
+      page,
+      request,
+    }) => {
+      // The card-detail page itself carries no text field, so the guard is
+      // exercised on the catalog's own query bar — landing there is exactly
+      // what a stray Cmd+[ over a typed-but-not-yet-submitted query must NOT
+      // discard.
+      const card = await exactCard(request, SINGLE_FACE_QUERY);
+      await page.goto(`/catalog?q=${encodeURIComponent(SINGLE_FACE_QUERY)}`);
+      await hydrated(page);
+
+      await page.locator(`a[href="/cards/${card.oracle_id}"]`).first().click();
+      await page.waitForURL((url) => url.pathname === `/cards/${card.oracle_id}`);
+      await hydrated(page);
+
+      // Back onto the catalog is the shortcut's own effect, so first prove it
+      // fires at all from a neutral focus (`body`)...
+      await page.locator("body").click();
+      await page.keyboard.press("Meta+BracketLeft");
+      await page.waitForURL((url) => url.pathname === "/catalog");
+
+      // ...then prove the identical chord is swallowed while a field owns the
+      // keyboard: focus the query bar, retype the card's own navigation
+      // (which the trigger no longer offers from here) is unnecessary — the
+      // input merely needs focus and a harmless edit for the guard to have
+      // something to protect.
+      const query = page.locator("#catalog-query");
+      await query.click();
+      await query.fill("a stray edit the shortcut must not discard");
+      await page.keyboard.press("Meta+BracketLeft");
+      // Still on the catalog (no back-out-of-the-app), still carrying the
+      // typed text — the shortcut did nothing at all rather than acting on
+      // the wrong target.
+      await expect(page.locator("#catalog-query")).toHaveValue(
+        "a stray edit the shortcut must not discard",
+      );
+      expect(new URL(page.url()).pathname).toBe("/catalog");
+    });
+  });
+});
+
 test.describe("authed", () => {
   test.use({ storageState: AUTH_STATE });
 

@@ -1279,8 +1279,11 @@ fn PaletteFooter() -> impl IntoView {
 
 // ------------------------------------------------------------ browser edges --
 
+/// `pub(crate)`: `back_nav::install_back_shortcut` reuses this platform check
+/// for its own chord split (`⌘[` vs `Alt+←`) rather than sniffing the
+/// platform a second way.
 #[cfg(feature = "hydrate")]
-fn is_mac() -> bool {
+pub(crate) fn is_mac() -> bool {
     window()
         .navigator()
         .platform()
