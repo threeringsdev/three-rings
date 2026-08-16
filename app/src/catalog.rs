@@ -317,6 +317,23 @@ pub(crate) struct SearchPayload {
     pub(crate) search: Result<shared::SearchResults, ServerFnError<shared::ApiError>>,
 }
 
+/// `search_count`'s answer, tagged with the query it answers — the same
+/// "echo the query back" shape [`SearchPayload`] uses, and for the same
+/// reason: `results` and `search_count` are two independent round trips of
+/// similar latency, so either can resolve first. Without the echo, nothing
+/// downstream could tell "this is the count for what's on screen right now"
+/// from "this is the count for a query the reader has since edited past" —
+/// `Pager` only ever needed the number, but the header's count line needs to
+/// know when its own number has fallen behind (WB-01M0324HQ12B590CZ0YXJPB5T6
+/// round 2, specs/catalog-search.md).
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CountPayload {
+    /// The query this count answers.
+    pub(crate) q: String,
+    /// `None` only when `search_catalog_count` itself errored.
+    pub(crate) count: Option<i64>,
+}
+
 #[component]
 pub fn CatalogPage() -> impl IntoView {
     let query_map = use_query_map();
@@ -417,9 +434,20 @@ pub fn CatalogPage() -> impl IntoView {
     // `results` immediately and *upgrades* once this resolves — never the
     // reverse. Kept off the per-keystroke path only by never being on it:
     // nothing here runs any more often than `results` itself already does.
+    //
+    // Resolves to [`CountPayload`], not a bare `Option<i64>` — the `q` it
+    // echoes back is how the header's count line tells its own number apart
+    // from a still-in-flight query's leftover answer (round 2's staleness
+    // fix; see `CountPayload`'s doc comment).
     let search_count = Resource::new(
         move || url_q.get(),
-        |q| async move { crate::search_catalog_count(q).await.ok().map(|c| c.cards) },
+        |q| async move {
+            let count = crate::search_catalog_count(q.clone())
+                .await
+                .ok()
+                .map(|c| c.cards);
+            CountPayload { q, count }
+        },
     );
 
     view! {
@@ -437,6 +465,87 @@ pub fn CatalogPage() -> impl IntoView {
                                     </p>
                                 }
                             })
+                    })}
+                </Transition>
+                // The filtered counterpart to the line above — same data source
+                // `Pager` already reads for its true-last-page number
+                // (`search_count`, specs/catalog-search.md "Numbered page
+                // links, round 2"), no second request.
+                //
+                // **The outer `move ||` closure reads nothing synchronously —
+                // not even `url_q`, on purpose.** An earlier revision read
+                // `url_q.get()` here to skip `search_count` entirely for an
+                // empty (browse-all) query, which seemed like the obvious
+                // place to gate it. That made this closure itself a tracked
+                // reactive computation, rebuilding a *brand new* `Suspend`
+                // cycle the instant `url_q` changed — independent of, and
+                // ahead of, whether `search_count`'s own fetch for the
+                // *previous* cycle had resolved. That premature rebuild
+                // disposes the previous cycle's reactive `Owner` — including
+                // `displaced_by`'s `Signal::derive`, below — while its content
+                // is still the one `<Transition>` is displaying, and reading
+                // that now-disposed signal panics (`unreachable`, taking the
+                // whole wasm module — and `results` alongside it, not just
+                // this line — down with it; reproduced live,
+                // WB-01M0324HQ12B590CZ0YXJPB5T6 round 2, adversarial review).
+                // `Results`' own outer closure (above, and again below) reads
+                // nothing synchronously either, for the identical reason —
+                // its only reactive dependency is the `.await` inside, so a
+                // new cycle begins only when `Suspend`'s own machinery decides
+                // a fresh value is ready, never on a raw signal tick. This
+                // mirrors that: `search_count` is unconditionally awaited, and
+                // "was this query empty" is read *after*, off the payload's
+                // own echoed `q` — a fact about the resolved cycle, not a
+                // trigger for starting a new one.
+                <Transition fallback=|| ()>
+                    {move || Suspend::new(async move {
+                        // Deliberately the same non-blocking relationship
+                        // `Pager` has with this resource: this `Transition`
+                        // is its own boundary, entirely separate from
+                        // `Results`' — so a slow count never holds up the
+                        // cards rendering, only this line's own text.
+                        let CountPayload { q, count } = search_count.await;
+                        if q.is_empty() {
+                            return None;
+                        }
+                        let label = count.and_then(filtered_count_label)?;
+                        // `results` and `search_count` are two independent
+                        // round trips of similar latency — either can
+                        // resolve first. When `results` wins the race, the
+                        // body can already show `NoResults` for the new
+                        // (zero-hit) query while this line is still showing
+                        // the *previous* query's number: real, not corrupted
+                        // (the reactive graph's version stamp guarantees that
+                        // much), but not a fact about what's on screen
+                        // either, and presenting it unqualified reads as a
+                        // contradiction, not a lag.
+                        //
+                        // `stale`'s comparison is `Pager`'s own signal, reused
+                        // verbatim (round 2, WB-01M0324HQ12B590CZ0YXJPB5T6)
+                        // rather than reinvented: `displaced_by` compares
+                        // *this number's own* echoed query (`q`, just
+                        // unpacked above) against the live URL/box, the same
+                        // comparison `Pager` already makes against `results`'
+                        // echoed query.
+                        //
+                        // Rendered through a genuine child `#[component]`
+                        // (`FilteredCount`, below) rather than inline here —
+                        // deliberate belt-and-suspenders, not the fix itself:
+                        // removing the synchronous `url_q.get()` above is what
+                        // empirically stops the panic (confirmed by reverting
+                        // *only* this component split, markup inlined right
+                        // here with the same no-sync-read outer closure — no
+                        // crash, same as with the split). The split earns its
+                        // keep anyway as a tripwire against a *future* regression
+                        // that reintroduces a synchronous read here: `Pager`
+                        // hit its own "already disposed" panic in round 1 for
+                        // an adjacent reason (its own doc comment) and settled
+                        // on the identical shape — `stale.get()` read inside a
+                        // child component's own plain view output, not a raw
+                        // `class:x=signal` binding built directly as a
+                        // `Suspend` block's tail value.
+                        let stale = displaced_by(q, url_q, query_text);
+                        Some(view! { <FilteredCount label stale /> })
                     })}
                 </Transition>
             </div>
@@ -457,6 +566,45 @@ pub fn CatalogPage() -> impl IntoView {
             <ResultsToolbar results list_view />
             <Results results last_good list_view url_q query_text search_count />
         </div>
+    }
+}
+
+/// The filtered header count's own body — a genuine child `#[component]`
+/// rather than markup built inline as the tail value of the `Suspend::new`
+/// async block that resolves `label`/`stale` (see the call site's own
+/// comment). Not the fix itself for the round-2 crash this task's
+/// adversarial review reproduced (WB-01M0324HQ12B590CZ0YXJPB5T6) — the
+/// confirmed, necessary fix was removing a synchronous `url_q.get()` read
+/// from that block's *outer* closure, which was rebuilding a fresh `Suspend`
+/// cycle on every keystroke-settled query change, independent of whether
+/// `search_count`'s own fetch had resolved, and disposing the *previous*
+/// cycle's `displaced_by` signal while its content was still what
+/// `<Transition>` had on screen. Reading that disposed signal from a live
+/// `class:x=`/attribute binding panicked (`unreachable`, wasm-fatal — took
+/// the whole page down, `results` included, not just this line) — reverting
+/// only *this* split (same markup, inlined at the call site, same no-sync-read
+/// outer closure) does not reproduce it, so the split is not independently
+/// load-bearing here.
+///
+/// Kept anyway as a deliberate tripwire against a *future* regression that
+/// reintroduces a synchronous read at that call site: `Pager` hit its own
+/// "already disposed" panic in round 1 (its own doc comment, an adjacent
+/// cause — N sibling `Signal::derive`-holding elements, not this task's
+/// premature-rebuild mechanism) and settled on the same shape — a live
+/// signal read inside a child component's own plain, non-`Suspend` view
+/// output, disposed only when that component itself unmounts, never as a
+/// side effect of a sibling `Suspend` cycle merely starting.
+#[component]
+fn FilteredCount(label: String, stale: Signal<bool>) -> impl IntoView {
+    view! {
+        <p
+            class="text-muted-foreground text-sm"
+            class:opacity-50=stale
+            data-stale=move || stale.get().then_some("true")
+            data-testid="catalog-count"
+        >
+            {label}
+        </p>
     }
 }
 
@@ -487,6 +635,27 @@ pub(crate) fn count_label(n: usize, has_more: bool, paged: bool) -> String {
         (false, true) => format!("{n}+ results"),
         (false, false) => format!("{n} results"),
     }
+}
+
+/// The header's count line for a **filtered** query — `search_count`'s
+/// unqualified counterpart to the unfiltered "N cards in the catalog." line
+/// above it. Unlike [`count_label`], no `+` qualifier is ever needed here:
+/// `search_count` runs a real `count(*)` (specs/catalog-search.md "Numbered
+/// page links, round 2"), so the number is exact regardless of how many pages
+/// the search runs to — `count_label`'s qualifier exists only because a page
+/// of *results* can't see past its own `next_cursor`, a limitation this
+/// number doesn't have.
+///
+/// **`None` for zero, on purpose — not `"0 cards match."`.** `NoResults`
+/// already renders "No cards match that search." in the body for exactly
+/// this case; the header repeating the same verdict a second time above the
+/// grid would be noise stacked on the one true message, not a second fact.
+///
+/// **No singular/plural agreement** (`"1 cards match."`), matching
+/// `count_label`'s own precedent (`"1 results"`) — this app's tone has never
+/// special-cased `n == 1` for a count line, so this doesn't start now.
+pub(crate) fn filtered_count_label(n: i64) -> Option<String> {
+    (n > 0).then(|| format!("{n} cards match."))
 }
 
 /// Is the query now in the box an edit of the one `kept` answered — the same
@@ -615,7 +784,7 @@ fn Results(
     list_view: Memo<bool>,
     url_q: Memo<String>,
     query_text: RwSignal<String>,
-    search_count: Resource<Option<i64>>,
+    search_count: Resource<CountPayload>,
 ) -> impl IntoView {
     view! {
         // Transition, not Suspense: re-searching keeps the previous results on
@@ -959,7 +1128,7 @@ fn Pager(
     q: String,
     list_view: Memo<bool>,
     stale: Signal<bool>,
-    search_count: Resource<Option<i64>>,
+    search_count: Resource<CountPayload>,
 ) -> impl IntoView {
     // Nothing before this page and nothing after it: the whole landmark is
     // noise, so it is not rendered.
@@ -989,7 +1158,7 @@ fn Pager(
                 } else {
                     search_count
                         .get()
-                        .flatten()
+                        .and_then(|p| p.count)
                         .filter(|_| page_size > 0)
                         .map(|total| (total.max(0) as usize).div_ceil(page_size))
                 };
@@ -1656,8 +1825,8 @@ pub(crate) fn raise_add_toast(t: AddToast) {
 #[cfg(test)]
 mod tests {
     use super::{
-        catalog_url, count_label, encode_query_value, page_strip, pager_is_needed, parse_page,
-        same_search, PageSlot, MAX_PAGE,
+        catalog_url, count_label, encode_query_value, filtered_count_label, page_strip,
+        pager_is_needed, parse_page, same_search, PageSlot, MAX_PAGE,
     };
 
     #[test]
@@ -1683,6 +1852,36 @@ mod tests {
         // ...and no `+` there: 50 is exactly what the page holds; the "more"
         // claim is already refused by the qualifier.
         assert_eq!(count_label(50, true, true), "50 results on this page");
+    }
+
+    #[test]
+    fn the_filtered_header_line_is_exact_no_plus_and_silent_at_zero() {
+        // Unlike `count_label`, this is a real `count(*)` — no "+" qualifier,
+        // ever, regardless of how many pages the search runs to.
+        assert_eq!(filtered_count_label(1), Some("1 cards match.".to_string()));
+        assert_eq!(
+            filtered_count_label(38_623),
+            Some("38623 cards match.".to_string())
+        );
+        // Zero is `None`, not `"0 cards match."` — `NoResults` already owns
+        // that verdict in the body, and the header repeating it would be
+        // stacked noise, not a second fact.
+        assert_eq!(filtered_count_label(0), None);
+        // Defensive: a `count(*)` cannot go negative, but the check is `n >
+        // 0`, not `n != 0`, so a negative value degrades the same way zero
+        // does rather than rendering a nonsense sentence.
+        assert_eq!(filtered_count_label(-1), None);
+        // No arithmetic here (unlike `page_strip`/`page_offset`'s `OFFSET`
+        // math), so there is nothing to overflow — but the boundary and an
+        // absurdly large value both still just format, no panic or wrap.
+        assert_eq!(
+            filtered_count_label(i64::MAX),
+            Some(format!("{} cards match.", i64::MAX))
+        );
+        assert_eq!(
+            filtered_count_label(999_999_999_999),
+            Some("999999999999 cards match.".to_string())
+        );
     }
 
     #[test]

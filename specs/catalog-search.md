@@ -486,6 +486,91 @@ link and zero `aria-disabled` anywhere on the strip; clicking the true last
 page directly from page one (no intermediate clicks) lands there in one
 navigation.
 
+### Filtered header counts, closing the loop (2026-08-15, WB-01M0324HQ12B590CZ0YXJPB5T6)
+
+The "N cards in the catalog." line under the `Catalog` header only ever
+rendered for browse-all — as soon as a query filtered the results, the line
+disappeared with no replacement. This was pure render work: `search_count`
+above already supplies the exact total for *any* query, filtered or not, and
+`CatalogPage` was already firing it unconditionally. No new resource, no new
+server fn, no new route — the header just wasn't reading the one that
+existed.
+
+**Wording:** the unfiltered sentence is untouched. Filtered gets its own,
+`"{n} cards match."` — no `+` qualifier the way `count_label`'s per-page
+phrase needs one, because `search_count` is a real `count(*)`, exact
+regardless of how many pages the search runs to (`filtered_count_label`,
+`app/src/catalog.rs`, unit-tested).
+
+**Zero results are silent, not `"0 cards match."`** `NoResults` already
+renders "No cards match that search." in the body for the zero case; the
+header repeating the same verdict a second time above the grid would be the
+same fact stated twice, not two facts.
+
+**Pending/staleness: a second `<Transition>`, deliberately its own boundary,
+plus `Pager`'s own dimming — not just "keep the old label."** The filtered
+line lives in its own `<Transition fallback=|| ()>` — reserving nothing
+before the first resolve (matching the unfiltered line's existing behaviour)
+and, on every later query change, keeping the *previous* query's label on
+screen until the new one lands rather than collapsing to blank. Kept as its
+**own** `<Transition>`, separate from `Results`': awaiting `search_count`
+here never gates the cards or the pager on this line's slower, independent
+request.
+
+That much alone is **not** a safe mirror of `Pager`'s staleness story,
+though an earlier revision of this section claimed it was: `results` and
+`search_count` are two independent round trips of *similar* latency
+(measured above: ~90–155 ms unfiltered/filtered for the count, a comparable
+order for a keyset page), so either can resolve first. When `results` wins
+— edit a 40-hit query to a 0-hit one, and the cards settle into `NoResults`
+before `search_count` has caught up — the *old* label (`"40 cards match."`)
+was staying on screen, presented as authoritative, directly contradicting
+the empty state right below it. The reactive graph's version guarantee (the
+Open Questions note below) only promises the number itself is never torn or
+corrupted — a real answer to a real, now-superseded query — it says nothing
+about whether that real-but-stale number is fit to *display unqualified*
+next to newer content that has already moved on. That gap is what round 2
+(adversarial review, WB-01M0324HQ12B590CZ0YXJPB5T6) closed: `search_count`
+now resolves to [`CountPayload`] (`app/src/catalog.rs`) — the count *and*
+the query it answers, the same "echo it back" shape `SearchPayload` already
+uses for `results` — and the header reuses `Pager`'s own `stale` signal
+verbatim (`displaced_by`, comparing the echoed query against the live
+URL/box) to dim the line (`opacity-50`, `data-stale`) whenever its own
+number has fallen behind, exactly the "inert, not gone" treatment `Pager`
+already gives its own links.
+
+Getting the dimming itself to render live cost a second, genuinely
+reproduced crash before it worked, and the fix is not what it first looked
+like. The obvious-looking gate — read `url_q.get()` synchronously in the
+`<Transition>`'s outer closure to skip `search_count` entirely for an empty
+query — made that closure a tracked reactive computation, rebuilding a
+*fresh* `Suspend` cycle on every settled query change regardless of whether
+the *previous* cycle's `search_count` fetch had resolved yet. That premature
+rebuild disposed the previous cycle's `displaced_by` signal while its label
+was still the content `<Transition>` had on screen; reading it from a live
+`class:opacity-50=`/`data-stale=` binding then panicked (`unreachable`, wasm
+fatal — took the whole page down, `results` included, not just this line;
+reproduced with the held-route idiom, editing a nonzero-hit query to a
+zero-hit one). The fix was removing that synchronous read: `search_count` is
+now awaited unconditionally, and "was this query empty" is read *after*, off
+the resolved `CountPayload`'s own echoed `q` — a fact about the cycle that
+already resolved, never a trigger for starting a new one before it has.
+Confirmed empirically, not just reasoned: the live binding renders inline at
+the call site (no separate component) exactly as safely as it does split out
+— the crash tracked to the outer closure's premature rebuild, not to
+"inline vs. component." It ships as a separate `#[component]`
+(`FilteredCount`, `app/src/catalog.rs`) anyway, as a deliberate tripwire
+against a *future* regression reintroducing a synchronous read at that call
+site — the same "live signal read inside a child component's own plain view,
+not a raw binding built directly as a `Suspend` block's tail value" shape
+`Pager` settled on for its own, adjacent round-1 panic (N sibling
+`Signal::derive`-holding elements, not this mechanism).
+
+**Anonymous vs signed-in:** `search_catalog_count` (like `search_catalog`)
+answers from `HostedBackend::anonymous()`/`NativeBackend::anonymous()` —
+catalog-wide, no ownership filter — so the line renders identically for both;
+nothing here is session-gated.
+
 ## Open questions
 
 - ~~Which Scryfall syntax subset ships in v1?~~ **Proposed above** (the
