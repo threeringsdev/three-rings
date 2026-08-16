@@ -1187,6 +1187,112 @@ test.describe("the printings table", () => {
     );
   });
 
+  // -------------------------------------------- printing flips and history ---
+  //
+  // The maintainer report this pins: #158 made each row click a *pushed*
+  // history entry, and #156's Back pops history one entry at a time — so a
+  // visit that flips through several printings needed one Back per printing
+  // before it ever left the page. Fix (cards.rs `CardPreview`'s
+  // `replace_history` prop, wired true only here): a printing switch within
+  // one card visit replaces the current entry instead of pushing a new one —
+  // "history granularity is per session", the same rule `components::query_bar`
+  // and `catalog::rail` already apply to `?q=` edits. `components::back_nav`'s
+  // wrapped `history.replaceState` carries the *current* entry's own
+  // `has_history` marker forward untouched, so the entry a reader landed on
+  // by clicking into this card from the catalog keeps naming the catalog as
+  // its own back-target no matter how many printings get flipped afterward.
+
+  test("flipping between printings then one Back returns to the catalog — not to a printing @fast", async ({
+    page,
+    request,
+  }) => {
+    const card = await exactCard(request, LONG_PRINTINGS_QUERY);
+    const printings = await cardPrintings(request, card.oracle_id);
+    const withArt = printings.filter((p) => p.image_uri);
+    expect(
+      withArt.length,
+      "need at least two printings with art to flip between",
+    ).toBeGreaterThanOrEqual(2);
+    const [first, second] = withArt;
+
+    const catalogUrl = `/catalog?q=${encodeURIComponent(LONG_PRINTINGS_QUERY)}&view=list`;
+    await page.goto(catalogUrl);
+    await hydrated(page);
+
+    // A real client-side navigation into the card — the one push that must
+    // remain this visit's only back-target.
+    await page.locator(`a[href="/cards/${card.oracle_id}"]`).first().click();
+    await page.waitForURL((url) => url.pathname === `/cards/${card.oracle_id}`);
+    await hydrated(page);
+
+    const rowFirst = printingRow(page, first.id);
+    await rowFirst.scrollIntoViewIfNeeded();
+    await rowFirst.click();
+    await page.waitForURL((url) => url.searchParams.get("printing") === first.id);
+
+    const rowSecond = printingRow(page, second.id);
+    await rowSecond.scrollIntoViewIfNeeded();
+    await rowSecond.click();
+    await page.waitForURL((url) => url.searchParams.get("printing") === second.id);
+
+    // One Back — not three — leaves the card entirely and lands on the exact
+    // search this visit started from. Against the unfixed base this instead
+    // lands back on `?printing=<first.id>` (a second Back needed to reach
+    // `?printing` unset, a third to finally reach `/catalog`), which is
+    // exactly the bug report: Back walked the printings viewed instead of
+    // leaving the page.
+    await page.getByTestId("card-detail-back").click();
+    await page.waitForURL(
+      (url) =>
+        url.pathname === "/catalog" &&
+        url.search === new URL(catalogUrl, page.url()).search,
+    );
+  });
+
+  test("a modifier-click on a printing row opens it in a new tab instead of navigating in place @fast", async ({
+    page,
+    context,
+    request,
+  }) => {
+    // The replace-navigation the test above pins is a client-side intercept
+    // (`ev.prevent_default()` + `navigate(..., { replace: true })`), and that
+    // intercept must stay out of the way of a modified click — the same
+    // guard `CardPreview::on_click` already applies for "open in a new tab".
+    const card = await exactCard(request, LONG_PRINTINGS_QUERY);
+    const printings = await cardPrintings(request, card.oracle_id);
+    const target = printings.find((p, i) => i > 0 && p.image_uri);
+    expect(
+      target,
+      "no second printing with art in the fixture — need a different query",
+    ).toBeTruthy();
+
+    await page.goto(`/cards/${card.oracle_id}`);
+    await hydrated(page);
+
+    const row = printingRow(page, target!.id);
+    await row.scrollIntoViewIfNeeded();
+
+    const [popup] = await Promise.all([
+      context.waitForEvent("page"),
+      row.click({ modifiers: ["Meta"] }),
+    ]);
+    // The popup starts at "about:blank" — wait for the real navigation to
+    // land rather than `waitForLoadState()`, which can resolve against that
+    // initial blank document.
+    await popup.waitForURL((url) => url.pathname === `/cards/${card.oracle_id}`);
+    const popupUrl = new URL(popup.url());
+    expect(popupUrl.pathname).toBe(`/cards/${card.oracle_id}`);
+    expect(popupUrl.searchParams.get("printing")).toBe(target!.id);
+    await popup.close();
+
+    // The original tab never navigated at all — the modifier click was left
+    // to the browser's native "open in a new tab" default, not swallowed by
+    // the same-page replace intercept.
+    const originalUrl = new URL(page.url());
+    expect(originalUrl.pathname).toBe(`/cards/${card.oracle_id}`);
+    expect(originalUrl.searchParams.has("printing")).toBe(false);
+  });
+
   test.describe("touch", () => {
     test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
 

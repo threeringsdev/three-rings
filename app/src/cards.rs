@@ -26,7 +26,8 @@
 //!   `resolve_current_printing` for the mechanics.
 
 use leptos::prelude::*;
-use leptos_router::hooks::{use_params_map, use_query_map};
+use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
+use leptos_router::NavigateOptions;
 use shared::{
     CardDetail, CardFaceSummary, CardSummary, OwnershipEntry, PrintingSummary, Ruling, WantEntry,
 };
@@ -317,12 +318,30 @@ pub fn CardPreview(
     /// printing the row itself would have — not this page's default hero.
     #[prop(into, optional)]
     detail_href: Option<String>,
+    /// Whether a same-page navigation through this preview (a plain click
+    /// that falls through past the sheet, or the sheet's own "Full details →"
+    /// link) **replaces** the current history entry instead of pushing a new
+    /// one. Default `false` — every ordinary call site (the catalog, `/my`'s
+    /// collection views, the palette) uses this preview to open a card for
+    /// the *first* time, a genuine new back-target that must push. `Printings`
+    /// (this module) is the one exception: its rows all point at the page the
+    /// reader is already on (`/cards/:id`, only `?printing=` differing), so a
+    /// flip between them is not a new visit — "history granularity is per
+    /// session", the same rule `components::query_bar` and `catalog::rail`
+    /// already apply to `?q=` edits. See `back_nav`'s module doc for why a
+    /// replace here is safe: the wrapped `history.replaceState` carries the
+    /// *current* entry's `has_history` marker forward untouched, so however
+    /// many printings a visit flips through, one `Back` still lands on
+    /// whatever sent the reader to this card in the first place.
+    #[prop(default = false)]
+    replace_history: bool,
     children: Children,
 ) -> impl IntoView {
     let oracle_id = card.oracle_id;
     let instance_id = id.unwrap_or_else(|| oracle_id.to_string());
     let href = detail_href.unwrap_or_else(|| format!("/cards/{oracle_id}"));
     let name = card.name.clone();
+    let navigate = use_navigate();
     // Each affordance's body lands in its own per-node closure, so they each
     // need an owned copy rather than sharing one.
     let hover_card_body = card.clone();
@@ -367,17 +386,40 @@ pub fn CardPreview(
     let touch_intent = RwSignal::new(false);
     let wants_sheet = Signal::derive(move || coarse.get() || touch_intent.get());
 
-    let on_click = move |ev: leptos::ev::MouseEvent| {
-        // A modified click is a navigation instruction, not a preview request
-        // — swallowing it would break "open in a new tab" for anyone with a
-        // keyboard attached to a touch device.
-        if ev.meta_key() || ev.ctrl_key() || ev.shift_key() || ev.alt_key() {
-            return;
-        }
-        if wants_sheet.get() {
-            ev.prevent_default();
-            sheet_seen.set(true);
-            sheet_open.set(true);
+    let on_click = {
+        // Own copies for the closure: `navigate` is `Clone` (a thin wrapper
+        // over the router's context, see `leptos_router::hooks::use_navigate`),
+        // and `href` is still needed below for the sheet's own "Full details"
+        // link.
+        let navigate = navigate.clone();
+        let href = href.clone();
+        move |ev: leptos::ev::MouseEvent| {
+            // A modified click is a navigation instruction, not a preview request
+            // — swallowing it would break "open in a new tab" for anyone with a
+            // keyboard attached to a touch device.
+            if ev.meta_key() || ev.ctrl_key() || ev.shift_key() || ev.alt_key() {
+                return;
+            }
+            if wants_sheet.get() {
+                ev.prevent_default();
+                sheet_seen.set(true);
+                sheet_open.set(true);
+            } else if replace_history {
+                // The desktop path: no sheet, and this click would otherwise
+                // fall through to the child `<a>`'s own href, which
+                // `leptos_router`'s global click delegate turns into a
+                // **push** — see the `replace_history` prop doc for why that
+                // is wrong for a same-page printing flip. Take over the
+                // navigation ourselves instead, with `replace: true`.
+                ev.prevent_default();
+                navigate(
+                    &href,
+                    NavigateOptions {
+                        replace: true,
+                        ..Default::default()
+                    },
+                );
+            }
         }
     };
 
@@ -451,6 +493,34 @@ pub fn CardPreview(
                             href=href.clone()
                             class="text-primary inline-block text-sm font-medium hover:underline"
                             data-testid="card-preview-full-details"
+                            on:click={
+                                // Fresh clones per invocation, not a move of
+                                // the outer `href`/`navigate` — this closure
+                                // sits inside `Show`'s `Fn` children, which
+                                // must stay callable more than once.
+                                let navigate = navigate.clone();
+                                let href = href.clone();
+                                move |ev: leptos::ev::MouseEvent| {
+                                    // A no-op everywhere but `Printings` — see
+                                    // the `replace_history` prop doc.
+                                    if !replace_history {
+                                        return;
+                                    }
+                                    if ev.meta_key() || ev.ctrl_key() || ev.shift_key()
+                                        || ev.alt_key()
+                                    {
+                                        return;
+                                    }
+                                    ev.prevent_default();
+                                    navigate(
+                                        &href,
+                                        NavigateOptions {
+                                            replace: true,
+                                            ..Default::default()
+                                        },
+                                    );
+                                }
+                            }
                         >
                             "Full details →"
                         </a>
@@ -1356,6 +1426,15 @@ fn Printings(
                                                     card=preview
                                                     id=id.to_string()
                                                     detail_href=href.clone()
+                                                    // Every row here is another printing of the
+                                                    // page the reader is already on — a flip, not
+                                                    // a new visit — so a same-page navigation
+                                                    // through this preview replaces the current
+                                                    // history entry instead of pushing a fresh
+                                                    // one for every printing viewed. See the prop
+                                                    // doc for the full "history granularity is
+                                                    // per session" reasoning.
+                                                    replace_history=true
                                                 >
                                                     <a
                                                         href=href
