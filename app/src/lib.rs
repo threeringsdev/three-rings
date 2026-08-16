@@ -2141,15 +2141,18 @@ fn google_error_redirect(clear_challenge: String) -> axum::response::Response {
 /// carries no sign-in affordance, but a future dynamically-registered page
 /// would sit outside this redirect.
 ///
-/// Scoped narrowly to avoid the two other places a request legitimately
-/// carries a `127.0.0.1` `Host`: behind Render (`x-forwarded-*` is always
-/// present there — production keeps Allow Localhost off and isn't this bug
-/// anyway) and the Tauri embedded server, which deliberately navigates its
-/// *own* window to `127.0.0.1` (`src-tauri/src/lib.rs`) while exporting
-/// `TR_EMBEDDED_ORIGIN=http://localhost:<port>` — detected here via
-/// `native::embedded_origin()` — only for the upstream Origin header, not
-/// the page's own location. Redirecting that window too would fight the
-/// Tauri shell's own navigation instead of the browser's.
+/// Scoped narrowly to avoid the one other place a request legitimately
+/// carries a `127.0.0.1` `Host`: behind Render, `x-forwarded-*` is always
+/// present (production keeps Allow Localhost off and isn't this bug anyway).
+/// The `native` check (`native::embedded_origin().is_some()`) is a second,
+/// belt-and-suspenders guard against ever fighting the Tauri shell's own
+/// window navigation — as of WB-01M036CA3M185WM4WGS5SDC161 that window
+/// navigates itself straight to `http://localhost:<port>` (not the raw
+/// `127.0.0.1` bind address; `src-tauri/src/lib.rs`), so in normal operation
+/// its `Host` is never `127.0.0.1` and this redirect would already no-op via
+/// the `host?.strip_prefix("127.0.0.1:")?` check below without the `native`
+/// guard at all — kept anyway so a future regression in the shell's own
+/// navigation degrades to "no redirect" rather than a fight between the two.
 /// The pure decision behind [`redirect_localhost_dev`]: given the request's
 /// method, whether it already arrived through a proxy, whether we're running
 /// inside a Tauri shell, and its `Host` header, what (if anything) to
@@ -2234,8 +2237,11 @@ mod redirect_localhost_dev_tests {
 
     #[test]
     fn skips_the_tauri_embedded_server() {
-        // The desktop shell deliberately navigates its own window to
-        // 127.0.0.1 — this redirect must not fight that.
+        // Belt-and-suspenders: the desktop shell's window now navigates
+        // itself to `localhost`, not `127.0.0.1` (WB-01M036CA3M185WM4WGS5SDC161),
+        // so this Host wouldn't occur in practice — but if it ever did, the
+        // `native` flag must still suppress the redirect rather than fight
+        // the shell's own navigation.
         assert_eq!(
             localhost_redirect_target(true, false, true, Some("127.0.0.1:54321"), "/"),
             None

@@ -606,6 +606,91 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     this host). Worth a maintainer-run smoke test of release-build
     email/password sign-in, and if it *is* broken, the fix is the same shape
     as `google_sign_in`'s existing override.
+- 2026-08-16 (`fix/release-desktop-auth`, WB-01M036CA3M185WM4WGS5SDC161) —
+  **Release-build desktop sign-in confirmed broken as predicted, fixed at the
+  code level, but a second, separate blocker remains on the production Neon
+  Auth branch.**
+  - **Symptom confirmed live.** Ran the maintainer's already-built release
+    `.app` (`target/release/bundle/macos/three-rings.app`) directly —
+    `Contents/MacOS/three_rings`, launched with no exported env, exactly what
+    a Finder double-click gets — and found its dynamic loopback port with
+    `lsof -i -P -a -p <pid>`. `curl -X POST http://127.0.0.1:<port>/api/sign_in`
+    with bad credentials returned the maintainer's exact reported symptom:
+    `{"Failed":{"message":"Invalid origin"}}`; `/api/google_sign_in` returned
+    `ServerError|auth api INVALID_CALLBACKURL: auth service returned 403
+    Forbidden` (the client's generic "isn't available right now"). This
+    matches the 2026-08-15 Findings entry's prediction verbatim: the
+    `native::embedded_origin()` override `google_sign_in` had was missing from
+    every other `account::` call.
+  - **Fix (this task, already implemented when this verification began):**
+    `cookies::request_origin` itself now checks `native::embedded_origin()`
+    first and returns it outright when set — factored into a pure,
+    unit-tested core (`request_origin_with(native_origin: Option<&str>,
+    headers)`) — so every caller (`sign_in`/`sign_up`/`verify_email`/
+    `resend_verification`/`request_password_reset`/`reset_password`/
+    `sign_out`/`fetch_current_user`/`auth_callback`, plus the native backend's
+    session-fallback JWT re-mint) gets the same trusted-origin override
+    `google_sign_in` used to apply only to itself, closing the asymmetry.
+    `google_sign_in` (`account.rs`) simplified accordingly — it now gets its
+    `origin` from `cookies::request_origin` like everything else, keeping
+    `native_origin` only as a boolean flag for its Android-bounce/
+    challenge-stash branches. Belt-and-suspenders: the release window itself
+    (`src-tauri/src/lib.rs`) now navigates to `http://localhost:<port>`
+    (the same string exported as `TR_EMBEDDED_ORIGIN`) instead of the raw
+    `http://127.0.0.1:<port>` bind address, so its own `Host` header is
+    correct independent of the origin override. Web is unaffected —
+    `TR_EMBEDDED_ORIGIN` is never set outside a Tauri shell, so
+    `embedded_origin()` returns `None` there and `request_origin` falls
+    through to the original header-derived logic unchanged (confirmed live:
+    the dev-server e2e login fixture, a real web sign-in, still passes).
+  - **Fix verified correct against the `dev` Neon Auth branch.** Relaunched
+    the same `.app` with `NEON_AUTH_BASE_URL` exported to the dev branch's
+    URL: `/api/sign_in` with bad credentials now returns the ordinary
+    `{"Failed":{"message":"Invalid email or password"}}`, and this holds
+    **regardless of whether the curl request's own `Host` header was
+    `127.0.0.1:<port>` or `localhost:<port>`** — proof the override is
+    unconditional, not a lucky header match. `/api/google_sign_in` now returns
+    `200` with a valid `.../sign-in/social/init?token=…` URL (previously
+    `INVALID_CALLBACKURL`/403) on both Host spellings too.
+  - **New discovery: the fix alone does not close the maintainer's reported
+    bug on a default-launched release build, because production Neon Auth
+    trusts no loopback origin at all.** Relaunched the same `.app` a third
+    time with **no** env override (i.e. exactly what Finder gives it —
+    `src-tauri/src/lib.rs` defaults `NEON_AUTH_BASE_URL` to the production
+    branch when unset, since "packaged release apps … receive no shell
+    environment"): `/api/sign_in` with bad credentials still returned
+    `{"Failed":{"message":"Invalid origin"}}` and `/api/google_sign_in` still
+    returned `INVALID_CALLBACKURL`/403 — the maintainer's exact original
+    symptom, reproduced *with the fix already applied*. This is not a code
+    bug: per the 2026-07-11 Findings entry, `allow_localhost=true` was set on
+    both branches at provisioning time, but the 2026-08-15 entry's
+    `redirect_localhost_dev` doc comment records that "production keeps Allow
+    Localhost off" — evidently toggled off since, and this probe confirms it
+    empirically. The code fix makes the app present the *correctly-spelled*
+    trusted origin (`localhost`, never the untrusted `127.0.0.1`), but
+    production refuses it outright regardless of spelling because it trusts
+    no loopback origin at all. Closing this needs a **production-branch**
+    Neon Auth config change (`allow_localhost=true`, mirroring dev, or an
+    explicit trusted-origins entry) — a maintainer decision, explicitly out
+    of this task's scope (constraint: no Neon Auth config changes here). Filed
+    as follow-up: WB-01M05GMSBW1HAXWXV8X57X93RY.
+  - **Regression checks:** `cargo fmt --all -- --check`; the three feature-gated
+    clippy lines (`hosted,component-bench`; `native`; `hydrate,component-bench`
+    wasm) all `-D warnings` clean; `cargo test -p app --features hosted --lib`
+    — 418 passed including the new `cookies::tests` cases and the existing
+    `session_fallback_tests` (#147 redirect tests, unaffected); `cargo build -p
+    three_rings` clean. `end2end/tests/session-fallback.spec.ts --grep @fast`
+    (chromium) — 2 passed, run against a `cargo leptos watch` dev server in
+    the worktree; this exercises the real web login fixture (email/password
+    sign-in with no `TR_EMBEDDED_ORIGIN` set) end-to-end and confirms web
+    sign-in is not regressed.
+  - **Incidental finding, unrelated, filed on the existing tracking task
+    (WB-01KZVB5M1SG8JFHT6R0AVB39QE):** `end2end/node_modules` is a committed
+    symlink to an absolute path that is now self-referential (points to
+    itself), breaking `ls`/`npx`/etc. through it with `ELOOP` even in the main
+    checkout, not only in worktrees. Worked around locally (deleted the
+    symlink, ran a scoped `npm install` in the worktree, restored the tracked
+    symlink afterward) — nothing committed for it here.
 
 ## Open questions (2026-08-15 addendum)
 
@@ -616,7 +701,20 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
   concurrent server (the shared cache this task was scoped to use serializes
   builds via cargo's package-cache lock, which made a live two-process
   repro impractical inside this task).
-- Whether release-build Tauri desktop email/password sign-in still works
-  against the current Neon Auth dev/production config (see the
-  `native::embedded_origin()` asymmetry noted in Findings above) —
-  unverified since the 2026-07-13 spike.
+- ~~Whether release-build Tauri desktop email/password sign-in still works
+  against the current Neon Auth dev/production config~~ — **answered
+  2026-08-16**: it works against `dev` once the origin-override fix lands
+  (WB-01M036CA3M185WM4WGS5SDC161); against `production` it still fails, but
+  because that branch trusts no loopback origin at all, not a spelling bug —
+  see the 2026-08-16 Findings entry.
+
+## Open questions (2026-08-16 addendum)
+
+- Whether the maintainer wants `allow_localhost=true` enabled on the
+  **production** Neon Auth branch (mirroring `dev`), or a narrower
+  trusted-origins allowance, to let a default-launched (no env override)
+  release desktop build authenticate — currently neither is done, so release
+  desktop sign-in against production still fails exactly as originally
+  reported even after WB-01M036CA3M185WM4WGS5SDC161's code fix. Tracked as
+  WB-01M05GMSBW1HAXWXV8X57X93RY; needs a maintainer call since it's a Neon
+  Auth console change, not a code change.

@@ -54,7 +54,32 @@ pub fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 /// `Origin` header (Better Auth CSRF-checks it against its trusted origins)
 /// and for building the OAuth callback URL. Render terminates TLS and sets
 /// `x-forwarded-proto`/`host`; plain local serving has only `host`.
+///
+/// Under a Tauri embedded server the shell-exported loopback origin
+/// ([`super::native::embedded_origin`]) is authoritative and wins outright —
+/// mirroring the preference `account::google_sign_in` already applied only to
+/// itself (specs/auth.md: the release desktop window's `Host` header doesn't
+/// reliably match the origin Neon Auth is configured to trust, e.g. the
+/// `127.0.0.1` the webview used to navigate to before that was fixed to
+/// `localhost` in `src-tauri/src/lib.rs`). Every other Better-Auth-facing
+/// caller of this function — `sign_in`/`sign_up`/`verify_email`/etc. in
+/// `account.rs`, and the native data-access backend's origin
+/// (`NativeBackend::authed`, `user_id_with_session_fallback`'s JWT re-mint) —
+/// now gets the same override for free, closing the asymmetry recorded in the
+/// 2026-08-15 Findings entry.
 pub fn request_origin(headers: &HeaderMap) -> String {
+    request_origin_with(super::native::embedded_origin().as_deref(), headers)
+}
+
+/// Pure core of [`request_origin`]: given the Tauri embedded origin (if any,
+/// taken as an explicit parameter rather than read from the environment here)
+/// and the request headers, decide the origin to present. Split out so the
+/// decision is unit-testable without racing on process-global env vars across
+/// parallel tests — the same split `lib.rs`'s `localhost_redirect_target` uses.
+fn request_origin_with(native_origin: Option<&str>, headers: &HeaderMap) -> String {
+    if let Some(origin) = native_origin {
+        return origin.to_string();
+    }
     let proto = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
@@ -106,7 +131,10 @@ mod tests {
             "x-forwarded-host",
             "three-rings-6p5o.onrender.com".parse().unwrap(),
         );
-        assert_eq!(request_origin(&h), "https://three-rings-6p5o.onrender.com");
+        assert_eq!(
+            request_origin_with(None, &h),
+            "https://three-rings-6p5o.onrender.com"
+        );
         assert!(request_is_secure(&h));
     }
 
@@ -114,8 +142,58 @@ mod tests {
     fn origin_falls_back_to_host_header() {
         let mut h = HeaderMap::new();
         h.insert(HOST, "127.0.0.1:3000".parse().unwrap());
-        assert_eq!(request_origin(&h), "http://127.0.0.1:3000");
+        assert_eq!(request_origin_with(None, &h), "http://127.0.0.1:3000");
         assert!(!request_is_secure(&h));
+    }
+
+    /// The regression this task fixes: a release-desktop request whose `Host`
+    /// is `127.0.0.1:<port>` (the webview's old navigation target — see
+    /// `src-tauri/src/lib.rs`) must still present the trusted embedded origin
+    /// upstream, not the untrusted header-derived one.
+    #[test]
+    fn native_origin_overrides_a_mismatched_host_header() {
+        let mut h = HeaderMap::new();
+        h.insert(HOST, "127.0.0.1:54321".parse().unwrap());
+        assert_eq!(
+            request_origin_with(Some("http://localhost:54321"), &h),
+            "http://localhost:54321"
+        );
+    }
+
+    /// Even when the `Host` header would itself compute the "right" answer
+    /// (e.g. once the webview navigates to `localhost`, or a proxy sets
+    /// `x-forwarded-*`), the native origin still wins outright — matching
+    /// `account::google_sign_in`'s existing preference, so the two paths can
+    /// never disagree.
+    #[test]
+    fn native_origin_wins_even_over_forwarded_headers() {
+        let mut h = HeaderMap::new();
+        h.insert(HOST, "internal:10000".parse().unwrap());
+        h.insert("x-forwarded-proto", "https".parse().unwrap());
+        h.insert(
+            "x-forwarded-host",
+            "three-rings-6p5o.onrender.com".parse().unwrap(),
+        );
+        assert_eq!(
+            request_origin_with(Some("http://localhost:3000"), &h),
+            "http://localhost:3000"
+        );
+    }
+
+    /// `request_origin` (the impure wrapper actually used by callers) reads
+    /// the real environment. Absent `TR_EMBEDDED_ORIGIN` (never set in the
+    /// test process), it must fall back to the header-derived value exactly
+    /// like `request_origin_with(None, ..)` — locking the wiring between the
+    /// two without depending on a set env var (which would race other tests).
+    #[test]
+    fn request_origin_matches_the_no_native_core_absent_the_env_var() {
+        assert!(
+            std::env::var("TR_EMBEDDED_ORIGIN").is_err(),
+            "test process must not have TR_EMBEDDED_ORIGIN set"
+        );
+        let mut h = HeaderMap::new();
+        h.insert(HOST, "127.0.0.1:3000".parse().unwrap());
+        assert_eq!(request_origin(&h), request_origin_with(None, &h));
     }
 
     #[test]
