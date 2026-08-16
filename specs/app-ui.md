@@ -7395,6 +7395,16 @@ decorations make this low-risk, left unverified); status-bar tap-through
 semantics (moot now that the close button itself moved off the inset).
 ### Desktop WKWebView popover misposition: the JS anchor fallback rebuilt to mirror the CSS path (2026-08-16, WB-01M05K42G96ZSGHEBHKQ47CBDV)
 
+> **Superseded on the diagnosis, kept for the fallback work** (same day,
+> WB-01M064BMRF8QBKAYJ4C9CNGQ0H below): the real-engine probe DISPROVED this
+> entry's premise — the system WKWebView fully supports CSS anchor
+> positioning and positioned the panel correctly all along; the invisibility
+> was `Command`'s `h-full` resolving to zero height there. Also,
+> `@position-try(flip-block)` inline blocks were never the flip mechanism in
+> any engine (always-invalid syntax; `position-try-fallbacks: flip-block`
+> does the flipping). The rebuilt JS fallback below remains correct and
+> shipped — it just wasn't what this bug needed.
+
 `app/src/components/ui/popover.rs` (`fallback_position`, `apply_fallback_position`,
 `watch_panel_resize`, `PopoverContext.align`); `end2end/force-fallback-probe.mjs`
 (new, one-off).
@@ -7538,3 +7548,206 @@ this. The underlying tracked blob was fixed for good the same day by PR
 #160 (chore(e2e): the symlink is untracked and the drifted lockfile
 refreshed), which merged while this branch was in flight — no follow-up
 task remains.
+
+### The desktop pickers were never a positioning bug: `Command`'s `h-full` collapsing under WebKit (2026-08-16, WB-01M064BMRF8QBKAYJ4C9CNGQ0H)
+
+`app/src/components/ui/command.rs` (the root class), `app/src/components/ui/popover.rs`
+(dead CSS + corrected claims), `end2end/wkwebview/` (new — a real-WKWebView probe
+harness). Successor to `#163`, whose diagnosis this entry **corrects**.
+
+**The report.** A `.app` built *after* `#163` still showed the tray's
+`Move to…` and the catalog's `Adding to` pickers not rendering usably. Since
+`#163`'s JS fallback demonstrably worked when forced, the standing hypothesis
+was that detection lied — that `anchor_positioning_supported()` returned
+`true` on this macOS's WKWebView (WebKit shipped CSS Anchor Positioning in
+Safari 26) and the CSS path was taken and misbehaving.
+
+**The harness.** `end2end/wkwebview/wkprobe.swift` — a `swiftc`-built binary
+that loads a URL into a real system `WKWebView`, injects a driver script, and
+prints what the page measures (plus awaitable screenshots). This is the gap
+`#148` and `#163` both fell into: **Playwright's `webkit` project is not the
+system WebKit `WKWebView` runs**, so "green on Playwright webkit" was never
+evidence about the `.app`. macOS 26.6.1, `AppleWebKit/605.1.15`.
+
+**What the engine actually does — every hypothesis in the task, refuted.**
+`CSS.supports` is `true` in real WKWebView for every declaration the CSS path
+uses: `position-anchor: --x` (the detection expression, verbatim),
+`anchor-name`, `position-area: block-start`, `bottom: anchor(top)`,
+`right: anchor(right)`, `anchor-size()`, `position-try-fallbacks: flip-block`,
+`position-try-order: most-height`, `position-visibility: anchors-visible`. And
+it means it: live-measured anchored popovers land exactly where the CSS asks —
+a `Center`/`position-area: block-start` panel centred on its trigger to the
+pixel, an `End` panel's right edge flush with the trigger's, a bottom-docked
+trigger's panel flipping above. **Detection does not lie, and must not be
+"fixed" into a runtime measurement probe.** On the real app, pre-fix, the tray
+panel measured `right: 1089.5` against `triggerRight: 1089.5` and
+`bottom: 741` against `triggerTop: 749` (the 8px gap) — perfect anchoring.
+
+**The real bug: the panel was 2px tall.** `PopoverContent`'s body is
+`DestinationList` → `Command`, whose root class carried `h-full`
+(`height: 100%`) from the registry. A percentage height resolves against the
+parent's height, and no `Command` parent in this app has a definite one.
+Chromium computes it to `auto` (CSS 2.1 §10.5) — inert, which is why it rode
+through vendoring unnoticed. **WebKit resolves it to `0` when the containing
+block is an auto-height absolutely-positioned box** — exactly what a top-layer
+`popover` panel is. `Command` is also `overflow: hidden`, so the entire picker
+body was clipped away, leaving the 2px border sliver the maintainer saw as
+"nothing renders". Isolated in-engine experiments, in order:
+
+| experiment | panel height |
+|---|---|
+| baseline (as shipped) | **2px** (`Command` 0px) |
+| `Command` `height: auto` | **296px**, full list |
+| panel given an explicit `height: 300px` | 300px |
+| every anchor declaration neutralised | **still 2px** |
+| `#163`'s JS fallback's exact inline writes | **still 2px** |
+
+The last two rows are the ones that matter: the collapse has **nothing to do
+with anchor positioning**, and `#163`'s fallback would not have fixed it even
+if detection had engaged it. That is why a post-`#163` `.app` was unchanged.
+
+**Reconciling the maintainer's accessibility read.** His a11y walk of the live
+`.app` found the picker present but invisible — `combo box ("Search
+collections…")`, **278×40**, sitting *at and below* the tray, which read as
+"placed below the trigger, painted behind the tray". The probe reproduces that
+frame exactly: with `Command` at `height: 0`, the `CommandInput` keeps a full
+**278×40 layout box** starting at the panel's content origin and running
+*downward* over the trigger and tray — clipped to nothing, so it paints
+nothing while accessibility still reports its geometry. Top-layer promotion is
+fine: `elementFromPoint` at the panel's own centre returns `PopoverContent`
+(inside the panel, above the tray), and post-fix the same probe returns
+`CommandItem`/`CommandInput` there. **No z-index belt is needed** — nothing was
+being painted behind anything, there was simply nothing painted.
+
+**The `@position-try(flip-block)` blocks were inert in every engine.**
+`popover.rs`'s per-align strings embedded `@position-try(flip-block) { … }`
+inside the rule body. That syntax exists in no spec (the real rule is a
+*top-level* `@position-try --name { … }` referenced by name), so both parsers
+consumed the invalid at-rule and discarded its declarations. Read back out of
+`document.styleSheets`, real WKWebView and chromium 151 serialize the `End`
+rule **identically** and neither keeps a single declaration from inside those
+blocks:
+
+```
+#popover-… { position-anchor: --anchor-…; inset: auto anchor(right) anchor(top) auto;
+             margin-bottom: 8px; position-try: most-height flip-block;
+             position-visibility: anchors-visible; … }
+```
+
+Both engines *do* know the real at-rule (`CSSPositionTryRule`), which is what
+makes the parenthesized form provably a typo rather than a vendor quirk. The
+flip has always come from `position-try-fallbacks: flip-block`, which is valid
+and applied. The dead blocks are deleted; the comments in `popover.rs` (and
+`#163`'s entry above) that treated them as the mechanism are corrected in
+place. One consequence worth naming: because those blocks never applied, a
+flipped panel keeps `margin-bottom: 8px` and picks up `my-[1ch]`'s ~9.8px
+above instead of the 8px they intended — cosmetic, unchanged by this task.
+
+**The fix.** One declaration: `h-full` removed from `Command`'s root class.
+Provably a no-op on chromium — measured pre/post, every `Command` in the app
+keeps byte-identical geometry (rail `91px` → `91px`, ⌘K palette `320px` →
+`320px` with `parentHeight 322px`, catalog panel `280×298` with `Command
+296px`, `positionArea: block-end`); the only computed-style difference is
+`height: 100%` → `auto` on `display:none` panels. The ⌘K palette's 320px comes
+from its own `min-h-80`, not from `h-full`, in both engines.
+
+**Verification.**
+- **Real macOS WKWebView, post-fix** (the harness, against a dev server built
+  from this branch). Tray `Move to…` at 1280×800: panel `280×298`,
+  `right 1089.5` = `triggerRight 1089.5`, `bottom 741` = `triggerTop 749 − 8`,
+  `top 443` — fully in-viewport, above its bottom-docked trigger, `Command`
+  `296px`, `CommandList` `256px`. At **1700×1050** (the size the maintainer
+  asked verification to run at): panel `280×298` at `(1019.5, 693)–(1299.5,
+  991)`, right-flush, in-viewport. At **800×600** (his original window):
+  `(447, 243)–(727, 541)`, right-flush, in-viewport. Catalog `Adding to`:
+  `280×296`, panel centre `1085.50` vs trigger centre `1085.49`, flipped below
+  (296px doesn't fit in the 199px above) — matching chromium's own
+  `position-area: block-end`. Screenshots confirm visually: before, clicking
+  `Move to…` paints nothing; after, the full collection list sits above the
+  trigger, over the table.
+- **Anchor-path regression, chromium**: `--project=chromium --grep @fast
+  selection-tray.spec.ts destination-picker.spec.ts` — **19/19 passed**, the
+  same 19 `#163` recorded.
+- **Every other `Command` consumer, chromium**, run against **both** this
+  branch and a stashed baseline under identical conditions, because this
+  worktree has a pre-existing failure population: parallel — fixed 13 failed /
+  94 passed vs baseline 14 failed / 93 passed; serial (`--workers=1`) — fixed
+  13/59 vs baseline 12/60, with **identical failure lists** but for
+  `collection-tree-manage.spec.ts:852`, which then failed **4/4 on the
+  baseline** and **4/4 with the fix** when isolated with `--repeat-each=4`.
+  No regression is attributable to this change; the standing failures
+  (`filter-rail`, `command-palette`, `collection-tree-manage`) are
+  environmental and pre-date it.
+- `cargo fmt --all --check` clean; clippy clean at `-D warnings` on all five
+  lines (workspace excl. frontend/three_rings, `-p frontend` wasm, `-p app
+  --features native`, `-p app --features hosted,component-bench`, `-p app
+  --features hydrate,component-bench` wasm); `cargo test --workspace --exclude
+  frontend --exclude three_rings` — **430 passed, 0 failed, 5 ignored**,
+  including all 12 `fallback_position_tests` (untouched: the fallback is
+  unchanged).
+- **Not run**: `cargo build -p three_rings` and the release `cargo leptos
+  build` (host-side, unchanged by an `app`-crate class edit; CI is the gate).
+  **The maintainer's rebuilt `.app` remains the final gate.**
+
+**Open question left behind.** `Command`'s `overflow: hidden` turns any future
+height miscalculation into "the component vanishes" rather than "it overflows"
+— the reason this bug read as a rendering failure instead of a layout one. Not
+changed here (it is what gives `CommandList` its own scroller), but worth
+knowing when the next picker looks blank.
+
+**Round-3 addendum — the verification that "failed" was measuring a different
+app.** A visual check of a `.app` built from this branch reported the original
+symptom intact: no visible picker, and an accessibility read putting the
+search combo box (278×40) hard against the tray at the window's bottom edge.
+The harness said the opposite. The isolated variable was **not** anything
+about WebKit, wry's `WKWebViewConfiguration`, release assets, or the native
+backend — it was **which process was being driven**.
+
+Every bundle this repo produces carries `CFBundleIdentifier
+com.three-rings.dev` and the executable name `three_rings`. The maintainer's
+installed `/Applications/three-rings.app` (built 16:23, **pre-fix**) was
+running alongside the worktree build, and **System Events resolves a process
+by that identity rather than by pid**. Reproduced deliberately: an
+AppleScript `first process whose unix id is <worktree pid>` reported success
+and read back `{80, 60} 1700×1050`, while `CGWindowListCopyWindowInfo` —
+which is pid-keyed and cannot alias — showed that geometry had been applied
+to the *`/Applications`* process, with the worktree build still at its
+default `800×600`. The intermittent `-25208` from `set frontmost` is the same
+collision. Both windows then sat at identical geometry, so every subsequent
+click, a11y query and screenshot went to the older, unfixed app.
+
+Settled without any GUI, by asking each running instance what it serves —
+each `.app` runs its embedded Axum on a dynamic port (`lsof -nP -iTCP
+-sTCP:LISTEN -a -p <pid>`):
+
+| instance | built | `data-name="Command"` class it serves |
+|---|---|---|
+| `/Applications` (the one measured) | 16:23, pre-fix | `… w-full **h-full** bg-transparent …` |
+| worktree bundle, this branch | 17:33, `0af380f` | `… w-full bg-transparent …` |
+
+and confirmed statically: the `/Applications` binary contains only the old
+class literal, the worktree bundle's binary and `app.wasm` only the new one.
+
+Independently, the fix was re-verified **against the `.app`'s own release
+assets**: a plain `WKWebView` pointed at the bundle's embedded server (its
+Tailwind `app.css`, not the dev server's), building the tray picker's exact
+DOM, measured `Command` at **0px / panel 2px** with `h-full` and **297px /
+panel 299px** without it, placed above the bottom-docked trigger with the
+right edges flush. Release CSS, release engine, same verdict as the dev
+server — which also rules out the release build and the native backend as
+variables.
+
+`end2end/wkwebview/axdrive.swift` (+ `winid.swift`) exist so this cannot
+recur: `AXUIElementCreateApplication` takes a pid, so resizing, raising and
+pressing are pid-exact, and `winid` reports CoreGraphics' own truth for the
+window bounds. The harness README's "Verifying against the built `.app`"
+section is the procedure.
+
+**Still owed, and blocked**: the click-through screenshot of the *actual*
+built `.app` window (tray `Move to…` and catalog `Adding to` visibly open at
+1700×1050). The correct instance was launched, resized pid-exactly to
+1700×1050, confirmed frontmost, and screenshot-confirmed signed in on
+`/my/all` — then the Mac's display locked, and a locked screen cannot be
+driven or captured. Everything up to the final click is done; the remaining
+step needs an unlocked machine, with every other `three-rings` instance
+quit first (or driven strictly by pid).

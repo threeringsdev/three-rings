@@ -111,6 +111,25 @@
 //!   [`CommandContext::visible`]'s doc). `visible.with(|v| !v.is_empty())`
 //!   is the same verdict, read off the already-computed list instead of
 //!   walking `items` again.
+//! - **`h-full` is gone from the root class** (WB-01M064BMRF8QBKAYJ4C9CNGQ0H).
+//!   Upstream's `Command` is a dialog body, where a definite-height parent
+//!   makes `height: 100%` mean something. Nothing in this app gives it one:
+//!   `CommandDialog`'s `DialogContent` is `fixed` with `max-h-[85vh]` and no
+//!   `height`, `DestinationList`'s parent is a native `popover` panel, and the
+//!   rail's is an ordinary content-sized block. Chromium computes the
+//!   percentage to `auto` in every one of those, so the declaration was inert
+//!   there and rode along unnoticed through vendoring; WebKit resolves it to
+//!   **0** against an auto-height *absolutely-positioned* containing block —
+//!   which is what a top-layer `popover` is — and this element's own
+//!   `overflow: hidden` then clips the whole body away. That is the desktop
+//!   `.app`'s "the picker doesn't render" bug: measured in a real macOS
+//!   WKWebView, the tray's `Move to…` and the catalog's `Adding to` panels
+//!   were anchored perfectly and 2px tall (borders only), with the
+//!   `CommandInput`'s 278×40 layout box still in the accessibility tree,
+//!   painting nothing. Removing the declaration is a no-op on Chromium (it
+//!   already computed to `auto`) and restores the pickers on WebKit; the ⌘K
+//!   palette's own `min-h-80` — not this — is what gives it its 320px, in
+//!   both engines. See specs/app-ui.md Findings for the probe and its numbers.
 
 use leptos::prelude::*;
 use tw_merge::tw_merge;
@@ -342,8 +361,22 @@ pub fn Command(
         ctx.highlight.set(0);
     });
 
+    // **No `h-full` here — that's a bug fix, not a stylistic call** (see the
+    // module doc's own entry). `height: 100%` is a percentage against the
+    // parent's height, and no consumer in this app gives `Command` a parent
+    // with a definite one. Chromium then computes it to `auto` (CSS 2.1 §10.5:
+    // a percentage height against a content-dependent containing block
+    // computes to `auto` for a non-absolutely-positioned box) and the
+    // declaration is inert — which is why it survived vendoring. WebKit
+    // resolves the same percentage to **0** when the containing block is an
+    // auto-height absolutely-positioned box, which is exactly what a native
+    // `popover` panel is: measured in the real macOS WKWebView the Tauri shell
+    // embeds, every `DestinationList` picker collapsed to `height: 0` and,
+    // because this element is also `overflow: hidden`, clipped its entire body
+    // away — leaving a 2px border sliver where the picker should be. See
+    // specs/app-ui.md Findings (WB-01M064BMRF8QBKAYJ4C9CNGQ0H) for the probe.
     let merged_class = tw_merge!(
-        "flex overflow-hidden flex-col w-full h-full bg-transparent rounded-none text-popover-foreground",
+        "flex overflow-hidden flex-col w-full bg-transparent rounded-none text-popover-foreground",
         class
     );
 
