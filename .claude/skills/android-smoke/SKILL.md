@@ -86,3 +86,22 @@ embedded-Axum; only release exercises it.
 - `adb forward --remove-all` clears stale forwards after app restarts.
 - Emulator unavailable → record "Android smoke deferred: emulator offline" in
   the task's spec Findings and flag the maintainer. Never silently skip.
+
+## Release APK signing in worktrees
+
+`src-tauri/gen/android/keystore.properties` is gitignored, so a fresh
+worktree does NOT have it — and gradle then silently falls back to the
+auto-generated **debug** keystore. A debug-signed APK refuses to install
+over the release-signed app on a device (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`,
+forcing an uninstall that the persistent-keystore design exists to avoid;
+this bit the maintainer twice on 2026-08-16). Before ANY release APK build
+in a worktree, copy it from the main checkout:
+
+```sh
+cp <main-repo>/src-tauri/gen/android/keystore.properties src-tauri/gen/android/
+```
+
+Then verify the built APK's signer is the release key, not `CN=Android
+Debug`: `apksigner verify --print-certs <apk> | grep "certificate DN"` —
+expected DN contains `O=threeringsdev`. An APK handed to the maintainer
+must ALWAYS be release-signed.
