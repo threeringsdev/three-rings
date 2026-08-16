@@ -1074,6 +1074,50 @@ test("a zero-hit query suppresses the header count; the empty state carries the 
   await expect(page.getByTestId("catalog-count")).toHaveCount(0);
 });
 
+test("a stale count dims instead of asserting itself over a newer empty result (WB-01M0324HQ12B590CZ0YXJPB5T6 round 2) @fast", async ({
+  page,
+}) => {
+  // `results` and `search_count` are two independent, similar-latency round
+  // trips — either can resolve first. Hold only the count route (mirroring
+  // "the strip shows a short form immediately..." above) so `results` wins
+  // the race: the body settles into the zero-hit empty state while the
+  // header is still carrying the *previous* query's number. That old number
+  // must not keep asserting itself as if it described what's on screen.
+  await page.goto("/catalog?q=bolt");
+  await hydrated(page);
+  const count = page.getByTestId("catalog-count");
+  await expect(count).toHaveText(/cards match\./);
+  await expect(count).not.toHaveAttribute("data-stale");
+  const staleText = await count.textContent();
+
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  await page.route("**/api/search_catalog_count*", async (route) => {
+    await gate;
+    await route.continue();
+  });
+
+  await page.fill("#catalog-query", "zzznonexistentcardnamequery12345");
+  await page.waitForURL(
+    (url) => url.searchParams.get("q") === "zzznonexistentcardnamequery12345",
+  );
+  // `search_catalog` was never held: the empty state is already up.
+  await expect(page.getByTestId("no-results")).toContainText(
+    "No cards match that search.",
+  );
+  // The header is still showing "bolt"'s count, unchanged — and now marked
+  // stale, not presented as an authoritative fact about the empty page
+  // directly below it.
+  await expect(count).toHaveText(staleText!);
+  await expect(count).toHaveAttribute("data-stale", "true");
+
+  release();
+  // The fresh count is zero, which is silent (the empty state above already
+  // owns that message) — so the line clears rather than un-dimming to
+  // "0 cards match."
+  await expect(count).toHaveCount(0);
+});
+
 test.describe("authed", () => {
   test.use({ storageState: AUTH_STATE });
 
