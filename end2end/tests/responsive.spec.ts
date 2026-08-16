@@ -401,11 +401,14 @@ test.describe("reaching a screen by clicking, not by goto", () => {
   // adjacent navigation — collection → Catalog — which is the last test here.
 
   /// Small collections only. This is a fixture requirement, not a convenience:
-  /// the assertion below is `tiles > collectionCards`, and a catalog page holds
-  /// 50. At 50 cards the comparison is `50 > 50` — false — so a full-size
-  /// collection like Bulk Box makes the test fail in *both* renderings, the
-  /// correct one included. The filter exists to keep the assertion meaningful,
-  /// not because a big collection would pass either way.
+  /// the assertion below is `tiles > collectionCards`, and a catalog page
+  /// holds 60 (`CATALOG_PAGE_SIZE`, WB-01M033AFA0VSCGB8Z3HTYPFZVD). At 60
+  /// cards the comparison is `60 > 60` — false — so a full-size collection
+  /// like Bulk Box makes the test fail in *both* renderings, the correct one
+  /// included. The `< 40` filter below stays well clear of that boundary
+  /// either way, so it needs no change with the page size — it exists to
+  /// keep the assertion meaningful, not because a big collection would pass
+  /// either way.
   async function smallHolders(request: APIRequestContext) {
     const rows = (await tree(request)).filter((r) => r.present > 0);
     const small: { row: TreeRow; cards: number }[] = [];

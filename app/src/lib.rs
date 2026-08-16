@@ -331,7 +331,14 @@ pub async fn search_catalog(
         shared::SearchQuery { q: Some(q) },
         shared::Page {
             cursor,
-            limit: None,
+            // The catalog's own default, not the generic `Page::limit()` one
+            // (WB-01M033AFA0VSCGB8Z3HTYPFZVD) — see `crate::catalog::CATALOG_PAGE_SIZE`'s
+            // doc comment for why this is catalog-only and doesn't flow to
+            // `all_cards`/`collection_view` below, which still pass `None`.
+            // The native branch below forwards this same `limit` verbatim as
+            // `?limit=` (`NativeBackend::search`), so one value covers both
+            // the hosted in-process call and the native HTTP forward.
+            limit: Some(crate::catalog::CATALOG_PAGE_SIZE),
         },
     );
 

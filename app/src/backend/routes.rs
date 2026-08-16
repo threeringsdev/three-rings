@@ -141,19 +141,28 @@ struct SearchParams {
     limit: Option<u32>,
     /// An explicit page-N jump — see `CatalogStore::search`'s doc comment.
     /// `page`, not `offset`: the wire carries a 1-indexed page *number*: the
-    /// row offset is `page_offset`'s (hosted-only) job, so a bumped page size
-    /// (queued: 50→60) changes what `page=9` fetches without this route or the
-    /// client needing to know the arithmetic.
+    /// row offset is `page_offset`'s (hosted-only) job, so the bumped page
+    /// size (50→60, WB-01M033AFA0VSCGB8Z3HTYPFZVD) changes what `page=9`
+    /// fetches without this route or the client needing to know the
+    /// arithmetic.
     page: Option<u32>,
 }
 
 /// `GET /api/catalog/search?q=&cursor=&limit=&page=` — one page of results,
 /// either the keyset continuation (`cursor`) or an explicit jump (`page`).
+///
+/// An absent `limit` falls back to the catalog's own default
+/// (`crate::catalog::CATALOG_PAGE_SIZE`, 60), not the generic
+/// `shared::Page::limit()` default (50) — every in-app caller of this route
+/// (the native backend's HTTP forward) already states `limit` explicitly, so
+/// this fallback is only reached by a direct API caller that doesn't. Scoped
+/// to this route alone: `collection_view`/`all_cards`, below, still fall
+/// through to the generic 50 for the same absent-`limit` case.
 async fn search(headers: http::HeaderMap, Query(p): Query<SearchParams>) -> Response {
     let query = SearchQuery { q: p.q };
     let page = Page {
         cursor: p.cursor,
-        limit: p.limit,
+        limit: p.limit.or(Some(crate::catalog::CATALOG_PAGE_SIZE)),
     };
     json_result(
         async {

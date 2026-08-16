@@ -2,9 +2,10 @@
 // and keyset"). Not a test — a probe, like `probe:paging` for `/my`, whose
 // header comment this one mirrors.
 //
-// Why this exists as a probe rather than an e2e assertion: the page's 50-row
-// page size is fixed, so a browser test walks at most two pages of the dev
-// fixture and never sees a boundary condition twice. The endpoint this walks
+// Why this exists as a probe rather than an e2e assertion: the page's page
+// size is fixed (60, `CATALOG_PAGE_SIZE`, WB-01M033AFA0VSCGB8Z3HTYPFZVD), so a
+// browser test walks at most two pages of the dev fixture and never sees a
+// boundary condition twice. The endpoint this walks
 // (`GET /api/catalog/search?q=&cursor=&limit=`) is the one caller that can ask
 // for a page small enough to iterate the whole set — and unlike `/api/all-cards`,
 // it needs no session (`/catalog` is public), so this script carries no
