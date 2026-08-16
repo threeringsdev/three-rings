@@ -22,6 +22,38 @@
                 <!-- AndroidTV support -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
+            <!-- LOAD-BEARING for the Google OAuth Android bounce
+                 (WB-01M0640EKXM1QCBMFG7K97E4M7): the release manifest
+                 shipped with NO three-rings:// filter, so the OAuth
+                 bounce page's `three-rings://auth/callback?...` deep
+                 link (app/src/lib.rs auth_app_return) was unclaimable —
+                 "Open the app" did nothing and the webview stayed on
+                 "Waiting for Google" forever. This block is Tauri's
+                 deep-link plugin (tauri-plugin-deep-link 2.4.9)
+                 injection for `plugins.deep-link.mobile` in
+                 src-tauri/tauri.conf.json (scheme "three-rings", no
+                 host/path — hence the blank data lines below), captured
+                 verbatim from a `cargo tauri android build` run so it is
+                 byte-identical to what the plugin's build.rs would
+                 regenerate — a future dev/build run should diff clean
+                 against this. DO NOT git-checkout this block away as
+                 build noise; it must stay committed. See
+                 .claude/skills/android-smoke/SKILL.md. -->
+            <!-- DEEP LINK PLUGIN. AUTO-GENERATED. DO NOT REMOVE. -->
+            <intent-filter >
+                <action android:name="android.intent.action.VIEW" />
+                <!-- ChromeOS ARC++ uses a different action for deep links -->
+                <action android:name="org.chromium.arc.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="three-rings" />
+                
+                
+                
+                
+                
+            </intent-filter>
+            <!-- DEEP LINK PLUGIN. AUTO-GENERATED. DO NOT REMOVE. -->
         </activity>
 
         <provider

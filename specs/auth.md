@@ -692,6 +692,18 @@ Accepted with these deferred to this task's execution; none blocks acceptance.
     symlink, ran a scoped `npm install` in the worktree, restored the tracked
     symlink afterward) — nothing committed for it here.
 
+## Threat-model note (2026-08-16, deep-link review)
+
+Any co-installed Android app can fire `three-rings://auth/callback` with a
+bogus verifier. It cannot inject a session (Neon Auth rejects a verifier
+that doesn't match the real challenge), but it CAN consume the one-shot
+in-process challenge and silently strand a concurrent legitimate Google
+sign-in — a local-lockout/DoS, surfaced today only as an eternal "Waiting
+for Google…". Accepted at single-user alpha (requires a hostile app on the
+same device); revisit before wider distribution — e.g. don't consume the
+challenge on verifier mismatch, or bind the callback to a per-attempt nonce
+in the deep-link path itself.
+
 ## Open questions (2026-08-15 addendum)
 
 - Whether the desktop-dev Google "Waiting for Google…" dead end is really

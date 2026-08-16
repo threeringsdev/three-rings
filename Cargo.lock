@@ -6321,6 +6321,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-shell",
  "tokio",
+ "url",
 ]
 
 [[package]]

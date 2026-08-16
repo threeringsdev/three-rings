@@ -231,8 +231,19 @@ pub fn run() {
                 // never exercised — desktop returns via the loopback server.
                 {
                     use tauri_plugin_deep_link::DeepLinkExt;
-                    app.deep_link().on_open_url(|event| {
-                        for url in event.urls() {
+
+                    // Shared by both delivery paths below — the plugin's
+                    // Android side only pushes through `on_open_url` when a
+                    // *running* app receives a new intent; a cold start
+                    // (the OS killed the backgrounded app while the system
+                    // browser ran Google's flow, then relaunched it via
+                    // this very deep link — the exact "frozen app"
+                    // scenario above) never fires it, verified live on the
+                    // emulator (WB-01M0640EKXM1QCBMFG7K97E4M7: `adb shell am
+                    // start -a VIEW -d three-rings://...` against a killed
+                    // app produced no `on_open_url` callback at all).
+                    fn handle_deep_link_urls(urls: Vec<url::Url>) {
+                        for url in urls {
                             let verifier = url
                                 .query_pairs()
                                 .find(|(k, _)| k == app::auth::upstream::SESSION_VERIFIER_PARAM)
@@ -255,7 +266,24 @@ pub fn run() {
                                 None => log::warn!("deep link without a session verifier: {url}"),
                             }
                         }
-                    });
+                    }
+
+                    // Path 1: the app is already running and receives the
+                    // deep link as a new intent (`onNewIntent` / desktop's
+                    // second-instance argv).
+                    app.deep_link()
+                        .on_open_url(|event| handle_deep_link_urls(event.urls()));
+
+                    // Path 2: the deep link itself launched this process —
+                    // the plugin's own docs: "Use get_current on app load to
+                    // check whether your app was started via a deep link."
+                    // Without this, a killed-then-relaunched app silently
+                    // drops the Google return and the webview polls forever.
+                    match app.deep_link().get_current() {
+                        Ok(Some(urls)) => handle_deep_link_urls(urls),
+                        Ok(None) => {}
+                        Err(e) => log::warn!("deep_link get_current failed: {e}"),
+                    }
                 }
 
                 #[cfg(not(target_os = "android"))]

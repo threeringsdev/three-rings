@@ -69,9 +69,20 @@ embedded-Axum; only release exercises it.
   forward then lists no targets (curl just hangs):
   `adb forward tcp:9222 localabstract:webview_devtools_remote_$(adb shell pidof com.three_rings.dev)`.
 
-- The dev build injects a deep-link intent-filter into
-  src-tauri/gen/android/.../AndroidManifest.xml — `git checkout` it before
-  committing.
+- The `three-rings://` deep-link `<intent-filter>` in
+  src-tauri/gen/android/.../AndroidManifest.xml is **committed and
+  load-bearing** (WB-01M0640EKXM1QCBMFG7K97E4M7) — it's what lets the Google
+  OAuth Android bounce page's `three-rings://auth/callback` deep link reach
+  the app; without it "Open the app" silently does nothing. A dev/build run
+  re-injects the identical block (byte-for-byte, including the trailing
+  whitespace on its blank `<data>` placeholder lines) between its own
+  `<!-- DEEP LINK PLUGIN. AUTO-GENERATED. DO NOT REMOVE. -->` markers, so
+  `git status` should come back clean afterward — a real diff there is a
+  signal something changed (e.g. `tauri.conf.json`'s `plugins.deep-link`
+  config), not routine noise to discard. **Do not `git checkout` this
+  block.** If some *other*, unrelated line in the manifest (or elsewhere
+  under gen/android) picks up incidental dev-run churn, that's still
+  fair game to revert — just leave the deep-link filter alone.
 - `adb forward --remove-all` clears stale forwards after app restarts.
 - Emulator unavailable → record "Android smoke deferred: emulator offline" in
   the task's spec Findings and flag the maintainer. Never silently skip.
