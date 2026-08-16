@@ -891,9 +891,15 @@ test.describe("grid view (grid-toggle task)", () => {
     // Selection stays reachable in grid mode (a deliberate choice, not an
     // oversight — see specs/app-ui.md's Findings for the grid-toggle task):
     // the tile's own select control toggles the shared tray same as a row's.
+    const before = page.url();
     await tile.getByTestId("tile-select").click();
     await expect(page.getByTestId("selection-tray")).toBeVisible();
     await expect(page.getByTestId("tray-count")).toContainText("1 card");
+    // The tray lives in the shell, not the tile — so on its own, the tray
+    // appearing does not prove the click was a *select*, not a navigation
+    // that happened to land somewhere the tray also renders. Assert the URL
+    // never moved: the click stayed on this page.
+    expect(page.url()).toBe(before);
   });
 
   test("390px: the grid renders without page overflow on /my/all @fast", async ({

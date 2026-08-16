@@ -6653,3 +6653,84 @@ Catalog controls this task never touched: the pager, the filter rail's
 debounce, the back-button session test), and every one of them passed
 individually and in the serial run — the documented post-bulk-load
 contention class, not a regression from moving `ViewSwitch`.
+
+### Grid-toggle round 2: the grid's frozen snapshot vs. a live stepper edit (2026-08-15)
+
+`app/src/my/collection.rs` (`RowDeltas`, `live_present`, `accumulate_row_delta`;
+`HereCount`/`CardTableRow`/`CollectionTable`/`CollectionBody`/`CollectionGrid`/
+`HoldingTile` each gain a `row_deltas` parameter). Adversarial review, major:
+`CollectionBody` freezes `view: CollectionView` into a `StoredValue` the
+moment it resolves (see this file's own module doc, "A commit does not
+refetch the view"), and `HoldingTile` read straight from that frozen
+snapshot with nothing overlaying it. The table tolerates the same freeze
+because `CardTableRow`'s `HaveStepper` owns its own live displayed value —
+but that value lives inside a component the table/grid switch itself
+unmounts the moment you leave list mode, so a HERE edit made in list mode
+was invisible on the tile after switching to grid (stale: a tile reading 2
+when the header already said 3), and a commit-to-zero left a **ghost tile**
+rendering for a holding a `remove_holding` call had already deleted
+server-side — persisting until an unrelated revision bump.
+
+**Fix shape: (a), a page-level per-row delta map** (the reviewer's preferred
+option over refetching `view_res` on grid entry, which would race a
+commit-in-flight against the toggle). `RowDeltas` is a third aggregate
+alongside `here_delta`/`section_delta`, keyed by `holding_id` — the one
+identifier a `HereCount` commit and a `HoldingTile` read can agree names the
+same row without a second resource read. `HereCount::on_change` pushes every
+commit's `(to - from)` into it, in *addition to* (never instead of) the two
+existing aggregates; `CollectionGrid` reads it exactly once, **untracked**,
+at its own construction — correct and sufficient because `CollectionBody`'s
+table/grid branch is itself the reactive boundary (a fresh `CollectionGrid`
+instance is built every time the switch is clicked into grid), and nothing
+can edit HERE while grid is showing (no stepper there). Reset alongside
+`here_delta.set(0)` the instant a fresh payload lands, for the identical
+reason that reset already documents.
+
+**The removal/Undo pair nets out correctly for free.** A commit-to-zero
+pushes `(0 - present)`; Undo pushes `(copies - 0)` back — both keyed by the
+*same* captured `holding_id` prop value, even though `HaveStepper::undo_removal`
+rewires its own internal `holding_id` signal to the id the server
+re-inserted under. Neither `HereCount` nor `RowDeltas` ever sees that
+rewiring (it's a plain, un-reactive prop, read once at construction), so
+both halves of a remove/undo pair always key against the value the row was
+built with — which is also what `HoldingTile`'s own `holding_id` prop reads,
+since both come from the same frozen snapshot. Pinned by a unit test
+(`a_removal_and_its_undo_net_back_to_the_snapshot`).
+
+**Deliberately out of scope, stated so it isn't mistaken for an oversight
+later:** the deck section header's own slot count in the grid stays exactly
+what `group_deck` computed from the frozen snapshot — unlike the table's
+`section_slots_live`, it does not get a live overlay. Deriving one correctly
+needs both the old and new present per `(oracle, board)` group at commit time
+(`section_slot_delta`'s own formula, `max(held, desired)`, is not a linear
+accumulation the way a plain present-count delta is), which the reviewer's
+two concrete repro cases — a stale tile count, a ghost tile — did not ask
+for. WANTED/OWNED badges on the tile are equally frozen, but that introduces
+no *new* disagreement: the table's own WANTED/OWNED cells are exactly as
+static already.
+
+**Verification.** Unit: `app/src/my/collection.rs` gained 5 tests
+(`live_present_applies_the_delta`, `live_present_never_goes_negative`,
+`accumulate_row_delta_sums_repeated_commits_to_the_same_holding`,
+`accumulate_row_delta_tracks_each_holding_independently`,
+`a_removal_and_its_undo_net_back_to_the_snapshot`) — `cargo test -p app
+--features hosted my::collection::`: 26/26. Full workspace:
+`cargo test --workspace --exclude frontend --exclude three_rings`: 402
+app + 43 shared, 0 failed. `cargo fmt --all --check`, `cargo clippy -p app
+--features hosted,component-bench --all-targets`, and `cargo clippy -p app
+--features hydrate,component-bench --target wasm32-unknown-unknown` all
+clean at `-D warnings`. e2e (chromium `@fast`, `--workers=1`): two new
+`collection-view.spec.ts` tests — edit HERE in list mode then switch to
+grid (tile shows the new count, not the snapshot's), and zero a row in list
+mode then switch to grid (its tile is gone; a second, un-edited card's tile
+survives as the positive control) — plus the full `collection-view.spec.ts`
+(30/30) and `all-cards.spec.ts` (19/21, the same 2 pre-existing
+fixture-pool failures already on record above, unrelated to this fix) `@fast`
+tiers, serially.
+
+**The e2e fold, same round.** The two tile-selection tests
+(`all-cards.spec.ts`, `collection-view.spec.ts`) asserted the selection tray
+appeared after a tile-select click but not that the click *stayed on the
+page* — since the tray is shell-level, that assertion alone would pass even
+if the click had also navigated. Both now capture `page.url()` before the
+click and assert it is unchanged after.

@@ -99,7 +99,7 @@ use leptos::task::spawn_local;
 use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 use leptos_router::NavigateOptions;
 use shared::{Board, CardRow, CardSummary, CollectionKind, CollectionView, Id, QuickAddKind};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::tree::{assemble, element_anchor, CollectionTreeResource, TreeNode};
 use super::tree_manage::{MenuTarget, TreeManage, TreeMenu};
@@ -364,6 +364,10 @@ pub fn CollectionPage() -> impl IntoView {
     // disagree without a reload (see the module doc on why a commit does not
     // refetch the view).
     let here_delta = RwSignal::new(0);
+    // `here_delta`'s per-row twin, for the grid — see [`RowDeltas`]'s doc.
+    // Reset alongside `here_delta` below, for the identical reason: a fresh
+    // payload already contains everything committed before it.
+    let row_deltas = RowDeltas::new();
 
     // ---- the two things that must be readable from outside every boundary ----
     //
@@ -491,6 +495,7 @@ pub fn CollectionPage() -> impl IntoView {
                     // *replaces* the header, so no totals are left on screen for
                     // a delta to correct.
                     here_delta.set(0);
+                    row_deltas.reset();
                     match payload {
                         Ok(view) => {
                             facts.set(Some(quick_add_facts(&view)));
@@ -575,6 +580,7 @@ pub fn CollectionPage() -> impl IntoView {
                                         tree
                                         tree_facts
                                         list_view
+                                        row_deltas
                                     />
                                     <Pager next paged q id list_view />
                                 }
@@ -1598,6 +1604,99 @@ fn section_slot_delta(old: i32, new: i32, desired: i32) -> i32 {
     new.max(desired) - old.max(desired)
 }
 
+/// A row's live HERE overlay on top of the snapshot's own `present` — the
+/// grid's counterpart to `here_delta`/`section_delta`, and the fix for a
+/// review finding (grid-toggle task round 2): `CollectionBody` freezes `view:
+/// CollectionView` into a `StoredValue` the moment it resolves, and a stepper
+/// commit deliberately never refetches it (see the module doc, "A commit does
+/// not refetch the view"). `CardTableRow`'s stepper tolerates that because it
+/// owns its own live displayed value; `HoldingTile` has nothing of the kind
+/// (the count stepper is list-only by design), so a HERE edit made in list
+/// mode was invisible on the tile after switching to grid — stale at best (a
+/// tile reading 2 when the header already says 3) and a **ghost** at worst (a
+/// tile still rendering for a holding a commit-to-zero just deleted).
+///
+/// Pure, so the "no edits yet" and "clamped at zero" edges are checkable
+/// without a reactive runtime — see [`RowDeltas`] for the signal this backs.
+fn live_present(snapshot: i32, delta: i32) -> i32 {
+    (snapshot + delta).max(0)
+}
+
+/// Live per-row HERE deltas since the currently rendered `view` snapshot,
+/// keyed by `holding_id` — the only identifier a `HereCount` commit and a
+/// `HoldingTile` read can agree names the same row without a second read of
+/// `view_res` (see [`live_present`]'s doc for why this exists at all).
+///
+/// **Write side:** every `HereCount` whose row carries a `holding_id` pushes
+/// its commit's `(to - from)` here, in *addition* to (never instead of) the
+/// existing `here_delta`/`section_delta` pushes — this is a third, parallel
+/// aggregate, not a replacement. Optimistic writes, server-error rollbacks and
+/// Undo all already arrive as a plain `StepperCommit`, so the same
+/// accumulate-the-difference trick `here_delta` already relies on nets every
+/// one of those out correctly with no special-casing here — including a
+/// commit-to-zero (removal): `push`ing its `(0 - present)` and a later Undo's
+/// `(copies - 0)` sum back to the original value, and a mid-flight Undo
+/// rewires the *stepper's own* `holding_id` signal to the id the server
+/// re-inserted under (see `HaveStepper::undo_removal`) but never touches the
+/// `holding_id` this component captured as a plain prop at construction — so
+/// both halves of a remove/undo pair key against the same value regardless of
+/// what the database now calls the row.
+///
+/// **Read side:** `CollectionGrid` is a fresh component instance every time
+/// the switch is clicked into grid (`CollectionBody`'s table/grid branch is
+/// itself the reactive boundary — see its own doc), and nothing can edit HERE
+/// while grid is showing (no stepper there), so one **untracked** read at
+/// `CollectionGrid`'s construction is both correct and sufficient — no
+/// `Memo`, no per-tile subscription needed. `CollectionGrid` uses it two ways:
+/// [`live_present`] for what a surviving tile's HERE badge shows, and to drop
+/// a row from the grid entirely once its live count reaches zero (the ghost
+/// tile case).
+///
+/// **Reset:** zeroed alongside `here_delta` the moment a fresh payload lands
+/// (`CollectionPage`'s header `Transition`) — a new `view` already contains
+/// everything committed before it, the same reasoning `here_delta.set(0)`'s
+/// own comment gives.
+#[derive(Clone, Copy)]
+struct RowDeltas(RwSignal<HashMap<Id, i32>>);
+
+impl RowDeltas {
+    fn new() -> Self {
+        Self(RwSignal::new(HashMap::new()))
+    }
+
+    fn reset(self) {
+        self.0.update(|m| m.clear());
+    }
+
+    fn push(self, holding_id: Id, delta: i32) {
+        self.0
+            .update(|m| accumulate_row_delta(m, holding_id, delta));
+    }
+
+    /// The overlaid HERE count for one row. `holding_id: None` (a multi-grain
+    /// cell, never edited via the stepper) always reads the snapshot as-is.
+    /// **Untracked** — see the struct doc's "Read side".
+    fn live_present(self, holding_id: Option<Id>, snapshot: i32) -> i32 {
+        match holding_id {
+            Some(id) => {
+                let delta = self.0.with_untracked(|m| m.get(&id).copied().unwrap_or(0));
+                live_present(snapshot, delta)
+            }
+            None => snapshot,
+        }
+    }
+}
+
+/// The map mutation `RowDeltas::push` performs, free of the signal so it is
+/// testable without a reactive runtime — the same pattern
+/// `selection_tray.rs`'s `toggle_in`/`retain_untokened` establish. A repeated
+/// commit against the same `holding_id` (an edit, then another edit; a
+/// removal, then its Undo) accumulates rather than overwrites, which is what
+/// lets the removal/Undo pair net back to zero — see [`RowDeltas`]'s doc.
+fn accumulate_row_delta(map: &mut HashMap<Id, i32>, holding_id: Id, delta: i32) {
+    *map.entry(holding_id).or_insert(0) += delta;
+}
+
 /// The table, or the empty state instead of it — and the one reactive decision
 /// between them (P6-127).
 ///
@@ -1629,6 +1728,13 @@ fn CollectionBody(
     /// re-await. Same split `crate::my::all_cards::AllCardsBody` uses; see
     /// its comment for the fuller account of why.
     list_view: Memo<bool>,
+    /// `here_delta`'s per-row twin, threaded to both branches: `CollectionTable`
+    /// writes it (every `HereCount` commit), `CollectionGrid` reads it (once,
+    /// on entry — see [`RowDeltas`]'s doc). Owned by `CollectionPage`, not
+    /// here, for the same reason `here_delta` is: it must be zeroed by the
+    /// same payload that puts fresh totals on screen, not by whichever branch
+    /// happens to be showing when a new one lands.
+    row_deltas: RowDeltas,
 ) -> impl IntoView {
     let cards_empty = view.cards.is_empty();
     let folders = folder_list(
@@ -1643,9 +1749,12 @@ fn CollectionBody(
         if cards_empty && no_folders.get() {
             view! { <EmptyState searching paged /> }.into_any()
         } else if list_view.get() {
-            view! { <CollectionTable view=view.get_value() folders here_delta tree /> }.into_any()
+            view! {
+                <CollectionTable view=view.get_value() folders here_delta tree row_deltas />
+            }
+            .into_any()
         } else {
-            view! { <CollectionGrid view=view.get_value() folders tree /> }.into_any()
+            view! { <CollectionGrid view=view.get_value() folders tree row_deltas /> }.into_any()
         }
     }
 }
@@ -1680,6 +1789,7 @@ fn CollectionTable(
     folders: Memo<Vec<shared::CollectionSummary>>,
     here_delta: RwSignal<i32>,
     tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
+    row_deltas: RowDeltas,
 ) -> impl IntoView {
     let is_deck = view.collection.kind == CollectionKind::Deck;
     let collection_id = view.collection.id;
@@ -1791,6 +1901,7 @@ fn CollectionTable(
                                                     here_delta
                                                     collection_id
                                                     section_delta=section_delta
+                                                    row_deltas
                                                 />
                                             }
                                         })
@@ -1801,7 +1912,9 @@ fn CollectionTable(
                             .into_any()
                     } else {
                         rows.into_iter()
-                            .map(|row| view! { <CardTableRow row here_delta collection_id /> })
+                            .map(|row| {
+                                view! { <CardTableRow row here_delta collection_id row_deltas /> }
+                            })
                             .collect_view()
                             .into_any()
                     }}
@@ -1886,6 +1999,9 @@ fn CardTableRow(
     /// `here_delta`. `None` in a binder, which has no sections.
     #[prop(optional)]
     section_delta: Option<RwSignal<i32>>,
+    /// `here_delta`'s per-row twin — see [`RowDeltas`]'s doc. Threaded straight
+    /// through to [`HereCount`], the only thing that writes it.
+    row_deltas: RowDeltas,
 ) -> impl IntoView {
     let wanted = wanted_cell(&row);
     let owned = owned_cell(&row.row);
@@ -2033,6 +2149,7 @@ fn CardTableRow(
                         holding_id
                         here_delta
                         section_delta
+                        row_deltas
                         removed
                     />
                     // Italic + dimmed, per the spec: copies a child collection
@@ -2101,6 +2218,10 @@ fn HereCount(
     /// Every push into it must go through [`section_slot_delta`], never a raw
     /// copy delta (P6-118 review round 1) — see that function's doc.
     section_delta: Option<RwSignal<i32>>,
+    /// `here_delta`'s per-row twin, keyed by `holding_id` — see
+    /// [`RowDeltas`]'s doc for why the grid needs this and the table's own
+    /// numbers do not.
+    row_deltas: RowDeltas,
     /// Owned by the caller (`CardTableRow`), not here, so the row's selection
     /// checkbox can react to the same flag `HaveStepper` flips — see that
     /// component's doc.
@@ -2115,6 +2236,12 @@ fn HereCount(
         here_delta.update(|d| *d += c.to - c.from);
         if let Some(d) = section_delta {
             d.update(|d| *d += section_slot_delta(c.from, c.to, desired));
+        }
+        // Pushed in addition to, never instead of, the two aggregates above —
+        // see `RowDeltas`'s doc on why the grid needs a *per-row* aggregate
+        // neither of those is.
+        if let Some(id) = holding_id {
+            row_deltas.push(id, c.to - c.from);
         }
     });
     let on_settled = Callback::new(move |()| tree.refetch());
@@ -2147,16 +2274,39 @@ fn HereCount(
 /// one tile grid per section, rather than flattening to a single grid — the
 /// section headers are load-bearing information (slot counts, sideboard vs
 /// main), not a table-only affordance, and losing them on the grid would make
-/// the two layouts describe different decks.
+/// the two layouts describe different decks. `group_deck` runs over every row
+/// from the snapshot, live-zeroed or not — bucketing and (deliberately, see
+/// [`RowDeltas`]'s doc — out of scope for this round) the section's own slot
+/// count stay exactly what the table itself would compute from this same
+/// snapshot; only *which rows get a tile* is where the live overlay applies.
+///
+/// **Reads `row_deltas` exactly once, right here, untracked** — see
+/// [`RowDeltas`]'s "Read side" for why that is both correct and sufficient:
+/// this component is a fresh instance every time the switch is clicked into
+/// grid, and nothing can edit HERE while grid is showing.
 #[component]
 fn CollectionGrid(
     view: CollectionView,
     folders: Memo<Vec<shared::CollectionSummary>>,
     tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
+    row_deltas: RowDeltas,
 ) -> impl IntoView {
     let is_deck = view.collection.kind == CollectionKind::Deck;
     let collection_id = view.collection.id;
     let rows = view_rows(view.cards);
+
+    // Pair each row with its live HERE count and drop the ones a same-session
+    // edit zeroed out — the review's "ghost tile" finding. A row with no
+    // `holding_id` (a multi-grain cell, or a want-only card) was never
+    // stepper-editable to begin with, so it always survives unchanged.
+    let live_rows = |rows: Vec<ViewRow>| -> Vec<(ViewRow, i32)> {
+        rows.into_iter()
+            .filter_map(|row| {
+                let live = row_deltas.live_present(row.row.holding_id, row.row.present);
+                (row.row.holding_id.is_none() || live > 0).then_some((row, live))
+            })
+            .collect()
+    };
 
     view! {
         <div class="flex flex-col gap-6" data-testid="collection-grid">
@@ -2185,10 +2335,11 @@ fn CollectionGrid(
                                     {label.clone()} " · " {section.slots.to_string()}
                                 </h3>
                                 <ul class=GRID_CLASS>
-                                    {section
-                                        .rows
+                                    {live_rows(section.rows)
                                         .into_iter()
-                                        .map(|row| view! { <HoldingTile row collection_id /> })
+                                        .map(|(row, live_present)| {
+                                            view! { <HoldingTile row collection_id live_present /> }
+                                        })
                                         .collect_view()}
                                 </ul>
                             </div>
@@ -2199,9 +2350,11 @@ fn CollectionGrid(
             } else {
                 view! {
                     <ul class=GRID_CLASS data-testid="collection-cards-grid">
-                        {rows
+                        {live_rows(rows)
                             .into_iter()
-                            .map(|row| view! { <HoldingTile row collection_id /> })
+                            .map(|(row, live_present)| {
+                                view! { <HoldingTile row collection_id live_present /> }
+                            })
                             .collect_view()}
                     </ul>
                 }
@@ -2262,21 +2415,35 @@ fn FolderTile(
 }
 
 /// One card's grid tile: image, name, and the same HERE/WANTED/OWNED badges
-/// the table's cells show — `here_total`/`wanted_cell`/`owned_cell` are the
-/// same pure helpers `CardTableRow` uses, so the two layouts cannot disagree
-/// about what a row's numbers are. No stepper here: HERE is editable in the
-/// table only (the count stepper is a list-only editing surface, not
-/// something the grid — a display mode — reproduces) — see
-/// specs/app-ui.md's Findings entry for the grid-toggle task.
+/// the table's cells show — `wanted_cell`/`owned_cell` are the same pure
+/// helpers `CardTableRow` uses, so the two layouts cannot disagree about
+/// those numbers. HERE is the one exception, and deliberately so: `live_present`
+/// (the caller's already-resolved [`RowDeltas`] overlay, plus this row's own
+/// `present_rollup`) stands in for `here_total(&row.row)`'s frozen-snapshot
+/// present — see `RowDeltas`'s doc for why HERE alone needs this and
+/// WANTED/OWNED do not (they are exactly as static in the table's own cells
+/// today, so leaving them be introduces no *new* disagreement between the two
+/// layouts). No stepper here: HERE is editable in the table only (the count
+/// stepper is a list-only editing surface, not something the grid — a
+/// display mode — reproduces) — see specs/app-ui.md's Findings entry for the
+/// grid-toggle task.
 ///
 /// Selection stays reachable: `SelectionCheckbox` is a sibling of the `<a>`,
 /// never nested inside it, for the same reason `AllCardsTile` keeps them
 /// siblings (see that component's doc).
 #[component]
-fn HoldingTile(row: ViewRow, collection_id: Id) -> impl IntoView {
+fn HoldingTile(
+    row: ViewRow,
+    collection_id: Id,
+    /// This row's live HERE count — `RowDeltas::live_present` already applied
+    /// by the caller (`CollectionGrid`), which is also what decided whether
+    /// this component gets mounted at all (a live-zeroed row never reaches
+    /// here — see that component's `live_rows`).
+    live_present: i32,
+) -> impl IntoView {
     let wanted = wanted_cell(&row);
     let owned = owned_cell(&row.row);
-    let here = here_total(&row.row);
+    let here = live_present + row.row.present_rollup;
     let CardRow {
         oracle_id,
         printing_id,
@@ -2849,6 +3016,69 @@ mod tests {
         assert_eq!(section_slot_delta(3, 1, 0), -2);
         assert_eq!(section_slot_delta(0, 3, 0), 3);
         assert_eq!(section_slot_delta(3, 0, 0), -3);
+    }
+
+    // ---------------------------------------------- grid HERE overlay ----
+    // `RowDeltas`, the fix for the grid-toggle task's round-2 review finding
+    // (a HoldingTile reading the frozen `view` snapshot directly went stale
+    // after a same-session HERE edit, and kept rendering a tile for a holding
+    // a commit-to-zero had deleted).
+
+    #[test]
+    fn live_present_applies_the_delta() {
+        assert_eq!(live_present(2, 0), 2);
+        assert_eq!(live_present(2, 1), 3);
+        assert_eq!(live_present(2, -2), 0);
+    }
+
+    #[test]
+    fn live_present_never_goes_negative() {
+        // A defensive floor, not a reachable case in practice — a row's own
+        // delta cannot out-negative its snapshot present (the commit that
+        // would have to produce that is refused server-side) — but a tile
+        // reading a negative HERE count would be a worse failure than a
+        // floor at zero if some future caller's bookkeeping ever drifted.
+        assert_eq!(live_present(1, -5), 0);
+    }
+
+    #[test]
+    fn accumulate_row_delta_sums_repeated_commits_to_the_same_holding() {
+        let mut map = HashMap::new();
+        let id = Id::from_u128(1);
+        accumulate_row_delta(&mut map, id, 1);
+        accumulate_row_delta(&mut map, id, 1);
+        assert_eq!(map.get(&id), Some(&2));
+    }
+
+    #[test]
+    fn accumulate_row_delta_tracks_each_holding_independently() {
+        let mut map = HashMap::new();
+        let a = Id::from_u128(1);
+        let b = Id::from_u128(2);
+        accumulate_row_delta(&mut map, a, 3);
+        accumulate_row_delta(&mut map, b, -1);
+        assert_eq!(map.get(&a), Some(&3));
+        assert_eq!(map.get(&b), Some(&-1));
+    }
+
+    #[test]
+    fn a_removal_and_its_undo_net_back_to_the_snapshot() {
+        // The exact sequence `HaveStepper::remove`/`undo_removal` produce: a
+        // commit-to-zero pushes `(0 - present)`, and Undo pushes
+        // `(present - 0)` back — both keyed by the *same* `holding_id`, even
+        // though the server re-inserts the holding under a new one (see
+        // `RowDeltas`'s doc on why that rewiring is invisible here).
+        let mut map = HashMap::new();
+        let id = Id::from_u128(7);
+        let present = 3;
+        accumulate_row_delta(&mut map, id, 0 - present);
+        assert_eq!(
+            live_present(present, map[&id]),
+            0,
+            "zeroed — the ghost-tile case"
+        );
+        accumulate_row_delta(&mut map, id, present);
+        assert_eq!(live_present(present, map[&id]), present, "Undo restores it");
     }
 
     #[test]
