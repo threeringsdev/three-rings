@@ -370,6 +370,32 @@ pub fn is_back_chord(key: &str, meta: bool, ctrl: bool, alt: bool, shift: bool, 
     }
 }
 
+/// Whether a click carries a "open in a new tab/window" modifier — meta,
+/// ctrl, shift, or alt. Every `on:click` in this app that intercepts a real
+/// `<a href>`'s default navigation to do something else in place instead
+/// (`history.back()`, a same-page `replace` flip, a bottom sheet) checks
+/// this first and bails out unmodified — a modified click is left to the
+/// browser's own "open in a new tab" handling, not swallowed by the
+/// in-place behavior. Split out and pure for the same testability reason as
+/// [`is_back_chord`]; previously copy-pasted at four call sites
+/// (`cards.rs`'s `CardPreview::on_click`, its sheet's "Full details →"
+/// link, `Printings`' `replace_nav_click`, and this module's own
+/// `BackControl` — cross-referenced from each site's doc comment before
+/// this extraction).
+///
+/// **Middle-click is deliberately not covered.** Browsers open a
+/// middle-clicked link in a new tab the same way they do a modified
+/// left-click, but which DOM event carries that — a plain `click` with
+/// `button() == 1`, or a separate `auxclick` — is not consistent across
+/// engines, and every `on:click` this guards is wired to `click` only.
+/// Handling it correctly would mean also listening for `auxclick` and
+/// reasoning about per-engine event-firing order; out of scope, left as a
+/// known gap rather than a partial, engine-inconsistent fix (adversarial
+/// review, round 2 of the printings-row fix).
+pub fn is_modified_click(meta: bool, ctrl: bool, shift: bool, alt: bool) -> bool {
+    meta || ctrl || shift || alt
+}
+
 /// Whether the keyboard focus is somewhere that should own its own keys — the
 /// query bar, a stepper's number field, a dialog's text input. Shared with
 /// `my/collection.rs`'s `SlashHint` (see the module doc's last paragraph for
@@ -475,5 +501,18 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn any_single_modifier_marks_a_click_as_modified() {
+        assert!(is_modified_click(true, false, false, false));
+        assert!(is_modified_click(false, true, false, false));
+        assert!(is_modified_click(false, false, true, false));
+        assert!(is_modified_click(false, false, false, true));
+    }
+
+    #[test]
+    fn a_bare_click_is_not_modified() {
+        assert!(!is_modified_click(false, false, false, false));
     }
 }

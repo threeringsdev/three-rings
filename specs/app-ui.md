@@ -109,10 +109,26 @@ carrying `?printing=<id>`; `CardDetailBody` reads it to pick that printing's
 art as the hero and float it to the top of the table — a query param, not a
 distinct route, because every printing shares its card's one `oracle_id`
 (Scryfall's model: `oracle_id` is the card, a printing's own `id` is one
-specific art/set/number). The row's whole width is clickable via a
-"stretched link" (`TableRow` `position: relative`, the anchor `absolute
-inset-0`d inside one cell) since nesting an `<a>` around a `<tr>` is invalid
-HTML. The table caps at ~20 rows tall and scrolls inside that cap
+specific art/set/number). **Row-click, not a stretched overlay
+(WB-01M06BM8D4VDKKQKV9XEAA1C9A, 2026-08-16):** the original whole-row
+clickability used the standard "stretched link" trick (`TableRow` `position:
+relative`, one cell's anchor `absolute inset-0`), which broke in the real
+desktop WKWebView — WebKit doesn't honor `position` on `<tr>` (CSS 2.1
+leaves it UA-defined), so the anchor's containing block fell through to the
+page container and every row rendered as a full-page invisible overlay
+eating every click on the screen; chromium (which does honor it) and
+keyboard/AT (`AXPress` bypasses hit-testing) both worked, masking it from
+review. Fixed with no `position` at all: cell 1 ("Set") is a real in-flow
+`<a>` — the row's one focusable, screen-reader-announced link — and cells
+2–4 are plain `<td>`s with their own `on:click` (not anchors: an
+`aria-hidden` duplicate-anchor first attempt was caught in review for
+silencing those cells' text from screen-reader table navigation). Every
+cell covering its own box with some click handling is what makes the row
+whole-width clickable without positioning anything against the `<tr>`; a
+modified click (open in a new tab) only works via cell 1's real `href`. See
+`cards.rs`'s `Printings` module doc for the full mechanism and the
+hover-trigger height chain it also required. The table caps at ~20 rows tall
+and scrolls inside that cap
 (`TableWrapper`'s own sticky header carries over for free); a plain load
 (no `?printing=`) already floats the default hero (oldest printing with art)
 to the top of the table too, not just as the art.
@@ -7052,12 +7068,15 @@ value: `TableHeader`'s `th` is `h-10` (2.5rem), a body row is a `p-4`-padded
 header is `2.5rem + 20 × 3.25rem`. `TableHeader` was already `sticky
 top-0` (table.rs, predates this task), so the pinned-header-while-scrolling
 half came for free once the cap was reinstated — no new wiring needed
-there. The row's own full-width clickability is a "stretched link"
-(`TableRow` gets `class="relative"`, the anchor `absolute inset-0`s inside
-one cell) rather than nesting an `<a>` around the `<tr>`, which is invalid
-HTML (`<a>`/`<span>` are not permitted `<tbody>`/`<tr>` children — verified
-by trying it in `CardPreview`'s existing `span`-wrapped trigger and reading
-the table content model, not by observing a browser silently "fixing" it).
+there. The row's own full-width clickability was originally a "stretched
+link" (`TableRow` gets `class="relative"`, the anchor `absolute inset-0`s
+inside one cell) rather than nesting an `<a>` around the `<tr>`, which is
+invalid HTML (`<a>`/`<span>` are not permitted `<tbody>`/`<tr>` children —
+verified by trying it in `CardPreview`'s existing `span`-wrapped trigger and
+reading the table content model, not by observing a browser silently
+"fixing" it). **Superseded 2026-08-16 (WB-01M06BM8D4VDKKQKV9XEAA1C9A):** that
+stretched-link mechanism broke in the real desktop WKWebView — see this
+section's later Findings entry for the current per-cell design and why.
 
 **Verification.** Unit (pure helpers, `app/src/cards.rs::tests`, 7 new):
 `resolve_current_printing_{prefers_a_valid_selection, falls_back_on_a_stale_
@@ -7751,3 +7770,104 @@ built `.app` window (tray `Move to…` and catalog `Adding to` visibly open at
 driven or captured. Everything up to the final click is done; the remaining
 step needs an unlocked machine, with every other `three-rings` instance
 quit first (or driven strictly by pid).
+
+### The printings-row overlay fix, round 2: aria-hidden silenced data, and `h-full` never actually resolved (2026-08-16, WB-01M06BM8D4VDKKQKV9XEAA1C9A)
+
+`app/src/cards.rs` (`Printings`, `CardPreview`, new `replace_nav_click` and
+`trigger_class` prop), `app/src/components/back_nav.rs` (new
+`is_modified_click`), `end2end/tests/card-detail.spec.ts`. Round 2 of the
+same task the entry above (in this section) documents; adversarial review
+caught two majors in the round-1 fix (real anchors on cells 2–4, one of
+them stretched to `h-full`) before it shipped.
+
+**Major 1 — the duplicate-link `aria-hidden` silenced real data.** Round 1
+gave cells 2–4 their own `<a aria-hidden="true" tabindex="-1">` so the row
+stayed whole-width clickable without adding extra Tab stops. `aria-hidden`
+removes an element's entire subtree from the accessibility tree, not just
+its focusability — so a screen reader's cell-by-cell table navigation
+(VoiceOver `Ctrl+Option+→`, say) heard *empty* cells where the collector
+number, rarity, and finishes used to read as plain text. Cell 1's
+`aria-label` describes the whole row; it is not a substitute for reading
+each cell's own data. Fixed by dropping the anchors in cells 2–4 entirely:
+the click affordance moved to the `<td>` itself (`on:click=replace_nav_click
+(...)`, `cursor-pointer`) — a `<td>` with a click listener hides nothing,
+adds no Tab stop, and announces nothing beyond its own plain text. Accepted
+consequence, load-bearing enough to be worth stating twice (also in
+`replace_nav_click`'s own doc comment): a modified click (`cmd`/`ctrl`/
+`shift`/`alt`, "open in a new tab") only works through cell 1's real
+`<a href>` now — cells 2–4 have no `href` for the browser to act on, so a
+modified click there is a deliberate no-op rather than either faking a
+new-tab open or silently downgrading the reader's explicit modifier to an
+in-place navigation.
+
+Verified with the real accessibility tree, not by re-reading the markup:
+`end2end/wkwebview/axdrive.swift dump` against the built `.app` on a real
+printings row returned
+
+```
+[…2.11.1.1] AXCell …  [...1.1.0] AXStaticText … 269
+[…2.11.1.2] AXCell …  [...1.2.0] AXStaticText … Uncommon
+[…2.11.1.3] AXCell …  [...1.3.0] AXStaticText … Nonfoil
+```
+
+— plain `AXStaticText` nodes for the collector number, rarity, and
+finishes, present and readable, where the round-1 build exposed nothing.
+Repo-wide, `aria-hidden="true"` dropped from 419 occurrences on a card-detail
+page (round 1: one per printing row × 3 duplicate anchors) to 8, all of them
+pre-existing decorative icons unrelated to this table (the filter
+sidebar's disclosure carets, the Back link's `‹`, mobile-tab emoji).
+
+**Major 2 — `h-full` threaded through the wrapper spans, but never actually
+resolved.** Round 1's fix for the #166-shaped hover-anchor-geometry bug
+(cell 1's trigger needs the *row's* height, not its own short content's)
+added a `trigger_class` prop to `CardPreview` and passed `h-full` through
+both of its wrapper `<span>`s. That compiles, looks right, and is wrong:
+CSS percentage heights resolve against a containing block whose `height`
+*property* is explicitly non-`auto` — and a `<td>`'s rendered box being the
+row's real height (table layout stretches every cell to the tallest one)
+does not make its `height` *property* non-`auto`. Nothing here ever sets
+it. Caught by measurement, not by re-deriving the spec: a standalone
+`wkprobe.swift` page reproducing the exact class list (`h-full` on both
+spans, nothing on the `<td>`) measured the trigger stuck at its own
+52px single-line content height while a sibling cell's wrapped text made
+the row 72.5px — the percentage chain never started, in both real WKWebView
+and chromium. Fixed with the classic table trick: `h-[1px]` on the `<td>`
+itself — an explicit, nonsensical `height: 1px` that the table row-height
+algorithm overrides right back to the real row height for rendering (cells
+never shrink below their content's needs) but which *registers* as
+explicit for the cascade, unlocking every descendant's `h-full` below it.
+Re-measured with the fix: trigger height within 1.5px of the row's (the
+remaining gap is the row's own `border-b`, not part of any cell's content
+box) — `true` in both engines. One more trap inside the same fix: the
+first attempt used the bare `h-px` utility, which rendered onto the
+element with no CSS rule behind it — this Tailwind version's spacing scale
+carries no `px` token — caught by grepping the *compiled* `app.css` for the
+rule, not by trusting the class name. `h-[1px]` (bracket/arbitrary-value
+syntax, already used elsewhere in this codebase for a `Separator`) is what
+actually compiles.
+
+**Verification, round 2.** Chromium `card-detail.spec.ts --project=chromium
+--workers=1 --grep @fast`: 39/39, no test changes needed (the "hovering a
+row" test from round 1 already targeted `printing-row-link`, whose testid
+and position didn't move). Real `.app`, pid-exact (`axdrive`), coordinate
+`click` (not `press`) — same three proofs as round 1, re-run against the
+round-2 build: Back landed on the source catalog search; a coordinate-click
+on a row's *Finishes* cell (a `<td>`, not a link) reordered that printing to
+the top, proving whole-row clickability survives dropping the duplicate
+anchors; the have-stepper's Increase button moved the count from 1 to 2
+(`AXIncrementor` read back "2"). The Mac's display locked mid-session before
+the stepper could be decremented back through the UI (same failure mode as
+this section's `#166` entry above) — restored instead through the
+authenticated hosted API directly (`POST /api/holdings/{id}/quantity`,
+`{"quantity": 0}`), and confirmed via a fresh `GET /api/cards/{oracle_id}`
+that `ownership` is `[]` again, matching the pre-test state exactly.
+
+**Folds picked up in the same pass** (adversarial review, not separately
+discovered): the four-way-duplicated `meta_key() || ctrl_key() ||
+shift_key() || alt_key()` modifier guard (`CardPreview::on_click`, its
+sheet's "Full details →" link, `BackControl`, and `replace_nav_click`)
+extracted to `back_nav::is_modified_click` — pure, boolean-in-boolean-out,
+same testability convention as `is_back_chord` right above it; middle-click
+(`auxclick`/`button() == 1`) stays uncovered, documented as a known gap in
+that function's own doc comment rather than a partial, engine-inconsistent
+fix. The printings table's four `TableHead`s gained `scope="col"`.

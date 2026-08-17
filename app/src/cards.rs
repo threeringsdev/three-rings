@@ -335,6 +335,18 @@ pub fn CardPreview(
     /// whatever sent the reader to this card in the first place.
     #[prop(default = false)]
     replace_history: bool,
+    /// Extra classes merged onto *both* wrapper levels the trigger sits
+    /// inside — the inner `<span class="block">` this component owns, and
+    /// (when `hover` is on) `HoverCardTrigger`'s own `<span>` outside that.
+    /// Empty by default (every call site but `Printings` leaves this unset,
+    /// so both spans keep their bare `block`/`block w-full` classes exactly
+    /// as before). `Printings` passes `h-full` here — see that module's doc
+    /// comment ("the hover anchor's geometry has to be the row's") for why a
+    /// *chain* of explicit heights, not just one on the innermost `<a>`, is
+    /// what a percentage height needs to resolve through two auto-height
+    /// wrapper levels.
+    #[prop(into, optional)]
+    trigger_class: String,
     children: Children,
 ) -> impl IntoView {
     let oracle_id = card.oracle_id;
@@ -397,7 +409,12 @@ pub fn CardPreview(
             // A modified click is a navigation instruction, not a preview request
             // — swallowing it would break "open in a new tab" for anyone with a
             // keyboard attached to a touch device.
-            if ev.meta_key() || ev.ctrl_key() || ev.shift_key() || ev.alt_key() {
+            if crate::components::back_nav::is_modified_click(
+                ev.meta_key(),
+                ev.ctrl_key(),
+                ev.shift_key(),
+                ev.alt_key(),
+            ) {
                 return;
             }
             if wants_sheet.get() {
@@ -423,11 +440,25 @@ pub fn CardPreview(
         }
     };
 
+    // Merged onto *both* wrapper spans below (not just the innermost one) —
+    // see `trigger_class`'s own doc comment for why a percentage height
+    // needs an explicit height at every level of the chain, not just one.
+    let inner_trigger_class = if trigger_class.is_empty() {
+        "block".to_string()
+    } else {
+        format!("block {trigger_class}")
+    };
+    let outer_trigger_class = if trigger_class.is_empty() {
+        "block w-full".to_string()
+    } else {
+        format!("block w-full {trigger_class}")
+    };
+
     // `span`, not `div`: this sits inside HoverCardTrigger's own `<span>`,
     // and flow content inside phrasing content is invalid HTML.
     let trigger = view! {
         <span
-            class="block"
+            class=inner_trigger_class
             on:click=on_click
             on:pointerdown=move |ev: leptos::ev::PointerEvent| {
                 touch_intent.set(ev.pointer_type() == "touch")
@@ -450,7 +481,7 @@ pub fn CardPreview(
                 disabled=wants_sheet
                 on_open_change=Callback::new(move |v| hover_open.set(v))
             >
-                <HoverCardTrigger class="block w-full">{trigger}</HoverCardTrigger>
+                <HoverCardTrigger class=outer_trigger_class>{trigger}</HoverCardTrigger>
                 <HoverCardContent class="w-72" {..} data-testid="card-preview-hover">
                     <Show when=move || hovered.get()>
                         <PreviewBody card=hover_card_body.clone() open=hover_open />
@@ -506,9 +537,12 @@ pub fn CardPreview(
                                     if !replace_history {
                                         return;
                                     }
-                                    if ev.meta_key() || ev.ctrl_key() || ev.shift_key()
-                                        || ev.alt_key()
-                                    {
+                                    if crate::components::back_nav::is_modified_click(
+                                        ev.meta_key(),
+                                        ev.ctrl_key(),
+                                        ev.shift_key(),
+                                        ev.alt_key(),
+                                    ) {
                                         return;
                                     }
                                     ev.prevent_default();
@@ -724,8 +758,14 @@ fn BackControl() -> impl IntoView {
             on:click=move |ev: leptos::ev::MouseEvent| {
                 // A modified click is a navigation instruction (open in a new
                 // tab/window), not a "take me back" request — same guard
-                // `CardPreview::on_click` applies to the preview trigger.
-                if ev.meta_key() || ev.ctrl_key() || ev.shift_key() || ev.alt_key() {
+                // `CardPreview::on_click` applies to the preview trigger, via
+                // the shared `back_nav::is_modified_click`.
+                if crate::components::back_nav::is_modified_click(
+                    ev.meta_key(),
+                    ev.ctrl_key(),
+                    ev.shift_key(),
+                    ev.alt_key(),
+                ) {
                     return;
                 }
                 // Read fresh, not from a stored signal — see
@@ -1316,33 +1356,125 @@ const PRINTINGS_MAX_HEIGHT: &str = "max-h-[67.5rem]";
 /// this projection carries, so the row preview shows none rather than
 /// mislabeling the oracle-level figure as this printing's own.
 ///
-/// The row's whole width is clickable via a "stretched link": `TableRow`
-/// gets `position: relative` and the anchor `absolute inset-0`s inside one
-/// cell, so its containing block is the row, not that cell — the standard
-/// pattern for a fully-clickable table row without nesting a `<tr>` inside
-/// an `<a>` (invalid HTML; `<a>` is not a permitted `<tbody>`/`<tr>` child).
-/// Nothing else in this row is interactive, so there is no nested-link
-/// hazard to route around. Deliberate tradeoff: the overlay sits above the
-/// visible text in paint order (a `position: absolute` box always paints
-/// over non-positioned siblings, regardless of DOM order), so a mouse drag
-/// across the row can't select its text — standard for this pattern, and
-/// accepted the same way a catalog tile's overlay link already is.
+/// **Not a stretched overlay link.** #158 originally made the row
+/// whole-width clickable via the standard "stretched link" trick —
+/// `TableRow` gets `position: relative` and one cell's anchor is
+/// `absolute inset-0`, so the anchor's containing block is meant to be the
+/// row. That trick relies on a UA actually honoring `position` on `<tr>`,
+/// and CSS 2.1 leaves that UA-defined: Blink/Chromium do, WebKit does not.
+/// In WebKit the anchor's containing block fell through past the
+/// non-positioned `<tr>` to the nearest positioned ancestor up the tree —
+/// the page container — so every row's "row-sized" overlay actually
+/// rendered page-sized, and N stacked full-page invisible links ate every
+/// mouse click on the whole card-detail screen (Back, steppers, hero —
+/// whichever overlay painted topmost). Keyboard/a11y (`AXPress` bypasses
+/// hit-testing entirely) and chromium e2e both worked, which is how it
+/// shipped and how it slipped past review. Live-probed in the real WKWebView
+/// `.app` (see `end2end/wkwebview/`), fixed here. Do not replace this with
+/// another UA-defined table-row trick (`transform`/`clip-path`/`filter` on
+/// `<tr>` are equally unreliable in WebKit) — the fix below avoids
+/// positioning `<tr>` (or sizing anything against it) at all.
 ///
-/// **The hover anchor's geometry has to be the row's, not zero.**
-/// `CardPreview`'s own trigger is a plain `<span>` that auto-sizes to its
-/// *in-flow* children — a `position: absolute` child (this row's stretched
-/// link) contributes nothing to that, so a `CardPreview` given only the
-/// overlay anchor as children renders a 0×0px trigger box, and
-/// `HoverCardContent`'s `position-area: block-end` then computes "below"
-/// from that zero-height box — i.e. from the row's *top* edge, opening the
-/// panel over the hovered row and the next several (round-2 adversarial
-/// review, caught by a bounding-box assertion no earlier test had). The fix
-/// is the same shape every other `CardPreview` call site already has: real
-/// visible content as a sibling *inside* the trigger, not floated outside
-/// it as a bare overlay. Here that content is the set name — wrapped in its
-/// own `<span class="block p-4">` carrying the `TableCell`'s padding (moved
-/// off the cell, which is `p-0` now) so the trigger's rendered box is the
-/// full padded row, not just the text's own line box.
+/// **The fix: one real link, plus a click affordance on every other cell.**
+/// No `position` anywhere in this row. Cell 1 ("Set") wraps its visible
+/// text directly in a normal, in-flow, block-level `<a>` — sized by its own
+/// content the same way any link is, in every engine, so there is no
+/// containing-block question to get wrong. That is the row's one real,
+/// keyboard-focusable, screen-reader-announced link (`aria-label` carries
+/// the full row description — see `link_label` below).
+///
+/// **a11y: plain readable cells (round 2).** Cells 2–4 do *not* get their
+/// own `<a>`. An earlier version of this fix gave them duplicate anchors
+/// (`aria-hidden` + `tabindex="-1"`, to avoid extra Tab stops) — caught in
+/// adversarial review as trading one accessibility bug for another:
+/// `aria-hidden` removes an element's entire subtree from the accessibility
+/// tree, so a screen reader's cell-by-cell table navigation (e.g. VoiceOver
+/// Ctrl+Option+arrows) heard *empty* cells where the collector number,
+/// rarity, and finishes used to read as plain text — cell 1's `aria-label`
+/// is a description of the whole row, not a substitute for reading each
+/// cell's own data. Fixed by putting the click affordance on the `<td>`
+/// itself instead: `on:click=replace_nav_click(...)` plus `cursor-pointer`
+/// for the visual affordance. A `<td>` with a click handler is not
+/// interactive markup — it hides nothing from the accessibility tree, adds
+/// no Tab stop, and announces nothing beyond its own plain text content.
+/// This is what keeps the row whole-width clickable without hiding data:
+/// every cell covers its own box with *some* click handling — a real
+/// `<a>` in cell 1, a `<td>` listener in cells 2–4 — so a click anywhere in
+/// the row's rendered area does something, in every engine, with zero
+/// positioning tricks. **Accepted consequence:** a modified click
+/// (cmd/ctrl/shift/alt, "open in a new tab") only works via cell 1's real
+/// `<a href>` — cells 2–4 have no `href` for the browser to open, so their
+/// click handler is mouse/touch-only convenience, not a link (see
+/// `replace_nav_click`'s own doc comment). (Also considered and rejected:
+/// restructuring the row into a non-table `<a>`-wrapping grid — a bigger
+/// blast radius for header alignment and table a11y semantics for no
+/// behavioral gain over this.)
+///
+/// `select-none` (on cell 1's anchor and cells 2–4's `<td>`s alike)
+/// preserves the tradeoff the old overlay had as a side effect of paint
+/// order (an absolutely-positioned box always paints over its
+/// non-positioned siblings, which meant a mouse drag across the row
+/// selected nothing): with real in-flow text and click targets now doing
+/// the work, a drag would otherwise select it, so non-selectability is now
+/// explicit CSS instead of an accident of `z`-order.
+///
+/// **The hover anchor's geometry has to be the row's, not zero — and not
+/// just at the innermost level.** `CardPreview`'s own trigger is a plain
+/// `<span>` that auto-sizes to its *in-flow* children — the old overlay
+/// anchor was `position: absolute` and contributed nothing to that, so a
+/// `CardPreview` given only the overlay as children rendered a 0×0px
+/// trigger box, and `HoverCardContent`'s `position-area: block-end` then
+/// computed "below" from that zero-height box — i.e. from the row's *top*
+/// edge, opening the panel over the hovered row and the next several
+/// (round-2 adversarial review, caught by a bounding-box assertion no
+/// earlier test had). Fixed the same way every other `CardPreview` call
+/// site already works: real visible content *inside* the trigger — cell
+/// 1's `<a>` *is* the trigger's content now, not a separate
+/// overlay-plus-sibling-span.
+///
+/// That alone is not sufficient, though (round 2, second pass): the `<a>`
+/// sits *two* auto-height `<span>` hops below the `<td>` — `CardPreview`'s
+/// own trigger span, and (when hovering is on) `HoverCardTrigger`'s span
+/// outside that — and a percentage height only resolves against a parent
+/// whose `height` *property* is explicitly non-`auto`. **The `<td>`'s
+/// rendered box is the row's real height (table layout stretches every
+/// cell to the tallest one), but its `height` *property* is still `auto`**
+/// — nothing here ever sets it — so that used, on-screen pixel size does
+/// not count as "explicit" for a child's percentage-height resolution
+/// (CSS 2.1 §10.5: a percentage height computes to `auto` unless the
+/// containing block's height was itself specified, not merely
+/// content-derived). Verified empirically, not assumed: a standalone
+/// WKWebView probe reproducing this exact markup (`h-full` threaded
+/// through both spans, nothing else) measured the trigger stuck at its own
+/// short content height while the row rendered taller from a wrapped
+/// sibling cell — the percentage chain never started. The classic table
+/// fix is `h-[1px]` on the `<td>` itself: an explicit (if nonsensical)
+/// `height: 1px` that the table layout algorithm overrides right back to
+/// the row's real height for rendering — cells never shrink below their
+/// content's needs — but which *registers* as "explicit" for the cascade,
+/// unlocking every descendant's `h-full` below it. (Bracket syntax, not the
+/// bare `h-px` keyword utility — this Tailwind version's spacing scale
+/// carries no `px` token, so `h-px` compiles to a dead class with no rule
+/// behind it; caught by checking the compiled `app.css`, not by assuming
+/// the class name did what it says.) With `h-[1px]` added, the same probe
+/// measured the trigger matching the row within a pixel (the row's own
+/// `border-b` on the `<tr>`, not part of any cell's content box). Chain,
+/// corrected: `<td>` (`h-[1px]`, explicit) → trigger span (`h-full`,
+/// resolves against it) → `HoverCardTrigger` span (`h-full`, resolves) →
+/// `<a>` (`h-full`, finally resolves) — and the hover panel positions off
+/// the row's true bottom edge regardless of which cell's content is
+/// tallest.
+///
+/// **Hover-preview scope, deliberately narrowed.** The old overlay spanned
+/// the whole row, so hovering *anywhere* opened the preview. The new
+/// structure only wires `CardPreview`'s hover/touch-sheet affordance to
+/// cell 1 (cells 2–4 are plain click-to-navigate, no preview) — matching
+/// the catalog list view's own `CardPreview` scope (name cell only,
+/// `catalog.rs::ResultsList`), and not one of this fix's "must keep"
+/// requirements (whole-row *clickability*, not whole-row *hover*). See
+/// `end2end/tests/card-detail.spec.ts`'s "hovering a row" test, updated to
+/// hover the row's link rather than the row's own (now not-necessarily-over-
+/// cell-1) bounding-box center.
 #[component]
 fn Printings(
     oracle_id: shared::Id,
@@ -1359,6 +1491,10 @@ fn Printings(
 ) -> impl IntoView {
     let count = printings.len();
     let ordered = Memo::new(move |_| reorder_current_first(&printings, selected_printing.get()));
+    // Shared by cells 2–4's duplicate links (`replace_nav_click`) — cell 1's
+    // own click-interception lives inside `CardPreview` and already has its
+    // own copy.
+    let navigate = use_navigate();
 
     view! {
         <section class="space-y-2">
@@ -1367,10 +1503,18 @@ fn Printings(
                 <Table {..} data-testid="card-printings">
                     <TableHeader>
                         <TableRow>
-                            <TableHead>"Set"</TableHead>
-                            <TableHead class="hidden sm:table-cell">"Number"</TableHead>
-                            <TableHead>"Rarity"</TableHead>
-                            <TableHead class="hidden sm:table-cell">"Finishes"</TableHead>
+                            <TableHead {..} scope="col">
+                                "Set"
+                            </TableHead>
+                            <TableHead class="hidden sm:table-cell" {..} scope="col">
+                                "Number"
+                            </TableHead>
+                            <TableHead {..} scope="col">
+                                "Rarity"
+                            </TableHead>
+                            <TableHead class="hidden sm:table-cell" {..} scope="col">
+                                "Finishes"
+                            </TableHead>
                         </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -1404,6 +1548,29 @@ fn Printings(
                                         "{name} — {set}, #{collector_number}, {rarity}, {}",
                                         finishes.join(", "),
                                     );
+                                    // One closure per duplicate link (cells 2–4) — built here,
+                                    // as plain owned locals, rather than inline in the `view!`
+                                    // attribute position: the reactive `{move || …}` this row
+                                    // lives inside must stay callable on every re-run
+                                    // (`ordered` is a `Memo`), and building `replace_nav_click`'s
+                                    // result inline at three attribute sites confused the
+                                    // closure's captured-by-reference/moved analysis into
+                                    // treating `navigate` as consumed after the first row.
+                                    let number_click = replace_nav_click(navigate.clone(), href.clone());
+                                    let rarity_click = replace_nav_click(navigate.clone(), href.clone());
+                                    let finishes_click = replace_nav_click(navigate.clone(), href.clone());
+                                    // A separately-named clone per `href=` attribute below, for
+                                    // the same reason as the `_click` locals above: the `view!`
+                                    // macro lowers each component/element's props into its own
+                                    // closure, and each one fully *moves* whatever `href` it
+                                    // captures — sharing one `href.clone()` expression across
+                                    // multiple sibling elements' attributes (rather than one
+                                    // uniquely-named local per site) hit the same "moved" error.
+                                    // Only two now (cells 2–4 no longer have their own `<a>`,
+                                    // hence no `href` of their own — see the module doc's "a11y:
+                                    // plain readable cells" note).
+                                    let preview_href = href.clone();
+                                    let set_href = href;
                                     let preview = CardSummary {
                                         oracle_id,
                                         name: name.clone(),
@@ -1416,16 +1583,27 @@ fn Printings(
                                     };
                                     view! {
                                         <TableRow
-                                            class="relative"
                                             {..}
                                             data-testid="printing-row"
                                             data-printing-id=id.to_string()
                                         >
-                                            <TableCell class="p-0 font-medium">
+                                            // `h-[1px]`: an explicit (table-layout-overridden)
+                                            // height, not a real 1px cell — what makes the
+                                            // `trigger_class="h-full"` chain below able to resolve
+                                            // at all. See the module doc's "hover anchor's
+                                            // geometry" note for why a *rendered* full-row height
+                                            // isn't enough on its own. Bracket syntax deliberately,
+                                            // not the bare `h-px` keyword utility: this Tailwind
+                                            // version's default spacing scale doesn't carry a `px`
+                                            // token, so `h-px` renders as a dead class with no CSS
+                                            // rule behind it — caught by checking the compiled
+                                            // `app.css` for the rule, not by assuming the class
+                                            // name compiled to something.
+                                            <TableCell class="h-[1px] p-0 font-medium">
                                                 <CardPreview
                                                     card=preview
                                                     id=id.to_string()
-                                                    detail_href=href.clone()
+                                                    detail_href=preview_href
                                                     // Every row here is another printing of the
                                                     // page the reader is already on — a flip, not
                                                     // a new visit — so a same-page navigation
@@ -1435,27 +1613,57 @@ fn Printings(
                                                     // doc for the full "history granularity is
                                                     // per session" reasoning.
                                                     replace_history=true
+                                                    // Threads an explicit height through both of
+                                                    // `CardPreview`'s own wrapper spans, so the
+                                                    // `h-full` on the `<a>` below actually
+                                                    // resolves — see `trigger_class`'s doc comment
+                                                    // and the module doc's "the hover anchor's
+                                                    // geometry" note for why a percentage height
+                                                    // needs an explicit height at *every* level of
+                                                    // the chain (td → span → span → a), not just
+                                                    // the innermost one.
+                                                    trigger_class="h-full"
                                                 >
+                                                    // The row's one real, keyboard-focusable,
+                                                    // screen-reader-announced link — see the
+                                                    // module doc's "not a stretched overlay link"
+                                                    // note. Real in-flow content (not an
+                                                    // absolutely-positioned sibling), which is
+                                                    // also what fixes the hover-trigger geometry:
+                                                    // this *is* the trigger's content now.
                                                     <a
-                                                        href=href
-                                                        class="absolute inset-0"
+                                                        href=set_href
+                                                        class="flex h-full select-none items-center p-4"
                                                         aria-label=link_label
                                                         data-testid="printing-row-link"
-                                                    ></a>
-                                                    // The cell's own `p-4` moved here (the
-                                                    // `TableCell` above is `p-0`): this is real
-                                                    // in-flow content, so it's what gives
-                                                    // `CardPreview`'s trigger its height — see
-                                                    // the module doc's "the hover anchor's
-                                                    // geometry" note for why that has to be true.
-                                                    <span class="block p-4">{set}</span>
+                                                    >
+                                                        {set}
+                                                    </a>
                                                 </CardPreview>
                                             </TableCell>
-                                            <TableCell class="text-muted-foreground hidden sm:table-cell">
+                                            // Cells 2–4: no `<a>`, no `aria-hidden` — the click
+                                            // affordance lives on the `<td>` itself
+                                            // (`cursor-pointer` + `on:click`), so the cell's own
+                                            // text stays plain, unhidden accessible content that
+                                            // a screen reader's cell-by-cell table navigation
+                                            // reads normally. See the module doc's "a11y: plain
+                                            // readable cells" note.
+                                            <TableCell
+                                                class="text-muted-foreground hidden cursor-pointer select-none sm:table-cell"
+                                                on:click=number_click
+                                            >
                                                 {collector_number}
                                             </TableCell>
-                                            <TableCell class="capitalize">{rarity}</TableCell>
-                                            <TableCell class="text-muted-foreground hidden capitalize sm:table-cell">
+                                            <TableCell
+                                                class="cursor-pointer select-none capitalize"
+                                                on:click=rarity_click
+                                            >
+                                                {rarity}
+                                            </TableCell>
+                                            <TableCell
+                                                class="text-muted-foreground hidden cursor-pointer select-none capitalize sm:table-cell"
+                                                on:click=finishes_click
+                                            >
                                                 {finishes.join(", ")}
                                             </TableCell>
                                         </TableRow>
@@ -1467,6 +1675,39 @@ fn Printings(
                 </Table>
             </TableWrapper>
         </section>
+    }
+}
+
+/// The printings row's cells-2-through-4 click handler (`Printings`, above —
+/// see its "a11y: plain readable cells" doc note for why these cells are
+/// plain `<td>`s with `on:click`, not anchors). Unlike `CardPreview::
+/// on_click` there is no real `href` underneath a `<td>` for a modified
+/// click to fall through to. The guard stays anyway: a cmd/ctrl/shift/
+/// alt-click asking to "open in a new tab" can't be honored on a `<td>`
+/// with no link, so the honest response is to do *nothing* rather than
+/// either fake a new-tab open or silently downgrade the reader's explicit
+/// modifier into an in-place navigation they didn't ask for.
+fn replace_nav_click(
+    navigate: impl Fn(&str, NavigateOptions) + 'static,
+    href: String,
+) -> impl Fn(leptos::ev::MouseEvent) + 'static {
+    move |ev: leptos::ev::MouseEvent| {
+        if crate::components::back_nav::is_modified_click(
+            ev.meta_key(),
+            ev.ctrl_key(),
+            ev.shift_key(),
+            ev.alt_key(),
+        ) {
+            return;
+        }
+        ev.prevent_default();
+        navigate(
+            &href,
+            NavigateOptions {
+                replace: true,
+                ..Default::default()
+            },
+        );
     }
 }
 
