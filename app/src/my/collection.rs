@@ -1412,17 +1412,17 @@ struct ViewRow {
     show_wanted: bool,
     /// Copies of this card, on this board, held across **every** printing row
     /// in the payload — the same per-`(oracle, board)` sum [`section_slots`]
-    /// folds, precomputed because the WANTED stepper needs it at commit time.
+    /// folds.
     ///
-    /// Only the WANTED-printing row ever reads it: a section's slot count is
-    /// `max(held, desired)` per card, so a *want* change moves the header by
-    /// `max(held, new) − max(held, old)` — exact with this number, and
-    /// otherwise an overshoot whenever the card is held under a second
-    /// printing (`present` on the first row would understate `held`, and
-    /// `max(·, desired)` is steeper the smaller `held` is). [`HereCount`]'s own
-    /// row-local approximation is left as it was: it under-shoots rather than
-    /// overshoots, which [`section_slot_delta`]'s doc argues is never worse
-    /// than the static value it replaces.
+    /// This is the **seed** for [`GroupLive::held`], which is what the two
+    /// steppers actually read at commit time; nothing reads this field after
+    /// [`group_live`] has folded it. A section's slot count is
+    /// `max(held, desired)` per card, so both a HERE and a WANTED change move
+    /// the header through [`section_slot_delta`] against the *group's* held
+    /// total — the row's own `present` would understate it whenever the card
+    /// is held under a second printing, and `max(·, desired)` is steeper the
+    /// smaller `held` is, so a row-local stand-in mis-states the delta in both
+    /// directions.
     held_in_group: i32,
 }
 
@@ -1456,8 +1456,21 @@ fn here_total(row: &CardRow) -> i32 {
 
 /// The WANTED cell, per the spec's "only when set and different".
 fn wanted_cell(row: &ViewRow) -> Option<i32> {
-    let d = row.row.desired;
-    (row.show_wanted && d > 0 && d != row.row.present).then_some(d)
+    wanted_of(row.show_wanted, row.row.present, row.row.desired)
+}
+
+/// [`wanted_cell`]'s rule over an explicit `(present, desired)` pair, so the
+/// grid can apply its [`RowDeltas`] overlay to `desired` and still reach the
+/// same decision by the same rule rather than a second copy of it.
+///
+/// `present` stays the caller's business on purpose: `HoldingTile` passes the
+/// **snapshot** present here even though its HERE badge shows the live one,
+/// because the collapse test ("different") is what the table's own cell
+/// evaluated once for this payload — overlaying it on the tile alone would
+/// make the two layouts disagree about whether the number prints, which is the
+/// one thing that tile's doc promises they cannot do.
+fn wanted_of(show_wanted: bool, present: i32, desired: i32) -> Option<i32> {
+    (show_wanted && desired > 0 && desired != present).then_some(desired)
 }
 
 /// The OWNED cell, per the spec's "collapses when equal to HERE". `owned` is
@@ -1605,9 +1618,16 @@ fn section_slots_live(slots: i32, delta: i32) -> i32 {
     slots + delta
 }
 
-/// The section header's slot-count delta for one row's present-copy change,
-/// from `old` to `new`, given the row's own `desired` (P6-118 review round 1
-/// — the first cut of this fix pushed the raw *copy* delta and was wrong).
+/// The section header's slot-count delta when one of the two numbers behind a
+/// card's slot contribution moves from `old` to `new`, with the other held at
+/// `fixed` (P6-118 review round 1 — the first cut of this fix pushed the raw
+/// *copy* delta and was wrong).
+///
+/// **Symmetric, and used from both steppers.** The contribution is
+/// `max(held, desired)`, so HERE passes `(held_before, held_after, desired)`
+/// and WANTED passes `(desired_before, desired_after, held)` — one function,
+/// the moving side first and the fixed side last, rather than two derivations
+/// that could drift.
 ///
 /// `section_slots` is not a copy count: per `(oracle, board)` it is
 /// `held + max(desired - held, 0)`, which is exactly `max(held, desired)`
@@ -1621,20 +1641,68 @@ fn section_slots_live(slots: i32, delta: i32) -> i32 {
 /// when `desired` is 0 does the slot delta reduce to the copy delta this
 /// replaces.
 ///
-/// `desired` is read at commit time from the row itself (`CardRow::desired`
-/// is oracle-grained, so every row already carries the group's true value —
-/// no cross-row aggregation needed). This is deliberately per-row, not
-/// per-`(oracle, board)`-group: a row's own commit only ever changes its own
-/// `present`, so treating this row's held count as standing in for the
-/// group's is exact whenever the row is the group's only holding (the
-/// overwhelmingly common case). For a wanted card held under two printings
-/// in one section it is an approximation introduced *here* (`section_slots`
-/// re-sums the whole group and is exact): the delta under-shoots — never
-/// overshoots, since `max(·, desired)` grows at most 1:1 with a row-local
-/// change — so the header is never *worse* than the static value it
-/// replaces, and the next refetch makes it exact.
-fn section_slot_delta(old: i32, new: i32, desired: i32) -> i32 {
-    new.max(desired) - old.max(desired)
+/// **Both arguments must come from [`GroupLive`], never from a component's
+/// construction-time copy.** Slot arithmetic is `(oracle, board)`-grained, and
+/// each of the two numbers has a stepper that can move it — so a caller that
+/// froze either one computes its delta against a value that may already be
+/// stale, and the header then stays wrong until a reload rather than merely
+/// approximating. That was the want-stepper round-1 MAJOR; see [`GroupLive`]
+/// for the repro and the contract that replaced it. `GroupLive` is
+/// group-scoped for the same reason `section_slots` re-sums the whole group:
+/// a card held under two printings has two rows whose commits both move the
+/// one `held` this function is asking about.
+fn section_slot_delta(old: i32, new: i32, fixed: i32) -> i32 {
+    new.max(fixed) - old.max(fixed)
+}
+
+/// One `(oracle, board)` group's **live** held and desired counts — the two
+/// numbers [`section_slot_delta`] needs, each of which one of the row's two
+/// steppers can move.
+///
+/// This exists because both numbers were previously captured as plain `i32`s
+/// at each stepper's construction (want-stepper review round 1, MAJOR): each
+/// stepper then computed its slot delta against the *other* column's
+/// pre-edit snapshot, so two edits in one row composed wrongly and stayed
+/// wrong until a reload. The reported repro: held 2 / desired 4, WANTED
+/// stepped 4 → 1 pushes `max(2,1) − max(2,4) = −2` (right, the header should
+/// read 2); HERE then stepped 2 → 3 pushed `max(3,4) − max(2,4) = 0` against
+/// a `desired` that was 4 when the component mounted and is 1 by now, leaving
+/// the header at 2 where the truth is 3.
+///
+/// The contract each stepper follows: **read the other field untracked at
+/// commit time, then write your own.** Neither is ever read to render, which
+/// is why plain `RwSignal`s are enough and no `Memo` is involved.
+///
+/// **Group-scoped, not row-scoped.** `desired` is oracle-grained and `held` is
+/// the sum over a card's printing rows ([`ViewRow::held_in_group`]), so a card
+/// held under two printings in one section has two `CardTableRow`s that must
+/// agree about both numbers — per-row copies would drift the moment the second
+/// row committed. [`group_live`] builds one of these per `(oracle, board)` and
+/// hands the same copy to every row in it, which also makes the HERE path
+/// exact where it used to be a documented under-shooting approximation.
+#[derive(Clone, Copy)]
+struct GroupLive {
+    /// Copies of this card held on this board, across every printing row of
+    /// the group — seeded from [`ViewRow::held_in_group`].
+    held: RwSignal<i32>,
+    /// This card's desired count on this board — seeded from
+    /// [`shared::CardRow::desired`], which is already this exact grain.
+    desired: RwSignal<i32>,
+}
+
+/// One [`GroupLive`] per `(oracle, board)`, seeded from the payload the table
+/// is about to render. Built once by `CollectionTable` and looked up per row,
+/// so every row of a group shares one pair of signals — see [`GroupLive`].
+fn group_live(rows: &[ViewRow]) -> HashMap<(Id, Board), GroupLive> {
+    let mut out: HashMap<(Id, Board), GroupLive> = HashMap::new();
+    for row in rows {
+        out.entry((row.row.oracle_id, row.row.board))
+            .or_insert_with(|| GroupLive {
+                held: RwSignal::new(row.held_in_group),
+                desired: RwSignal::new(row.row.desired),
+            });
+    }
+    out
 }
 
 /// A row's live HERE overlay on top of the snapshot's own `present` — the
@@ -1655,13 +1723,24 @@ fn live_present(snapshot: i32, delta: i32) -> i32 {
     (snapshot + delta).max(0)
 }
 
-/// Live per-row HERE deltas since the currently rendered `view` snapshot,
-/// keyed by `holding_id` — the only identifier a `HereCount` commit and a
-/// `HoldingTile` read can agree names the same row without a second read of
-/// `view_res` (see [`live_present`]'s doc for why this exists at all).
+/// Live per-row HERE **and WANTED** deltas since the currently rendered `view`
+/// snapshot — keyed by `holding_id` and `desire_id` respectively, the only
+/// identifiers a stepper commit and a `HoldingTile` read can agree name the
+/// same row without a second read of `view_res` (see [`live_present`]'s doc
+/// for why this exists at all).
+///
+/// **The wants half is the same fix for the same defect** (want-stepper review
+/// round 1, MAJOR): once WANTED became steppable in the table, editing a want
+/// in list mode and toggling to grid showed the pre-edit count, and zeroing a
+/// want-only card's last desire left a **ghost tile** badged `1 wanted` for a
+/// `desires` row that no longer exists — exactly the HERE defect this struct
+/// was built for, reintroduced in the other column. Two maps rather than one,
+/// because the two columns are keyed by different ids and a row can be
+/// editable in one, the other, both, or neither.
 ///
 /// **Write side:** every `HereCount` whose row carries a `holding_id` pushes
-/// its commit's `(to - from)` here, in *addition* to (never instead of) the
+/// its commit's `(to - from)` here (and every `WantedCount` with a
+/// `desire_id` pushes its own), in *addition* to (never instead of) the
 /// existing `here_delta`/`section_delta` pushes — this is a third, parallel
 /// aggregate, not a replacement. Optimistic writes, server-error rollbacks and
 /// Undo all already arrive as a plain `StepperCommit`, so the same
@@ -1680,44 +1759,86 @@ fn live_present(snapshot: i32, delta: i32) -> i32 {
 /// itself the reactive boundary — see its own doc), and nothing can edit HERE
 /// while grid is showing (no stepper there), so one **untracked** read at
 /// `CollectionGrid`'s construction is both correct and sufficient — no
-/// `Memo`, no per-tile subscription needed. `CollectionGrid` uses it two ways:
-/// [`live_present`] for what a surviving tile's HERE badge shows, and to drop
-/// a row from the grid entirely once its live count reaches zero (the ghost
-/// tile case).
+/// `Memo`, no per-tile subscription needed. `CollectionGrid` uses it three
+/// ways: [`live_present`] for what a surviving tile's HERE badge shows, the
+/// same overlay applied to `desired` for its WANTED badge, and both together
+/// to decide whether the row still has a tile at all (the ghost tile case —
+/// see [`row_survives`]).
 ///
 /// **Reset:** zeroed alongside `here_delta` the moment a fresh payload lands
 /// (`CollectionPage`'s header `Transition`) — a new `view` already contains
 /// everything committed before it, the same reasoning `here_delta.set(0)`'s
 /// own comment gives.
 #[derive(Clone, Copy)]
-struct RowDeltas(RwSignal<HashMap<Id, i32>>);
+struct RowDeltas {
+    /// Keyed by `holding_id` — HERE.
+    present: RwSignal<HashMap<Id, i32>>,
+    /// Keyed by `desire_id` — WANTED.
+    desired: RwSignal<HashMap<Id, i32>>,
+}
 
 impl RowDeltas {
     fn new() -> Self {
-        Self(RwSignal::new(HashMap::new()))
+        Self {
+            present: RwSignal::new(HashMap::new()),
+            desired: RwSignal::new(HashMap::new()),
+        }
     }
 
     fn reset(self) {
-        self.0.update(|m| m.clear());
+        self.present.update(|m| m.clear());
+        self.desired.update(|m| m.clear());
     }
 
-    fn push(self, holding_id: Id, delta: i32) {
-        self.0
+    fn push_present(self, holding_id: Id, delta: i32) {
+        self.present
             .update(|m| accumulate_row_delta(m, holding_id, delta));
+    }
+
+    fn push_desired(self, desire_id: Id, delta: i32) {
+        self.desired
+            .update(|m| accumulate_row_delta(m, desire_id, delta));
     }
 
     /// The overlaid HERE count for one row. `holding_id: None` (a multi-grain
     /// cell, never edited via the stepper) always reads the snapshot as-is.
     /// **Untracked** — see the struct doc's "Read side".
     fn live_present(self, holding_id: Option<Id>, snapshot: i32) -> i32 {
-        match holding_id {
+        Self::overlay(self.present, holding_id, snapshot)
+    }
+
+    /// WANTED's counterpart, keyed by `desire_id` — same rule, same clamp: a
+    /// cell no stepper could address reads its snapshot unchanged.
+    fn live_desired(self, desire_id: Option<Id>, snapshot: i32) -> i32 {
+        Self::overlay(self.desired, desire_id, snapshot)
+    }
+
+    fn overlay(map: RwSignal<HashMap<Id, i32>>, key: Option<Id>, snapshot: i32) -> i32 {
+        match key {
             Some(id) => {
-                let delta = self.0.with_untracked(|m| m.get(&id).copied().unwrap_or(0));
+                let delta = map.with_untracked(|m| m.get(&id).copied().unwrap_or(0));
                 live_present(snapshot, delta)
             }
             None => snapshot,
         }
     }
+}
+
+/// Whether a row still deserves a grid tile, given both live counts and
+/// whether either column was ever stepper-addressable.
+///
+/// The rule the wants overlay forced (want-stepper review round 1): a row that
+/// no stepper could reach in *either* column cannot have been zeroed in this
+/// session, so it always survives — that was the old
+/// `holding_id.is_none() => keep` shortcut, which stopped being true the
+/// moment a want-only row (`holding_id: None`, `desire_id: Some`) became
+/// editable, leaving a ghost tile behind every zeroed want. An addressable row
+/// survives while it still has copies here **or** copies wanted here; a
+/// held-and-wanted row whose HERE is stepped to zero therefore stays as a
+/// want-only tile, which is what the table's own row does and what the server
+/// still holds a `desires` row for.
+fn row_survives(editable: bool, live_present: i32, live_desired: i32) -> bool {
+    !editable || live_present > 0 || live_desired > 0
 }
 
 /// The map mutation `RowDeltas::push` performs, free of the signal so it is
@@ -1754,8 +1875,9 @@ fn CollectionBody(
     paged: Memo<bool>,
     here_delta: RwSignal<i32>,
     /// `here_delta`'s wants twin, threaded to the table alone: the WANTED cell
-    /// is steppable in list view only, exactly as HERE is (the grid's badges
-    /// are read-only — see [`CollectionGrid`]).
+    /// is steppable in list view only, exactly as HERE is. The grid shows what
+    /// those edits did — through `row_deltas`, not through this — because it
+    /// renders badges, not controls (see [`CollectionGrid`]).
     want_delta: RwSignal<i32>,
     tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
     tree_facts: RwSignal<Option<TreeFacts>>,
@@ -1840,10 +1962,28 @@ fn CollectionTable(
     let is_deck = view.collection.kind == CollectionKind::Deck;
     let collection_id = view.collection.id;
     let rows = view_rows(view.cards);
+    // One live `(held, desired)` pair per `(oracle, board)`, shared by every
+    // row of the group — see [`GroupLive`] for the composition defect this
+    // fixes. Built from the whole page's rows before `group_deck` splits them,
+    // since a group's rows all land in one section anyway (the bucket is a
+    // property of the card).
+    let group_live = group_live(&rows);
     let sections = if is_deck {
         group_deck(rows.clone())
     } else {
         Vec::new()
+    };
+    // The fallback can only fire if a row reached the view without passing
+    // through `group_live` above, which it cannot — it is here so a lookup miss
+    // degrades to the old per-row behavior instead of panicking.
+    let live_for = move |row: &ViewRow| -> GroupLive {
+        group_live
+            .get(&(row.row.oracle_id, row.row.board))
+            .copied()
+            .unwrap_or_else(|| GroupLive {
+                held: RwSignal::new(row.held_in_group),
+                desired: RwSignal::new(row.row.desired),
+            })
     };
 
     view! {
@@ -1941,6 +2081,7 @@ fn CollectionTable(
                                         .rows
                                         .into_iter()
                                         .map(|row| {
+                                            let live = live_for(&row);
                                             view! {
                                                 <CardTableRow
                                                     row
@@ -1949,6 +2090,7 @@ fn CollectionTable(
                                                     collection_id
                                                     section_delta=section_delta
                                                     row_deltas
+                                                    live
                                                 />
                                             }
                                         })
@@ -1960,6 +2102,7 @@ fn CollectionTable(
                     } else {
                         rows.into_iter()
                             .map(|row| {
+                                let live = live_for(&row);
                                 view! {
                                     <CardTableRow
                                         row
@@ -1967,6 +2110,7 @@ fn CollectionTable(
                                         want_delta
                                         collection_id
                                         row_deltas
+                                        live
                                     />
                                 }
                             })
@@ -2057,13 +2201,18 @@ fn CardTableRow(
     /// `here_delta`. `None` in a binder, which has no sections.
     #[prop(optional)]
     section_delta: Option<RwSignal<i32>>,
-    /// `here_delta`'s per-row twin — see [`RowDeltas`]'s doc. Threaded straight
-    /// through to [`HereCount`], the only thing that writes it.
+    /// `here_delta`'s per-row twin — see [`RowDeltas`]'s doc. Threaded through
+    /// to both steppers: `HereCount` writes its `holding_id` half, `WantedCount`
+    /// its `desire_id` half.
     row_deltas: RowDeltas,
+    /// This row's `(oracle, board)` group's live held/desired pair, shared with
+    /// every other row of the same group — see [`GroupLive`]. Both steppers
+    /// need it: each reads the *other* field at commit time to compute its
+    /// section-slot delta, and writes its own afterward.
+    live: GroupLive,
 ) -> impl IntoView {
     let wanted = wanted_cell(&row);
     let owned = owned_cell(&row.row);
-    let held_in_group = row.held_in_group;
     let CardRow {
         oracle_id,
         printing_id,
@@ -2072,7 +2221,6 @@ fn CardTableRow(
         mana_cost,
         type_line,
         present,
-        desired,
         owned: owned_total,
         present_rollup,
         board,
@@ -2209,11 +2357,11 @@ fn CardTableRow(
                     <HereCount
                         name=name.clone()
                         present
-                        desired
                         holding_id
                         here_delta
                         section_delta
                         row_deltas
+                        live
                         removed
                     />
                     // Italic + dimmed, per the spec: copies a child collection
@@ -2241,9 +2389,10 @@ fn CardTableRow(
                     name=want_name
                     wanted
                     desire_id
-                    held_in_group
                     want_delta
                     section_delta
+                    row_deltas
+                    live
                 />
             </TableCell>
             <TableCell
@@ -2275,10 +2424,6 @@ fn CardTableRow(
 fn HereCount(
     name: String,
     present: i32,
-    /// The row's own oracle-grained desire count — needed only to compute
-    /// [`section_slot_delta`] correctly (a wanted, under-held row's slot
-    /// count does not move copy-for-copy with its present count).
-    desired: i32,
     holding_id: Option<Id>,
     here_delta: RwSignal<i32>,
     /// This row's deck section delta, when it has one (`None` in a binder) —
@@ -2293,6 +2438,11 @@ fn HereCount(
     /// [`RowDeltas`]'s doc for why the grid needs this and the table's own
     /// numbers do not.
     row_deltas: RowDeltas,
+    /// This `(oracle, board)` group's live held/desired pair — see
+    /// [`GroupLive`]. Read for the group's *current* `desired` (which the
+    /// row's own WANTED stepper may already have moved) and written with the
+    /// group's new held total.
+    live: GroupLive,
     /// Owned by the caller (`CardTableRow`), not here, so the row's selection
     /// checkbox can react to the same flag `HaveStepper` flips — see that
     /// component's doc.
@@ -2306,13 +2456,26 @@ fn HereCount(
     let on_change = Callback::new(move |c: StepperCommit| {
         here_delta.update(|d| *d += c.to - c.from);
         if let Some(d) = section_delta {
-            d.update(|d| *d += section_slot_delta(c.from, c.to, desired));
+            // Against the group's live numbers, not this component's
+            // construction-time snapshot of either: this row's own WANTED
+            // stepper may already have moved `desired`, and a sibling printing
+            // row may already have moved `held` (want-stepper review round 1,
+            // MAJOR — see [`GroupLive`]). The group's held moves by exactly
+            // this row's copy delta, since the group is a sum over its rows.
+            let held_before = live.held.get_untracked();
+            let held_after = held_before + (c.to - c.from);
+            d.update(|d| {
+                *d += section_slot_delta(held_before, held_after, live.desired.get_untracked())
+            });
         }
+        // Written even without a section (a binder has none): `WantedCount`
+        // reads it, and the two steppers must compose in either layout.
+        live.held.update(|h| *h += c.to - c.from);
         // Pushed in addition to, never instead of, the two aggregates above —
         // see `RowDeltas`'s doc on why the grid needs a *per-row* aggregate
         // neither of those is.
         if let Some(id) = holding_id {
-            row_deltas.push(id, c.to - c.from);
+            row_deltas.push_present(id, c.to - c.from);
         }
     });
     let on_settled = Callback::new(move |()| tree.refetch());
@@ -2370,12 +2533,6 @@ fn WantedCount(
     wanted: Option<i32>,
     /// The one `desires` row backing this cell — [`shared::CardRow::desire_id`].
     desire_id: Option<Id>,
-    /// This card's held copies on this board, summed across its printing rows
-    /// ([`ViewRow::held_in_group`]) — needed only for [`section_slot_delta`]: a
-    /// section's slot count is `max(held, desired)` per card, so a *want*
-    /// change moves it by the same function with the roles swapped, held being
-    /// the fixed side this time.
-    held_in_group: i32,
     /// The page header's live "· N wanted" clause — see [`counts_summary`].
     want_delta: RwSignal<i32>,
     /// This row's deck section, when it has one (`None` in a binder). Not
@@ -2383,16 +2540,37 @@ fn WantedCount(
     /// caller already holds an `Option` and is forwarding it, not deciding
     /// presence here.
     section_delta: Option<RwSignal<i32>>,
+    /// `here_delta`'s per-row twin — this component writes its `desire_id`
+    /// half, which is what keeps a grid tile's WANTED badge honest and stops a
+    /// zeroed want leaving a ghost tile behind (see [`RowDeltas`]).
+    row_deltas: RowDeltas,
+    /// This `(oracle, board)` group's live held/desired pair — see
+    /// [`GroupLive`]. Read for the group's *current* held total (which the
+    /// row's own HERE stepper may already have moved) and written with the new
+    /// desired count.
+    live: GroupLive,
 ) -> impl IntoView {
     let Some(desired) = wanted else {
-        return view! { <span data-testid="wanted-placeholder">"—"</span> }.into_any();
+        return view! {
+            <span class="text-muted-foreground" data-testid="wanted-placeholder">
+                "—"
+            </span>
+        }
+        .into_any();
     };
     let tree = expect_context::<CollectionTreeResource>().0;
 
     let on_change = Callback::new(move |c: StepperCommit| {
         want_delta.update(|d| *d += c.to - c.from);
         if let Some(d) = section_delta {
-            d.update(|d| *d += section_slot_delta(c.from, c.to, held_in_group));
+            // The group's *live* held, not this component's construction-time
+            // copy — the row's HERE stepper may already have moved it. See
+            // [`GroupLive`] and `HereCount`'s mirror of this comment.
+            d.update(|d| *d += section_slot_delta(c.from, c.to, live.held.get_untracked()));
+        }
+        live.desired.set(c.to);
+        if let Some(id) = desire_id {
+            row_deltas.push_desired(id, c.to - c.from);
         }
     });
     let on_settled = Callback::new(move |()| tree.refetch());
@@ -2424,12 +2602,13 @@ fn WantedCount(
 /// from the snapshot, live-zeroed or not — bucketing and (deliberately, see
 /// [`RowDeltas`]'s doc — out of scope for this round) the section's own slot
 /// count stay exactly what the table itself would compute from this same
-/// snapshot; only *which rows get a tile* is where the live overlay applies.
+/// snapshot; *which rows get a tile* and *what their HERE and WANTED badges
+/// read* are where the live overlay applies.
 ///
 /// **Reads `row_deltas` exactly once, right here, untracked** — see
 /// [`RowDeltas`]'s "Read side" for why that is both correct and sufficient:
 /// this component is a fresh instance every time the switch is clicked into
-/// grid, and nothing can edit HERE while grid is showing.
+/// grid, and neither column can be edited while grid is showing.
 #[component]
 fn CollectionGrid(
     view: CollectionView,
@@ -2441,15 +2620,19 @@ fn CollectionGrid(
     let collection_id = view.collection.id;
     let rows = view_rows(view.cards);
 
-    // Pair each row with its live HERE count and drop the ones a same-session
-    // edit zeroed out — the review's "ghost tile" finding. A row with no
-    // `holding_id` (a multi-grain cell, or a want-only card) was never
-    // stepper-editable to begin with, so it always survives unchanged.
-    let live_rows = |rows: Vec<ViewRow>| -> Vec<(ViewRow, i32)> {
+    // Pair each row with its live HERE *and* WANTED counts, and drop the ones a
+    // same-session edit zeroed out in both — the "ghost tile" finding, in the
+    // two columns that can now produce one. A row addressable by neither
+    // stepper (a multi-grain HERE cell with no single desires row behind its
+    // want either) cannot have been zeroed here, so it survives unchanged; see
+    // [`row_survives`].
+    let live_rows = |rows: Vec<ViewRow>| -> Vec<(ViewRow, i32, i32)> {
         rows.into_iter()
             .filter_map(|row| {
-                let live = row_deltas.live_present(row.row.holding_id, row.row.present);
-                (row.row.holding_id.is_none() || live > 0).then_some((row, live))
+                let present = row_deltas.live_present(row.row.holding_id, row.row.present);
+                let desired = row_deltas.live_desired(row.row.desire_id, row.row.desired);
+                let editable = row.row.holding_id.is_some() || row.row.desire_id.is_some();
+                row_survives(editable, present, desired).then_some((row, present, desired))
             })
             .collect()
     };
@@ -2483,8 +2666,15 @@ fn CollectionGrid(
                                 <ul class=GRID_CLASS>
                                     {live_rows(section.rows)
                                         .into_iter()
-                                        .map(|(row, live_present)| {
-                                            view! { <HoldingTile row collection_id live_present /> }
+                                        .map(|(row, live_present, live_desired)| {
+                                            view! {
+                                                <HoldingTile
+                                                    row
+                                                    collection_id
+                                                    live_present
+                                                    live_desired
+                                                />
+                                            }
                                         })
                                         .collect_view()}
                                 </ul>
@@ -2498,8 +2688,10 @@ fn CollectionGrid(
                     <ul class=GRID_CLASS data-testid="collection-cards-grid">
                         {live_rows(rows)
                             .into_iter()
-                            .map(|(row, live_present)| {
-                                view! { <HoldingTile row collection_id live_present /> }
+                            .map(|(row, live_present, live_desired)| {
+                                view! {
+                                    <HoldingTile row collection_id live_present live_desired />
+                                }
                             })
                             .collect_view()}
                     </ul>
@@ -2561,18 +2753,31 @@ fn FolderTile(
 }
 
 /// One card's grid tile: image, name, and the same HERE/WANTED/OWNED badges
-/// the table's cells show — `wanted_cell`/`owned_cell` are the same pure
-/// helpers `CardTableRow` uses, so the two layouts cannot disagree about
-/// those numbers. HERE is the one exception, and deliberately so: `live_present`
-/// (the caller's already-resolved [`RowDeltas`] overlay, plus this row's own
-/// `present_rollup`) stands in for `here_total(&row.row)`'s frozen-snapshot
-/// present — see `RowDeltas`'s doc for why HERE alone needs this and
-/// WANTED/OWNED do not (they are exactly as static in the table's own cells
-/// today, so leaving them be introduces no *new* disagreement between the two
-/// layouts). No stepper here: HERE is editable in the table only (the count
-/// stepper is a list-only editing surface, not something the grid — a
-/// display mode — reproduces) — see specs/app-ui.md's Findings entry for the
-/// grid-toggle task.
+/// the table's cells show — `wanted_of`/`owned_cell` are the same pure helpers
+/// `CardTableRow` uses, so the two layouts cannot disagree about those
+/// numbers.
+///
+/// **HERE and WANTED both arrive live**, resolved by the caller
+/// (`CollectionGrid`) through [`RowDeltas`]: `live_present` (plus this row's
+/// own `present_rollup`) stands in for `here_total(&row.row)`'s
+/// frozen-snapshot present, and `live_desired` for `row.row.desired`. WANTED
+/// used to be listed here as deliberately static — true only while the column
+/// was read-only, and false the moment the table's WANTED cell became
+/// steppable (want-stepper review round 1, MAJOR): a want edited in list mode
+/// then viewed in grid showed the pre-edit number, and a zeroed want-only card
+/// kept a `1 wanted` badge for a `desires` row that no longer existed.
+///
+/// OWNED *is* still static, and stays so: it is a global per-oracle aggregate
+/// no stepper on this page addresses, exactly as static in the table's own
+/// cell, so leaving it introduces no disagreement between the two layouts.
+/// The **collapse test** for WANTED is likewise still evaluated against the
+/// snapshot `present` rather than the live one — see [`wanted_of`]'s doc for
+/// why that is the choice that keeps the two layouts agreeing.
+///
+/// No stepper here: editing is a table-only surface (the count stepper is a
+/// list-only editing surface, not something the grid — a display mode —
+/// reproduces) — see specs/app-ui.md's Findings entry for the grid-toggle
+/// task.
 ///
 /// Selection stays reachable: `SelectionCheckbox` is a sibling of the `<a>`,
 /// never nested inside it, for the same reason `AllCardsTile` keeps them
@@ -2583,11 +2788,15 @@ fn HoldingTile(
     collection_id: Id,
     /// This row's live HERE count — `RowDeltas::live_present` already applied
     /// by the caller (`CollectionGrid`), which is also what decided whether
-    /// this component gets mounted at all (a live-zeroed row never reaches
-    /// here — see that component's `live_rows`).
+    /// this component gets mounted at all (a row live-zeroed in both columns
+    /// never reaches here — see that component's `live_rows`).
     live_present: i32,
+    /// This row's live WANTED count — `RowDeltas::live_desired` applied by the
+    /// same caller, for the same reason.
+    live_desired: i32,
 ) -> impl IntoView {
-    let wanted = wanted_cell(&row);
+    // Snapshot `present` on purpose in the collapse test — see `wanted_of`.
+    let wanted = wanted_of(row.show_wanted, row.row.present, live_desired);
     let owned = owned_cell(&row.row);
     let here = live_present + row.row.present_rollup;
     let CardRow {
@@ -3155,6 +3364,41 @@ mod tests {
         assert_eq!(section_slot_delta(5, 3, 4), -1);
     }
 
+    /// The want-stepper round-1 MAJOR, as arithmetic: both steppers in one row,
+    /// used in sequence, must land the header on the truth — which they only
+    /// do if each reads the *other* number's post-edit value (`GroupLive`),
+    /// not the copy it captured when it mounted.
+    #[test]
+    fn both_steppers_in_one_row_compose_against_the_live_other_column() {
+        // The reported repro: held 2, desired 4 — so the section contributes
+        // `max(2, 4)` = 4 slots at load.
+        let (mut held, mut desired) = (2, 4);
+        let mut header = 4;
+
+        // WANTED 4 → 1.
+        header += section_slot_delta(desired, 1, held);
+        desired = 1;
+        assert_eq!(header, 2, "2 held, 1 wanted → the 2 copies are the slots");
+
+        // HERE 2 → 3, against the *live* desired (1), not the mounted 4. The
+        // stale read is what pushed 0 here and left the header at 2.
+        header += section_slot_delta(held, 3, desired);
+        held = 3;
+        assert_eq!(header, held.max(desired));
+        assert_eq!(header, 3);
+
+        // …and the reverse order lands on the same truth, which is the
+        // property that makes the two steppers order-independent.
+        let (mut held, mut desired) = (2, 4);
+        let mut header = 4;
+        header += section_slot_delta(held, 3, desired);
+        held = 3;
+        header += section_slot_delta(desired, 1, held);
+        desired = 1;
+        assert_eq!(header, held.max(desired));
+        assert_eq!(header, 3);
+    }
+
     #[test]
     fn section_slot_delta_serves_a_want_edit_with_its_arguments_swapped() {
         // `max(held, desired)` is symmetric in the two numbers, so the WANTED
@@ -3227,6 +3471,41 @@ mod tests {
         // reading a negative HERE count would be a worse failure than a
         // floor at zero if some future caller's bookkeeping ever drifted.
         assert_eq!(live_present(1, -5), 0);
+    }
+
+    #[test]
+    fn a_grid_row_survives_while_either_column_still_has_something() {
+        // The ghost-tile rule, in the two columns that can now produce one.
+        // A row no stepper could address was never zeroable here, so it keeps
+        // its tile whatever the numbers say — the old
+        // `holding_id.is_none() => keep` shortcut, now stated as what it
+        // actually meant.
+        assert!(row_survives(false, 0, 0));
+        // Held only: the HERE stepper decides it.
+        assert!(row_survives(true, 2, 0));
+        assert!(!row_survives(true, 0, 0));
+        // Want-only (the case the shortcut used to wave through): once the
+        // want is zeroed there is nothing left, and the tile must go.
+        assert!(row_survives(true, 0, 3));
+        // Held *and* wanted, with HERE stepped to zero: still a want here, so
+        // the tile stays — as a want-only tile, which is exactly what the
+        // table's own row becomes and what the server still holds a row for.
+        assert!(row_survives(true, 0, 4));
+    }
+
+    #[test]
+    fn a_tiles_wanted_badge_reads_the_live_desire_by_the_same_rule_as_the_cell() {
+        // `wanted_of` is the one rule both layouts evaluate; the grid feeds it
+        // an overlaid `desired` and the table its snapshot. Stepping a want
+        // 4 → 2 must move the badge, and zeroing it must remove the badge
+        // rather than leave `0 wanted` (or the pre-edit 4) standing.
+        assert_eq!(wanted_of(true, 0, 4), Some(4));
+        assert_eq!(wanted_of(true, 0, 2), Some(2));
+        assert_eq!(wanted_of(true, 0, 0), None);
+        // The dedupe and collapse halves of the rule are unchanged by the
+        // overlay: a repeat row prints nothing, and a met want collapses.
+        assert_eq!(wanted_of(false, 0, 4), None);
+        assert_eq!(wanted_of(true, 2, 2), None);
     }
 
     #[test]

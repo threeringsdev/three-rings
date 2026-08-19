@@ -7933,11 +7933,102 @@ value; the collection table passes `wanted-placeholder`. For the same reason
 assertion is now scoped to the HERE **cell** rather than the row — the row is
 expected to carry a stepper now, in the other column.
 
-**Verification.** `--project=chromium --workers=1 --grep @fast` on
-`collection-view.spec.ts`, `card-detail.spec.ts` and `removal.spec.ts`: 70
-passed, 9 failed — every failure in `removal.spec.ts`, all of them the
-`unownedCards` fixture-pool drain this suite already carries as debt
-(measured live during this task: 7 free cards at `q=n&limit=200` against
-helpers asking for up to 13, and the helper's own `mine` read is capped at 200
-so it under-counts what the account owns). That helper runs before any page
-load and reads two catalog/ownership routes this change does not touch.
+**Verification (round 1 — and how it was wrong).** The round-1 numbers
+reported for this task ("292 passed, exit 0") were **not evidence of a green
+suite**, and the mistake is worth writing down because it is invisible and
+repeatable: the run was `npx playwright test … | tail -60`, so the shell
+reported `tail`'s exit status, not Playwright's, and the line reporter's
+carriage-return redraw left only the *failure list* in the captured tail with
+the `N failed` summary line scrolled off. `.last-run.json` (`status`,
+`failedTests`) is the artifact that answers the question honestly; the tail of
+a piped line reporter is not. **Never pipe a Playwright run whose exit code
+you intend to quote** — redirect to a file and read `$?`, or read
+`test-results/.last-run.json`.
+
+The one measurement from that round that does stand: the `unownedCards`
+fixture-pool drain this suite already carries as debt — **7** free cards at
+`q=n&limit=200` against helpers asking for up to 13, with the helper's own
+`mine` read capped at 200 so it under-counts what the account owns. Measured
+again unchanged after round 2's fixes, so nothing in this task moved it.
+
+### WANTED stepper, review round 2: the blocker, two majors (2026-08-19)
+
+`app/src/my/collection.rs`, `end2end/tests/needs.spec.ts`,
+`end2end/tests/collection-view.spec.ts` — adversarial review of the entry
+immediately above.
+
+**BLOCKER — a stepper cell's text is not its number.** `needs.spec.ts`'s
+sideboard test asserted `toHaveText("1")` on the row's `wanted-count` *cell*.
+Once that cell became steppable the assertion failed deterministically, and
+the failure text is the lesson: `Received: "−1+"`. Playwright's text
+extraction skips `display:none` but **not** `opacity:0`, and `CountStepper`'s
+`−`/`+` are `hidden sm:inline-flex opacity-0` — laid out and readable at every
+width from `sm` up, which is every width the suite runs at. Migrated to the
+same inner-count locator `collection-view.spec.ts` uses (`count-stepper-value`
+or `wanted-placeholder`). Verified by reverting the assertion, watching it
+fail with that exact string, and restoring it.
+
+The generalisation, for anyone making another read-only cell editable: **grep
+the whole suite for `toHaveText` against that cell's testid before shipping
+it**, not just the spec file you are working in. The round-1 pass migrated
+`collection-view.spec.ts` and missed `needs.spec.ts` because nothing in the
+first file pointed at the second.
+
+**MAJOR — the grid's WANTED badge went stale, and zeroed wants left ghost
+tiles.** Exactly the HERE defect `RowDeltas` was built for, reintroduced in
+the other column: `HoldingTile` recomputed its badge from the frozen `view`
+snapshot, and `CollectionGrid::live_rows` kept every `holding_id: None` row
+unconditionally — sound while such a row had no stepper, false the moment a
+want-only row got one. So a want edited in list mode read its pre-edit count
+after toggling to grid, and zeroing a want-only card's last desire left a
+tile badged `1 wanted` for a `desires` row that no longer existed. Fixed by
+giving `RowDeltas` a second, `desire_id`-keyed map beside the `holding_id`
+one, and replacing the `holding_id.is_none() => keep` shortcut with
+[`row_survives`], which states what the shortcut actually meant: a row no
+stepper could address in *either* column cannot have been zeroed here, and an
+addressable one survives while it still has copies here **or** copies wanted
+here. That last clause is a small behavioural gain of its own — a
+held-and-wanted row whose HERE is stepped to zero now stays as a want-only
+tile, matching what the table's own row does and what the server still holds
+a `desires` row for, where before it vanished from the grid.
+
+The tile's WANTED **collapse test** deliberately still reads the *snapshot*
+`present`, not the live one, even though its HERE badge shows the live count:
+"only when set and different" is evaluated once per payload in the table's own
+cell, and overlaying `present` on the tile alone would make the two layouts
+disagree about whether the number prints at all. `wanted_of` exists so both
+layouts reach that decision through one rule rather than two copies of it.
+
+**MAJOR — the deck section header composed two edits in one row wrongly, and
+durably.** A section's contribution per card is `max(held, desired)`, and
+`HereCount` captured `desired` while `WantedCount` captured `held_in_group` —
+both as plain `i32`s, at construction. Each stepper therefore computed its
+slot delta against the *other* column's pre-edit value. Repro: held 2,
+desired 4 (header 4); WANTED 4 → 1 pushes −2 correctly (header 2); HERE 2 → 3
+then pushes `max(3,4) − max(2,4) = 0` against a `desired` that was 4 when the
+component mounted and is 1 by now — header stranded at 2 where the truth is 3,
+until a reload.
+
+Fixed with `GroupLive`: one `(held, desired)` pair of `RwSignal`s per
+`(oracle, board)`, built by `group_live` and handed to every row of the group.
+The contract is **read the other field untracked at commit time, then write
+your own** — neither is ever read to render, which is why plain signals are
+enough. Group-scoped rather than row-scoped on purpose: `desired` is
+oracle-grained and `held` is a sum over the card's printing rows, so a card
+held under two printings has two rows whose commits both move the one `held`
+the arithmetic asks about. That also retires the old row-local approximation
+`section_slot_delta`'s doc used to argue for (it "only under-shoots") — the
+HERE path is now exact too, and `section_slot_delta`'s third argument is
+renamed `fixed`, since which of the two numbers is moving depends on which
+stepper is calling.
+
+**Verification (round 2).** Unit: 438 + 44 passed, 0 failed — including three
+new pure tests (`both_steppers_in_one_row_compose_against_the_live_other_column`
+walks the exact repro above in both orders and asserts the header lands on
+`max(held, desired)` each time; `a_grid_row_survives_while_either_column…`;
+`a_tiles_wanted_badge_reads_the_live_desire…`). E2E: three new `@fast` cases —
+a deck section header composing a WANTED then a HERE edit in one row (with a
+reload cross-check against the server), and the two grid counterparts of the
+existing HERE live/ghost pair. Full `--project=chromium --workers=1` run
+recorded below with its real exit status, read from `.last-run.json` rather
+than a piped tail.
