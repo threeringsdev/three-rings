@@ -139,11 +139,36 @@ location summary (`7 across 3 collections`). Quick search input, keyset paging.
 
 **`/my/collections/:id`** — child collections as folder rows on top, cards
 below. Three right-aligned numeric columns under one header: HERE / WANTED /
-OWNED (WANTED only when set and different; OWNED collapses when equal to HERE;
-rolled-up child counts italic + dimmed). HERE is editable in place via the count
-stepper, and so is **WANTED** (2026-08-19, alpha feedback — see Findings): the
-same stepper, writing `set_desire_quantity`, wherever the display rule already
-prints a number and one `desires` row backs it. Persistent in-collection
+OWNED (OWNED collapses when equal to HERE; rolled-up child counts italic +
+dimmed). HERE is editable in place via the count stepper, and so is **WANTED**.
+
+**WANTED counts copies still needed here** — `max(desired − held, 0)` at
+`(oracle, board)` grain, printed once per card and board (maintainer ruling
+2026-08-19, WB-01M0DXVHB8V2JQRR5ES99SGME4; this supersedes the earlier "WANTED
+only when set and different", which printed the want's own target and
+collapsed to `—` when it was met or absent). It is the same number the needs
+page, the shopping list and the header's needs chip already speak in, so a
+deck row reading `2` means "buy two". The rules:
+
+- **Every row that prints one is steppable, including a `0`.** A met want and
+  a card nothing is wanted for both read `0`, and that zero is the control —
+  there is no `—` to click past.
+- **Committing a gap `v` sets the target to `held + v`.** Stepping up on a
+  card with no `desires` row **creates** one (unpinned, on the row's own
+  board); stepping to `0` on a row holding nothing **deletes** it.
+- **Stepping to `0` on a row that holds copies keeps the want**, at the level
+  held — a want means "keep N of these here", and forgetting one outright
+  stays `/cards/:id`'s job, the surface that lists wants as quantities rather
+  than gaps.
+- **The lower bound is 0** (no negative shortfall), and a want already spread
+  over several `desires` rows still refuses to be edited from one number.
+- **Grid tiles badge the same gap, but only when it is positive** — a tile has
+  no control, so `0 wanted` on every tile would be noise.
+
+The header's `· N wanted` clause and `/my/all`'s WANTED column deliberately
+still count **wants**, not gaps (ruling, rule 6) — see Open questions.
+
+Persistent in-collection
 quick-search/type-ahead in the header (`/`
 focus hint) that filters this collection and inline-adds catalog matches — the
 intake path. Per-row move (kebab / swipe / `m`) and select (checkbox /
@@ -258,7 +283,19 @@ at this scale); no image pipeline this phase.
 
 ## Open questions
 
-None — all resolved at spec review (maintainer, 2026-07-17):
+**WANTED means two different things on one page (raised 2026-08-19, deferred by
+the same ruling).** The collection table's WANTED column now counts copies
+**still needed** (`desired − held`), while the header's `· N wanted` clause and
+`/my/all`'s WANTED column still count **wants** (`Σ desired`). A binder holding
+4 of a card it wants 4 of therefore reads `0` in the row and `· 4 wanted` in
+the header of the same page. That is deliberate for this branch — the ruling
+scoped the change to the table cell — and it is recorded here so the
+inconsistency is a decision rather than a drift. If it bothers the reader in
+use, the options are to re-word the header (`· N still needed`), to switch it
+to gaps (it would then duplicate the needs chip), or to leave it; the
+maintainer rules later.
+
+Everything else — all resolved at spec review (maintainer, 2026-07-17):
 
 - **Theme persistence** — **dark mode is the default**; an explicit toggle
   override is persisted as a saved user preference. The dark-palette task wires
@@ -7896,15 +7933,13 @@ THEN (array_agg(id))[1] END` over the `(oracle, board)` desires group), so a
 cell summing a printing-pinned want beside an unpinned one refuses rather than
 guessing which row a typed number meant.
 
-**The display rule was left alone, deliberately.** WANTED still prints "only
-when set and different", and the stepper renders only where a number already
-prints. Two consequences, both accepted rather than overlooked: a want that is
-exactly met (`desired == present`) collapses to `—` and so is **not adjustable
-from the table** — `/cards/:id`'s "Your wants" lists every desire
-unconditionally and remains the surface for that — and a want cannot be
-*created* from zero here, which is quick-add's job (`⌥⏎`), not the stepper's.
-Making the cell editable does not license printing a count the spec collapses
-away; changing that rule is a maintainer call, not a side effect of this fix.
+**The display rule was left alone, deliberately — and that is what got
+overruled.** This round kept "only when set and different", so a met want
+collapsed to `—` and was not adjustable from the table, and a want could not be
+created from zero here. Both were flagged as accepted limitations needing a
+maintainer call rather than a side-effect change. The call came (round 3,
+below): the column now counts copies still needed and is steppable on every row
+it prints, which closes both.
 
 **Two aggregates had to be taught about wants.** The header's `· N wanted`
 clause now carries a `want_delta` twin of `here_delta` (same payload zeroes
@@ -7992,12 +8027,11 @@ held-and-wanted row whose HERE is stepped to zero now stays as a want-only
 tile, matching what the table's own row does and what the server still holds
 a `desires` row for, where before it vanished from the grid.
 
-The tile's WANTED **collapse test** deliberately still reads the *snapshot*
-`present`, not the live one, even though its HERE badge shows the live count:
-"only when set and different" is evaluated once per payload in the table's own
-cell, and overlaying `present` on the tile alone would make the two layouts
-disagree about whether the number prints at all. `wanted_of` exists so both
-layouts reach that decision through one rule rather than two copies of it.
+(Round 2 originally kept a *snapshot* `present` in the tile's collapse test, so
+the two layouts could not disagree about whether a number printed. The ruling
+in the round-3 entry removed the collapse rule outright, and that reasoning
+went with it: the tile now folds the group's **live** held count and shows the
+same gap the cell does, badging it only when positive.)
 
 **MAJOR — the deck section header composed two edits in one row wrongly, and
 durably.** A section's contribution per card is `max(held, desired)`, and
@@ -8032,3 +8066,79 @@ reload cross-check against the server), and the two grid counterparts of the
 existing HERE live/ghost pair. Full `--project=chromium --workers=1` run
 recorded below with its real exit status, read from `.last-run.json` rather
 than a piped tail.
+
+### WANTED counts copies still needed — maintainer ruling (2026-08-19)
+
+`shared/src/collection.rs`, `app/src/lib.rs`, `app/src/my/collection.rs`,
+`end2end/tests/collection-view.spec.ts` — WB-01M0DXVHB8V2JQRR5ES99SGME4, taken
+from an explicit three-option dialog. The rule itself is in Design above
+(`/my/collections/:id`); this records why and what it cost.
+
+**What changed.** The collection table's WANTED column showed the want's own
+target and hid itself whenever that target was zero or already met — so the
+two things an alpha user most wants to do from a collection table (start
+wanting a card; stop needing one) were the two the column could not express.
+It now shows `max(desired − held, 0)` and is a control on every row it prints,
+zero included. The number matches what `/needs`, `/my/shopping` and the header
+chip already say, which is the deeper reason to prefer it: the table used to be
+the one surface on the page speaking in targets while everything around it
+spoke in gaps.
+
+**Committing a gap is not committing a quantity**, and that is the whole of the
+write logic: `desired' = held + v`. Three commits fall out of it, and one of
+them is the ruling's most deliberate choice — **stepping to zero on a row that
+holds copies keeps the want**, at the level held. A want is a standing intent
+("keep 4 of these here"), not a shopping-list line that evaporates when filled;
+deleting one outright stays `/cards/:id`'s job, the surface that lists wants as
+quantities. Only a row holding nothing reaches a target of 0, which deletes
+(`desires` has `CHECK quantity > 0`).
+
+**Create-from-zero needed a server fn, not a new authorization surface.**
+`crate::create_desire` is a thin wrapper over `CollectionStore::add_desire` —
+the same backend method `quick_add`'s Want arm and
+`POST /api/collections/{id}/want` already go through, so the hosted backend's
+RLS-scoped transaction stays the one terminus. It exists rather than a call to
+`quick_add` for two reasons `quick_add` structurally cannot cover: that fn
+hardcodes `Board::default()` (wrong for a deck's sideboard row — it would
+create a want the row does not display), and `QuickAddReceipt` carries only an
+undo id, while this caller must **rewire its stepper to the row it just
+made** or a second step in the same session creates-and-increments again
+instead of setting. `DesireLine` already carried the id; only the server fn was
+missing.
+
+**The gap is reactive on the other column, which is new.** Because the number
+is `desired − held`, the row's HERE stepper changes it: stepping HERE 2 → 3 on
+a 5-target row must take the WANTED cell from 3 to 2 with no refetch. That is
+an `Effect` on the shared `GroupLive` pair — the same signals round 2
+introduced for the section-header arithmetic. What was a correctness fix for an
+aggregate is now load-bearing for a *displayed* number, so `GroupLive` moved
+from "nice invariant" to "the mechanism the cell is built on".
+
+**`WantedCount` stopped sharing `WantStepper` with `/cards/:id`.** That
+component's contract — the value *is* the desire quantity, a committed zero
+deletes — is still exactly right on card detail. Here the value is a gap, a
+commit is `held + v`, and zero usually means "keep what you have". Sharing one
+component across those two would have forced one surface to lie about its own
+number, so the table composes `CountStepper` directly and card detail is
+untouched. Worth stating plainly because the round-1 entry above sells the
+sharing as the design's virtue: it was, until the semantics diverged.
+
+**Deliberately left inconsistent** (ruling, rule 6): the header's `· N wanted`
+clause and `/my/all`'s WANTED column still count wants, not gaps — so a binder
+holding all 4 of a card it wants 4 of reads `0` in the row and `· 4 wanted` in
+the header. Recorded as an Open question rather than quietly fixed.
+
+**One place the ruling's wording had to be read rather than followed
+literally.** "A stepper on EVERY row" is implemented as *every row that prints
+the column*, which keeps the existing `(oracle, board)` dedupe: `desired` is
+oracle-grained, so a card held under two printings has two rows over one
+`desires` row, and putting a control on both would double every aggregate
+either pushed and let two steppers disagree on screen about one number. The
+non-first row keeps its `—`. Flagged to the maintainer with the fix; if the
+intent was literally every row, the dedupe is the thing that has to go and the
+grain problem has to be solved first. Relatedly, the gap is measured against
+the **group's** held total (`ViewRow::held_in_group`), not the row's own
+`present` as the ruling's shorthand had it — the two differ only for
+multi-printing cards, where the row-local reading gives a visibly wrong gap
+(4 wanted, 1+2 held, would read 3 instead of 1) and disagrees with
+`read_need_gaps` server-side.

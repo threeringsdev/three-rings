@@ -114,7 +114,7 @@ use crate::components::ui::breadcrumb::{
 };
 use crate::components::ui::button::{Button, ButtonVariant};
 use crate::components::ui::context_menu::{use_context_menu, ContextMenu};
-use crate::components::ui::count_stepper::StepperCommit;
+use crate::components::ui::count_stepper::{CountStepper, StepperCommit};
 use crate::components::ui::dialog::{
     Dialog, DialogBody, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader,
     DialogTitle,
@@ -1454,23 +1454,62 @@ fn here_total(row: &CardRow) -> i32 {
     row.present + row.present_rollup
 }
 
-/// The WANTED cell, per the spec's "only when set and different".
-fn wanted_cell(row: &ViewRow) -> Option<i32> {
-    wanted_of(row.show_wanted, row.row.present, row.row.desired)
+/// **What the WANTED column counts: copies still needed here, not the want's
+/// own quantity** (maintainer ruling 2026-08-19, WB-01M0DXVHB8V2JQRR5ES99SGME4
+/// — see specs/app-ui.md, which this supersedes the "only when set and
+/// different" rule of).
+///
+/// `desired` is the target ("I want to end up with 4 of these here"); `held` is
+/// what the collection already has toward it. The column shows the gap, which
+/// is the number a shopping list, the needs page and the header's own needs
+/// chip all already speak in — so a deck row reading `2` means "buy two", not
+/// "the target is two". A met or over-met want reads `0`, not a negative.
+///
+/// Held at `(oracle, board)` grain on both sides: `desired` is oracle-grained
+/// already, so the copies it is measured against must be the *group's*
+/// ([`ViewRow::held_in_group`]), not one printing row's. That is also exactly
+/// the arithmetic `read_need_gaps` performs server-side, so the cell, the needs
+/// page and the chip cannot describe the same card differently.
+fn shortfall(held: i32, desired: i32) -> i32 {
+    (desired - held).max(0)
 }
 
-/// [`wanted_cell`]'s rule over an explicit `(present, desired)` pair, so the
-/// grid can apply its [`RowDeltas`] overlay to `desired` and still reach the
-/// same decision by the same rule rather than a second copy of it.
+/// The desire quantity a committed shortfall means: the target the collection
+/// must reach for the gap to be `v`. The inverse of [`shortfall`], and the one
+/// place the two directions are tied together.
 ///
-/// `present` stays the caller's business on purpose: `HoldingTile` passes the
-/// **snapshot** present here even though its HERE badge shows the live one,
-/// because the collapse test ("different") is what the table's own cell
-/// evaluated once for this payload — overlaying it on the tile alone would
-/// make the two layouts disagree about whether the number prints, which is the
-/// one thing that tile's doc promises they cannot do.
-fn wanted_of(show_wanted: bool, present: i32, desired: i32) -> Option<i32> {
-    (show_wanted && desired > 0 && desired != present).then_some(desired)
+/// `held + 0` is deliberately **not** zero when the collection holds copies: a
+/// met want is a standing intent ("keep 4 of these here"), so stepping the gap
+/// down to nothing sets the target to what is held rather than deleting the
+/// row. Deleting a want outright stays `/cards/:id`'s job, where wants are
+/// listed as quantities rather than gaps. Only a row holding nothing reaches a
+/// target of 0, which is the delete (`desires` has `CHECK quantity > 0`).
+fn desired_for_shortfall(held: i32, v: i32) -> i32 {
+    held + v.max(0)
+}
+
+/// The WANTED **cell**: the still-needed count, printed once per
+/// `(oracle, board)`.
+///
+/// `None` only on a row that repeats a card already shown — `desired` is
+/// oracle-grained, so a card held under two printings would otherwise carry two
+/// controls over the one `desires` row, which would double every aggregate
+/// either of them pushed. Zero is a number here, not an absence: it is the
+/// create-from-zero and keep-a-met-want affordance.
+fn wanted_cell(row: &ViewRow) -> Option<i32> {
+    row.show_wanted
+        .then(|| shortfall(row.held_in_group, row.row.desired))
+}
+
+/// The WANTED **badge** on a grid tile: the same still-needed count, but only
+/// when there is something still needed.
+///
+/// The cell and the badge diverge here on purpose (maintainer ruling, rule 5):
+/// the table's cell is a control, so a `0` there is the affordance that lets
+/// you create a want; a tile has no control, so a `0 wanted` badge on every
+/// tile in the grid would be noise carrying no information.
+fn wanted_badge(show_wanted: bool, shortfall: i32) -> Option<i32> {
+    (show_wanted && shortfall > 0).then_some(shortfall)
 }
 
 /// The OWNED cell, per the spec's "collapses when equal to HERE". `owned` is
@@ -2221,6 +2260,7 @@ fn CardTableRow(
         mana_cost,
         type_line,
         present,
+        desired,
         owned: owned_total,
         present_rollup,
         board,
@@ -2389,6 +2429,10 @@ fn CardTableRow(
                     name=want_name
                     wanted
                     desire_id
+                    desired
+                    collection_id
+                    oracle_id
+                    board
                     want_delta
                     section_delta
                     row_deltas
@@ -2498,42 +2542,70 @@ fn HereCount(
     }
 }
 
-/// The WANTED number: the in-place stepper where the cell both prints a number
-/// and has a single `desires` row to address, plain text everywhere else.
+/// The WANTED number: **copies still needed here**, editable in place on every
+/// row that prints one (maintainer ruling 2026-08-19,
+/// WB-01M0DXVHB8V2JQRR5ES99SGME4 — specs/app-ui.md carries the rule and the
+/// date). See [`shortfall`] for what the number means and
+/// [`desired_for_shortfall`] for what committing one does.
 ///
-/// The write semantics live in
-/// [`crate::components::holding_stepper::WantStepper`] — the same component
-/// `/cards/:id`'s "Your wants" rows use, so the two surfaces cannot drift on
-/// what a committed zero means (desires carry no ledger, so it is a direct,
-/// non-undoable delete; see that component's doc). This wrapper is the
-/// page-specific half, exactly as [`HereCount`] is for HERE: it turns the
-/// stepper's generic `(from, to)` into this page's aggregates and refetches the
-/// sidebar tree.
+/// **This composes `CountStepper` directly rather than reusing
+/// [`crate::components::holding_stepper::WantStepper`]**, which it did until
+/// the ruling. That component's contract is "the value *is* the desire
+/// quantity, and a committed zero deletes the row" — still exactly right on
+/// `/cards/:id`, where wants are listed per collection as quantities. Here the
+/// value is a *gap*, a commit is `desired' = held + v`, and a zero usually
+/// means "keep what you have" rather than "delete". Sharing one component
+/// across those two would have forced one of the surfaces to lie about its own
+/// number, so the write semantics are stated here and the two surfaces are
+/// honestly different.
 ///
-/// **When the stepper renders.** Only where [`wanted_cell`] already prints a
-/// number — the spec's "WANTED only when set and different" (specs/app-ui.md)
-/// decides *visibility*, and making the cell editable does not license
-/// printing a count the spec collapses away. Two consequences worth knowing:
-/// a card whose want is exactly met (`desired == present`) collapses to `—`
-/// and is therefore not steppable *here* (adjust it from `/cards/:id`'s "Your
-/// wants", which lists every desire unconditionally), and a want the WANTED
-/// column dedupes onto the card's first `(oracle, board)` row is steppable on
-/// that row alone — which is right, since `desire_id` is that same grain.
+/// **Three commits, one control:**
 ///
-/// A cell that prints a number but sums several `desires` rows (a
-/// printing-pinned want beside an unpinned one) falls to `WantStepper`'s own
-/// refusal span, under this page's `wanted-placeholder` testid rather than the
-/// component's default `here-count` — the row's HERE cell may already carry
-/// one of those, and a row-scoped locator must not match two.
+/// - no `desires` row yet and the gap is stepped above zero → **create** one,
+///   through [`crate::create_desire`] (the same `add_desire` terminus
+///   quick-add's Want arm uses), and rewire to the row it returns so the next
+///   step in the same session sets rather than creates again;
+/// - a row exists and the new target is positive → `set_desire_quantity`;
+/// - a row exists, the collection holds nothing, and the gap is stepped to
+///   zero → the target is zero, which deletes (desires carry no ledger, so
+///   this is a direct, non-undoable delete — hence the confirmation toast with
+///   no Undo).
+///
+/// **The gap re-renders when HERE moves.** Because the displayed number is
+/// `desired − held`, the row's *other* stepper changes it: stepping HERE from
+/// 2 to 3 on a 4-wanted card must take this cell from `2` to `1` with no
+/// refetch. An `Effect` on [`GroupLive::held`] does that — the same shared
+/// signal pair `HereCount` writes, which is why both steppers must go through
+/// [`GroupLive`] rather than their own captured copies.
+///
+/// **Refusal is unchanged and narrower than it looks:** only a cell whose want
+/// already sums several `desires` rows (a printing-pinned want beside an
+/// unpinned one) refuses. `desired == 0` is *not* a refusal — it is the
+/// create-from-zero case. The refusal span carries this page's
+/// `wanted-placeholder` testid rather than `here-count`, because the row's
+/// HERE cell may already carry one of those and a row-scoped locator must not
+/// match two.
 #[component]
 fn WantedCount(
     name: String,
-    /// What this cell prints, straight from [`wanted_cell`]. `None` is the
-    /// spec's collapsed `—`, and never a stepper.
+    /// What this cell prints, straight from [`wanted_cell`] — the still-needed
+    /// count. `None` only on a row repeating a card already shown, which gets
+    /// the plain placeholder and no control.
     wanted: Option<i32>,
     /// The one `desires` row backing this cell — [`shared::CardRow::desire_id`].
+    /// `None` with `desired == 0` is "nothing wanted here yet" (create), and
+    /// `None` with `desired > 0` is the multi-row refusal.
     desire_id: Option<Id>,
+    /// This row's own `desired`, straight from the payload — read only to tell
+    /// those two `desire_id: None` cases apart.
+    desired: i32,
+    /// Which collection and card a created want belongs to.
+    collection_id: Id,
+    oracle_id: Id,
+    board: Board,
     /// The page header's live "· N wanted" clause — see [`counts_summary`].
+    /// Moves by the change in the *desire quantity*, not in the gap: the
+    /// header still counts wants, which the ruling deliberately left alone.
     want_delta: RwSignal<i32>,
     /// This row's deck section, when it has one (`None` in a binder). Not
     /// `#[prop(optional)]`, for the same reason [`HereCount`]'s isn't: the
@@ -2541,16 +2613,17 @@ fn WantedCount(
     /// presence here.
     section_delta: Option<RwSignal<i32>>,
     /// `here_delta`'s per-row twin — this component writes its `desire_id`
-    /// half, which is what keeps a grid tile's WANTED badge honest and stops a
-    /// zeroed want leaving a ghost tile behind (see [`RowDeltas`]).
+    /// half, in desire-quantity units, which is what keeps a grid tile's
+    /// WANTED badge honest and stops a zeroed want leaving a ghost tile behind
+    /// (see [`RowDeltas`]).
     row_deltas: RowDeltas,
     /// This `(oracle, board)` group's live held/desired pair — see
-    /// [`GroupLive`]. Read for the group's *current* held total (which the
-    /// row's own HERE stepper may already have moved) and written with the new
-    /// desired count.
+    /// [`GroupLive`]. Read for the group's current held total (which the row's
+    /// own HERE stepper may already have moved), written with the new desired,
+    /// and *subscribed to* so a HERE commit re-renders this gap.
     live: GroupLive,
 ) -> impl IntoView {
-    let Some(desired) = wanted else {
+    let Some(gap) = wanted else {
         return view! {
             <span class="text-muted-foreground" data-testid="wanted-placeholder">
                 "—"
@@ -2558,31 +2631,147 @@ fn WantedCount(
         }
         .into_any();
     };
-    let tree = expect_context::<CollectionTreeResource>().0;
-
-    let on_change = Callback::new(move |c: StepperCommit| {
-        want_delta.update(|d| *d += c.to - c.from);
-        if let Some(d) = section_delta {
-            // The group's *live* held, not this component's construction-time
-            // copy — the row's HERE stepper may already have moved it. See
-            // [`GroupLive`] and `HereCount`'s mirror of this comment.
-            d.update(|d| *d += section_slot_delta(c.from, c.to, live.held.get_untracked()));
+    if desire_id.is_none() && desired > 0 {
+        return view! {
+            <span
+                class="text-muted-foreground"
+                data-testid="wanted-placeholder"
+                title="wanted across more than one board or pinned printing here — edit them individually"
+            >
+                {gap.to_string()}
+            </span>
         }
-        live.desired.set(c.to);
-        if let Some(id) = desire_id {
-            row_deltas.push_desired(id, c.to - c.from);
+        .into_any();
+    }
+
+    let tree = expect_context::<CollectionTreeResource>().0;
+    let toast = expect_context::<ToastHandle>();
+    let label = StoredValue::new(name);
+    // Rewired after a create: the row this cell writes to is not the row it
+    // mounted with once the user steps up from nothing.
+    let desire_id = RwSignal::new(desire_id);
+    let value = RwSignal::new(gap);
+
+    // The gap is `desired − held`, so the row's HERE stepper moves it. Reads
+    // both halves of `GroupLive` and writes the displayed value; `value` is
+    // only ever the *committed* count (`CountStepper` keeps its own in-flight
+    // session), so this cannot fight a user mid-edit.
+    Effect::new(move |_| {
+        let live_gap = shortfall(live.held.get(), live.desired.get());
+        if value.get_untracked() != live_gap {
+            value.set(live_gap);
         }
     });
-    let on_settled = Callback::new(move |()| tree.refetch());
+
+    let on_commit = Callback::new(move |c: StepperCommit| {
+        let held = live.held.get_untracked();
+        let was = live.desired.get_untracked();
+        let target = desired_for_shortfall(held, c.to);
+        if target == was {
+            return;
+        }
+
+        // Every aggregate on this page counts wants, not gaps, so all three
+        // move by the change in the target.
+        let advance = move || {
+            want_delta.update(|d| *d += target - was);
+            if let Some(d) = section_delta {
+                d.update(|d| *d += section_slot_delta(was, target, held));
+            }
+            if let Some(id) = desire_id.get_untracked() {
+                row_deltas.push_desired(id, target - was);
+            }
+            live.desired.set(target);
+        };
+        // Undo the optimistic half after a failed write. `try_*` throughout: a
+        // toast outlives its row, so this can run after a navigation.
+        let revert = move || {
+            let _ = value.try_set(c.from);
+            let _ = live.desired.try_set(was);
+        };
+
+        match desire_id.get_untracked() {
+            Some(id) => {
+                advance();
+                spawn_local(async move {
+                    match crate::set_desire_quantity(id, target).await {
+                        Ok(()) => {
+                            if target == 0 {
+                                let _ = desire_id.try_set(None);
+                                toast.show(
+                                    ToastOptions::message(format!(
+                                        "Removed {} from wants",
+                                        label.get_value()
+                                    ))
+                                    .kind(ToastKind::Success),
+                                );
+                            }
+                            tree.refetch();
+                        }
+                        Err(e) => {
+                            revert();
+                            want_delta.update(|d| *d -= target - was);
+                            if let Some(d) = section_delta {
+                                d.update(|d| *d -= section_slot_delta(was, target, held));
+                            }
+                            row_deltas.push_desired(id, was - target);
+                            toast.show(
+                                ToastOptions::message(format!("Couldn't save: {}", message_of(&e)))
+                                    .kind(ToastKind::Error),
+                            );
+                        }
+                    }
+                });
+            }
+            // Nothing wanted here yet. Only a step *up* creates one; a
+            // committed 0 against no row is a no-op (`target == was` above
+            // already caught it whenever `held` is 0, and a held row stepped
+            // to 0 would ask for a want equal to what it holds, which the
+            // ruling reserves for rows that already have one).
+            None => {
+                if c.to <= 0 {
+                    return;
+                }
+                advance();
+                spawn_local(async move {
+                    match crate::create_desire(collection_id, oracle_id, board, target).await {
+                        Ok(line) => {
+                            let _ = desire_id.try_set(Some(line.id));
+                            // The overlay could not be keyed until the row
+                            // existed; key it now, so the grid drops or badges
+                            // this row from the same number the table shows.
+                            row_deltas.push_desired(line.id, target - was);
+                            tree.refetch();
+                        }
+                        Err(e) => {
+                            revert();
+                            want_delta.update(|d| *d -= target - was);
+                            if let Some(d) = section_delta {
+                                d.update(|d| *d -= section_slot_delta(was, target, held));
+                            }
+                            toast.show(
+                                ToastOptions::message(format!("Couldn't save: {}", message_of(&e)))
+                                    .kind(ToastKind::Error),
+                            );
+                        }
+                    }
+                });
+            }
+        }
+    });
 
     view! {
-        <crate::components::holding_stepper::WantStepper
-            name
-            desired
-            desire_id
-            on_change
-            on_settled
-            count_testid="wanted-placeholder"
+        <CountStepper
+            value
+            label=format!("{} wanted", label.get_value())
+            on_commit
+            // This component raises its own message for the one commit that
+            // needs one (the delete) and stays silent otherwise: a gap moving
+            // is not an event worth a toast per keystroke session, and the
+            // stepper's built-in Undo would re-commit a *gap* against a target
+            // that may have moved underneath it.
+            caller_reports=Callback::new(|_: StepperCommit| true)
+            class="justify-end"
         />
     }
     .into_any()
@@ -2626,13 +2815,38 @@ fn CollectionGrid(
     // stepper (a multi-grain HERE cell with no single desires row behind its
     // want either) cannot have been zeroed here, so it survives unchanged; see
     // [`row_survives`].
+    // Two passes, because the WANTED badge is `(oracle, board)`-grained: a
+    // card's still-needed count is measured against what the *group* holds
+    // (`shortfall`'s own doc), so the per-row live HERE counts have to be
+    // folded before any badge can be decided. The table gets this for free
+    // from `ViewRow::held_in_group` + `GroupLive`; the grid has to re-fold it
+    // from the overlay, since a HERE edit made in list mode is exactly what
+    // this is here to reflect.
     let live_rows = |rows: Vec<ViewRow>| -> Vec<(ViewRow, i32, i32)> {
-        rows.into_iter()
-            .filter_map(|row| {
+        let live: Vec<(ViewRow, i32, i32)> = rows
+            .into_iter()
+            .map(|row| {
                 let present = row_deltas.live_present(row.row.holding_id, row.row.present);
                 let desired = row_deltas.live_desired(row.row.desire_id, row.row.desired);
+                (row, present, desired)
+            })
+            .collect();
+        let mut held: HashMap<(Id, Board), i32> = HashMap::new();
+        for (row, present, _) in &live {
+            *held.entry((row.row.oracle_id, row.row.board)).or_default() += present;
+        }
+        live.into_iter()
+            .filter_map(|(row, present, desired)| {
                 let editable = row.row.holding_id.is_some() || row.row.desire_id.is_some();
-                row_survives(editable, present, desired).then_some((row, present, desired))
+                let group_held = held
+                    .get(&(row.row.oracle_id, row.row.board))
+                    .copied()
+                    .unwrap_or(present);
+                row_survives(editable, present, desired).then_some((
+                    row,
+                    present,
+                    shortfall(group_held, desired),
+                ))
             })
             .collect()
     };
@@ -2666,13 +2880,13 @@ fn CollectionGrid(
                                 <ul class=GRID_CLASS>
                                     {live_rows(section.rows)
                                         .into_iter()
-                                        .map(|(row, live_present, live_desired)| {
+                                        .map(|(row, live_present, live_shortfall)| {
                                             view! {
                                                 <HoldingTile
                                                     row
                                                     collection_id
                                                     live_present
-                                                    live_desired
+                                                    live_shortfall
                                                 />
                                             }
                                         })
@@ -2688,9 +2902,9 @@ fn CollectionGrid(
                     <ul class=GRID_CLASS data-testid="collection-cards-grid">
                         {live_rows(rows)
                             .into_iter()
-                            .map(|(row, live_present, live_desired)| {
+                            .map(|(row, live_present, live_shortfall)| {
                                 view! {
-                                    <HoldingTile row collection_id live_present live_desired />
+                                    <HoldingTile row collection_id live_present live_shortfall />
                                 }
                             })
                             .collect_view()}
@@ -2752,27 +2966,31 @@ fn FolderTile(
     }
 }
 
-/// One card's grid tile: image, name, and the same HERE/WANTED/OWNED badges
-/// the table's cells show — `wanted_of`/`owned_cell` are the same pure helpers
-/// `CardTableRow` uses, so the two layouts cannot disagree about those
-/// numbers.
+/// One card's grid tile: image, name, and the HERE/WANTED/OWNED badges beside
+/// the table's cells. [`shortfall`] and [`owned_cell`] are the same pure rules
+/// `CardTableRow` reaches its numbers through, so the two layouts cannot
+/// disagree about them.
 ///
 /// **HERE and WANTED both arrive live**, resolved by the caller
 /// (`CollectionGrid`) through [`RowDeltas`]: `live_present` (plus this row's
 /// own `present_rollup`) stands in for `here_total(&row.row)`'s
-/// frozen-snapshot present, and `live_desired` for `row.row.desired`. WANTED
-/// used to be listed here as deliberately static — true only while the column
-/// was read-only, and false the moment the table's WANTED cell became
-/// steppable (want-stepper review round 1, MAJOR): a want edited in list mode
-/// then viewed in grid showed the pre-edit number, and a zeroed want-only card
-/// kept a `1 wanted` badge for a `desires` row that no longer existed.
+/// frozen-snapshot present, and `live_shortfall` for the gap the table's cell
+/// shows. WANTED used to be listed here as deliberately static — true only
+/// while the column was read-only, and false the moment the table's WANTED
+/// cell became steppable (want-stepper review round 1, MAJOR): a want edited
+/// in list mode then viewed in grid showed the pre-edit number, and a zeroed
+/// want-only card kept a `1 wanted` badge for a `desires` row that no longer
+/// existed.
+///
+/// **The one place cell and badge diverge is the zero** ([`wanted_badge`],
+/// maintainer ruling rule 5): the table prints a steppable `0` because that
+/// zero is the control you create a want with, and a tile — which has no
+/// control — prints nothing rather than badging every card in the grid with a
+/// number that says only "nothing to do".
 ///
 /// OWNED *is* still static, and stays so: it is a global per-oracle aggregate
 /// no stepper on this page addresses, exactly as static in the table's own
 /// cell, so leaving it introduces no disagreement between the two layouts.
-/// The **collapse test** for WANTED is likewise still evaluated against the
-/// snapshot `present` rather than the live one — see [`wanted_of`]'s doc for
-/// why that is the choice that keeps the two layouts agreeing.
 ///
 /// No stepper here: editing is a table-only surface (the count stepper is a
 /// list-only editing surface, not something the grid — a display mode —
@@ -2791,12 +3009,13 @@ fn HoldingTile(
     /// this component gets mounted at all (a row live-zeroed in both columns
     /// never reaches here — see that component's `live_rows`).
     live_present: i32,
-    /// This row's live WANTED count — `RowDeltas::live_desired` applied by the
-    /// same caller, for the same reason.
-    live_desired: i32,
+    /// This row's live **still-needed** count — `RowDeltas::live_desired`
+    /// folded against the group's live held total by the same caller, for the
+    /// same reason. Already a gap, not a desire quantity: the fold is
+    /// `(oracle, board)`-grained and this component only has its own row.
+    live_shortfall: i32,
 ) -> impl IntoView {
-    // Snapshot `present` on purpose in the collapse test — see `wanted_of`.
-    let wanted = wanted_of(row.show_wanted, row.row.present, live_desired);
+    let wanted = wanted_badge(row.show_wanted, live_shortfall);
     let owned = owned_cell(&row.row);
     let here = live_present + row.row.present_rollup;
     let CardRow {
@@ -3283,30 +3502,18 @@ mod tests {
         assert_eq!(add_default(CollectionKind::Binder), QuickAddKind::Have);
     }
 
+    /// The wireframe's own row, re-read under the 2026-08-19 ruling: Bolt
+    /// 3-held / 4-wanted used to print `4` (the target) and now prints `1`
+    /// (what is still needed). The dedupe and zero halves of the rule are
+    /// `the_wanted_cell_prints_a_zero_but_only_once_per_card_and_board`.
     #[test]
-    fn wanted_shows_only_when_set_and_different() {
-        // The wireframe's own rows: Bolt 3/4/7 prints WANTED, Brainstorm has
-        // none set, and a card whose desire is already met prints none either.
+    fn wanted_prints_what_is_still_needed() {
         let bolt = view_rows(vec![card("Bolt", "Instant", 3, 4, 7)]);
-        assert_eq!(wanted_cell(&bolt[0]), Some(4));
-        let brainstorm = view_rows(vec![card("Brainstorm", "Instant", 4, 0, 12)]);
-        assert_eq!(wanted_cell(&brainstorm[0]), None);
-        let met = view_rows(vec![card("Counterspell", "Instant", 2, 2, 2)]);
-        assert_eq!(wanted_cell(&met[0]), None);
-    }
-
-    #[test]
-    fn wanted_prints_once_per_card_and_board() {
-        // `desired` is oracle-grained, so two printings of one card both carry
-        // it; printing it twice would read as eight wanted, not four.
-        let mut a = card("Bolt", "Instant", 1, 4, 7);
-        let mut b = card("Bolt", "Instant", 2, 4, 7);
-        b.printing_id = Id::from_u128(9999);
-        a.board = Board::Main;
-        b.board = Board::Main;
-        let rows = view_rows(vec![a, b]);
-        assert_eq!(wanted_cell(&rows[0]), Some(4));
-        assert_eq!(wanted_cell(&rows[1]), None);
+        assert_eq!(wanted_cell(&bolt[0]), Some(1));
+        // Held nowhere: the whole target is still needed, which is the case
+        // the old rule and this one agree on.
+        let unheld = view_rows(vec![card("Bolt", "Instant", 0, 4, 7)]);
+        assert_eq!(wanted_cell(&unheld[0]), Some(4));
     }
 
     #[test]
@@ -3494,18 +3701,72 @@ mod tests {
     }
 
     #[test]
-    fn a_tiles_wanted_badge_reads_the_live_desire_by_the_same_rule_as_the_cell() {
-        // `wanted_of` is the one rule both layouts evaluate; the grid feeds it
-        // an overlaid `desired` and the table its snapshot. Stepping a want
-        // 4 → 2 must move the badge, and zeroing it must remove the badge
-        // rather than leave `0 wanted` (or the pre-edit 4) standing.
-        assert_eq!(wanted_of(true, 0, 4), Some(4));
-        assert_eq!(wanted_of(true, 0, 2), Some(2));
-        assert_eq!(wanted_of(true, 0, 0), None);
-        // The dedupe and collapse halves of the rule are unchanged by the
-        // overlay: a repeat row prints nothing, and a met want collapses.
-        assert_eq!(wanted_of(false, 0, 4), None);
-        assert_eq!(wanted_of(true, 2, 2), None);
+    fn a_tiles_wanted_badge_shows_a_gap_and_only_a_gap() {
+        // The cell/badge divergence the ruling asks for: the table prints a
+        // steppable 0 (it is the create affordance), a tile prints nothing —
+        // `0 wanted` on every tile would be noise carrying no information.
+        assert_eq!(wanted_badge(true, 4), Some(4));
+        assert_eq!(wanted_badge(true, 1), Some(1));
+        assert_eq!(wanted_badge(true, 0), None);
+        // The dedupe half is unchanged: a row repeating a card prints nothing
+        // whatever the gap is.
+        assert_eq!(wanted_badge(false, 4), None);
+    }
+
+    #[test]
+    fn the_wanted_column_counts_copies_still_needed() {
+        // The maintainer ruling (2026-08-19): the column is a gap, not the
+        // want's own quantity. Want 4 holding 2 needs 2 more…
+        assert_eq!(shortfall(2, 4), 2);
+        // …a met want needs nothing, and an over-met one does not go negative.
+        assert_eq!(shortfall(4, 4), 0);
+        assert_eq!(shortfall(7, 4), 0);
+        // Nothing wanted is also a gap of nothing — which is the steppable 0
+        // the create-from-zero case hangs on, not an absence.
+        assert_eq!(shortfall(0, 0), 0);
+        // The have-nothing case, which is the common one, is unchanged in
+        // appearance from the old "print the desire" rule.
+        assert_eq!(shortfall(0, 4), 4);
+    }
+
+    #[test]
+    fn committing_a_gap_sets_the_target_it_implies() {
+        // `desired' = held + v`, the inverse of `shortfall` — so committing
+        // the number shown is a no-op, which is what makes the cell honest.
+        assert_eq!(desired_for_shortfall(2, 2), 4);
+        assert_eq!(shortfall(2, desired_for_shortfall(2, 2)), 2);
+        // Stepping the gap down on a row that holds copies KEEPS the want, at
+        // the level already held: "maintain 2 here", not "forget it". Deleting
+        // a want outright stays card detail's job (ruling, rule 3).
+        assert_eq!(desired_for_shortfall(2, 0), 2);
+        // Only a row holding nothing reaches a target of 0 — the delete.
+        assert_eq!(desired_for_shortfall(0, 0), 0);
+        // Create-from-zero on a row holding nothing asks for exactly the gap.
+        assert_eq!(desired_for_shortfall(0, 3), 3);
+        // …and on a row that holds copies, for those copies plus the gap.
+        assert_eq!(desired_for_shortfall(2, 3), 5);
+    }
+
+    #[test]
+    fn the_wanted_cell_prints_a_zero_but_only_once_per_card_and_board() {
+        // Zero is a number in the cell (the create affordance)…
+        let none_wanted = view_rows(vec![card("Brainstorm", "Instant", 4, 0, 12)]);
+        assert_eq!(wanted_cell(&none_wanted[0]), Some(0));
+        // …including a met want, which the old rule collapsed to `—`.
+        let met = view_rows(vec![card("Counterspell", "Instant", 2, 2, 2)]);
+        assert_eq!(wanted_cell(&met[0]), Some(0));
+        // A repeat row still prints nothing at all: one `desires` row must not
+        // grow a second control (see `wanted_cell`'s own doc).
+        let mut a = card("Bolt", "Instant", 1, 4, 7);
+        let mut b = card("Bolt", "Instant", 2, 4, 7);
+        b.printing_id = Id::from_u128(9999);
+        a.board = Board::Main;
+        b.board = Board::Main;
+        let rows = view_rows(vec![a, b]);
+        // …and the gap it prints is measured against the GROUP's 3 held, not
+        // the first row's own 1 — 4 wanted, 3 held, 1 still needed.
+        assert_eq!(wanted_cell(&rows[0]), Some(1));
+        assert_eq!(wanted_cell(&rows[1]), None);
     }
 
     #[test]

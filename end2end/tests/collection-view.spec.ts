@@ -175,9 +175,15 @@ async function renderedCells(page: Page) {
 }
 
 /// What a row should render, derived from the API row — the expectation half.
-/// Mirrors the spec's rules: WANTED only when set and different, OWNED collapses
-/// when equal to the here total, the rolled-up part appended as `+n`.
+/// Mirrors the spec's rules: WANTED is the still-needed count printed once per
+/// card and board, OWNED collapses when equal to the here total, the rolled-up
+/// part appended as `+n`.
 function expectedCells(rows: Row[]) {
+  const heldByGroup = new Map<string, number>();
+  for (const r of rows) {
+    const k = `${r.oracle_id}/${r.board}`;
+    heldByGroup.set(k, (heldByGroup.get(k) ?? 0) + r.present);
+  }
   const seen = new Set<string>();
   return rows.map((r) => {
     const key = `${r.oracle_id}/${r.board}`;
@@ -187,6 +193,11 @@ function expectedCells(rows: Row[]) {
     const here =
       (r.present > 0 ? String(r.present) : "—") +
       (r.present_rollup > 0 ? `+${r.present_rollup}` : "");
+    // WANTED counts copies STILL NEEDED (maintainer ruling 2026-08-19), at
+    // `(oracle, board)` grain on both sides — so the gap is measured against
+    // what the whole card group holds, not this printing row's own copies.
+    const groupHeld = heldByGroup.get(key) ?? r.present;
+    const shortfall = Math.max(r.desired - groupHeld, 0);
     return {
       oracle: r.oracle_id,
       // Exactly the rows a single `holdings` row backs get the stepper: a cell
@@ -194,18 +205,14 @@ function expectedCells(rows: Row[]) {
       // is not addressable by one number.
       editable: r.holding_id !== null,
       here,
-      wanted:
-        first && r.desired > 0 && r.desired !== r.present
-          ? String(r.desired)
-          : "—",
-      // WANTED is steppable on exactly the rows that *print* a number and are
-      // backed by a single `desires` row — the display rule decides
-      // visibility, `desire_id` decides addressability.
-      wantedEditable:
-        first &&
-        r.desired > 0 &&
-        r.desired !== r.present &&
-        r.desire_id !== null,
+      // Printed once per card and board; zero is a number here, not a dash —
+      // it is the create-a-want / keep-a-met-want affordance.
+      wanted: first ? String(shortfall) : "—",
+      // …and steppable wherever it prints, except the one refusal: a want
+      // already spread over several `desires` rows has no single row a lone
+      // number could mean. `desired === 0` is NOT a refusal — it is the
+      // create-from-zero case.
+      wantedEditable: first && !(r.desired > 0 && r.desire_id === null),
       owned: r.owned !== hereTotal ? String(r.owned) : "—",
     };
   });
@@ -1224,9 +1231,10 @@ test("committing a WANTED cell to zero drops the want, with no Undo offered @fas
       .click();
     await page.locator('[data-testid="collection-title"]').click();
 
-    // The cell falls back to the placeholder, and the header's wanted clause
-    // goes with it rather than standing stale at "1 wanted" until a reload.
-    await expect(wantedValue(tr)).toHaveText("—");
+    // The cell stays a stepper reading 0 — that zero is the affordance that
+    // lets you want the card again — and the header's wanted clause goes,
+    // rather than standing stale at "1 wanted" until a reload.
+    await expect(wantedValue(tr)).toHaveText("0");
     await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
       "0 here",
     );
@@ -1242,6 +1250,132 @@ test("committing a WANTED cell to zero drops the want, with no Undo offered @fas
       expect(after.cards).toEqual([]);
       expect(after.totals.desired).toBe(0);
     }).toPass({ timeout: 10_000 });
+  } finally {
+    await deleteCollection(request, scratch);
+  }
+});
+
+test("a met want is a steppable 0, and stepping it back to 0 keeps the want @fast", async ({
+  page,
+  request,
+}) => {
+  // Maintainer ruling 2026-08-19, rule 3: WANTED counts copies still needed,
+  // so a want you have already filled reads 0 — and stepping that 0 sets the
+  // target to what is held rather than deleting the row. A want means "keep N
+  // of these here"; forgetting one outright stays card detail's job.
+  const card = await somePrinting(request);
+  const scratch = await createCollection(
+    request,
+    "binder",
+    scratchName("met-want"),
+  );
+  try {
+    await addHave(request, scratch, card.printing_id, 2);
+    await addWant(request, scratch, card.oracle_id, 2);
+    await page.goto(`/my/collections/${scratch}`);
+    await hydrated(page);
+
+    const tr = rowFor(page, card.oracle_id);
+    // A steppable zero, not the `—` the pre-ruling rule collapsed this to.
+    await expect(wantedValue(tr)).toHaveText("0");
+    await expect(
+      tr.locator('[data-testid="wanted-count"] [data-testid="count-stepper"]'),
+    ).toHaveCount(1);
+
+    // Ask for one more than is here: the target becomes held + 1 = 3.
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-inc"]')
+      .click();
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(wantedValue(tr)).toHaveText("1");
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(3);
+    }).toPass({ timeout: 10_000 });
+
+    // …and back down to nothing-still-needed. The want survives at the level
+    // held (2); it is NOT deleted, which is the half of the ruling this test
+    // exists for.
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-dec"]')
+      .click();
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(wantedValue(tr)).toHaveText("0");
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(2);
+    }).toPass({ timeout: 10_000 });
+
+    // Card detail still lists the want — the surface that speaks in
+    // quantities rather than gaps, and the one that can delete it.
+    const detail = await request.get(`/api/cards/${card.oracle_id}`);
+    expect(detail.status()).toBe(200);
+    const wants = ((await detail.json()) as {
+      wants: { collection_id: string; quantity: number }[] | null;
+    }).wants;
+    expect(wants?.find((w) => w.collection_id === scratch)?.quantity).toBe(2);
+
+    await page.reload();
+    await hydrated(page);
+    await expect(wantedValue(rowFor(page, card.oracle_id))).toHaveText("0");
+  } finally {
+    await deleteCollection(request, scratch);
+  }
+});
+
+test("stepping WANTED up on a card nothing is wanted for creates the want @fast", async ({
+  page,
+  request,
+}) => {
+  // The create-from-zero case (ruling rule 3): no `desires` row exists, so the
+  // commit goes through `create_desire` rather than `set_desire_quantity`, and
+  // the stepper rewires to the row it made — a second step in the same session
+  // must SET that row, not create-and-increment a second time.
+  const card = await somePrinting(request);
+  const scratch = await createCollection(
+    request,
+    "binder",
+    scratchName("want-create"),
+  );
+  try {
+    await addHave(request, scratch, card.printing_id, 1);
+    await page.goto(`/my/collections/${scratch}`);
+    await hydrated(page);
+
+    const tr = rowFor(page, card.oracle_id);
+    await expect(wantedValue(tr)).toHaveText("0");
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "1 here",
+    );
+
+    // Ask for two more than the one already here → target 3.
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-inc"]')
+      .click();
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-inc"]')
+      .click();
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(wantedValue(tr)).toHaveText("2");
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "1 here · 3 wanted",
+    );
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(3);
+    }).toPass({ timeout: 10_000 });
+
+    // A second edit in the same session must land on the row the first one
+    // created — 4, not 3 + 4.
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-inc"]')
+      .click();
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(wantedValue(tr)).toHaveText("3");
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(4);
+    }).toPass({ timeout: 10_000 });
+
+    await page.reload();
+    await hydrated(page);
+    await expect(wantedValue(rowFor(page, card.oracle_id))).toHaveText("3");
   } finally {
     await deleteCollection(request, scratch);
   }
@@ -1271,30 +1405,35 @@ test("a deck section header composes a WANTED edit and a HERE edit in the same r
     await hydrated(page);
 
     // One card in a fresh scratch deck is one section, so its header is
-    // unambiguously this row's own contribution.
+    // unambiguously this row's own contribution: max(2 held, 4 wanted) = 4.
     const section = page.locator('[data-testid="deck-section"]');
     await expect(section).toHaveCount(1);
     await expect(section).toHaveText(/· 4$/);
 
     const tr = rowFor(page, card.oracle_id);
-    await expect(wantedValue(tr)).toHaveText("4");
+    // Still needed, not the target: 4 wanted less the 2 already here.
+    await expect(wantedValue(tr)).toHaveText("2");
 
-    // WANTED 4 → 1, by typing (one action instead of three − clicks).
+    // Gap 2 → 3, by typing (one action instead of a click each). The target
+    // this implies is held + 3 = 5, so the section grows to 5.
     await tr
       .locator('[data-testid="wanted-count"] [data-testid="count-stepper-value"]')
       .click();
     await tr
       .locator('[data-testid="wanted-count"] [data-testid="count-stepper-input"]')
-      .fill("1");
+      .fill("3");
     await tr
       .locator('[data-testid="wanted-count"] [data-testid="count-stepper-input"]')
       .press("Enter");
     await page.locator('[data-testid="collection-title"]').click();
-    await expect(wantedValue(tr)).toHaveText("1");
-    await expect(section).toHaveText(/· 2$/);
+    await expect(wantedValue(tr)).toHaveText("3");
+    await expect(section).toHaveText(/· 5$/);
 
-    // …then HERE 2 → 3 in the same row, in the same session. This is the step
-    // that was wrong: it has to read the want's *post-edit* value.
+    // …then HERE 2 → 3 in the same row, in the same session. Two things have
+    // to happen at once, and each was a separate defect: the section header
+    // must compute against the want's *post-edit* target (5, so it does not
+    // move), and this row's WANTED cell must re-render its gap live, from 3
+    // to 2, because the number it shows is `desired − held`.
     await tr
       .locator('[data-testid="here-cell"] [data-testid="count-stepper-inc"]')
       .click();
@@ -1302,20 +1441,22 @@ test("a deck section header composes a WANTED edit and a HERE edit in the same r
     await expect(
       tr.locator('[data-testid="here-cell"] [data-testid="count-stepper-value"]'),
     ).toHaveText("3");
-    await expect(section).toHaveText(/· 3$/);
+    await expect(wantedValue(tr)).toHaveText("2");
+    await expect(section).toHaveText(/· 5$/);
 
-    // The server agrees, and so does a header rebuilt from it — the live
-    // number was not merely self-consistent.
+    // The server agrees, and so does a page rebuilt from it — the live
+    // numbers were not merely self-consistent.
     await expect(async () => {
       const after = await viewOf(request, deck);
       expect(after.cards[0].present).toBe(3);
-      expect(after.cards[0].desired).toBe(1);
+      expect(after.cards[0].desired).toBe(5);
     }).toPass({ timeout: 10_000 });
     await page.reload();
     await hydrated(page);
     await expect(page.locator('[data-testid="deck-section"]')).toHaveText(
-      /· 3$/,
+      /· 5$/,
     );
+    await expect(wantedValue(rowFor(page, card.oracle_id))).toHaveText("2");
   } finally {
     await deleteCollection(request, deck);
   }

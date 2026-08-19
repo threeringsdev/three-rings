@@ -692,6 +692,61 @@ pub async fn set_holding_quantity(
     }
 }
 
+/// Create a want for a card in a collection and hand back the row it made —
+/// the collection table's WANTED stepper stepping up from a shortfall of zero
+/// on a card nothing is wanted for yet (maintainer ruling 2026-08-19; see
+/// `crate::my::collection::WantedCount`).
+///
+/// **This adds no authorization surface.** It is a thin server fn over
+/// [`crate::backend::CollectionStore::add_desire`] — the same backend method
+/// `quick_add`'s Want arm and `POST /api/collections/{id}/want` already go
+/// through, so the hosted backend's RLS-scoped transaction (and the native
+/// backend's session requirement) remain the one terminus.
+///
+/// Two things it needs that `quick_add` cannot give it, which is why it exists
+/// rather than a call to that:
+///
+/// - **the board.** `quick_add` hardcodes `Board::default()`, which is right
+///   for a catalog row and wrong here: a deck's sideboard row must create a
+///   *sideboard* want, or the want it creates is not the one the row displays.
+/// - **the new row's id.** `QuickAddReceipt` carries only an undo id, and this
+///   caller must rewire its stepper to the created `desires` row — a second
+///   step in the same editing session would otherwise create-and-increment
+///   again instead of setting the target it just made.
+///
+/// No printing pin, same as `quick_add`'s Want arm: the cell is oracle-grained
+/// ("I want this card here"), and pinning a printing is `/cards/:id`'s job.
+#[server(prefix = "/api", endpoint = "create_desire")]
+pub async fn create_desire(
+    collection_id: shared::Id,
+    oracle_id: shared::Id,
+    board: shared::Board,
+    quantity: i32,
+) -> Result<shared::DesireLine, ServerFnError<shared::ApiError>> {
+    #[cfg(feature = "ssr")]
+    {
+        use crate::backend::CollectionStore;
+        collection_backend()
+            .await?
+            .add_desire(
+                collection_id,
+                shared::AddWant {
+                    oracle_id,
+                    printing_id: None,
+                    board,
+                    quantity,
+                },
+            )
+            .await
+            .map_err(api_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (collection_id, oracle_id, board, quantity);
+        Err(ServerFnError::ServerError("server-only".into()))
+    }
+}
+
 /// Set a desire's absolute quantity — the wants counterpart of
 /// [`set_holding_quantity`] (specs/app-ui.md → the card-detail want stepper).
 /// `0` deletes the desire row, same documented meaning for a committed zero.
