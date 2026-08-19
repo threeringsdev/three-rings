@@ -22,6 +22,15 @@
 //! `HaveStepper` does (a stale toast/undo must not write to a row the zero
 //! commit already deleted), so it keeps the same `removed`-gated shape.
 //!
+//! **[`WantStepper`] has two callers now**, the same way [`HaveStepper`] does:
+//! `/cards/:id`'s "Your wants" rows, and `/my/collections/:id`'s WANTED cell
+//! (`crate::my::collection::WantedCount`) — the alpha report that the wanted
+//! count could be read but not edited from a collection table. Nothing about
+//! the component's write semantics moved for it; the second caller supplies
+//! its own aggregates through `on_change` and overrides the placeholder
+//! spans' `data-testid` (see `count_testid`), because a collection row already
+//! carries a `here-count` in its HERE cell.
+//!
 //! Both components own their write, their optimistic update, and their own
 //! toast; what they do **not** own is any page-level aggregate (a header
 //! total, a deck section's slot count) or which secondary reads to refresh
@@ -67,11 +76,20 @@ fn stale_commit_should_be_dropped(row_removed: bool) -> bool {
     row_removed
 }
 
+/// The `data-testid` both placeholder spans carry unless a caller names its
+/// own. Historic and a slight misnomer — it means "a count that is *not* the
+/// editable stepper", which is what `/my/collections/:id`'s HERE cell and
+/// `/cards/:id`'s rows both assert against. A caller rendering a stepper
+/// somewhere a `here-count` already exists in the same row must pass a
+/// different one, or a row-scoped locator matches two elements
+/// (`WantStepper::count_testid`).
+const DEFAULT_COUNT_TESTID: &str = "here-count";
+
 /// A cell whose count cannot be edited in place — either it sums more than one
 /// underlying row, or (defensively) there is nothing here at all.
-fn refusal_span(n: i32, title: &'static str) -> impl IntoView {
+fn refusal_span(n: i32, title: &'static str, testid: &'static str) -> impl IntoView {
     view! {
-        <span class="text-muted-foreground" data-testid="here-count" title=title>
+        <span class="text-muted-foreground" data-testid=testid title=title>
             {count_or_dash(n)}
         </span>
     }
@@ -80,9 +98,9 @@ fn refusal_span(n: i32, title: &'static str) -> impl IntoView {
 /// The "row is gone" placeholder — shown once a committed zero has removed the
 /// backing row, until an ancestor refetch drops the row from view entirely (or,
 /// for a have, until the removal's own Undo restores it).
-fn removed_span(title: &'static str) -> impl IntoView {
+fn removed_span(title: &'static str, testid: &'static str) -> impl IntoView {
     view! {
-        <span class="text-muted-foreground" data-testid="here-count" title=title>
+        <span class="text-muted-foreground" data-testid=testid title=title>
             "—"
         </span>
     }
@@ -140,7 +158,7 @@ pub fn HaveStepper(
         } else {
             "wanted here, not held"
         };
-        return refusal_span(present, title).into_any();
+        return refusal_span(present, title, DEFAULT_COUNT_TESTID).into_any();
     };
 
     // A signal, not a plain `Id`: undoing a removal re-inserts the holding
@@ -293,7 +311,10 @@ pub fn HaveStepper(
         <Show
             when=move || !removed.get()
             fallback=move || {
-                removed_span("removed — Undo from the toast, or reload to see the card gone")
+                removed_span(
+                    "removed — Undo from the toast, or reload to see the card gone",
+                    DEFAULT_COUNT_TESTID,
+                )
             }
         >
             <CountStepper
@@ -330,14 +351,23 @@ pub fn WantStepper(
     /// As [`HaveStepper::on_settled`]: run after every successful write.
     #[prop(into)]
     on_settled: Callback<()>,
+    /// The `data-testid` on the two non-stepper placeholder spans (the
+    /// multi-grain refusal and the post-removal "—"). Defaults to
+    /// [`DEFAULT_COUNT_TESTID`], which `/cards/:id`'s want rows assert
+    /// against; `/my/collections/:id`'s WANTED cell overrides it, because that
+    /// row already carries a `here-count` in its HERE cell and a row-scoped
+    /// locator must not match both.
+    #[prop(optional)]
+    count_testid: Option<&'static str>,
 ) -> impl IntoView {
+    let count_testid = count_testid.unwrap_or(DEFAULT_COUNT_TESTID);
     let Some(desire_id) = desire_id else {
         let title = if desired > 0 {
             "wanted across more than one board or pinned printing here — edit them individually"
         } else {
             "not wanted here"
         };
-        return refusal_span(desired, title).into_any();
+        return refusal_span(desired, title, count_testid).into_any();
     };
 
     let desire_id = RwSignal::new(desire_id);
@@ -393,7 +423,9 @@ pub fn WantStepper(
     view! {
         <Show
             when=move || !removed.get()
-            fallback=move || removed_span("removed from your wants — reload to see it gone")
+            fallback=move || {
+                removed_span("removed from your wants — reload to see it gone", count_testid)
+            }
         >
             <CountStepper
                 value

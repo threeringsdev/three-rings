@@ -364,6 +364,10 @@ pub fn CollectionPage() -> impl IntoView {
     // disagree without a reload (see the module doc on why a commit does not
     // refetch the view).
     let here_delta = RwSignal::new(0);
+    // The same, for the WANTED cells' steppers: copies committed through them
+    // that the rendered `totals.desired` does not yet include. Zeroed by the
+    // same payload `here_delta` is, for the same reason.
+    let want_delta = RwSignal::new(0);
     // `here_delta`'s per-row twin, for the grid — see [`RowDeltas`]'s doc.
     // Reset alongside `here_delta` below, for the identical reason: a fresh
     // payload already contains everything committed before it.
@@ -495,6 +499,7 @@ pub fn CollectionPage() -> impl IntoView {
                     // *replaces* the header, so no totals are left on screen for
                     // a delta to correct.
                     here_delta.set(0);
+                    want_delta.set(0);
                     row_deltas.reset();
                     match payload {
                         Ok(view) => {
@@ -503,6 +508,7 @@ pub fn CollectionPage() -> impl IntoView {
                                 <CollectionHeader
                                     view
                                     here_delta
+                                    want_delta
                                     teardown_open
                                     view_res
                                     tree
@@ -577,6 +583,7 @@ pub fn CollectionPage() -> impl IntoView {
                                         searching
                                         paged
                                         here_delta
+                                        want_delta
                                         tree
                                         tree_facts
                                         list_view
@@ -855,7 +862,14 @@ fn flatten_destinations(nodes: &[TreeNode], exclude: Id) -> Vec<(Id, String)> {
 /// The parenthetical appears only when something *is* rolled up, and the
 /// wanted clause only when something is wanted — an all-zeroes binder should
 /// read `0 here`, not a row of noughts.
-fn counts_summary(totals: &shared::CollectionTotals, delta: i32) -> String {
+///
+/// Both deltas are the same trick for the same reason (see [`CollectionPage`]'s
+/// module doc: a stepper commit deliberately does not refetch the view):
+/// `delta` carries the HERE cells' un-refetched copies, `want_delta` the WANTED
+/// cells'. The wanted clause is gated on the *live* number, so zeroing a
+/// collection's last want drops the clause rather than leaving a stale `· 1
+/// wanted` behind.
+fn counts_summary(totals: &shared::CollectionTotals, delta: i32, want_delta: i32) -> String {
     let own = totals.present + delta;
     let here = own + totals.present_rollup;
     let mut out = format!("{here} here");
@@ -865,8 +879,9 @@ fn counts_summary(totals: &shared::CollectionTotals, delta: i32) -> String {
             totals.present_rollup
         ));
     }
-    if totals.desired > 0 {
-        out.push_str(&format!(" · {} wanted", totals.desired));
+    let wanted = totals.desired + want_delta;
+    if wanted > 0 {
+        out.push_str(&format!(" · {wanted} wanted"));
     }
     out
 }
@@ -930,6 +945,11 @@ fn chip_state(totals: &shared::CollectionTotals) -> Option<ChipState> {
 fn CollectionHeader(
     view: CollectionView,
     here_delta: RwSignal<i32>,
+    /// `here_delta`'s wants twin — see [`counts_summary`]. Read only by the
+    /// counts line; the needs chip below is deliberately **not** live (it is
+    /// derived from `missing`/`owned_elsewhere`, which no client-side delta can
+    /// recompute, and a HERE commit has always left it stale the same way).
+    want_delta: RwSignal<i32>,
     teardown_open: RwSignal<bool>,
     view_res: Resource<Result<CollectionViewPayload, ServerFnError<shared::ApiError>>>,
     tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
@@ -1039,7 +1059,7 @@ fn CollectionHeader(
                             })}
                     </div>
                     <p class="text-muted-foreground text-sm" data-testid="collection-counts">
-                        {move || counts_summary(&totals, here_delta.get())}
+                        {move || counts_summary(&totals, here_delta.get(), want_delta.get())}
                     </p>
                     // Which quick action leads here (spec: decks are Want-led,
                     // binders and Inbox Have-led). Stated in the header because
@@ -1390,16 +1410,37 @@ struct ViewRow {
     /// it repeats on every printing row of the same card and board
     /// (specs/collection-api.md: "the UI shows it once").
     show_wanted: bool,
+    /// Copies of this card, on this board, held across **every** printing row
+    /// in the payload — the same per-`(oracle, board)` sum [`section_slots`]
+    /// folds, precomputed because the WANTED stepper needs it at commit time.
+    ///
+    /// Only the WANTED-printing row ever reads it: a section's slot count is
+    /// `max(held, desired)` per card, so a *want* change moves the header by
+    /// `max(held, new) − max(held, old)` — exact with this number, and
+    /// otherwise an overshoot whenever the card is held under a second
+    /// printing (`present` on the first row would understate `held`, and
+    /// `max(·, desired)` is steeper the smaller `held` is). [`HereCount`]'s own
+    /// row-local approximation is left as it was: it under-shoots rather than
+    /// overshoots, which [`section_slot_delta`]'s doc argues is never worse
+    /// than the static value it replaces.
+    held_in_group: i32,
 }
 
-/// Decide, in document order, which rows print WANTED.
+/// Decide, in document order, which rows print WANTED, and fold each card's
+/// per-`(oracle, board)` held total onto its rows.
 fn view_rows(rows: Vec<CardRow>) -> Vec<ViewRow> {
+    let mut held: HashMap<(Id, Board), i32> = HashMap::new();
+    for row in &rows {
+        *held.entry((row.oracle_id, row.board)).or_default() += row.present;
+    }
     let mut seen: HashSet<(Id, Board)> = HashSet::new();
     rows.into_iter()
         .map(|row| {
-            let first = seen.insert((row.oracle_id, row.board));
+            let key = (row.oracle_id, row.board);
+            let first = seen.insert(key);
             ViewRow {
                 show_wanted: first,
+                held_in_group: held.get(&key).copied().unwrap_or(row.present),
                 row,
             }
         })
@@ -1712,6 +1753,10 @@ fn CollectionBody(
     searching: bool,
     paged: Memo<bool>,
     here_delta: RwSignal<i32>,
+    /// `here_delta`'s wants twin, threaded to the table alone: the WANTED cell
+    /// is steppable in list view only, exactly as HERE is (the grid's badges
+    /// are read-only — see [`CollectionGrid`]).
+    want_delta: RwSignal<i32>,
     tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
     tree_facts: RwSignal<Option<TreeFacts>>,
     /// Table or grid — read *inside* the closure below, not baked at this
@@ -1742,7 +1787,14 @@ fn CollectionBody(
             view! { <EmptyState searching paged /> }.into_any()
         } else if list_view.get() {
             view! {
-                <CollectionTable view=view.get_value() folders here_delta tree row_deltas />
+                <CollectionTable
+                    view=view.get_value()
+                    folders
+                    here_delta
+                    want_delta
+                    tree
+                    row_deltas
+                />
             }
             .into_any()
         } else {
@@ -1780,6 +1832,8 @@ fn CollectionTable(
     view: CollectionView,
     folders: Memo<Vec<shared::CollectionSummary>>,
     here_delta: RwSignal<i32>,
+    /// `here_delta`'s wants twin — see [`CollectionBody`].
+    want_delta: RwSignal<i32>,
     tree: Resource<Option<Result<shared::CollectionTree, ServerFnError<shared::ApiError>>>>,
     row_deltas: RowDeltas,
 ) -> impl IntoView {
@@ -1891,6 +1945,7 @@ fn CollectionTable(
                                                 <CardTableRow
                                                     row
                                                     here_delta
+                                                    want_delta
                                                     collection_id
                                                     section_delta=section_delta
                                                     row_deltas
@@ -1905,7 +1960,15 @@ fn CollectionTable(
                     } else {
                         rows.into_iter()
                             .map(|row| {
-                                view! { <CardTableRow row here_delta collection_id row_deltas /> }
+                                view! {
+                                    <CardTableRow
+                                        row
+                                        here_delta
+                                        want_delta
+                                        collection_id
+                                        row_deltas
+                                    />
+                                }
                             })
                             .collect_view()
                             .into_any()
@@ -1984,6 +2047,9 @@ fn FolderTableRow(
 fn CardTableRow(
     row: ViewRow,
     here_delta: RwSignal<i32>,
+    /// `here_delta`'s wants twin — threaded straight through to
+    /// [`WantedCount`], the only thing that writes it.
+    want_delta: RwSignal<i32>,
     collection_id: Id,
     /// This row's deck section, when it has one — threaded straight through to
     /// [`HereCount`] so a section header can react to this row's own commits
@@ -1997,6 +2063,7 @@ fn CardTableRow(
 ) -> impl IntoView {
     let wanted = wanted_cell(&row);
     let owned = owned_cell(&row.row);
+    let held_in_group = row.held_in_group;
     let CardRow {
         oracle_id,
         printing_id,
@@ -2010,6 +2077,7 @@ fn CardTableRow(
         present_rollup,
         board,
         holding_id,
+        desire_id,
         faces,
         ..
     } = row.row;
@@ -2062,6 +2130,10 @@ fn CardTableRow(
         faces,
     };
     let link_name = name.clone();
+    // Cloned out here rather than at the call site: the HERE cell's own
+    // `<div>` closure captures `name`, so a second `name.clone()` further down
+    // the same `view!` would be a use-after-move.
+    let want_name = name.clone();
     let type_line_text = type_line.unwrap_or_default();
 
     view! {
@@ -2165,7 +2237,14 @@ fn CardTableRow(
                 {..}
                 data-testid="wanted-count"
             >
-                {wanted.map(|n| n.to_string()).unwrap_or_else(|| "—".to_string())}
+                <WantedCount
+                    name=want_name
+                    wanted
+                    desire_id
+                    held_in_group
+                    want_delta
+                    section_delta
+                />
             </TableCell>
             <TableCell
                 class="px-1 py-2 text-right tabular-nums md:px-2"
@@ -2254,6 +2333,81 @@ fn HereCount(
             removed
         />
     }
+}
+
+/// The WANTED number: the in-place stepper where the cell both prints a number
+/// and has a single `desires` row to address, plain text everywhere else.
+///
+/// The write semantics live in
+/// [`crate::components::holding_stepper::WantStepper`] — the same component
+/// `/cards/:id`'s "Your wants" rows use, so the two surfaces cannot drift on
+/// what a committed zero means (desires carry no ledger, so it is a direct,
+/// non-undoable delete; see that component's doc). This wrapper is the
+/// page-specific half, exactly as [`HereCount`] is for HERE: it turns the
+/// stepper's generic `(from, to)` into this page's aggregates and refetches the
+/// sidebar tree.
+///
+/// **When the stepper renders.** Only where [`wanted_cell`] already prints a
+/// number — the spec's "WANTED only when set and different" (specs/app-ui.md)
+/// decides *visibility*, and making the cell editable does not license
+/// printing a count the spec collapses away. Two consequences worth knowing:
+/// a card whose want is exactly met (`desired == present`) collapses to `—`
+/// and is therefore not steppable *here* (adjust it from `/cards/:id`'s "Your
+/// wants", which lists every desire unconditionally), and a want the WANTED
+/// column dedupes onto the card's first `(oracle, board)` row is steppable on
+/// that row alone — which is right, since `desire_id` is that same grain.
+///
+/// A cell that prints a number but sums several `desires` rows (a
+/// printing-pinned want beside an unpinned one) falls to `WantStepper`'s own
+/// refusal span, under this page's `wanted-placeholder` testid rather than the
+/// component's default `here-count` — the row's HERE cell may already carry
+/// one of those, and a row-scoped locator must not match two.
+#[component]
+fn WantedCount(
+    name: String,
+    /// What this cell prints, straight from [`wanted_cell`]. `None` is the
+    /// spec's collapsed `—`, and never a stepper.
+    wanted: Option<i32>,
+    /// The one `desires` row backing this cell — [`shared::CardRow::desire_id`].
+    desire_id: Option<Id>,
+    /// This card's held copies on this board, summed across its printing rows
+    /// ([`ViewRow::held_in_group`]) — needed only for [`section_slot_delta`]: a
+    /// section's slot count is `max(held, desired)` per card, so a *want*
+    /// change moves it by the same function with the roles swapped, held being
+    /// the fixed side this time.
+    held_in_group: i32,
+    /// The page header's live "· N wanted" clause — see [`counts_summary`].
+    want_delta: RwSignal<i32>,
+    /// This row's deck section, when it has one (`None` in a binder). Not
+    /// `#[prop(optional)]`, for the same reason [`HereCount`]'s isn't: the
+    /// caller already holds an `Option` and is forwarding it, not deciding
+    /// presence here.
+    section_delta: Option<RwSignal<i32>>,
+) -> impl IntoView {
+    let Some(desired) = wanted else {
+        return view! { <span data-testid="wanted-placeholder">"—"</span> }.into_any();
+    };
+    let tree = expect_context::<CollectionTreeResource>().0;
+
+    let on_change = Callback::new(move |c: StepperCommit| {
+        want_delta.update(|d| *d += c.to - c.from);
+        if let Some(d) = section_delta {
+            d.update(|d| *d += section_slot_delta(c.from, c.to, held_in_group));
+        }
+    });
+    let on_settled = Callback::new(move |()| tree.refetch());
+
+    view! {
+        <crate::components::holding_stepper::WantStepper
+            name
+            desired
+            desire_id
+            on_change
+            on_settled
+            count_testid="wanted-placeholder"
+        />
+    }
+    .into_any()
 }
 
 /// The grid layout: folder tiles (when there are any and no search is
@@ -2858,6 +3012,7 @@ mod tests {
             present_rollup: 0,
             board: Board::Main,
             holding_id: None,
+            desire_id: None,
             faces: vec![],
         }
     }
@@ -2998,6 +3153,47 @@ mod tests {
         // Over-held (5 held, 4 desired) stepped down to 3: only the 1 truly
         // surplus copy (5 → 4) counts against the header, not the full 2.
         assert_eq!(section_slot_delta(5, 3, 4), -1);
+    }
+
+    #[test]
+    fn section_slot_delta_serves_a_want_edit_with_its_arguments_swapped() {
+        // `max(held, desired)` is symmetric in the two numbers, so the WANTED
+        // stepper pushes through the same function — the moving side first,
+        // the fixed side last. 3 held, want 4 → 6: two more slots.
+        assert_eq!(section_slot_delta(4, 6, 3), 2);
+        // Want cut below what is already held: the copies are still in the
+        // deck, so the section's count does not move.
+        assert_eq!(section_slot_delta(4, 2, 5), 0);
+        // Want dropped entirely on a card held nowhere: the slots go with it.
+        assert_eq!(section_slot_delta(3, 0, 0), -3);
+    }
+
+    #[test]
+    fn view_rows_fold_a_cards_held_copies_across_its_printings() {
+        // The number the WANTED stepper needs at commit time: `section_slots`
+        // sums held per `(oracle, board)`, and the stepper lives on the *first*
+        // row of that group, whose own `present` is only one printing's worth.
+        let mut a = card("Bolt", "Instant", 1, 4, 7);
+        let mut b = card("Bolt", "Instant", 2, 4, 7);
+        b.printing_id = Id::from_u128(9999);
+        a.board = Board::Main;
+        b.board = Board::Main;
+        let rows = view_rows(vec![a, b]);
+        assert_eq!(rows[0].held_in_group, 3);
+        assert_eq!(rows[1].held_in_group, 3);
+        // …and it is exactly what `section_slots` folds for the same rows, so
+        // the live delta and the static count cannot disagree on `held`.
+        assert_eq!(section_slots(&rows), 4);
+
+        // Boards are separate groups: a sideboard copy is not a mainboard one.
+        let mut main = card("Bolt", "Instant", 1, 4, 7);
+        let mut side = card("Bolt", "Instant", 2, 1, 7);
+        side.printing_id = Id::from_u128(9999);
+        main.board = Board::Main;
+        side.board = Board::Side;
+        let split = view_rows(vec![main, side]);
+        assert_eq!(split[0].held_in_group, 1);
+        assert_eq!(split[1].held_in_group, 2);
     }
 
     #[test]
@@ -3147,13 +3343,26 @@ mod tests {
     #[test]
     fn counts_summary_matches_the_wireframe() {
         assert_eq!(
-            counts_summary(&totals(102, 18, 6, 0, 0), 0),
+            counts_summary(&totals(102, 18, 6, 0, 0), 0, 0),
             "120 here (102 own + 18 rolled up) · 6 wanted"
         );
         // No children, nothing wanted: just the one number.
-        assert_eq!(counts_summary(&totals(7, 0, 0, 0, 0), 0), "7 here");
+        assert_eq!(counts_summary(&totals(7, 0, 0, 0, 0), 0, 0), "7 here");
         // A committed stepper edit moves the header without a refetch.
-        assert_eq!(counts_summary(&totals(7, 0, 0, 0, 0), 3), "10 here");
+        assert_eq!(counts_summary(&totals(7, 0, 0, 0, 0), 3, 0), "10 here");
+    }
+
+    #[test]
+    fn counts_summary_tracks_committed_want_edits() {
+        // The WANTED stepper's own un-refetched commits, the wants twin of the
+        // HERE case above.
+        assert_eq!(
+            counts_summary(&totals(0, 0, 6, 0, 0), 0, 2),
+            "0 here · 8 wanted"
+        );
+        // Zeroing the collection's last want drops the clause rather than
+        // leaving a stale `· 1 wanted` standing until a reload.
+        assert_eq!(counts_summary(&totals(4, 0, 1, 0, 0), 0, -1), "4 here");
     }
 
     #[test]

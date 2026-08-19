@@ -873,6 +873,7 @@ mod tests {
             present_rollup: rollup,
             board: shared::Board::default(),
             holding_id: None,
+            desire_id: None,
             faces: vec![],
         }
     }

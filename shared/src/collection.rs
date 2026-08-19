@@ -300,6 +300,21 @@ pub struct CardRow {
     /// cannot say which grain it meant.
     #[serde(default)]
     pub holding_id: Option<Id>,
+    /// The one `desires` row behind this row's WANTED cell — the in-place want
+    /// stepper's write target (`set_desire_quantity`), and the exact
+    /// counterpart of [`Self::holding_id`].
+    ///
+    /// `None` when the cell is **not** addressable by a single number: either
+    /// this collection's want for the card sums several `desires` rows (a
+    /// printing-pinned want alongside an unpinned one — `desires_uniq`'s grain
+    /// is `(collection, oracle, printing_id, board)` while `desired` here is
+    /// `(oracle, board)`), or nothing is wanted here at all.
+    ///
+    /// Repeats on every printing row of the same `(oracle, board)`, exactly as
+    /// [`Self::desired`] does; the UI stepper renders on the one row that
+    /// prints WANTED.
+    #[serde(default)]
+    pub desire_id: Option<Id>,
     /// Per-face flip data for **this row's printing** (not a representative
     /// one), so a collection row's preview flips the copy you actually hold.
     /// Non-empty only for a layout with a real back face — the same
@@ -906,6 +921,25 @@ mod tests {
             serde_json::from_str(r#"{"collection_id":"00000000-0000-0000-0000-000000000001"}"#)
                 .expect("id-only body");
         assert_eq!(wire, req);
+    }
+
+    /// `CardRow::desire_id` is additive (the want-stepper-in-collection-tables
+    /// task), exactly as `holding_id` was before it: a payload encoded by an
+    /// older hosted API must still decode, as `None`, because a native client
+    /// can be a version ahead of the API it talks to.
+    #[test]
+    fn a_card_row_decodes_without_its_stepper_ids() {
+        let old: CardRow = serde_json::from_str(
+            r#"{"oracle_id":"00000000-0000-0000-0000-000000000001",
+                "printing_id":"00000000-0000-0000-0000-000000000002",
+                "name":"Lightning Bolt","set_code":"lea","collector_number":"161",
+                "image_uri":null,"mana_cost":"{R}","type_line":"Instant",
+                "colors":["R"],"present":3,"desired":4,"owned":7,
+                "present_rollup":0,"board":"main"}"#,
+        )
+        .expect("old card row, no holding_id or desire_id");
+        assert_eq!(old.holding_id, None);
+        assert_eq!(old.desire_id, None);
     }
 
     /// The endpoint has always accepted `POST /api/collections/{id}/delete`

@@ -1582,7 +1582,8 @@ impl CollectionStore for HostedBackend {
                GROUP BY printing_id, board \
              ), \
              want AS ( \
-               SELECT oracle_id, board, sum(quantity)::int AS desired \
+               SELECT oracle_id, board, sum(quantity)::int AS desired, \
+                      CASE WHEN count(*) = 1 THEN (array_agg(id))[1] END AS desire_id \
                FROM desires WHERE collection_id = (SELECT cid FROM me) \
                GROUP BY oracle_id, board \
              ), \
@@ -1616,7 +1617,7 @@ impl CollectionStore for HostedBackend {
                     ca.mana_cost, ca.type_line, ca.colors, l.present, \
                     COALESCE(w.desired, 0) AS desired, COALESCE(o.owned, 0) AS owned, \
                     COALESCE(ro.present_rollup, 0) AS present_rollup, \
-                    l.board::text AS board, l.holding_id, ca.layout, ",
+                    l.board::text AS board, l.holding_id, w.desire_id, ca.layout, ",
         );
         qb.push(format!(
             "CASE WHEN ca.layout IN ({layouts}) THEN ca.card_faces END AS card_faces, "
@@ -3783,6 +3784,9 @@ struct CardRowSql {
     board: String,
     /// NULL when the cell aggregates several grains, or is desire-only.
     holding_id: Option<Uuid>,
+    /// NULL when this `(oracle, board)`'s want sums several `desires` rows, or
+    /// when nothing is wanted here — [`shared::CardRow::desire_id`].
+    desire_id: Option<Uuid>,
     layout: Option<String>,
     /// NULL unless the layout has a real back face (the select gates it).
     card_faces: Option<serde_json::Value>,
@@ -3823,6 +3827,7 @@ impl CardRowSql {
             board: Board::from_pg(&self.board)
                 .ok_or_else(|| ApiError::Upstream(format!("bad board '{}'", self.board)))?,
             holding_id: self.holding_id,
+            desire_id: self.desire_id,
             faces,
         })
     }

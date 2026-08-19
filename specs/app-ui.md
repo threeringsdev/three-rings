@@ -141,7 +141,10 @@ location summary (`7 across 3 collections`). Quick search input, keyset paging.
 below. Three right-aligned numeric columns under one header: HERE / WANTED /
 OWNED (WANTED only when set and different; OWNED collapses when equal to HERE;
 rolled-up child counts italic + dimmed). HERE is editable in place via the count
-stepper. Persistent in-collection quick-search/type-ahead in the header (`/`
+stepper, and so is **WANTED** (2026-08-19, alpha feedback — see Findings): the
+same stepper, writing `set_desire_quantity`, wherever the display rule already
+prints a number and one `desires` row backs it. Persistent in-collection
+quick-search/type-ahead in the header (`/`
 focus hint) that filters this collection and inline-adds catalog matches — the
 intake path. Per-row move (kebab / swipe / `m`) and select (checkbox /
 long-press / `x`) affordances. The needs chip
@@ -7871,3 +7874,70 @@ same testability convention as `is_back_chord` right above it; middle-click
 (`auxclick`/`button() == 1`) stays uncovered, documented as a known gap in
 that function's own doc comment rather than a partial, engine-inconsistent
 fix. The printings table's four `TableHead`s gained `scope="col"`.
+
+### WANTED is steppable from the collection table (2026-08-19)
+
+`shared/src/collection.rs`, `app/src/backend/hosted.rs`,
+`app/src/components/holding_stepper.rs`, `app/src/my/collection.rs`,
+`end2end/tests/collection-view.spec.ts` — alpha feedback: "there's a stepper
+for changing the quantity of cards 'here' in a collection, but not for
+'Wanted'". Correct as reported; the WANTED cell was plain text on both
+layouts.
+
+**No new write path was needed.** `WantStepper` (`holding_stepper.rs`) already
+owned the wants semantics for `/cards/:id`'s "Your wants" rows — optimistic
+set, `set_desire_quantity`, and a committed zero that is a *direct,
+non-undoable delete* because desires carry no ledger. The collection table now
+mounts the same component through a thin page-local `WantedCount` wrapper, the
+exact shape `HereCount` already is for `HaveStepper`. The only real work was
+supplying the write target: `CardRow` gained **`desire_id`**, computed in the
+collection-view query the same way `holding_id` is (`CASE WHEN count(*) = 1
+THEN (array_agg(id))[1] END` over the `(oracle, board)` desires group), so a
+cell summing a printing-pinned want beside an unpinned one refuses rather than
+guessing which row a typed number meant.
+
+**The display rule was left alone, deliberately.** WANTED still prints "only
+when set and different", and the stepper renders only where a number already
+prints. Two consequences, both accepted rather than overlooked: a want that is
+exactly met (`desired == present`) collapses to `—` and so is **not adjustable
+from the table** — `/cards/:id`'s "Your wants" lists every desire
+unconditionally and remains the surface for that — and a want cannot be
+*created* from zero here, which is quick-add's job (`⌥⏎`), not the stepper's.
+Making the cell editable does not license printing a count the spec collapses
+away; changing that rule is a maintainer call, not a side effect of this fix.
+
+**Two aggregates had to be taught about wants.** The header's `· N wanted`
+clause now carries a `want_delta` twin of `here_delta` (same payload zeroes
+both, same reason: a commit never refetches the view), and it gates on the
+*live* number so zeroing a collection's last want drops the clause instead of
+leaving a stale `· 1 wanted`. Deck section slot counts move through the
+existing `section_slot_delta` with its arguments swapped — the per-card
+contribution is `max(held, desired)`, which is symmetric, so a want change is
+the same function with `held` as the fixed side. That needed an *exact* `held`,
+not the row-local approximation `HereCount` uses: the WANTED cell sits on the
+group's **first** printing row, whose own `present` understates the group and
+would make the delta **overshoot** (`HereCount`'s approximation only ever
+undershoots, which is why it was allowed to stand). Hence `ViewRow::held_in_group`,
+folded in `view_rows` and unit-pinned against `section_slots` itself. The needs
+chip stays static until a refetch — unchanged, and already true of HERE
+commits.
+
+**A testid collision was designed out, not discovered.** `refusal_span` /
+`removed_span` hardcoded `data-testid="here-count"`, which is a misnomer
+meaning "a count that is not the editable stepper". Reusing it in the WANTED
+cell would put two `here-count`s in one row (a want-only row's HERE cell is
+already a refusal span), breaking every row-scoped locator under Playwright's
+strict mode. `WantStepper` gained a `count_testid` prop defaulting to the old
+value; the collection table passes `wanted-placeholder`. For the same reason
+`collection-view.spec.ts`'s "no stepper on a row with nothing here to step"
+assertion is now scoped to the HERE **cell** rather than the row — the row is
+expected to carry a stepper now, in the other column.
+
+**Verification.** `--project=chromium --workers=1 --grep @fast` on
+`collection-view.spec.ts`, `card-detail.spec.ts` and `removal.spec.ts`: 70
+passed, 9 failed — every failure in `removal.spec.ts`, all of them the
+`unownedCards` fixture-pool drain this suite already carries as debt
+(measured live during this task: 7 free cards at `q=n&limit=200` against
+helpers asking for up to 13, and the helper's own `mine` read is capped at 200
+so it under-counts what the account owns). That helper runs before any page
+load and reads two catalog/ownership routes this change does not touch.
