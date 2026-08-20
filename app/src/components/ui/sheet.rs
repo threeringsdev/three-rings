@@ -200,8 +200,29 @@ pub fn SheetContent(
     let ctx = expect_context::<SheetContext>();
     let open = ctx.open;
 
+    // `data-[state=open]:will-change-transform` is load-bearing on the Android
+    // System WebView, and it is a *compositing* fix, not a decoration
+    // (WB-01M0DT5XSA). Without the hint Chromium promotes this panel to its own
+    // composited layer only for the duration of the `transition-transform`, then
+    // drops the layer on the commit after the transition ends. On the Android
+    // WebView that de-promotion costs one bad frame: for ~2 frames (~33 ms)
+    // neither this panel's `bg-card` nor the backdrop's `bg-black/50` paints, so
+    // the page underneath shows through at full brightness and the whole screen
+    // appears to flash. Measured on the emulator, filter drawer, 60 fps device
+    // recording: 2–3 frames deviating 67 % from the settled frame, at a
+    // reproducible +367 ms after the tap (the 300 ms transition plus the
+    // WebView's commit latency) — on open *and* on close.
+    //
+    // Keying the hint on `data-state=open` rather than applying it
+    // unconditionally matters twice over. It must cover the whole *opening*
+    // animation (the layer has to already exist when the transition starts, or
+    // the end-of-transition drop happens anyway), and it must NOT be permanent:
+    // `crate::cards::CardPreview` mounts one `Sheet` per catalog row, so an
+    // unconditional `will-change` would permanently promote a layer per row.
+    // Dropping the hint as the panel starts closing is safe — that commit
+    // repaints the panel anyway, and the measured close is clean.
     let base_class = tw_merge!(
-        "fixed z-100 bg-card shadow-lg p-6 transition-transform duration-300 overflow-y-auto overscroll-y-contain data-[state=closed]:pointer-events-none",
+        "fixed z-100 bg-card shadow-lg p-6 transition-transform duration-300 overflow-y-auto overscroll-y-contain data-[state=closed]:pointer-events-none data-[state=open]:will-change-transform",
         direction.initial_position(),
         direction.safe_area_padding(),
         class

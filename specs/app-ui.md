@@ -8658,3 +8658,93 @@ rediscovered.
 button now *is* first in document order, so both would have silently retargeted
 at it — still green, no longer testing what their titles say. Both are now
 `li[data-tree-row] [data-tree-row-actions]`.
+
+### The mobile "screen flashes" is one dropped compositor layer (2026-08-20)
+
+`app/src/components/ui/sheet.rs`, `end2end/tests/filter-rail.spec.ts` —
+WB-01M0DT5XSA ("in Catalog list view, tapping a card name flashes the screen
+several times; same when opening/closing the filter drawer"). Both reported
+surfaces are the **same vendored component**: the card "modal" is not a route
+navigation but `crate::cards::CardPreview`'s bottom `Sheet`, and the filter
+drawer is `catalog::rail::FilterSheet`'s left `Sheet`. That shared component
+is where the defect lives, and it is not a re-render, a hydration re-run, or
+an SSR round trip.
+
+**Mechanism, measured.** `SheetContent`'s panel animates with
+`transition-transform duration-300`. Chromium promotes an element to its own
+composited layer for the *duration* of such a transition and then drops that
+layer on the first commit after the transition ends. On the Android System
+WebView the de-promotion costs one bad frame: for 2–3 frames (~33–50 ms)
+neither the panel's `bg-card` nor the backdrop's `bg-black/50` paints, so the
+catalog page underneath shows through at full brightness — a whole-screen
+flash that reads exactly like "quick full page re-rendering".
+
+**Evidence** (emulator, `cargo tauri android dev` attach, `adb screenrecord`
+at 60 fps, frames diffed against the settled frame, with an on-page colour
+marker painted from a `click` listener and a `body`-style `MutationObserver`
+so device frames align to DOM events):
+
+| run | flash frames | offset from the tap | screen deviating |
+|---|---|---|---|
+| filter drawer open, baseline | 2 | +367 ms | 67 % |
+| filter drawer open, baseline (repeat ×3) | 2–3 | +367 ms | 67 % |
+| filter drawer close, baseline | 3 | +333 ms | 67 % |
+| card sheet open/reopen, baseline | 0 | — | — |
+
++367 ms is the 300 ms transition plus the WebView's commit latency, which is
+what identifies the end of the transition as the trigger. Four A/B runs
+isolated it, each toggled live through injected CSS against the running app:
+`transition:none` on both overlay elements — **clean**; `will-change:transform`
+on the panel — **clean**; `will-change:opacity` on the backdrop only — **still
+flashes**; blocking `scroll_lock`'s `body` writes — clean, but only because a
+non-scrollable document changes what has to be re-rastered, not because the
+lock is the cause. The panel, not the backdrop, is the element whose layer
+churn does it. The confirming detail: in the `will-change` run the flash
+reappeared 2.7 s later, at the exact moment the test harness *removed* the
+injected rule and the layer was dropped after all.
+
+**Two things the report and the measurement disagree about, recorded rather
+than smoothed over.** (1) The card sheet did **not** flash on the emulator, on
+a first open or on a reopen with its content and image already mounted — only
+the filter drawer did. The filter panel is full-height, `w-[85vw]`, and carries
+the whole rail body; the card sheet is `h-auto` over a short body. Size of the
+promoted layer is the plausible discriminator, and the maintainer's device is a
+real phone on a different WebView build. The fix is at the shared component, so
+it covers the card sheet either way, but this repo has no emulator repro of
+that half. (2) `scroll_lock::lock()` was the first suspect and is exonerated:
+its read phase measures **0.6 ms** for the `querySelectorAll` and **4.3 ms** of
+`getComputedStyle` over 347 candidate nodes on a 1,483-node catalog page, and
+click→body-write is 4.5–12 ms end to end. It also computes the right offset
+(`top: -900px` from a 900 px scroll). What *looked* like a 350 ms lock in an
+early trace was the WebView's touch→click latency plus the probe's own
+`touchStart`/`touchEnd` gap; a Playwright `.click()` also scroll-into-views
+first and forged a `top: 0px` reading. Coordinate taps via
+`Input.dispatchTouchEvent` are the only honest way to measure this.
+
+**Fix:** `data-[state=open]:will-change-transform` on `SheetContent`. Keyed on
+the open state, not unconditional, for two independent reasons — the hint has
+to already be in effect when the *opening* transition starts (a layer created
+mid-animation is still dropped at the end), and `CardPreview` mounts one
+`Sheet` per catalog row, so a permanent hint would permanently promote a layer
+per row. Dropping it as the panel begins closing is safe and measured clean:
+that commit repaints the panel anyway. Post-fix runs: filter open **clean**,
+filter close **clean**, card open **clean**, with the slide animations
+themselves unchanged (5–11 % per-frame deltas across the 300 ms).
+
+**Desktop WKWebView: not the same surface, and not measurable here.** Neither
+reported gesture exists on the desktop app as used — `wants_sheet` is
+`coarse || touch_intent`, so a mouse click on a catalog row navigates instead
+of opening the sheet, and `FilterSheet` is wrapped in `md:hidden`. A narrow
+(<768 px) desktop window does reach the drawer; a real-WKWebView probe
+(`end2end/wkwebview/wkprobe.swift`, 390×844 against the dev server) confirms
+the engine supports `will-change: transform` and applies the rule exactly as
+Chromium does — `auto` closed, `transform` open, dropped again on close — but
+an offscreen `WKWebView` does not tick transitions or expose compositing, so
+whether WebKit shares the artifact is **unmeasured**, not answered.
+
+**Sibling not fixed, deliberately.** `DialogContent` carries the same shape —
+`transition-all duration-200` with `data-[state=open]:scale-100 opacity-100` —
+so the same layer churn is plausible there. Every surface that mounts a
+`Dialog` is authed and unreachable from the dev-webview attach (the login form
+answers "Something went wrong" there), so there is no way to measure it on this
+task's evidence, and it is left for its own task rather than fixed blind.
