@@ -262,6 +262,91 @@ test.describe("signed in", () => {
     await expect(page.getByText("No collection matches.")).toBeVisible();
   });
 
+  // Regression guard for an alpha bug report (WB-01M0DT0J4R): the picker's
+  // search box had no horizontal padding, so what you typed sat flush against
+  // the panel edge. `CommandInput` carries no `px-*` of its own by design —
+  // every consumer supplies it on the wrapper — and `DestinationList` was the
+  // one consumer that shipped without a wrapper. Measured in CSS pixels off
+  // the *panel* rather than read off a class name, so a future restyle that
+  // keeps the padding by other means still passes and one that drops it fails.
+  //
+  // `DestinationList` is shared, so this covers the selection tray's and the
+  // tree's "Move to…" boxes too; the catalog's is the reachable one to measure
+  // (the other two need a selection / a tree dialog first).
+  test("the search box's text is inset from the panel edge @fast", async ({
+    page,
+  }) => {
+    await page.goto("/catalog?q=bolt");
+    await hydrated(page);
+    const label = page.getByTestId("destination-label");
+    await expect(label).toHaveText(/Inbox/, { timeout: 10000 });
+
+    await label.click();
+    const panel = page.locator("#popover-destination-picker");
+    await expect(panel).toBeVisible();
+    const search = page.getByPlaceholder("Search collections…");
+    await expect(search).toBeVisible();
+    await expect(page.getByTestId("destination-option").first()).toBeVisible();
+    // The native popover's 150ms open transition still has the panel at
+    // `scale(0.95)` — measuring mid-transition scales every gap below.
+    await page.waitForTimeout(250);
+
+    // Type first: the placeholder and the caret share the content box, and the
+    // report is about typed text specifically.
+    await search.fill("in");
+    // The Inbox always survives this filter and is always the first row, so
+    // the row measured below is a real, visible one.
+    await expect(
+      page.getByTestId("destination-option").filter({ hasText: /Inbox/ }),
+    ).toBeVisible();
+
+    const m = await search.evaluate((el) => {
+      const input = el as HTMLInputElement;
+      const panelEl = document.getElementById("popover-destination-picker")!;
+      const p = panelEl.getBoundingClientRect();
+      const ics = getComputedStyle(input);
+      const ir = input.getBoundingClientRect();
+      // Where the glyphs actually start/end: the input's content box, which is
+      // its border box minus its own border and padding. The padding that
+      // fixes this bug lives on the wrapper, so reading the input's own
+      // `padding-left` alone would report 0 both before and after.
+      const textLeft =
+        ir.left + parseFloat(ics.borderLeftWidth) + parseFloat(ics.paddingLeft);
+      const textRight =
+        ir.right -
+        parseFloat(ics.borderRightWidth) -
+        parseFloat(ics.paddingRight);
+
+      // The rows below it, for alignment: `CommandItem`'s own content box.
+      // The first *visible* one — filtering hides non-matches rather than
+      // unmounting them, and a hidden element measures 0×0 at 0,0.
+      const row = Array.from(
+        panelEl.querySelectorAll("[data-testid=destination-option]"),
+      ).find((el) => (el as HTMLElement).offsetParent !== null) as HTMLElement;
+      const rcs = getComputedStyle(row);
+      const rr = row.getBoundingClientRect();
+      const rowTextLeft =
+        rr.left + parseFloat(rcs.borderLeftWidth) + parseFloat(rcs.paddingLeft);
+
+      return {
+        leftGap: textLeft - p.left,
+        rightGap: p.right - textRight,
+        rowLeftGap: rowTextLeft - p.left,
+      };
+    });
+
+    // The bug: 0 (the panel is `p-0`, so the input's content box started at
+    // the panel's own border). 8px is the smallest inset that reads as
+    // deliberate; the shipped value is 12.
+    expect(m.leftGap).toBeGreaterThanOrEqual(8);
+    // Both sides — a `pl-` only fix would leave the caret welded to the right
+    // edge once the text is long enough to scroll.
+    expect(m.rightGap).toBeGreaterThanOrEqual(8);
+    // ...and it lines up with the rows it filters, rather than being merely
+    // nonzero. 1px of slack for subpixel rounding.
+    expect(Math.abs(m.leftGap - m.rowLeftGap)).toBeLessThanOrEqual(1);
+  });
+
   // Regression guard for a maintainer bug report filed against pre-#148 code:
   // (a) the picker appeared to render outside the view frame — only "a slim
   // gray bar above the picker" was visible — and (b) clicking away flashed

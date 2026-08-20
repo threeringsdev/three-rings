@@ -293,11 +293,26 @@ pub fn DestinationList(
     let empty = StoredValue::new(empty);
     view! {
         <Command class="rounded-md">
-            {match input_id {
-                Some(id) => view! { <CommandInput id=id placeholder=placeholder.clone() /> }
-                    .into_any(),
-                None => view! { <CommandInput placeholder=placeholder.clone() /> }.into_any(),
-            }}
+            // **The wrapper is where a `CommandInput`'s horizontal padding
+            // lives** — the primitive carries `py-3` and no `px-*` at all, by
+            // design (its own class list, app/src/components/ui/command.rs),
+            // because a search row usually pairs the field with an adornment
+            // and the two share one padded box. Every other consumer supplies
+            // one (the palette's `flex items-center gap-2 border-b px-4`, the
+            // rail's and the bench's `border-b px-2`); this component did not,
+            // so the typed text and the placeholder sat flush against the
+            // panel edge — reported against the catalog's "Adding to" picker,
+            // but the same in the selection tray's and the tree's "Move to…",
+            // which are this same control. `px-3` (12px) is what lines the
+            // text up with the rows below it: `CommandList`'s `p-1` plus
+            // `CommandItem`'s `px-2`.
+            <div class="border-b px-3">
+                {match input_id {
+                    Some(id) => view! { <CommandInput id=id placeholder=placeholder.clone() /> }
+                        .into_any(),
+                    None => view! { <CommandInput placeholder=placeholder.clone() /> }.into_any(),
+                }}
+            </div>
             <CommandList class="max-h-64 overflow-y-auto p-1">
                 <CommandEmpty
                     class="text-muted-foreground p-3 text-sm"
