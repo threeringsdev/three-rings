@@ -309,7 +309,13 @@ test.describe("mobile", () => {
         "0px",
       );
     }).toPass({ timeout: 3000 });
-    await expect(page.locator("[data-tree-row-actions]").first()).toBeVisible();
+    // A real collection row's ⋯, not the pinned All-cards one — that row grew
+    // the same button (`app/src/my/tree.rs`), and it opens the create-only
+    // background menu, which is not the create/rename/move/delete path this
+    // assertion is about.
+    await expect(
+      page.locator("li[data-tree-row] [data-tree-row-actions]").first(),
+    ).toBeVisible();
 
     // A navigation is a dismissal (shell.rs), and the list is still underneath.
     // Tap the scrim to the *right* of the 240 px panel: the scrim spans the
