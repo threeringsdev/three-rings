@@ -6632,15 +6632,50 @@ appropriate only when a column genuinely should absorb every spare pixel. Pair `
 percentage when the column needs a floor of its own, or with nothing at all when the column's width
 is declared on its header — and prefer the header whenever more than one row kind shares the column.
 
-**The `md` band (768px), measured rather than assumed.** Type is `hidden lg:table-cell`, so the
-768–1023 band runs five visible columns inside a 478px table (the 240px rail takes the rest), and
-`/my/all`'s card names wrap to four lines there. That is *not* an overflow: measured post-fix, the
+**The `md` band (768px), measured rather than assumed — both tables.** Type is
+`hidden lg:table-cell`, so the 768–1023 band runs five visible columns inside a 478px table (the
+240px rail takes the rest). This is the tightest width either table sees, and P6-001 named it as
+the one that historically overflowed, so it was re-measured on both rather than reasoned about.
+
+*`/my/all`.* Card names wrap to four lines here. That is *not* an overflow: measured post-fix, the
 `TableWrapper` is `scrollWidth − clientWidth = 0` and the document likewise — the names wrapping is
 precisely what absorbs the width instead of the table growing. Pre-fix at the same width the table
 also did not overflow (Card 118px / WHERE 155px, vs. 121px / 143px after), so this band is a
 pre-existing squeeze that this task slightly improves and does not regress. It is left alone: with
 select 32 + Mana 53 + WANTED 67 + OWNED 63 already spoken for, Card and WHERE are splitting 263px,
 and no allocation of those 263px puts a 30-character card name on one line.
+
+*The collection table, and why `w-[38%]` cannot overflow it (delta review).* The arithmetic looks
+alarming: the non-Card columns' min-content at 768 is Select 24 + Mana 52 + HERE 92 + WANTED 92 +
+OWNED 63 = **323px**, so 38% of a 478px table (182px) plus 323px is 505px — 27px more than the
+table has. It does not overflow, because **a percentage width under `table-layout: auto` is a
+preference, not a floor**: the browser clamps it to what is left once every other column has its
+min-content. Card lands at **155px (32.4%)**, not 182px, and the columns sum to exactly 478. Only a
+*fixed* width (`w-[182px]`) or `table-layout: fixed` could force the overflow the arithmetic
+suggests. Measured at 768×900 on **all nine** seeded collections, `scrollWidth − clientWidth` on
+the `TableWrapper`, with `documentElement` checked alongside:
+
+| collection | card rows | `here-rollup` rows | Card | HERE | **wrapper overflow** | doc overflow |
+|---|---|---|---|---|---|---|
+| Commander Deck | 11 | 0 | 155 | 92 | **0** | 0 |
+| Shoebox | 1 (+1 folder) | 0 | 155 | 92 | **0** | 0 |
+| Inbox | 50 | 0 | 155 | 92 | **0** | 0 |
+| Bulk Box | 50 | 0 | 155 | 92 | **0** | 0 |
+| Trade Binder | 6 | 0 | 155 | 92 | **0** | 0 |
+| Rares | 2 | 0 | 155 | 92 | **0** | 0 |
+| Depth Drawer | 1 | 0 | 155 | 92 | **0** | 0 |
+| **Depth Shelf** | 1 | **1** | 136 | 112 | **0** | 0 |
+| **Depth Box** | 3 | **1** | 136 | 112 | **0** | 0 |
+
+The last two are the real worst case — the only seeded collections whose rows carry the dimmed
+`+n` here-rollup span. It widens HERE by 20px and Card gives back 19px, which is the clamp doing
+its job in miniature. (Shoebox was nominated as the worst case but does not currently render a
+rollup at all; Depth Shelf and Depth Box do.)
+
+`CountStepper`'s ± need no separate hover measurement: `REVEAL` is
+`hidden sm:inline-flex opacity-0 … group-hover/row:opacity-100`, so at `sm` and up the buttons keep
+their layout box at rest and hover only changes opacity. Confirmed anyway — every number above is
+byte-identical with a row hovered.
 
 **Evidence.** Four new e2e tests, each kill-verified by reverting the lever it guards, rebuilding,
 and rerunning — restoring `w-full` on both cells failed them at Card = 10.3% of the table,
