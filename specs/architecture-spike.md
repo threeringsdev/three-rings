@@ -171,3 +171,97 @@ symptom is the one being investigated.
 
 Anything else added to the setup hook that renders or spawns needs the same
 treatment; the trap is that the sync-looking `build_router` is what renders.
+
+### Launch is remote-blocked, so the window gets a splash (2026-08-20)
+
+Alpha feedback (WB-01M0DT46WN): the desktop app takes "a long time" to show
+anything after launch, with no loading state in the meantime, and "seems to
+load faster if I've only recently closed the app". Measured on the release
+`.app` (macOS, wired connection, `three-rings.app/Contents/MacOS/three_rings`
+launched from a shell so its `tauri-plugin-log` trace is readable).
+
+**The startup timeline, before the fix**
+
+| leg | time |
+|---|---|
+| process start → embedded listener accepting | 0.40 – 0.96 s |
+| `GET /` served to the webview → first byte | everything below |
+| ↳ Neon Auth: JWKS on a cold process, + `mint_jwt` when `tr_jwt` has expired | ~0.3 – 1.3 s |
+| ↳ 302 → `/my`, which awaits the hosted API on Render | 0.3 s warm, **13 s** on a cold Render container (observed) |
+| **launch → first pixel of the app** | **~1.0 s best case, 15.5 s observed worst** |
+
+All of it is a blank window, and the two halves of that are separate causes:
+
+1. **Nothing paints before the listener exists** (0.4–0.96 s). The setup hook
+   runs synchronously inside `applicationDidFinishLaunching`, and the window is
+   already on screen (`viewDidMoveToWindow` precedes it in the trace) — so the
+   `generate_route_list` render, `get_configuration`, and the bind all happen
+   behind an empty window.
+2. **Nothing paints while `/` is being rendered** — the dominant cost. Every
+   top-level route is `SsrMode::Async` (`app/src/lib.rs`, deliberately: the auth
+   redirects need a real 302, which out-of-order streaming cannot give once
+   headers are flushed). `Async` sends **no byte of HTML** until every resource
+   resolves, and on the `native` backend those resources are HTTPS round trips.
+   A WKWebView paints nothing while a navigation is provisional, so the entire
+   remote chain is a blank window rather than a slow one.
+
+Isolated, against one running embedded server:
+
+```
+GET /          no cookies                      ttfb 0.0008 s   (nothing remote to do)
+GET /          Cookie: tr_session=<stale>      ttfb 0.223  s   (one upstream round trip)
+GET /__loading                                 ttfb 0.0004 s
+```
+
+**"Faster if I've only recently closed the app" is real and has two causes.**
+The `tr_jwt` cookie lives 15 minutes: inside that window `fetch_current_user`
+verifies locally and skips `mint_jwt` entirely (one Neon Auth call instead of
+two — confirmed in the trace). And Render's container is still awake, so `/my`'s
+data calls are ~0.3 s instead of the 13 s cold start measured here. Nothing
+about the app changes; only how much of the path is warm.
+
+**The fix (`src-tauri/src/splash.rs`).** The shell no longer points the window
+at `/`. It mounts one extra route on the embedded router, `/__loading`, and
+navigates there instead: a self-contained page (no stylesheet, no wasm, no
+image — 2.5 KB, first byte in ~0.4 ms) that paints the wordmark, three spinning
+rings, and "Signing you in…", then hands the webview on to `/`. The webview
+keeps painting it until the real response commits, so the remote chain now
+happens behind a loading state. After the change the same cold-Render launch
+put the splash up **0.9 s after launch** and the app at 15.5 s, instead of 15.5 s
+of nothing. The window also carries `backgroundColor: #161616` (the `--background`
+token) so leg 1's blank is the app's own dark ground rather than white.
+
+Kept in `src-tauri/`, not `app`: the hosted web deployment has no use for it
+(a browser shows the *previous* page during a navigation, never a blank one),
+and this way the web target is untouched.
+
+**Trap — `requestAnimationFrame` does not run when nothing is on screen.** The
+hand-off was first written as `load` → two nested rAFs, so the navigation
+provably starts after the first painted frame. On a Mac with the display locked
+the splash was served and the app then **sat there for the full 25 s of the
+run**: WebKit stops servicing rAF while the view is not visible, and a launch
+into a locked display, another app's full-screen space, or a minimized window
+hits exactly that. The rAF path is still the fast path; a 300 ms `setTimeout`
+behind a single-fire latch is the one that makes the app work at all. Any future
+"wait for paint" logic in a webview needs the same escape hatch.
+
+**Open — not addressed here.**
+
+- The 13 s Render cold start is the biggest number on the page and is
+  infrastructure, not app code (the `native` backend's `DEFAULT_WEB_ORIGIN`
+  points at a container that sleeps). Warming it from the shell at process
+  start, in parallel with the auth round trips, would overlap it with work
+  already happening.
+- `/` is still remote-blocked; the splash hides the wait rather than shortening
+  it. Making the first response stream a shell and resolve the session
+  client-side is the real cure and needs a maintainer ruling — it trades away
+  the `SsrMode::Async` 302 the auth redirects depend on.
+- **Android** (WB-01M0DT7YTF, "I initially see an `index.html not found` error
+  message, but then the app fully loads") is the *same* wait with a worse thing
+  in front of it: SSR ships no `index.html`, so the asset protocol's error page
+  is what the webview shows until `on_page_load` redirects it (finding 3 above),
+  and it stays there for the whole remote chain measured here. Pointing that
+  redirect at `/__loading` — the route is already mounted on every platform —
+  replaces the error page with the splash for all but the first instant; the
+  first instant needs a real `index.html` in the bundled assets. Left alone
+  here: untestable from this task's macOS host.
