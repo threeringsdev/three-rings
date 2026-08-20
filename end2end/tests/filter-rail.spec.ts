@@ -989,6 +989,54 @@ test.describe("mobile", () => {
     await expect(page.getByTestId("filter-badge")).toContainText("5");
   });
 
+  test("the open filter sheet holds its own compositor layer @fast", async ({
+    page,
+  }) => {
+    // Regression guard for WB-01M0DT5XSA — the "screen flashes when the filter
+    // drawer opens/closes" report. On the Android System WebView, a panel that
+    // Chromium promotes to its own composited layer *only for the duration of*
+    // `transition-transform` gets that layer dropped on the commit after the
+    // transition ends, and the WebView pays for the de-promotion with one bad
+    // frame: neither the panel's `bg-card` nor the backdrop's `bg-black/50`
+    // paints for 2–3 frames (~33–50 ms, measured at 67 % of the screen deviating
+    // from the settled frame, on open *and* on close). `will-change: transform`
+    // while the sheet is open keeps the layer alive across the whole animation
+    // and removes the end-of-transition drop.
+    //
+    // Asserting the *computed* value, not the class string: the whole point is
+    // that the browser is told to keep a layer, and a class that tw_merge
+    // dropped or a `will-change-*` utility Tailwind never emitted would both
+    // still read as present in `className`.
+    //
+    // It must be conditional on the open state, not unconditional:
+    // `CardPreview` mounts one `Sheet` per catalog row, so a permanent hint
+    // would permanently promote a layer per row.
+    await page.goto("/catalog?q=t%3Ainstant");
+    await hydrated(page);
+    const panel = page.locator(
+      '[data-name=SheetContent][aria-label="Filters"]',
+    );
+    const willChange = () =>
+      panel.evaluate((el) => getComputedStyle(el).willChange);
+
+    await expect(panel).toHaveAttribute("data-state", "closed");
+    expect(await willChange()).toBe("auto");
+
+    await page.getByRole("button", { name: /Filters/ }).click();
+    await expect(panel).toHaveAttribute("data-state", "open");
+    expect(await willChange()).toBe("transform");
+
+    // Dropped again once it closes, so the hint costs nothing at rest.
+    // Escape, not a backdrop click: `SheetBackdrop` is `fixed inset-0`, so its
+    // bounding box is the whole viewport and Playwright aims at the centre —
+    // which hit-tests to the open panel (`z-100`) sitting over it (`z-60`), and
+    // the actionability check then spins until it times out. Escape is the
+    // sheet's own dismissal, the same signal a real backdrop tap flips.
+    await page.keyboard.press("Escape");
+    await expect(panel).toHaveAttribute("data-state", "closed");
+    expect(await willChange()).toBe("auto");
+  });
+
   test("the set picker works inside the filter sheet @fast", async ({
     page,
     request,
