@@ -8142,3 +8142,63 @@ the **group's** held total (`ViewRow::held_in_group`), not the row's own
 multi-printing cards, where the row-local reading gives a visibly wrong gap
 (4 wanted, 1+2 held, would read 3 instead of 1) and disagrees with
 `read_need_gaps` server-side.
+
+### The serial full pass outlives its own login (2026-08-19)
+
+Not a product finding — a **suite-infrastructure** one, discovered while
+verifying the WANTED-column work and worth recording because it silently
+inflates every failure count on this branch and will do the same on the next.
+
+Both auth cookies (`tr_jwt`, `tr_session`) carry `Max-Age=900` —
+`session-fallback.spec.ts`'s own module doc states it. The login fixture runs
+once, as the `setup` project, and its `storageState` is what every authed test
+and every `APIRequestContext` in the suite reuses. A serial chromium pass now
+takes **~20 minutes** over 373 tests. So from roughly minute 15 onward, every
+API read in the suite returns **401**, and everything still to run fails for a
+reason that has nothing to do with the code under test.
+
+Measured on this branch, same build, same server:
+
+| Run | Result | 401s among the failures |
+|---|---|---|
+| `--project=chromium --workers=1` (full, ~20 min) | 270 passed / 105 failed | 84 |
+| the same 105, re-run with a fresh login (~14 min) | 66 passed / 40 failed | 0 |
+| `--shard=1/2` (~16 min) | 142 passed / 46 failed | 18 |
+| **4 shards, ~4–12 min each, a login per shard** | **342 passed / 36 failed** | **0** |
+
+The pattern is the tell: the 401 count tracks how far past minute 15 the run
+went, and re-running the failures with a fresh login clears two thirds of them
+without touching a line of code. The skill's own `247/259` baseline was
+measured at **12.4 minutes** — just inside the window — which is why this has
+not bitten before; the suite has since grown across the cookie lifetime.
+
+**Verify with shards, not one long pass.** Four shards
+(`--shard=N/4 --workers=1`, ~8 minutes each) each re-run the `setup` project,
+so each gets a login well inside 900s and the whole suite still gets covered.
+A single serial pass over ~15 minutes cannot be green on this fixture no
+matter what the code does, so quoting one as a task's verification is quoting
+an artifact.
+
+Two smaller traps found alongside it, both of which produced *wrong* numbers
+in this task's own round-1 report before they were caught:
+
+- **`npx playwright test … | tail -N` reports `tail`'s exit status**, not
+  Playwright's, and the line reporter's carriage-return redraw leaves only the
+  failure list in the captured tail with the `N failed` summary scrolled off.
+  Redirect to a file and read `$?`, or read `test-results/.last-run.json`
+  (`status`, `failedTests`) — that file is the honest answer.
+- **`--last-failed` reads `test-results/.last-run.json`**, which any
+  intervening run overwrites — including a bare `--project=setup` run. Copy it
+  aside first, or run `--last-failed` as one invocation and let `setup` come in
+  as the project dependency.
+
+The residual 36, once the session artifact is gone, are the two classes already
+filed and nothing else: the `unownedCards` fixture-pool drain (WB-01KZMVA2Y1 —
+"fewer than N catalog cards the dev user owns nowhere", "no genuinely unowned
+card found in the pool") and shared-dev-server contention/order sensitivity
+(WB-01KZRZ0TT7, WB-01KZNPJC9S — 30-second timeouts, disposed request contexts),
+spread over `removal` (9), `needs` (7), `batch-move` (6), `command-palette` (4),
+`filter-rail` (3), `collection-tree-manage` (3), `all-cards` (2), `responsive`
+(1) and `collection-undo-restore` (1). `collection-view.spec.ts` — which
+carries every test this branch added — `card-detail.spec.ts` and
+`quick-add.spec.ts` are clean.
