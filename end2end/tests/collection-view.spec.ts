@@ -66,6 +66,9 @@ type Row = {
   name: string;
   type_line: string | null;
   present: number;
+  /// The card's copies here across every printing on this board — folded
+  /// server-side, because the rows are one keyset page (see CardRow's doc).
+  present_group: number;
   desired: number;
   owned: number;
   present_rollup: number;
@@ -189,11 +192,6 @@ async function renderedCells(page: Page) {
 /// card and board, OWNED collapses when equal to the here total, the rolled-up
 /// part appended as `+n`.
 function expectedCells(rows: Row[]) {
-  const heldByGroup = new Map<string, number>();
-  for (const r of rows) {
-    const k = `${r.oracle_id}/${r.board}`;
-    heldByGroup.set(k, (heldByGroup.get(k) ?? 0) + r.present);
-  }
   const seen = new Set<string>();
   return rows.map((r) => {
     const key = `${r.oracle_id}/${r.board}`;
@@ -205,9 +203,10 @@ function expectedCells(rows: Row[]) {
       (r.present_rollup > 0 ? `+${r.present_rollup}` : "");
     // WANTED counts copies STILL NEEDED (maintainer ruling 2026-08-19), at
     // `(oracle, board)` grain on both sides — so the gap is measured against
-    // what the whole card group holds, not this printing row's own copies.
-    const groupHeld = heldByGroup.get(key) ?? r.present;
-    const shortfall = Math.max(r.desired - groupHeld, 0);
+    // what the whole card group holds, which the SERVER folds. Deriving it
+    // here from the page's rows would reproduce the very page-boundary bug the
+    // server fold exists to prevent, and the test would agree with the bug.
+    const shortfall = Math.max(r.desired - r.present_group, 0);
     return {
       oracle: r.oracle_id,
       // Exactly the rows a single `holdings` row backs get the stepper: a cell
@@ -1386,6 +1385,233 @@ test("stepping WANTED up on a card nothing is wanted for creates the want @fast"
     await page.reload();
     await hydrated(page);
     await expect(wantedValue(rowFor(page, card.oracle_id))).toHaveText("3");
+  } finally {
+    await deleteCollection(request, scratch);
+  }
+});
+
+test("the want-set endpoint sets rather than adds, so a stale stepper cannot compound @fast", async ({
+  request,
+}) => {
+  // Review round 2, MAJOR. The WANTED stepper commits an ABSOLUTE target it
+  // computed from what it believes is there, so the endpoint behind
+  // create-from-zero must SET. With `+ Want`'s incrementing upsert, a want
+  // created in another tab since the page loaded — or a second commit racing
+  // the first, before the created row's id comes back — lands a quantity
+  // nobody asked for.
+  //
+  // At the API level, because that is where the two semantics differ: the
+  // stepper cannot be made to race itself reliably from a browser.
+  const card = await somePrinting(request);
+  const scratch = await createCollection(
+    request,
+    "binder",
+    scratchName("want-set"),
+  );
+  try {
+    // Someone else's write lands first…
+    await addWant(request, scratch, card.oracle_id, 3);
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(3);
+    }).toPass({ timeout: 10_000 });
+
+    // …and the stepper's own create, which believes it is starting from
+    // nothing, asks for 2. SET semantics: the answer is 2, not 5.
+    const set = await request.post(`/api/collections/${scratch}/want/set`, {
+      data: { oracle_id: card.oracle_id, quantity: 2 },
+    });
+    expect(set.status(), "want/set").toBe(200);
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(2);
+    }).toPass({ timeout: 10_000 });
+
+    // Twice more with the same body: setting is idempotent, adding would not be.
+    for (const q of [2, 2]) {
+      const again = await request.post(`/api/collections/${scratch}/want/set`, {
+        data: { oracle_id: card.oracle_id, quantity: q },
+      });
+      expect(again.status()).toBe(200);
+    }
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(2);
+    }).toPass({ timeout: 10_000 });
+
+    // …while `+ Want` keeps its own gesture semantics, untouched: pressing it
+    // again means "and one more". This is the positive control — without it
+    // the assertions above would also pass if both routes had become SET.
+    await addWant(request, scratch, card.oracle_id, 1);
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(3);
+    }).toPass({ timeout: 10_000 });
+  } finally {
+    await deleteCollection(request, scratch);
+  }
+});
+
+test("the WANTED gap is measured against the card's whole held count here @fast", async ({
+  page,
+  request,
+}) => {
+  // Review round 2, BLOCKER. `desired − held` is `(oracle, board)`-grained on
+  // both sides, and `held` must be the card's total in this collection — the
+  // server's `present_group`, not a fold over the rendered rows, which are one
+  // keyset page and can split a multi-printing card across two of them. The
+  // gap is not only printed from that number, it is WRITTEN back through it
+  // (`desired' = held + gap`), so a fold would save a wrong quantity.
+  //
+  // Two printings of ONE card in one collection is the shape that tells a
+  // group total from a row's own `present` at all — `Depth Box` is the seeded
+  // collection that has it (`app/src/seed.rs` `build_depth`), and the guard
+  // below fails loudly rather than skipping if a re-seed ever loses it. (The
+  // page-boundary case itself is pinned as arithmetic in
+  // `the_gap_is_measured_against_the_servers_group_total`; a >50-row fixture
+  // costs far more here than it proves.)
+  const source = await collectionNamed(request, "Depth Box");
+  const view = await viewOf(request, source.summary.id, { limit: 200 });
+  const groups = new Map<string, Row[]>();
+  for (const r of view.cards.filter((c) => c.present > 0)) {
+    const k = `${r.oracle_id}/${r.board}`;
+    groups.set(k, [...(groups.get(k) ?? []), r]);
+  }
+  const pair = [...groups.values()].find((rs) => rs.length >= 2);
+  expect(
+    pair,
+    "dev seed must hold two printings of one card in one collection (build_depth)",
+  ).toBeTruthy();
+  const [p1, p2] = pair!;
+
+  const scratch = await createCollection(
+    request,
+    "binder",
+    scratchName("group-gap"),
+  );
+  try {
+    // 1 + 2 of the same card, under two printings, in one collection.
+    await addHave(request, scratch, p1.printing_id, 1);
+    await addHave(request, scratch, p2.printing_id, 2);
+    await addWant(request, scratch, p1.oracle_id, 6);
+
+    await expect(async () => {
+      const after = await viewOf(request, scratch);
+      const rows = after.cards.filter((r) => r.oracle_id === p1.oracle_id);
+      expect(rows.length, "two printing rows for one card").toBe(2);
+      // The server folds the group's held total onto BOTH rows — the field
+      // the client is forbidden from deriving for itself.
+      for (const r of rows) {
+        expect(r.present_group, "the server folds the group's held").toBe(3);
+      }
+      // …and the per-row `present` still differs, which is what makes a
+      // client-side fold distinguishable from the server's number at all.
+      expect(new Set(rows.map((r) => r.present))).toEqual(new Set([1, 2]));
+    }).toPass({ timeout: 10_000 });
+
+    await page.goto(`/my/collections/${scratch}`);
+    await hydrated(page);
+    // The cell prints once, on the first of the two rows.
+    const cells = page.locator(
+      `[data-testid="collection-row"][data-oracle="${p1.oracle_id}"] [data-testid="wanted-count"] [data-testid="count-stepper-value"]`,
+    );
+    await expect(cells).toHaveCount(1);
+    // 6 wanted, 3 held here → 3 still needed. A fold over this row alone would
+    // print 5 (6 − 1) or 4 (6 − 2) depending on which printing carried it.
+    await expect(cells).toHaveText("3");
+
+    // Stepping to 4 must ask for 3 + 4 = 7. Against a row-local `held` it
+    // would have written 5 or 6 — the silent part of the defect.
+    const tr = page
+      .locator(
+        `[data-testid="collection-row"][data-oracle="${p1.oracle_id}"]`,
+      )
+      .first();
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-inc"]')
+      .click();
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(cells).toHaveText("4");
+    await expect(async () => {
+      const v = await viewOf(request, scratch);
+      expect(
+        v.cards.find((r) => r.oracle_id === p1.oracle_id)!.desired,
+      ).toBe(7);
+    }).toPass({ timeout: 10_000 });
+  } finally {
+    await deleteCollection(request, scratch);
+  }
+});
+
+test("a round trip through grid keeps the session's live numbers, and what they write @fast", async ({
+  page,
+  request,
+}) => {
+  // Review round 2, MAJOR. The live `(held, desired)` pair used to be a map of
+  // signals built by `CollectionTable`, so its lifetime was that component's
+  // MOUNT. Toggling to grid and back rebuilt it from the frozen payload and
+  // every session edit silently reverted — and because `held` is a WRITE input
+  // (`desired' = held + gap`), the next WANTED commit then saved a number
+  // computed from the reverted value. Hoisted to the payload's lifetime, the
+  // same one `row_deltas` has.
+  const card = await somePrinting(request);
+  const scratch = await createCollection(
+    request,
+    "binder",
+    scratchName("grid-roundtrip"),
+  );
+  try {
+    await addHave(request, scratch, card.printing_id, 2);
+    await page.goto(`/my/collections/${scratch}`);
+    await hydrated(page);
+
+    const tr = rowFor(page, card.oracle_id);
+    // HERE 2 → 5, in this session only: the payload still says 2.
+    await tr.locator(HERE_VALUE).click();
+    await tr
+      .locator('[data-testid="here-cell"] [data-testid="count-stepper-input"]')
+      .fill("5");
+    await tr
+      .locator('[data-testid="here-cell"] [data-testid="count-stepper-input"]')
+      .press("Enter");
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(tr.locator(HERE_VALUE)).toHaveText("5");
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "5 here",
+    );
+
+    // Out to grid and straight back — no reload, no navigation, so `view_res`
+    // never refetches and the payload the table rebuilds from still says 2.
+    await page.getByRole("radio", { name: "Grid view" }).click();
+    await page.waitForURL((url) => url.searchParams.get("view") === "grid");
+    await expect(page.getByTestId("collection-grid")).toBeVisible();
+    await page.getByRole("radio", { name: "List view" }).click();
+    await page.waitForURL((url) => url.searchParams.get("view") !== "grid");
+    await hydrated(page);
+
+    // (a) the numbers survived the round trip…
+    const back = rowFor(page, card.oracle_id);
+    await expect(back.locator(HERE_VALUE)).toHaveText("5");
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "5 here",
+    );
+
+    // (b) …and so did what they WRITE. Ask for 5 more than are here: the
+    // target must be 5 + 5 = 10. Against a reverted `held` of 2 it would have
+    // saved 7 — the silent half of this defect, and the reason the assertion
+    // above is not enough on its own.
+    await back
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-value"]')
+      .click();
+    await back
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-input"]')
+      .fill("5");
+    await back
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-input"]')
+      .press("Enter");
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(wantedValue(back)).toHaveText("5");
+    await expect(async () => {
+      const v = await viewOf(request, scratch);
+      expect(v.cards[0].present).toBe(5);
+      expect(v.cards[0].desired).toBe(10);
+    }).toPass({ timeout: 10_000 });
   } finally {
     await deleteCollection(request, scratch);
   }

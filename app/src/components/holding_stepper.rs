@@ -22,14 +22,16 @@
 //! `HaveStepper` does (a stale toast/undo must not write to a row the zero
 //! commit already deleted), so it keeps the same `removed`-gated shape.
 //!
-//! **[`WantStepper`] has two callers now**, the same way [`HaveStepper`] does:
-//! `/cards/:id`'s "Your wants" rows, and `/my/collections/:id`'s WANTED cell
-//! (`crate::my::collection::WantedCount`) — the alpha report that the wanted
-//! count could be read but not edited from a collection table. Nothing about
-//! the component's write semantics moved for it; the second caller supplies
-//! its own aggregates through `on_change` and overrides the placeholder
-//! spans' `data-testid` (see `count_testid`), because a collection row already
-//! carries a `here-count` in its HERE cell.
+//! **[`WantStepper`] has one caller: `/cards/:id`'s "Your wants" rows.** It
+//! briefly had two — `/my/collections/:id`'s WANTED cell reused it when that
+//! column first became editable — and then the maintainer ruling of
+//! 2026-08-19 made that column show *copies still needed* rather than the
+//! want's own quantity. This component's contract is the quantity one (the
+//! value **is** `desires.quantity`, and a committed zero deletes the row),
+//! which is still exactly right on card detail and would be a lie in a column
+//! showing a gap. So `crate::my::collection::WantedCount` composes
+//! `CountStepper` directly and states its own write semantics, and nothing
+//! here changed for it. See specs/app-ui.md → Findings.
 //!
 //! Both components own their write, their optimistic update, and their own
 //! toast; what they do **not** own is any page-level aggregate (a header
@@ -76,13 +78,10 @@ fn stale_commit_should_be_dropped(row_removed: bool) -> bool {
     row_removed
 }
 
-/// The `data-testid` both placeholder spans carry unless a caller names its
-/// own. Historic and a slight misnomer — it means "a count that is *not* the
-/// editable stepper", which is what `/my/collections/:id`'s HERE cell and
-/// `/cards/:id`'s rows both assert against. A caller rendering a stepper
-/// somewhere a `here-count` already exists in the same row must pass a
-/// different one, or a row-scoped locator matches two elements
-/// (`WantStepper::count_testid`).
+/// The `data-testid` both placeholder spans carry. Historic and a slight
+/// misnomer — it means "a count that is *not* the editable stepper", which is
+/// what `/my/collections/:id`'s HERE cell and `/cards/:id`'s rows both assert
+/// against.
 const DEFAULT_COUNT_TESTID: &str = "here-count";
 
 /// A cell whose count cannot be edited in place — either it sums more than one
@@ -351,23 +350,14 @@ pub fn WantStepper(
     /// As [`HaveStepper::on_settled`]: run after every successful write.
     #[prop(into)]
     on_settled: Callback<()>,
-    /// The `data-testid` on the two non-stepper placeholder spans (the
-    /// multi-grain refusal and the post-removal "—"). Defaults to
-    /// [`DEFAULT_COUNT_TESTID`], which `/cards/:id`'s want rows assert
-    /// against; `/my/collections/:id`'s WANTED cell overrides it, because that
-    /// row already carries a `here-count` in its HERE cell and a row-scoped
-    /// locator must not match both.
-    #[prop(optional)]
-    count_testid: Option<&'static str>,
 ) -> impl IntoView {
-    let count_testid = count_testid.unwrap_or(DEFAULT_COUNT_TESTID);
     let Some(desire_id) = desire_id else {
         let title = if desired > 0 {
             "wanted across more than one board or pinned printing here — edit them individually"
         } else {
             "not wanted here"
         };
-        return refusal_span(desired, title, count_testid).into_any();
+        return refusal_span(desired, title, DEFAULT_COUNT_TESTID).into_any();
     };
 
     let desire_id = RwSignal::new(desire_id);
@@ -424,7 +414,10 @@ pub fn WantStepper(
         <Show
             when=move || !removed.get()
             fallback=move || {
-                removed_span("removed from your wants — reload to see it gone", count_testid)
+                removed_span(
+                    "removed from your wants — reload to see it gone",
+                    DEFAULT_COUNT_TESTID,
+                )
             }
         >
             <CountStepper

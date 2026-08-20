@@ -868,6 +868,7 @@ mod tests {
             type_line: None,
             colors: vec![],
             present,
+            present_group: present,
             desired: 0,
             owned: present,
             present_rollup: rollup,

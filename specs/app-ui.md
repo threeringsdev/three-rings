@@ -7957,7 +7957,12 @@ folded in `view_rows` and unit-pinned against `section_slots` itself. The needs
 chip stays static until a refetch — unchanged, and already true of HERE
 commits.
 
-**A testid collision was designed out, not discovered.** `refusal_span` /
+**A testid collision was designed out, not discovered.** *(Superseded — the
+`count_testid` prop described below is gone. The 2026-08-19 ruling made the
+collection table's WANTED cell stop sharing `WantStepper` with `/cards/:id`
+altogether, so the collision it avoided cannot arise: the only caller left
+uses the default. The round-2 review removed the now-dead machinery. The
+**lesson** below stands and is why the round-2 blocker was found at all.)* `refusal_span` /
 `removed_span` hardcoded `data-testid="here-count"`, which is a misnomer
 meaning "a count that is not the editable stepper". Reusing it in the WANTED
 cell would put two `here-count`s in one row (a want-only row's HERE cell is
@@ -8202,3 +8207,91 @@ spread over `removal` (9), `needs` (7), `batch-move` (6), `command-palette` (4),
 (1) and `collection-undo-restore` (1). `collection-view.spec.ts` — which
 carries every test this branch added — `card-detail.spec.ts` and
 `quick-add.spec.ts` are clean.
+
+### WANTED shortfall, review round 2: four write-path defects (2026-08-19)
+
+`shared/src/collection.rs`, `app/src/backend/{hosted,native,mod,routes}.rs`,
+`app/src/lib.rs`, `app/src/my/collection.rs`,
+`end2end/tests/collection-view.spec.ts`. All four were introduced by the
+shortfall rework, and all four are the same *shape*: the column now **writes**
+a number it derives from other numbers (`desired' = held + gap`), so anything
+that makes one of those inputs stale or wrong stops being a display bug and
+becomes a silently wrong saved quantity. That is the sentence to keep.
+
+**BLOCKER — the gap was measured against a page fold.** `held` came from
+summing `present` over the rendered rows. Rows are one keyset page of 50,
+ordered `(name, printing_id, board)`, so a card held under two printings can
+straddle a page boundary — and `seen` resets per page, so *both* pages print a
+gap and both are wrong. The repro: printing A (present 2) last on page 1,
+printing B (present 2) first on page 2, desired 6 — both pages print `4` where
+the truth is `2`, and committing the `2` a reader can see writes `desired = 4`
+instead of `6`. Fixed at the source: the collection-view query folds
+`present_group` per `(oracle, board)` in SQL, from the `held` CTE it already
+builds, and `CardRow` carries it. Display and `desired_for_shortfall` both read
+it; `ViewRow::held_in_group` and the fold that produced it are gone. The grid
+folds only the *session's own* HERE deltas on top of the server number, which
+are page-local by construction (only rows on this page have steppers). Pinned
+as arithmetic in `the_gap_is_measured_against_the_servers_group_total`
+(including the straddling-page shape) and end-to-end against `Depth Box`, the
+one seeded collection holding two printings of one card — that test asserts
+`present_group == 3` while the two rows' own `present` are 1 and 2, which is
+what makes the server's number distinguishable from any fold at all.
+
+**MAJOR — `create_desire` incremented where its caller meant set.** It went
+through `add_desire`, whose upsert is `quantity = desires.quantity +
+EXCLUDED.quantity` — right for `+ Want`, which is a gesture ("and one more"),
+wrong for a caller that has already computed an absolute target from what it
+believes is there. A want created in another tab since the page loaded (held 2,
+someone else set 3, reader asks for a gap of 1 → the database lands 6), or two
+same-session commits racing before the created row's id comes back, both
+produce quantities nobody asked for. Split into `CollectionStore::upsert_desire`
+(`DO UPDATE SET quantity = EXCLUDED.quantity`) beside `add_desire`, sharing one
+`write_desire` helper so the two cannot drift on validation, ownership or the
+returned row — only on the conflict clause. `POST /api/collections/{id}/want/set`
+carries it for the native backend, same extractor and same guard as `want`.
+`quick_add` keeps incrementing. The e2e pin drives the API directly (the two
+semantics are indistinguishable from a browser that cannot race itself) and
+carries its own positive control: `+ Want` must still add, or the test would
+pass just as well if both routes had become SET.
+
+**MAJOR — a want created from zero was invisible to the grid.** The wants
+overlay was keyed by `desire_id`, which is not stable across the very edits it
+records: a want created from nothing has no id in the snapshot the grid reads
+(`desire_id: None`), so the delta filed under its brand-new id was unreachable
+there and the row could lose its tile; and a delete-then-recreate orphaned the
+first id's delta. Re-keyed to `(oracle_id, board)` — the row's standing
+identity, the grain `desired` is already at, and unchanged by create, delete
+and recreate. `row_survives` was left alone; it was correct.
+
+**MAJOR — a round trip through grid reverted the session, then wrote from the
+revert.** Round 1's `GroupLive` was a map of `RwSignal`s built by
+`CollectionTable`, so its lifetime was that component's *mount*; the deck
+section deltas were likewise `RwSignal`s created in its section loop. Toggling
+to grid and back rebuilt both from the frozen payload. Held 2, stepped to 5,
+out to grid and back: the cells read 2 again and the next WANTED commit wrote
+`2 + gap`. Fixed by lifetime, not by patching the symptom — `LiveGroups` and
+`SectionDeltas` are plain data in page-owned signals with the same lifecycle
+`row_deltas` already had, seeded **only if absent** so a remount cannot clobber
+what the session recorded, and cleared exactly when a fresh payload lands.
+
+*The e2e pin for it found a second half the review had not named:* the HERE
+stepper's own **displayed** value was still seeded from the payload prop, so
+the cell showed 2 even once the write path was right. `row_deltas` already held
+that overlay for the grid's tiles; `CardTableRow` now reads it for the table
+too. The pin asserts both halves — the number on screen *and* the target the
+next commit saves — because the first passing alone was exactly the state that
+hid this.
+
+**Minors folded:** the dead `count_testid` prop and its module doc; a
+supersession note on the round-1 testid entry above; and the multi-desires
+refusal span, which printed a gap under a title describing want quantities.
+
+**One confirmation the review asked for.** The full-run record had folded a
+single `responsive` failure into the debt classes without checking it
+individually, and this branch widens every row with a second stepper.
+`collection-view.spec.ts`'s "no collection table scrolls sideways at phone
+width" (390×844, measuring `TableWrapper`'s own scroll container) **passes**,
+and it passes for a reason rather than by luck: `CountStepper`'s ± buttons are
+`hidden sm:inline-flex`, so below 640px they leave the layout entirely and the
+WANTED cell renders only the number that column already showed. The `@fast`
+grid-overflow tests at the same width pass too.

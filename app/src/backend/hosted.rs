@@ -1381,32 +1381,13 @@ impl CollectionStore for HostedBackend {
     }
 
     async fn add_desire(&self, collection_id: Id, req: AddWant) -> ApiResult<DesireLine> {
-        if req.quantity <= 0 {
-            return Err(ApiError::Validation("quantity must be > 0".into()));
-        }
-        let user_id = self.session_id()?;
-        let mut tx = self.scoped_tx().await?;
-        require_owned_collection(&mut tx, collection_id).await?;
+        self.write_desire(collection_id, req, DesireConflict::Increment)
+            .await
+    }
 
-        let row: DesireRow = sqlx::query_as(&format!(
-            "INSERT INTO desires (user_id, collection_id, oracle_id, printing_id, board, quantity) \
-             VALUES ($1, $2, $3, $4, $5::card_board, $6) \
-             ON CONFLICT ON CONSTRAINT desires_uniq \
-               DO UPDATE SET quantity = desires.quantity + EXCLUDED.quantity \
-             RETURNING {DESIRE_COLS}"
-        ))
-        .bind(user_id)
-        .bind(collection_id)
-        .bind(req.oracle_id)
-        .bind(req.printing_id)
-        .bind(req.board.to_pg())
-        .bind(req.quantity)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(db_err)?;
-
-        tx.commit().await.map_err(upstream)?;
-        row.into_line()
+    async fn upsert_desire(&self, collection_id: Id, req: AddWant) -> ApiResult<DesireLine> {
+        self.write_desire(collection_id, req, DesireConflict::Set)
+            .await
     }
 
     async fn set_holding_quantity(
@@ -1596,6 +1577,16 @@ impl CollectionStore for HostedBackend {
                SELECT p.oracle_id, pr.printing_id, pr.board, pr.present, pr.holding_id \
                FROM present pr JOIN printings p ON p.id = pr.printing_id \
              ), \
+             /* The card's copies here re-grained to (oracle, board) — the grain
+                `desired` is already at, and the one the WANTED column's gap is
+                measured against. Folded here, not client-side: the rows the
+                client sees are one keyset page, so a card held under two
+                printings can straddle a page boundary (shared::CardRow's own
+                doc). Same shape as read_need_gaps' `present_here`. */ \
+             present_group AS ( \
+               SELECT oracle_id, board, sum(present)::int AS present_group \
+               FROM held GROUP BY oracle_id, board \
+             ), \
              lines AS ( \
                SELECT oracle_id, printing_id, board, present, holding_id FROM held \
                UNION ALL \
@@ -1615,6 +1606,7 @@ impl CollectionStore for HostedBackend {
                     COALESCE(p.image_uris->>'normal', p.faces->0->'image_uris'->>'normal') \
                         AS image_uri, \
                     ca.mana_cost, ca.type_line, ca.colors, l.present, \
+                    COALESCE(pg.present_group, 0) AS present_group, \
                     COALESCE(w.desired, 0) AS desired, COALESCE(o.owned, 0) AS owned, \
                     COALESCE(ro.present_rollup, 0) AS present_rollup, \
                     l.board::text AS board, l.holding_id, w.desire_id, ca.layout, ",
@@ -1633,6 +1625,8 @@ impl CollectionStore for HostedBackend {
              LEFT JOIN sets s ON s.id = p.set_id \
              LEFT JOIN owned_by_card o ON o.oracle_id = l.oracle_id \
              LEFT JOIN want w ON w.oracle_id = l.oracle_id AND w.board = l.board \
+             LEFT JOIN present_group pg \
+               ON pg.oracle_id = l.oracle_id AND pg.board = l.board \
              LEFT JOIN rollup ro ON ro.printing_id = l.printing_id \
              WHERE true",
         );
@@ -3558,7 +3552,66 @@ const REPRESENTATIVE_PRINTING_JOIN: &str = " LEFT JOIN LATERAL ( \
                         p.faces->0->'image_uris'->>'normal') IS NULL), p.id \
      LIMIT 1 ) rep ON true ";
 
+/// What a `desires` upsert does when the row is already there — see
+/// [`CollectionStore::upsert_desire`] for why both behaviours are needed.
+#[derive(Clone, Copy)]
+enum DesireConflict {
+    /// `+ Want`'s gesture semantics: pressing it again means "and one more".
+    Increment,
+    /// The WANTED stepper's absolute-target semantics: last intent wins, so a
+    /// stale snapshot or a racing second commit converges instead of
+    /// compounding.
+    Set,
+}
+
+impl DesireConflict {
+    fn clause(self) -> &'static str {
+        match self {
+            Self::Increment => "quantity = desires.quantity + EXCLUDED.quantity",
+            Self::Set => "quantity = EXCLUDED.quantity",
+        }
+    }
+}
+
 impl HostedBackend {
+    /// The one `desires` insert-or-update, shared by [`CollectionStore::add_desire`]
+    /// and [`CollectionStore::upsert_desire`] so the two cannot drift on
+    /// validation, ownership or the returned row — only on the conflict clause.
+    async fn write_desire(
+        &self,
+        collection_id: Id,
+        req: AddWant,
+        conflict: DesireConflict,
+    ) -> ApiResult<DesireLine> {
+        if req.quantity <= 0 {
+            return Err(ApiError::Validation("quantity must be > 0".into()));
+        }
+        let user_id = self.session_id()?;
+        let mut tx = self.scoped_tx().await?;
+        require_owned_collection(&mut tx, collection_id).await?;
+
+        let row: DesireRow = sqlx::query_as(&format!(
+            "INSERT INTO desires (user_id, collection_id, oracle_id, printing_id, board, quantity) \
+             VALUES ($1, $2, $3, $4, $5::card_board, $6) \
+             ON CONFLICT ON CONSTRAINT desires_uniq \
+               DO UPDATE SET {clause} \
+             RETURNING {DESIRE_COLS}",
+            clause = conflict.clause(),
+        ))
+        .bind(user_id)
+        .bind(collection_id)
+        .bind(req.oracle_id)
+        .bind(req.printing_id)
+        .bind(req.board.to_pg())
+        .bind(req.quantity)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        tx.commit().await.map_err(upstream)?;
+        row.into_line()
+    }
+
     /// Disambiguate a write that affected no rows: an existing-but-Inbox row is a
     /// `Conflict` (Inbox is protected), an absent/not-owned/**soft-deleted** row
     /// is `NotFound`. `op` is the past-tense verb for the message ("renamed",
@@ -3778,6 +3831,9 @@ struct CardRowSql {
     type_line: Option<String>,
     colors: Vec<String>,
     present: i32,
+    /// The card's copies here across every printing on this board — see
+    /// [`shared::CardRow::present_group`] for why this is folded in SQL.
+    present_group: i32,
     desired: i32,
     owned: i32,
     present_rollup: i32,
@@ -3821,6 +3877,7 @@ impl CardRowSql {
             type_line: self.type_line,
             colors: self.colors,
             present: self.present,
+            present_group: self.present_group,
             desired: self.desired,
             owned: self.owned,
             present_rollup: self.present_rollup,

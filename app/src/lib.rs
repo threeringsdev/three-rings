@@ -698,10 +698,19 @@ pub async fn set_holding_quantity(
 /// `crate::my::collection::WantedCount`).
 ///
 /// **This adds no authorization surface.** It is a thin server fn over
-/// [`crate::backend::CollectionStore::add_desire`] — the same backend method
+/// [`crate::backend::CollectionStore::upsert_desire`], which shares its
+/// validation, ownership check and returned row with the `add_desire` that
 /// `quick_add`'s Want arm and `POST /api/collections/{id}/want` already go
-/// through, so the hosted backend's RLS-scoped transaction (and the native
+/// through — the hosted backend's RLS-scoped transaction (and the native
 /// backend's session requirement) remain the one terminus.
+///
+/// **It SETS rather than increments, and that is the point** (review round 2):
+/// this caller has already computed an absolute target from what it believes
+/// is there, so an incrementing upsert turns any staleness into a silently
+/// wrong saved quantity — a want created in another tab since this page
+/// loaded, or a second commit racing the first before the created row's id
+/// comes back. `+ Want` keeps incrementing, because pressing it twice does
+/// mean "and one more"; here the last thing the reader typed wins.
 ///
 /// Two things it needs that `quick_add` cannot give it, which is why it exists
 /// rather than a call to that:
@@ -728,7 +737,7 @@ pub async fn create_desire(
         use crate::backend::CollectionStore;
         collection_backend()
             .await?
-            .add_desire(
+            .upsert_desire(
                 collection_id,
                 shared::AddWant {
                     oracle_id,

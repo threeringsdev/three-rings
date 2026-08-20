@@ -70,6 +70,10 @@ where
         )
         .route(&paths::collection_op_route(op::HAVE), post(add_holding))
         .route(&paths::collection_op_route(op::WANT), post(add_desire))
+        .route(
+            &paths::collection_op_route(op::WANT_SET),
+            post(upsert_desire),
+        )
         .route(&paths::collection_op_route(op::BATCH), post(batch_add))
         .route(&paths::collection_op_route(op::VIEW), get(collection_view))
         .route(&paths::collection_op_route(op::TEARDOWN), post(teardown))
@@ -382,6 +386,24 @@ async fn add_holding(user: AuthUser, Path(id): Path<Id>, Json(req): Json<AddHave
             HostedBackend::for_user(user.user_id)
                 .await?
                 .add_holding(id, req)
+                .await
+        }
+        .await,
+    )
+}
+
+/// `POST /api/collections/{id}/want/set` — set a desired count outright.
+///
+/// Same body, same guard and the same backend upsert as `want` below; only the
+/// conflict clause differs (see `CollectionStore::upsert_desire`). Exists as
+/// its own route because the two callers mean different things by "want 3":
+/// `+ Want` means "three more", the WANTED stepper means "three in total".
+async fn upsert_desire(user: AuthUser, Path(id): Path<Id>, Json(req): Json<AddWant>) -> Response {
+    json_result(
+        async {
+            HostedBackend::for_user(user.user_id)
+                .await?
+                .upsert_desire(id, req)
                 .await
         }
         .await,

@@ -282,6 +282,25 @@ pub struct CardRow {
     /// Oracle-grained, so it repeats on every printing row of that oracle; the
     /// UI shows it once (see `crate::CardRow` consumers).
     pub desired: i32,
+    /// Copies of this **card** held here on this board, across every printing —
+    /// `present` re-grained from `(printing, board)` up to `(oracle, board)`,
+    /// which is the grain [`Self::desired`] is already at.
+    ///
+    /// **The WANTED column's arithmetic needs this and cannot fold it
+    /// client-side.** That column shows `max(desired − present_group, 0)` and
+    /// *writes* `desired' = present_group + committed_gap`, so a wrong value
+    /// here is a wrong number saved, not merely a wrong number shown. Summing
+    /// `present` over the rendered rows would do exactly that: rows are a
+    /// keyset page (50), ordered `(name, printing_id, board)`, so a card held
+    /// under two printings can straddle a page boundary and each page would
+    /// fold only its own half.
+    ///
+    /// Same grain and same scope as `read_need_gaps`' `present_here`, so this
+    /// cell, `/needs` and the header's needs chip cannot describe one card
+    /// differently. Repeats on every printing row of the group, as `desired`
+    /// does.
+    #[serde(default)]
+    pub present_group: i32,
     /// Owned — global aggregate of present across all the user's collections
     /// (per oracle card).
     pub owned: i32,
@@ -923,10 +942,18 @@ mod tests {
         assert_eq!(wire, req);
     }
 
-    /// `CardRow::desire_id` is additive (the want-stepper-in-collection-tables
-    /// task), exactly as `holding_id` was before it: a payload encoded by an
-    /// older hosted API must still decode, as `None`, because a native client
-    /// can be a version ahead of the API it talks to.
+    /// `CardRow::desire_id` and `CardRow::present_group` are additive (the
+    /// want-stepper-in-collection-tables task and its round-2 review), exactly
+    /// as `holding_id` was before them: a payload encoded by an older hosted
+    /// API must still decode, because a native client can be a version ahead
+    /// of the API it talks to.
+    ///
+    /// **`present_group` defaulting to 0 is a safe fallback, not a silent
+    /// wrong answer.** The WANTED column reads it as the card's copies here,
+    /// so an older API makes every gap read as the full desire — visibly
+    /// generous rather than quietly under-counted, and it cannot make the
+    /// stepper *write* a smaller target than the reader asked for
+    /// (`desired' = present_group + gap` is monotonic in both).
     #[test]
     fn a_card_row_decodes_without_its_stepper_ids() {
         let old: CardRow = serde_json::from_str(
@@ -940,6 +967,7 @@ mod tests {
         .expect("old card row, no holding_id or desire_id");
         assert_eq!(old.holding_id, None);
         assert_eq!(old.desire_id, None);
+        assert_eq!(old.present_group, 0);
     }
 
     /// The endpoint has always accepted `POST /api/collections/{id}/delete`
