@@ -25,6 +25,19 @@
 //! use for it (a browser shows the previous page, not a blank window, while a
 //! navigation is in flight), and keeping the diff inside `src-tauri/` leaves
 //! the web target byte-for-byte unchanged.
+//!
+//! ## The instant before this page (Android — WB-01M0DT7YTF)
+//!
+//! Android's webview is created *after* `setup` runs, so the shell cannot
+//! navigate it there; it points it here from `on_page_load` instead, once the
+//! webview's own first load has finished (`lib.rs`). That first load is the
+//! asset protocol's root, and with no `index.html` in `frontendDist` — SSR
+//! emits none — it was the protocol's "asset not found: index.html" error
+//! page, which then stayed on screen for the *whole* remote chain above. So a
+//! static twin of this page, `src-tauri/launch-placeholder.html`, is copied into
+//! `frontendDist` by `tauri.conf.json`'s `beforeBuildCommand` and occupies
+//! that slot. It is deliberately inert — the shell moves the webview off it;
+//! it never moves itself — and the tests below hold its look to this one's.
 
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
@@ -98,11 +111,7 @@ fn page(dark: bool) -> String {
     // needs no color-function support: `--background`, `--foreground`,
     // `--muted-foreground`, and a dim ring track between `--border` and
     // `--muted`.
-    let vars = if dark {
-        "--bg:#161616;--fg:#fafafa;--muted:#a1a1a1;--dim:#3a3a3a;color-scheme:dark"
-    } else {
-        "--bg:#ffffff;--fg:#0a0a0a;--muted:#737373;--dim:#d4d4d4;color-scheme:light"
-    };
+    let vars = if dark { DARK_VARS } else { LIGHT_VARS };
     // The script carries braces of its own, so it is a template with two
     // substitutions rather than another `format!` argument.
     let js = JS
@@ -116,12 +125,24 @@ fn page(dark: bool) -> String {
          <title>Three Rings</title>\
          <style>{CSS}</style></head>\
          <body><main>{RINGS}\
-         <p class=\"wordmark\">Three Rings</p>\
-         <p class=\"status\">Signing you in\u{2026}</p>\
-         <p class=\"slow\" id=\"slow\">Still working \u{2014} the server may be waking up.</p>\
+         <p class=\"wordmark\">{WORDMARK}</p>\
+         <p class=\"status\">{STATUS}</p>\
+         <p class=\"slow\" id=\"slow\">{SLOW_NOTICE}</p>\
          </main><script>{js}</script></body></html>"
     )
 }
+
+/// The dark/light token sets, resolved to hex (see [`page`]). Named because
+/// `launch-placeholder.html` embeds the dark one verbatim and a test holds
+/// the two together.
+const DARK_VARS: &str = "--bg:#161616;--fg:#fafafa;--muted:#a1a1a1;--dim:#3a3a3a;color-scheme:dark";
+const LIGHT_VARS: &str =
+    "--bg:#ffffff;--fg:#0a0a0a;--muted:#737373;--dim:#d4d4d4;color-scheme:light";
+
+/// The three lines of copy, in the order they stack under the rings.
+const WORDMARK: &str = "Three Rings";
+const STATUS: &str = "Signing you in\u{2026}";
+const SLOW_NOTICE: &str = "Still working \u{2014} the server may be waking up.";
 
 /// Three concentric arcs, one per ring, over their own dim tracks.
 const RINGS: &str = "<svg class=\"rings\" viewBox=\"0 0 64 64\" width=\"64\" height=\"64\" \
@@ -274,6 +295,38 @@ mod tests {
         assert!(PATH.starts_with('/'));
         assert_ne!(PATH, NEXT);
         let _: Router = mount(Router::new());
+    }
+
+    /// The static first-frame twin the asset protocol serves (module doc).
+    /// `beforeBuildCommand` copies this exact file to `<frontendDist>/index.html`.
+    const PLACEHOLDER: &str = include_str!("../launch-placeholder.html");
+
+    #[test]
+    fn the_placeholder_wears_this_page_s_dark_skin() {
+        // Not "looks similar" — the same bytes, so the hand-off from the
+        // placeholder to the splash is invisible rather than a restyle.
+        assert!(PLACEHOLDER.contains(DARK_VARS), "same tokens");
+        assert!(PLACEHOLDER.contains(CSS), "same stylesheet");
+        assert!(PLACEHOLDER.contains(RINGS), "same rings");
+        for line in [WORDMARK, STATUS, SLOW_NOTICE] {
+            assert!(
+                PLACEHOLDER.contains(line),
+                "placeholder is missing {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_placeholder_is_self_contained_and_inert() {
+        assert!(!PLACEHOLDER.contains("<link"), "no external stylesheet");
+        assert!(!PLACEHOLDER.contains("src="), "no external script or image");
+        // Inert on purpose. It is served over the *asset protocol*, where the
+        // splash's own `location.replace("/")` would resolve back to this same
+        // document — an infinite reload, with `on_page_load` re-firing on every
+        // pass. The shell moves the webview off this page; the page never
+        // moves itself.
+        assert!(!PLACEHOLDER.contains("<script"), "no script");
+        assert!(!PLACEHOLDER.contains("http-equiv"), "no meta refresh");
     }
 
     #[test]

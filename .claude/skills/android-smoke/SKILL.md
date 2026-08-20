@@ -63,7 +63,11 @@ embedded-Axum; only release exercises it.
   Tauri build script resolves its `frontendDist` (`../target/site`) against the
   repo, not against the target dir, and panics with
   `resource path ../target/site doesn't exist`. Same directory the merge gate
-  creates for the same reason.
+  creates for the same reason. For a **release APK** an empty dir is not enough:
+  that directory is what gets embedded and extracted at runtime, so it must be
+  the real site output. Symlink it — `ln -s "$CARGO_TARGET_DIR/site"
+  <worktree>/target/site` — or the APK ships without `pkg/app.js`, the launch
+  placeholder, and everything else the embedded server serves.
 - **Forward the socket that matches the *running* pid.** `head -1`/`tail -1`
   over `/proc/net/unix` picks a dead app's socket after a relaunch and the
   forward then lists no targets (curl just hangs):

@@ -7,7 +7,7 @@
     "frontendDist": "../target/site",
     "devUrl": "http://localhost:3000",
     "beforeDevCommand": "cd .. && TR_EMBEDDED_ORIGIN=http://localhost:3000 cargo leptos watch --features component-bench",
-    "beforeBuildCommand": "cd .. && cargo leptos build --release"
+    "beforeBuildCommand": "cd .. && cargo leptos build --release && test -f target/site/pkg/app.js && cp src-tauri/launch-placeholder.html target/site/index.html"
   },
   "plugins": {
     "deep-link": {

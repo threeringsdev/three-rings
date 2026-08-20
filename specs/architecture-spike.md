@@ -256,12 +256,84 @@ behind a single-fire latch is the one that makes the app work at all. Any future
   it. Making the first response stream a shell and resolve the session
   client-side is the real cure and needs a maintainer ruling — it trades away
   the `SsrMode::Async` 302 the auth redirects depend on.
-- **Android** (WB-01M0DT7YTF, "I initially see an `index.html not found` error
-  message, but then the app fully loads") is the *same* wait with a worse thing
-  in front of it: SSR ships no `index.html`, so the asset protocol's error page
-  is what the webview shows until `on_page_load` redirects it (finding 3 above),
-  and it stays there for the whole remote chain measured here. Pointing that
-  redirect at `/__loading` — the route is already mounted on every platform —
-  replaces the error page with the splash for all but the first instant; the
-  first instant needs a real `index.html` in the bundled assets. Left alone
-  here: untestable from this task's macOS host.
+- Android was left for its own task; see the section below.
+
+### The Android arm: the first frame the shell does not own (2026-08-20)
+
+WB-01M0DT7YTF, alpha feedback: *"When opening the mobile app, I initially see an
+`index.html not found` error message, but then the app fully loads."* Same wait
+as above, with a worse thing in front of it.
+
+Android's webview is created **after** the `setup` hook returns (finding 3
+above), so the shell's first chance to steer it is `on_page_load`. Whatever the
+webview loads before that is the **asset protocol's** root — and cargo-leptos
+writes no `index.html` into `frontendDist` (`target/site`), because an SSR app
+has no static entry page. The protocol answered that root with its own "asset
+not found: index.html", and the webview kept painting it for the entire
+remote-blocked chain measured above.
+
+Two changes, both inside `src-tauri/`:
+
+1. **`on_page_load` navigates to `/__loading`, not `/`** (`lib.rs`). The route
+   was already mounted on every platform. The loop guard is unchanged and still
+   terminates, because it keys on the **host**, not the path — a launch is three
+   loads: `tauri.localhost/…` (asset protocol → navigate fires),
+   `127.0.0.1:<port>/__loading` (guard blocks), and `127.0.0.1:<port>/` plus the
+   302 targets it hands off to (guard blocks). The host stays the raw bind
+   address here on purpose: desktop's `localhost` rewrite
+   (WB-01M036CA3M185WM4WGS5SDC161) is desktop-only, and this guard reads the
+   literal `127.0.0.1` that the navigate produces.
+2. **A real `index.html` in the bundled assets** —
+   `src-tauri/launch-placeholder.html`, copied to `<frontendDist>/index.html` by
+   `tauri.conf.json`'s `beforeBuildCommand`, i.e. by the same step that produces
+   the rest of that directory. It carries the splash's dark skin verbatim
+   (tokens, stylesheet, rings SVG, copy — unit tests in `splash.rs` assert the
+   bytes match) minus the script, so placeholder → splash is not a restyle.
+   **Inert on purpose:** it is served over the *asset protocol*, where a
+   `location.replace("/")` or a meta refresh resolves back to this same document
+   — an infinite reload with `on_page_load` re-firing every pass. The shell moves
+   the webview off it; the page never moves itself. It also cannot read the
+   `tr_theme` cookie (no server, no script), so it is the dark default; a
+   light-theme user sees dark for the few hundred ms before the splash — which
+   does read the cookie — replaces it.
+
+The web target stays untouched: `beforeBuildCommand` runs only for
+`cargo tauri build` / `cargo tauri android build`, never for the Render
+`Dockerfile` build or the merge gate's `cargo leptos build --release`.
+One local residue: after a Tauri build on a dev host, `target/site/index.html`
+exists, so a later `cargo leptos watch` serves the placeholder at
+`/index.html` (via `file_and_error_handler`) until a clean — cosmetic, and
+CI/Render never see it. The `cp` is guarded by `test -f target/site/pkg/app.js`
+so a mis-set-up worktree (frontendDist not populated — see the worktree
+release-APK skill note) fails the build loudly instead of shipping a
+placeholder-only APK.
+
+**Verified on the emulator** (Samsung_Flip_7 AVD, Android 16, two signed release
+APKs built from `68ac2f2` and from this branch; a debug APK proves nothing here
+— it rides `devUrl` and never starts the embedded server). The webview of a
+release build is not debuggable, so the documents were read off the embedded
+server itself: `adb root`, find the app's loopback listener in `/proc/net/tcp`,
+`adb forward`, `curl`.
+
+| probe | before (`68ac2f2`) | after |
+|---|---|---|
+| `GET /index.html` on the embedded server (the bytes the asset protocol serves at its root) | **404**, 1167 B — the Leptos error shell | **200**, 3553 B — the placeholder (`class="wordmark">Three Rings`, `--bg:#161616`) |
+| `splash: served` in `logcat` after a cold launch | **0** — the webview went straight to `/` | **1 per launch**, ~0.8 s after `am start` |
+| first painted frames (`adb screenrecord`) | system splash → bare window → app | system splash → the app's own dark ground → app |
+| `scripts/smoke-android.sh` | — | **SMOKE PASS** (process alive, no fatal, webview present) |
+
+The placeholder rendered by the device's own Chromium, at
+`http://127.0.0.1:<port>/index.html`: dark ground, three spinning rings,
+"Three Rings", "Signing you in…" — the splash's frame, minus the redirect.
+
+**What the emulator does *not* reproduce.** The reporter's *visible* "index.html
+not found" text never appeared here: signed out, with Render warm, `/` commits
+in a few hundred ms, so the asset-protocol 404 is on screen too briefly to paint
+its body and the window just reads as dark. Emulator network throttling
+(`adb emu network delay 3000`) did not lengthen it — signed-out `/` awaits
+nothing remote (the 0.0008 s row in the table above), and the long waits in the
+timeline are the *signed-in* path, which needs credentials this host does not
+have. So the frame evidence shows the two builds' first documents are different
+(404 shell vs. branded placeholder) rather than showing the error text
+disappearing. The 404 → 200 row is the load-bearing receipt: with a document at
+that address there is no error page left to render, whatever the wait.
