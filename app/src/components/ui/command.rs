@@ -130,6 +130,21 @@
 //!   already computed to `auto`) and restores the pickers on WebKit; the ⌘K
 //!   palette's own `min-h-80` — not this — is what gives it its 320px, in
 //!   both engines. See specs/app-ui.md Findings for the probe and its numbers.
+//!
+//! **A `CommandInput` has no horizontal padding of its own** — upstream's
+//! doesn't either, and this is a contract rather than an oversight: the search
+//! row is a *wrapper* that usually pairs the field with an adornment (the ⌘K
+//! palette's `⌕`), and one padded box around both is what keeps the glyph and
+//! the text on one inset. So every consumer owes the field a wrapper carrying
+//! the `px-*` (`palette.rs` `px-4`, `rail.rs` and the bench `px-2`,
+//! `DestinationList` `px-3` — matching `CommandList`'s `p-1` plus
+//! `CommandItem`'s `px-2`, so the typed text lines up with the rows it
+//! filters). Rendering a bare `<CommandInput/>` inside a `p-0` panel puts what
+//! you type flush against the panel's border — shipped that way in
+//! `DestinationList` and reported from alpha against the catalog's "Adding to"
+//! picker (WB-01M0DT0J4R). Guarded by `destination-picker.spec.ts`'s
+//! "inset from the panel edge", which measures the input's content box against
+//! the panel rather than asserting on a class name.
 
 use leptos::prelude::*;
 use tw_merge::tw_merge;

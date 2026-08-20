@@ -8759,3 +8759,42 @@ so the same layer churn is plausible there. Every surface that mounts a
 `Dialog` is authed and unreachable from the dev-webview attach (the login form
 answers "Something went wrong" there), so there is no way to measure it on this
 task's evidence, and it is left for its own task rather than fixed blind.
+
+### The "Adding to" search box had no padding: a `CommandInput` wrapper nobody wrote (2026-08-20, WB-01M0DT0J4R)
+
+`app/src/catalog/destination.rs`, `end2end/tests/destination-picker.spec.ts` —
+alpha report: "the search input has no padding — the text you type is right up
+against the edge of the box."
+
+**Not a `tw_merge` collision and not this call site's class.** `CommandInput`
+carries no `px-*` at all (`flex py-3 w-full h-10 …`), by design and matching
+upstream: the search row is meant to be a *wrapper* that can also hold an
+adornment, and one padded box around field + adornment is what keeps them on a
+single inset. Every other consumer supplies that wrapper — `palette.rs`'s
+`flex items-center gap-2 border-b px-4` (its `⌕` lives in the same box),
+`rail.rs`'s and the bench's `border-b px-2`. `DestinationList` — the shared
+body behind the catalog's "Adding to", the selection tray's "Move to…" and
+the tree's — rendered a bare `<CommandInput/>` straight into a `Command`
+inside a `PopoverContent p-0`, so the field's content box started at the
+panel's own 1px border.
+
+**Measured** (`/catalog?q=bolt`, picker open, "in" typed, gaps in CSS px from
+the panel's outer edge to the input's content box):
+
+| | left | right | first row's text |
+|---|---|---|---|
+| before | 1 | 1 | 13 |
+| after (`border-b px-3`) | 13 | 13 | 13 |
+
+`px-3` rather than the rail's `px-2` because 12px is what lines the typed text
+up with the rows it filters: `CommandList`'s `p-1` plus `CommandItem`'s
+`px-2`. The `border-b` comes with the wrapper for the same reason it does at
+the other three sites — the search row reads as a row.
+
+The convention is now written down in `command.rs`'s module doc, since the
+next consumer has no other way to learn it, and guarded by
+`destination-picker.spec.ts`'s "the search box's text is inset from the panel
+edge": it measures the input's content box against the panel and against a
+visible row, so a restyle that keeps the inset by other means still passes.
+Reading the input's own `padding-left` would report 0 both before and after —
+the padding that fixes this is on the wrapper.
