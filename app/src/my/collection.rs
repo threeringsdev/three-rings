@@ -2266,12 +2266,26 @@ fn FolderTableRow(
             // Padding still tracks the card rows' select cell, or the two row
             // kinds would size the column differently.
             <TableCell class="p-0 md:p-2">""</TableCell>
-            // `max-w-0 w-full` (P6-020): a child's `truncate` alone doesn't
-            // cap this column's own auto-layout min-content width — see the
-            // matching comment on `all_cards.rs`'s WHERE cell and
-            // specs/app-ui.md's P6-001 section. Folder names are
-            // user-chosen, same risk as a WHERE-cell collection name.
-            <TableCell class="max-w-0 w-full p-2">
+            // `max-w-0` (P6-020): a child's `truncate` alone doesn't cap this
+            // column's own auto-layout min-content width — see the matching
+            // comment on `all_cards.rs`'s WHERE cell and specs/app-ui.md's
+            // P6-001 section. Folder names are user-chosen, same risk as a
+            // WHERE-cell collection name.
+            //
+            // **No `w-full` (WB-01M0AWAM8Z).** P6-020 paired it with one, and
+            // `width: 100%` on a cell claims the table's whole leftover width
+            // — so *any* collection with a child row handed the Card column
+            // 743px of a 1150px table (65%) and starved the rest: Type
+            // collapsed to 84px, wrapping a type line onto four lines, and
+            // Mana to 52px, one symbol per line. Collections without folder
+            // rows were already fine, which is why this only showed up on
+            // some pages. Dropping `w-full` leaves the column's width to the
+            // *card* rows that share it (measured 259px here, one line per
+            // name, Type back to 356px) while `max-w-0` still stops a long
+            // unbreakable folder name from widening it — the invariant P6-020
+            // actually landed. Nothing here needs the leftover width: the
+            // folder name truncates inside whatever the card rows establish.
+            <TableCell class="max-w-0 p-2">
                 <a
                     href=format!("/my/collections/{id}")
                     class="flex items-center gap-2 font-medium hover:underline"

@@ -6571,6 +6571,80 @@ the fix and rebuilding turned it green again. Full serial run (`--workers=1`) of
 is the documented fixture-pool baseline failure (e2e-suite skill), unrelated to table layout,
 present before this task's changes too.
 
+**Amended, WB-01M0AWAM8Z (2026-08-19): `w-full` was the wrong half of that idiom.** The fix above
+is right about `max-w-0` and wrong about `w-full`, and alpha feedback caught it: *"on the /my cards
+list table, the card name column is way too narrow… the columns are not exactly the same as on the
+catalog, but they should still follow a similar layout."*
+
+`width: 100%` on a table cell is not "claim a fair share of the leftover width" — it is "claim
+**all** of it". Under `table-layout: auto` every other column then falls back to its own
+min-content, which for a wrapping text cell is its **longest word**. Measured at 1440×900 against
+the dev seed (`table` = 1150px in both rows; the catalog list read in the same session is the
+reference the feedback names):
+
+| table | Select | Name/Card | Type | Mana | WHERE/HERE | Wanted | Owned | max name lines |
+|---|---|---|---|---|---|---|---|---|
+| `/catalog?view=list` (the reference) | — | **449 (39%)** | 417 | 132 | — | — | 152 (Add) | 1 |
+| `/my/all` before | 24 | **118 (10%)** | 101 | 52 | **726 (63%)** | 67 | 63 | **4** |
+| `/my/all` after | 32 | **320 (28%)** | 294 | 99 | 276 (24%) | 67 | 63 | 1 |
+| collection w/ folder rows, before | 24 | **743 (65%)** | 84 | 52 | 92 | 92 | 63 | 1 |
+| collection w/ folder rows, after | 32 | 259 (23%) | 356 | 139 | 135 | 135 | 92 | 1 |
+
+Two cells carried it and both are fixed, differently, because they want different things:
+
+- **`all_cards.rs`'s WHERE cell** does need a real width of its own (it renders `"{n} in {name}"`),
+  so `w-full` became a **bounded percentage**: `w-[30%] lg:w-[24%]`. Two steps because Type is
+  `hidden lg:table-cell` right beside it — at `lg` a seventh column appears and WHERE gives some
+  back. The remaining width is then shared content-proportionally, which is all "follow a similar
+  layout to the catalog" ever meant: Card:Type comes out 320:294 against the catalog's own 449:417.
+- **`collection.rs`'s `FolderTableRow` name cell** needs *no* width — it shares the Card column with
+  the card rows, which already size it well. `w-full` was simply **dropped**, leaving bare
+  `max-w-0`. This one is worth flagging as the sneakier of the two: it only misbehaved on
+  collections that actually *have* child rows, so a collection page with no folders looked correct
+  and the P6-020 measurements (taken on the seeded fixture) missed it.
+
+**The general rule, so the next cell gets it right:** `max-w-0` is the part that buys
+data-independence — it caps this cell's contribution to the column's intrinsic-width pass at zero,
+so no user-chosen string can widen the column. `w-full` is a *separate*, much stronger claim, and
+appropriate only when a column genuinely should absorb every spare pixel. Pair `max-w-0` with a
+percentage when the column needs a floor, or with nothing at all when its siblings already size it.
+
+**Evidence.** Three new e2e tests, all three kill-verified by restoring `w-full` on both cells,
+rebuilding, and rerunning (they failed at Card = 10.3% of the table, folder-row Card = 64.6%, and
+Card 110px < WHERE 122px respectively):
+
+- `all-cards.spec.ts`, "desktop — the name column is allocated like the catalog's" → "/my/all gives
+  Card a catalog-sized share and WHERE stops hoarding". Reads `/catalog?view=list` **live** in the
+  same run rather than hardcoding a pixel budget, then asserts `/my/all`'s Card share exceeds half
+  the catalog's own Name share, WHERE stays under 35%, Card ≥ WHERE, and no card name wraps past
+  two lines — with an explicit base control that the fixture's first page carries a ≥20-char name,
+  since a wrapping assertion over short names is vacuous.
+- same describe → "a collection table with folder rows keeps Type and Mana readable", on the seeded
+  Shoebox (it holds *Rares*, so `folder-row` is actually present — the shape the assertion needs).
+- `all-cards.spec.ts`, "390px — bounding WHERE did not cost the phone layout". WHERE is now sized by
+  a number rather than by "whatever is left", so the phone width had to be re-measured rather than
+  assumed: 0px of `TableWrapper` overflow, 0px of document overflow, Type/Mana measuring 0 (the
+  `hidden` shape this width is supposed to have), WHERE under 35%, Card > WHERE.
+
+`cargo test --workspace --exclude frontend --exclude three_rings`: 484 passed, 0 failed (no Rust
+unit tests changed — this is a two-class-string diff).
+
+**Open question / filed debt, not this task's:** two pre-existing `all-cards.spec.ts` tests fail
+**solo** on the current dev branch from fixture drift, both before rendering anything and both
+provably independent of this diff:
+
+- "the location summary expands to the collections it names" — its own read,
+  `GET /api/all_cards?q=`, returns 50 rows of which **0** are multi-location (verified directly);
+  the account's multi-location seed rows sort past page one now that it holds 4,559 cards. This is
+  the failure the e2e-suite skill enumerates as "all-cards :270 (location summary)" under the
+  fixture-pool class — but it is no longer order-sensitive, it is deterministic.
+- "@fast the WHERE cell truncates a long unbreakable name instead of overflowing" (P6-020's own
+  test, above) — it needs "a catalog card this account owns nowhere" to build a *single*-location
+  row, and the account now owns every one of the 100 `q=z` candidates it scans (20 sampled by hand,
+  all owned). Its base control fails before the page is ever loaded. The 390px invariant it used to
+  guard is covered by the new 390px arm above; restoring this one needs a fixture decision (re-seed,
+  or a different way to get a single-location row), not a layout change.
+
 ### Bare `/my` ships the list, not the hidden table (2026-08-13, P6-166)
 
 `app/src/my/all_cards.rs` (`AllCardsPage`, new `AllCardsPending` /
