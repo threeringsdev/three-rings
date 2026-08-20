@@ -8295,3 +8295,39 @@ and it passes for a reason rather than by luck: `CountStepper`'s ± buttons are
 `hidden sm:inline-flex`, so below 640px they leave the layout entirely and the
 WANTED cell renders only the number that column already showed. The `@fast`
 grid-overflow tests at the same width pass too.
+
+**Verification (round 2).** Unit: 440 + 44 passed, 0 failed — including
+`the_gap_is_measured_against_the_servers_group_total` (the straddling-page
+shape as arithmetic) and `committing_a_gap_sets_the_target_it_implies`. E2E:
+`collection-view.spec.ts` **41/41, no skips**; four new `@fast` pins (the
+server group total end-to-end against `Depth Box`, `want/set`'s
+set-not-add with a `+ Want` positive control, the grid round trip asserting
+both the number shown *and* the target the next commit writes, plus the
+existing shortfall cases). Full suite in 4 shards with a login each:
+**341 passed / 40 failed, zero 401s, zero strict-mode violations**, and zero
+failures in `collection-view.spec.ts`.
+
+**The 40 were confirmed individually this time, not folded** — the review's
+objection to the previous round. Six pool-drain and 29 timeout/contention
+failures in the two filed classes, plus five that had not been checked
+one-by-one before; all five re-run solo and all five are shared-fixture
+accumulation, measured rather than assumed:
+
+- `collection-undo-restore:208` expects 2 copies of its card in the Inbox and
+  finds **159** — every scratch delete relocates holdings there
+  (`HaveDisposition::ToParent`), so the Inbox is the suite's sediment.
+- `collection-undo-restore:312`/`:393` cannot find their own row in
+  `/my/recently-deleted`. That list is `LIMIT 50` and is **full**, its oldest
+  entry timestamped minutes earlier: the suite soft-deletes faster than the
+  window holds, so a subject falls out of it while its own test is still
+  running.
+- `responsive:430` walks every collection in the tree clicking through to
+  `/catalog`. The tree carries **137 leftover `zz-e2e` collections out of 146
+  live ones**, so that walk is now ~137 page loads and times out with an
+  unrendered grid. Its failure message even names another spec's leftover
+  (`zz-e2e-undo-res-subj-…`).
+- `collection-header-kebab:309` passed solo.
+
+None of the five reads a collection-table WANTED cell. Worth filing separately
+from the two existing debt tasks: **the suite has no teardown for soft-deleted
+collections**, and three distinct failure modes now trace to that one fact.
