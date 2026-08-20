@@ -41,8 +41,13 @@ import { AUTH_STATE, hydrated } from "./helpers";
 test.use({ storageState: AUTH_STATE });
 
 const TOAST = '[data-name="Toast"]';
-const STEPPER_VALUE = '[data-testid="count-stepper-value"]';
-const STEPPER_INPUT = '[data-testid="count-stepper-input"]';
+// Scoped to the HERE cell: every collection row now carries a second
+// stepper in its WANTED cell (the still-needed count), so a row-scoped
+// `count-stepper-*` locator resolves to two elements.
+const STEPPER_VALUE =
+  '[data-testid="here-cell"] [data-testid="count-stepper-value"]';
+const STEPPER_INPUT =
+  '[data-testid="here-cell"] [data-testid="count-stepper-input"]';
 const HERE = '[data-testid="here-count"]';
 
 type Summary = { id: string; name: string };

@@ -42,6 +42,16 @@ test.use({ storageState: AUTH_STATE });
 
 const quick = expect.configure({ timeout: 2000 });
 
+/// HERE-cell-scoped stepper locators. Every collection row carries **two**
+/// steppers since WANTED became a still-needed count you can edit
+/// (specs/app-ui.md, maintainer ruling 2026-08-19), so a row-scoped
+/// `count-stepper-*` locator resolves to two elements and fails Playwright's
+/// strict mode. Say which column you mean.
+const HERE_VALUE =
+  '[data-testid="here-cell"] [data-testid="count-stepper-value"]';
+const HERE_INC = '[data-testid="here-cell"] [data-testid="count-stepper-inc"]';
+const HERE_DEC = '[data-testid="here-cell"] [data-testid="count-stepper-dec"]';
+
 type Summary = {
   id: string;
   parent_id: string | null;
@@ -56,11 +66,15 @@ type Row = {
   name: string;
   type_line: string | null;
   present: number;
+  /// The card's copies here across every printing on this board — folded
+  /// server-side, because the rows are one keyset page (see CardRow's doc).
+  present_group: number;
   desired: number;
   owned: number;
   present_rollup: number;
   board: "main" | "side" | "maybe";
   holding_id: string | null;
+  desire_id: string | null;
 };
 type Totals = {
   present: number;
@@ -139,10 +153,12 @@ const rowFor = (page: Page, oracleId: string) =>
 
 /// Every rendered card row's three numeric columns, in document order.
 ///
-/// HERE is read from the count element rather than the cell: an editable cell
-/// is a `CountStepper`, whose `textContent` also carries its `−`/`+` button
-/// labels. `count-stepper-value` (editable) and `here-count` (not) are the two
-/// shapes, and which one appears is itself part of the contract.
+/// HERE and WANTED are read from the count element rather than the cell: an
+/// editable cell is a `CountStepper`, whose `textContent` also carries its
+/// `−`/`+` button labels. `count-stepper-value` (editable) and
+/// `here-count` / `wanted-placeholder` (not) are the two shapes per column, and
+/// which one appears is itself part of the contract — so both columns report
+/// their editability alongside their number.
 async function renderedCells(page: Page) {
   return page.$$eval('[data-testid="collection-row"]', (trs) =>
     trs.map((tr) => {
@@ -151,14 +167,18 @@ async function renderedCells(page: Page) {
         '[data-testid="count-stepper-value"], [data-testid="here-count"]',
       );
       const rollup = cell?.querySelector('[data-testid="here-rollup"]');
+      const wantCell = tr.querySelector('[data-testid="wanted-count"]');
+      const want = wantCell?.querySelector(
+        '[data-testid="count-stepper-value"], [data-testid="wanted-placeholder"]',
+      );
       return {
         oracle: tr.getAttribute("data-oracle") ?? "",
         editable: !!cell?.querySelector('[data-testid="count-stepper"]'),
         here: (count?.textContent?.trim() ?? "") + (rollup?.textContent?.trim() ?? ""),
-        wanted:
-          tr
-            .querySelector('[data-testid="wanted-count"]')
-            ?.textContent?.trim() ?? "",
+        wanted: want?.textContent?.trim() ?? "",
+        wantedEditable: !!wantCell?.querySelector(
+          '[data-testid="count-stepper"]',
+        ),
         owned:
           tr.querySelector('[data-testid="owned-count"]')?.textContent?.trim() ??
           "",
@@ -168,8 +188,9 @@ async function renderedCells(page: Page) {
 }
 
 /// What a row should render, derived from the API row — the expectation half.
-/// Mirrors the spec's rules: WANTED only when set and different, OWNED collapses
-/// when equal to the here total, the rolled-up part appended as `+n`.
+/// Mirrors the spec's rules: WANTED is the still-needed count printed once per
+/// card and board, OWNED collapses when equal to the here total, the rolled-up
+/// part appended as `+n`.
 function expectedCells(rows: Row[]) {
   const seen = new Set<string>();
   return rows.map((r) => {
@@ -180,6 +201,12 @@ function expectedCells(rows: Row[]) {
     const here =
       (r.present > 0 ? String(r.present) : "—") +
       (r.present_rollup > 0 ? `+${r.present_rollup}` : "");
+    // WANTED counts copies STILL NEEDED (maintainer ruling 2026-08-19), at
+    // `(oracle, board)` grain on both sides — so the gap is measured against
+    // what the whole card group holds, which the SERVER folds. Deriving it
+    // here from the page's rows would reproduce the very page-boundary bug the
+    // server fold exists to prevent, and the test would agree with the bug.
+    const shortfall = Math.max(r.desired - r.present_group, 0);
     return {
       oracle: r.oracle_id,
       // Exactly the rows a single `holdings` row backs get the stepper: a cell
@@ -187,10 +214,14 @@ function expectedCells(rows: Row[]) {
       // is not addressable by one number.
       editable: r.holding_id !== null,
       here,
-      wanted:
-        first && r.desired > 0 && r.desired !== r.present
-          ? String(r.desired)
-          : "—",
+      // Printed once per card and board; zero is a number here, not a dash —
+      // it is the create-a-want / keep-a-met-want affordance.
+      wanted: first ? String(shortfall) : "—",
+      // …and steppable wherever it prints, except the one refusal: a want
+      // already spread over several `desires` rows has no single row a lone
+      // number could mean. `desired === 0` is NOT a refusal — it is the
+      // create-from-zero case.
+      wantedEditable: first && !(r.desired > 0 && r.desire_id === null),
       owned: r.owned !== hereTotal ? String(r.owned) : "—",
     };
   });
@@ -297,11 +328,20 @@ test("a card the deck only wants is still a row @fast", async ({
       const tr = rowFor(page, row.oracle_id);
       await quick(tr).toHaveCount(1);
       await quick(tr.locator('[data-testid="here-cell"]')).toHaveText("—");
-      await quick(tr.locator('[data-testid="wanted-count"]')).toHaveText(
-        String(row.desired),
-      );
-      // No stepper on a row with nothing here to step.
-      await quick(tr.locator('[data-testid="count-stepper"]')).toHaveCount(0);
+      // Read the WANTED number from its own count element, not the cell: where
+      // the want is steppable the cell's text carries the `−`/`+` labels too.
+      await quick(
+        tr.locator(
+          '[data-testid="wanted-count"] [data-testid="count-stepper-value"],' +
+            ' [data-testid="wanted-count"] [data-testid="wanted-placeholder"]',
+        ),
+      ).toHaveText(String(row.desired));
+      // No HERE stepper on a row with nothing here to step. (The WANTED cell
+      // may well carry one — that is this column's whole point — so the scope
+      // is the HERE cell, not the row.)
+      await quick(
+        tr.locator('[data-testid="here-cell"] [data-testid="count-stepper"]'),
+      ).toHaveCount(0);
     }
   }).toPass({ timeout: 30_000, intervals: [500, 1_000, 2_000] });
 });
@@ -998,6 +1038,30 @@ async function addHave(
   expect(res.status(), "add have").toBe(200);
 }
 
+/// Want a card in a collection — the desire-only row shape the WANTED column
+/// exists for. Oracle-grained, with no printing pin, so exactly one `desires`
+/// row backs the cell and the stepper has something to address.
+async function addWant(
+  request: APIRequestContext,
+  id: string,
+  oracleId: string,
+  quantity = 1,
+) {
+  const res = await request.post(`/api/collections/${id}/want`, {
+    data: { oracle_id: oracleId, quantity },
+  });
+  expect(res.status(), "add want").toBe(200);
+}
+
+/// A row's WANTED number, wherever it lives. The cell is a `CountStepper` where
+/// the want is editable, and its `textContent` would carry the `−`/`+` labels
+/// too — so read the count element, whichever of the two shapes rendered.
+const wantedValue = (tr: ReturnType<typeof rowFor>) =>
+  tr.locator(
+    '[data-testid="wanted-count"] [data-testid="count-stepper-value"],' +
+      ' [data-testid="wanted-count"] [data-testid="wanted-placeholder"]',
+  );
+
 /// Some printing the fixture already holds — any will do; the tests below only
 /// move it inside their own scratch collections.
 async function somePrinting(request: APIRequestContext): Promise<Row> {
@@ -1029,12 +1093,12 @@ test("the stepper edits HERE in place, and the header follows it @fast", async (
     );
 
     // Step up, then blur out of the stepper: one editing session, one commit.
-    await tr.locator('[data-testid="count-stepper-inc"]').click();
+    await tr.locator(HERE_INC).click();
     await page.locator('[data-testid="collection-title"]').click();
 
     // Both numbers move, and the *database* moved — asserting only the DOM
     // would pass with the save stubbed out.
-    await expect(tr.locator('[data-testid="count-stepper-value"]')).toHaveText(
+    await expect(tr.locator(HERE_VALUE)).toHaveText(
       "3",
     );
     await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
@@ -1056,7 +1120,7 @@ test("the stepper edits HERE in place, and the header follows it @fast", async (
     await expect(
       page.locator(`[data-tree-row="${scratch}"] [data-name="Badge"]`).first(),
     ).toHaveText("3");
-    await expect(tr.locator('[data-testid="count-stepper-value"]')).toHaveText(
+    await expect(tr.locator(HERE_VALUE)).toHaveText(
       "3",
     );
 
@@ -1064,7 +1128,7 @@ test("the stepper edits HERE in place, and the header follows it @fast", async (
     const toast = page.locator('[data-name="Toast"]', { hasText: "2 → 3" });
     await expect(toast).toBeVisible();
     await toast.getByRole("button", { name: "Undo" }).click();
-    await expect(tr.locator('[data-testid="count-stepper-value"]')).toHaveText(
+    await expect(tr.locator(HERE_VALUE)).toHaveText(
       "2",
     );
     await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
@@ -1082,6 +1146,555 @@ test("the stepper edits HERE in place, and the header follows it @fast", async (
     );
   } finally {
     await deleteCollection(request, scratch);
+  }
+});
+
+// The alpha report this pair exists for: "there's a stepper for changing the
+// quantity of cards 'here' in a collection, but not for 'Wanted'". WANTED is
+// the same `CountStepper`, wired to `set_desire_quantity` through the shared
+// `WantStepper` that `/cards/:id`'s "Your wants" rows already used — so these
+// two tests are the collection-table half of `card-detail.spec.ts`'s want
+// stepper pair, and they assert the two things a shared component cannot bring
+// with it: this page's own header clause, and that the write reaches the row
+// the *table* addressed.
+
+test("the WANTED stepper edits a want in place from the table, and a reload agrees @fast", async ({
+  page,
+  request,
+}) => {
+  const card = await somePrinting(request);
+  const scratch = await createCollection(
+    request,
+    "binder",
+    scratchName("want-stepper"),
+  );
+  try {
+    await addWant(request, scratch, card.oracle_id, 2);
+    await page.goto(`/my/collections/${scratch}`);
+    await hydrated(page);
+
+    const tr = rowFor(page, card.oracle_id);
+    await expect(tr).toHaveCount(1);
+    await expect(wantedValue(tr)).toHaveText("2");
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "0 here · 2 wanted",
+    );
+    // The row holds nothing, so HERE is the non-editable shape — which is also
+    // what makes the stepper found below unambiguously the WANTED one.
+    await expect(
+      tr.locator('[data-testid="here-cell"] [data-testid="count-stepper"]'),
+    ).toHaveCount(0);
+
+    // Step up, then blur out of the stepper: one editing session, one commit.
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-inc"]')
+      .click();
+    await page.locator('[data-testid="collection-title"]').click();
+
+    // The cell, the header clause, and the *database* — asserting only the DOM
+    // would pass with the save stubbed out.
+    await expect(wantedValue(tr)).toHaveText("3");
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "0 here · 3 wanted",
+    );
+    await expect(async () => {
+      const after = await viewOf(request, scratch);
+      expect(after.cards[0].desired).toBe(3);
+      expect(after.totals.desired).toBe(3);
+    }).toPass({ timeout: 10_000 });
+
+    // A reload agrees: the optimistic number was not the only thing that moved.
+    await page.reload();
+    await hydrated(page);
+    await expect(wantedValue(rowFor(page, card.oracle_id))).toHaveText("3");
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "0 here · 3 wanted",
+    );
+  } finally {
+    await deleteCollection(request, scratch);
+  }
+});
+
+test("committing a WANTED cell to zero drops the want, with no Undo offered @fast", async ({
+  page,
+  request,
+}) => {
+  // Desires carry no ledger (`shared::QuickAddReceipt`'s own doc: a `+ Want`
+  // is confirmed but never undoable), so a committed zero here is a direct
+  // delete — unlike the HERE stepper's reversible move, which offers Undo.
+  const card = await somePrinting(request);
+  const scratch = await createCollection(
+    request,
+    "binder",
+    scratchName("want-zero"),
+  );
+  try {
+    await addWant(request, scratch, card.oracle_id, 1);
+    await page.goto(`/my/collections/${scratch}`);
+    await hydrated(page);
+
+    const tr = rowFor(page, card.oracle_id);
+    await expect(wantedValue(tr)).toHaveText("1");
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-dec"]')
+      .click();
+    await page.locator('[data-testid="collection-title"]').click();
+
+    // The cell stays a stepper reading 0 — that zero is the affordance that
+    // lets you want the card again — and the header's wanted clause goes,
+    // rather than standing stale at "1 wanted" until a reload.
+    await expect(wantedValue(tr)).toHaveText("0");
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "0 here",
+    );
+
+    const toast = page.locator('[data-name="Toast"]', {
+      hasText: `Removed ${card.name} from wants`,
+    });
+    await expect(toast).toBeVisible();
+    await expect(toast.getByRole("button", { name: "Undo" })).toHaveCount(0);
+
+    await expect(async () => {
+      const after = await viewOf(request, scratch);
+      expect(after.cards).toEqual([]);
+      expect(after.totals.desired).toBe(0);
+    }).toPass({ timeout: 10_000 });
+  } finally {
+    await deleteCollection(request, scratch);
+  }
+});
+
+test("a met want is a steppable 0, and stepping it back to 0 keeps the want @fast", async ({
+  page,
+  request,
+}) => {
+  // Maintainer ruling 2026-08-19, rule 3: WANTED counts copies still needed,
+  // so a want you have already filled reads 0 — and stepping that 0 sets the
+  // target to what is held rather than deleting the row. A want means "keep N
+  // of these here"; forgetting one outright stays card detail's job.
+  const card = await somePrinting(request);
+  const scratch = await createCollection(
+    request,
+    "binder",
+    scratchName("met-want"),
+  );
+  try {
+    await addHave(request, scratch, card.printing_id, 2);
+    await addWant(request, scratch, card.oracle_id, 2);
+    await page.goto(`/my/collections/${scratch}`);
+    await hydrated(page);
+
+    const tr = rowFor(page, card.oracle_id);
+    // A steppable zero, not the `—` the pre-ruling rule collapsed this to.
+    await expect(wantedValue(tr)).toHaveText("0");
+    await expect(
+      tr.locator('[data-testid="wanted-count"] [data-testid="count-stepper"]'),
+    ).toHaveCount(1);
+
+    // Ask for one more than is here: the target becomes held + 1 = 3.
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-inc"]')
+      .click();
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(wantedValue(tr)).toHaveText("1");
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(3);
+    }).toPass({ timeout: 10_000 });
+
+    // …and back down to nothing-still-needed. The want survives at the level
+    // held (2); it is NOT deleted, which is the half of the ruling this test
+    // exists for.
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-dec"]')
+      .click();
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(wantedValue(tr)).toHaveText("0");
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(2);
+    }).toPass({ timeout: 10_000 });
+
+    // Card detail still lists the want — the surface that speaks in
+    // quantities rather than gaps, and the one that can delete it.
+    const detail = await request.get(`/api/cards/${card.oracle_id}`);
+    expect(detail.status()).toBe(200);
+    const wants = ((await detail.json()) as {
+      wants: { collection_id: string; quantity: number }[] | null;
+    }).wants;
+    expect(wants?.find((w) => w.collection_id === scratch)?.quantity).toBe(2);
+
+    await page.reload();
+    await hydrated(page);
+    await expect(wantedValue(rowFor(page, card.oracle_id))).toHaveText("0");
+  } finally {
+    await deleteCollection(request, scratch);
+  }
+});
+
+test("stepping WANTED up on a card nothing is wanted for creates the want @fast", async ({
+  page,
+  request,
+}) => {
+  // The create-from-zero case (ruling rule 3): no `desires` row exists, so the
+  // commit goes through `create_desire` rather than `set_desire_quantity`, and
+  // the stepper rewires to the row it made — a second step in the same session
+  // must SET that row, not create-and-increment a second time.
+  const card = await somePrinting(request);
+  const scratch = await createCollection(
+    request,
+    "binder",
+    scratchName("want-create"),
+  );
+  try {
+    await addHave(request, scratch, card.printing_id, 1);
+    await page.goto(`/my/collections/${scratch}`);
+    await hydrated(page);
+
+    const tr = rowFor(page, card.oracle_id);
+    await expect(wantedValue(tr)).toHaveText("0");
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "1 here",
+    );
+
+    // Ask for two more than the one already here → target 3.
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-inc"]')
+      .click();
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-inc"]')
+      .click();
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(wantedValue(tr)).toHaveText("2");
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "1 here · 3 wanted",
+    );
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(3);
+    }).toPass({ timeout: 10_000 });
+
+    // A second edit in the same session must land on the row the first one
+    // created — 4, not 3 + 4.
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-inc"]')
+      .click();
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(wantedValue(tr)).toHaveText("3");
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(4);
+    }).toPass({ timeout: 10_000 });
+
+    await page.reload();
+    await hydrated(page);
+    await expect(wantedValue(rowFor(page, card.oracle_id))).toHaveText("3");
+  } finally {
+    await deleteCollection(request, scratch);
+  }
+});
+
+test("the want-set endpoint sets rather than adds, so a stale stepper cannot compound @fast", async ({
+  request,
+}) => {
+  // Review round 2, MAJOR. The WANTED stepper commits an ABSOLUTE target it
+  // computed from what it believes is there, so the endpoint behind
+  // create-from-zero must SET. With `+ Want`'s incrementing upsert, a want
+  // created in another tab since the page loaded — or a second commit racing
+  // the first, before the created row's id comes back — lands a quantity
+  // nobody asked for.
+  //
+  // At the API level, because that is where the two semantics differ: the
+  // stepper cannot be made to race itself reliably from a browser.
+  const card = await somePrinting(request);
+  const scratch = await createCollection(
+    request,
+    "binder",
+    scratchName("want-set"),
+  );
+  try {
+    // Someone else's write lands first…
+    await addWant(request, scratch, card.oracle_id, 3);
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(3);
+    }).toPass({ timeout: 10_000 });
+
+    // …and the stepper's own create, which believes it is starting from
+    // nothing, asks for 2. SET semantics: the answer is 2, not 5.
+    const set = await request.post(`/api/collections/${scratch}/want/set`, {
+      data: { oracle_id: card.oracle_id, quantity: 2 },
+    });
+    expect(set.status(), "want/set").toBe(200);
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(2);
+    }).toPass({ timeout: 10_000 });
+
+    // Twice more with the same body: setting is idempotent, adding would not be.
+    for (const q of [2, 2]) {
+      const again = await request.post(`/api/collections/${scratch}/want/set`, {
+        data: { oracle_id: card.oracle_id, quantity: q },
+      });
+      expect(again.status()).toBe(200);
+    }
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(2);
+    }).toPass({ timeout: 10_000 });
+
+    // …while `+ Want` keeps its own gesture semantics, untouched: pressing it
+    // again means "and one more". This is the positive control — without it
+    // the assertions above would also pass if both routes had become SET.
+    await addWant(request, scratch, card.oracle_id, 1);
+    await expect(async () => {
+      expect((await viewOf(request, scratch)).cards[0].desired).toBe(3);
+    }).toPass({ timeout: 10_000 });
+  } finally {
+    await deleteCollection(request, scratch);
+  }
+});
+
+test("the WANTED gap is measured against the card's whole held count here @fast", async ({
+  page,
+  request,
+}) => {
+  // Review round 2, BLOCKER. `desired − held` is `(oracle, board)`-grained on
+  // both sides, and `held` must be the card's total in this collection — the
+  // server's `present_group`, not a fold over the rendered rows, which are one
+  // keyset page and can split a multi-printing card across two of them. The
+  // gap is not only printed from that number, it is WRITTEN back through it
+  // (`desired' = held + gap`), so a fold would save a wrong quantity.
+  //
+  // Two printings of ONE card in one collection is the shape that tells a
+  // group total from a row's own `present` at all — `Depth Box` is the seeded
+  // collection that has it (`app/src/seed.rs` `build_depth`), and the guard
+  // below fails loudly rather than skipping if a re-seed ever loses it. (The
+  // page-boundary case itself is pinned as arithmetic in
+  // `the_gap_is_measured_against_the_servers_group_total`; a >50-row fixture
+  // costs far more here than it proves.)
+  const source = await collectionNamed(request, "Depth Box");
+  const view = await viewOf(request, source.summary.id, { limit: 200 });
+  const groups = new Map<string, Row[]>();
+  for (const r of view.cards.filter((c) => c.present > 0)) {
+    const k = `${r.oracle_id}/${r.board}`;
+    groups.set(k, [...(groups.get(k) ?? []), r]);
+  }
+  const pair = [...groups.values()].find((rs) => rs.length >= 2);
+  expect(
+    pair,
+    "dev seed must hold two printings of one card in one collection (build_depth)",
+  ).toBeTruthy();
+  const [p1, p2] = pair!;
+
+  const scratch = await createCollection(
+    request,
+    "binder",
+    scratchName("group-gap"),
+  );
+  try {
+    // 1 + 2 of the same card, under two printings, in one collection.
+    await addHave(request, scratch, p1.printing_id, 1);
+    await addHave(request, scratch, p2.printing_id, 2);
+    await addWant(request, scratch, p1.oracle_id, 6);
+
+    await expect(async () => {
+      const after = await viewOf(request, scratch);
+      const rows = after.cards.filter((r) => r.oracle_id === p1.oracle_id);
+      expect(rows.length, "two printing rows for one card").toBe(2);
+      // The server folds the group's held total onto BOTH rows — the field
+      // the client is forbidden from deriving for itself.
+      for (const r of rows) {
+        expect(r.present_group, "the server folds the group's held").toBe(3);
+      }
+      // …and the per-row `present` still differs, which is what makes a
+      // client-side fold distinguishable from the server's number at all.
+      expect(new Set(rows.map((r) => r.present))).toEqual(new Set([1, 2]));
+    }).toPass({ timeout: 10_000 });
+
+    await page.goto(`/my/collections/${scratch}`);
+    await hydrated(page);
+    // The cell prints once, on the first of the two rows.
+    const cells = page.locator(
+      `[data-testid="collection-row"][data-oracle="${p1.oracle_id}"] [data-testid="wanted-count"] [data-testid="count-stepper-value"]`,
+    );
+    await expect(cells).toHaveCount(1);
+    // 6 wanted, 3 held here → 3 still needed. A fold over this row alone would
+    // print 5 (6 − 1) or 4 (6 − 2) depending on which printing carried it.
+    await expect(cells).toHaveText("3");
+
+    // Stepping to 4 must ask for 3 + 4 = 7. Against a row-local `held` it
+    // would have written 5 or 6 — the silent part of the defect.
+    const tr = page
+      .locator(
+        `[data-testid="collection-row"][data-oracle="${p1.oracle_id}"]`,
+      )
+      .first();
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-inc"]')
+      .click();
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(cells).toHaveText("4");
+    await expect(async () => {
+      const v = await viewOf(request, scratch);
+      expect(
+        v.cards.find((r) => r.oracle_id === p1.oracle_id)!.desired,
+      ).toBe(7);
+    }).toPass({ timeout: 10_000 });
+  } finally {
+    await deleteCollection(request, scratch);
+  }
+});
+
+test("a round trip through grid keeps the session's live numbers, and what they write @fast", async ({
+  page,
+  request,
+}) => {
+  // Review round 2, MAJOR. The live `(held, desired)` pair used to be a map of
+  // signals built by `CollectionTable`, so its lifetime was that component's
+  // MOUNT. Toggling to grid and back rebuilt it from the frozen payload and
+  // every session edit silently reverted — and because `held` is a WRITE input
+  // (`desired' = held + gap`), the next WANTED commit then saved a number
+  // computed from the reverted value. Hoisted to the payload's lifetime, the
+  // same one `row_deltas` has.
+  const card = await somePrinting(request);
+  const scratch = await createCollection(
+    request,
+    "binder",
+    scratchName("grid-roundtrip"),
+  );
+  try {
+    await addHave(request, scratch, card.printing_id, 2);
+    await page.goto(`/my/collections/${scratch}`);
+    await hydrated(page);
+
+    const tr = rowFor(page, card.oracle_id);
+    // HERE 2 → 5, in this session only: the payload still says 2.
+    await tr.locator(HERE_VALUE).click();
+    await tr
+      .locator('[data-testid="here-cell"] [data-testid="count-stepper-input"]')
+      .fill("5");
+    await tr
+      .locator('[data-testid="here-cell"] [data-testid="count-stepper-input"]')
+      .press("Enter");
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(tr.locator(HERE_VALUE)).toHaveText("5");
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "5 here",
+    );
+
+    // Out to grid and straight back — no reload, no navigation, so `view_res`
+    // never refetches and the payload the table rebuilds from still says 2.
+    await page.getByRole("radio", { name: "Grid view" }).click();
+    await page.waitForURL((url) => url.searchParams.get("view") === "grid");
+    await expect(page.getByTestId("collection-grid")).toBeVisible();
+    await page.getByRole("radio", { name: "List view" }).click();
+    await page.waitForURL((url) => url.searchParams.get("view") !== "grid");
+    await hydrated(page);
+
+    // (a) the numbers survived the round trip…
+    const back = rowFor(page, card.oracle_id);
+    await expect(back.locator(HERE_VALUE)).toHaveText("5");
+    await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
+      "5 here",
+    );
+
+    // (b) …and so did what they WRITE. Ask for 5 more than are here: the
+    // target must be 5 + 5 = 10. Against a reverted `held` of 2 it would have
+    // saved 7 — the silent half of this defect, and the reason the assertion
+    // above is not enough on its own.
+    await back
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-value"]')
+      .click();
+    await back
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-input"]')
+      .fill("5");
+    await back
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-input"]')
+      .press("Enter");
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(wantedValue(back)).toHaveText("5");
+    await expect(async () => {
+      const v = await viewOf(request, scratch);
+      expect(v.cards[0].present).toBe(5);
+      expect(v.cards[0].desired).toBe(10);
+    }).toPass({ timeout: 10_000 });
+  } finally {
+    await deleteCollection(request, scratch);
+  }
+});
+
+test("a deck section header composes a WANTED edit and a HERE edit in the same row @fast", async ({
+  page,
+  request,
+}) => {
+  // Want-stepper review round 1, MAJOR. A section's contribution per card is
+  // `max(held, desired)`, and each column's stepper used to compute its own
+  // slot delta against a copy of the *other* number captured when it mounted.
+  // Held 2 / desired 4: WANTED 4 → 1 correctly pushed −2, and HERE 2 → 3 then
+  // pushed `max(3,4) − max(2,4)` = 0 against a `desired` that was already 1,
+  // stranding the header at 2 where the truth is 3 — durably, until a reload.
+  const card = await somePrinting(request);
+  const deck = await createCollection(
+    request,
+    "deck",
+    scratchName("compose"),
+    "commander",
+  );
+  try {
+    await addHave(request, deck, card.printing_id, 2);
+    await addWant(request, deck, card.oracle_id, 4);
+    await page.goto(`/my/collections/${deck}`);
+    await hydrated(page);
+
+    // One card in a fresh scratch deck is one section, so its header is
+    // unambiguously this row's own contribution: max(2 held, 4 wanted) = 4.
+    const section = page.locator('[data-testid="deck-section"]');
+    await expect(section).toHaveCount(1);
+    await expect(section).toHaveText(/· 4$/);
+
+    const tr = rowFor(page, card.oracle_id);
+    // Still needed, not the target: 4 wanted less the 2 already here.
+    await expect(wantedValue(tr)).toHaveText("2");
+
+    // Gap 2 → 3, by typing (one action instead of a click each). The target
+    // this implies is held + 3 = 5, so the section grows to 5.
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-value"]')
+      .click();
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-input"]')
+      .fill("3");
+    await tr
+      .locator('[data-testid="wanted-count"] [data-testid="count-stepper-input"]')
+      .press("Enter");
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(wantedValue(tr)).toHaveText("3");
+    await expect(section).toHaveText(/· 5$/);
+
+    // …then HERE 2 → 3 in the same row, in the same session. Two things have
+    // to happen at once, and each was a separate defect: the section header
+    // must compute against the want's *post-edit* target (5, so it does not
+    // move), and this row's WANTED cell must re-render its gap live, from 3
+    // to 2, because the number it shows is `desired − held`.
+    await tr
+      .locator('[data-testid="here-cell"] [data-testid="count-stepper-inc"]')
+      .click();
+    await page.locator('[data-testid="collection-title"]').click();
+    await expect(
+      tr.locator('[data-testid="here-cell"] [data-testid="count-stepper-value"]'),
+    ).toHaveText("3");
+    await expect(wantedValue(tr)).toHaveText("2");
+    await expect(section).toHaveText(/· 5$/);
+
+    // The server agrees, and so does a page rebuilt from it — the live
+    // numbers were not merely self-consistent.
+    await expect(async () => {
+      const after = await viewOf(request, deck);
+      expect(after.cards[0].present).toBe(3);
+      expect(after.cards[0].desired).toBe(5);
+    }).toPass({ timeout: 10_000 });
+    await page.reload();
+    await hydrated(page);
+    await expect(page.locator('[data-testid="deck-section"]')).toHaveText(
+      /· 5$/,
+    );
+    await expect(wantedValue(rowFor(page, card.oracle_id))).toHaveText("2");
+  } finally {
+    await deleteCollection(request, deck);
   }
 });
 
@@ -1107,10 +1720,10 @@ test("the stepper's last copy is removable, not floored @fast", async ({
     await hydrated(page);
 
     const tr = rowFor(page, card.oracle_id);
-    const dec = tr.locator('[data-testid="count-stepper-dec"]');
+    const dec = tr.locator(HERE_DEC);
     await expect(dec).toHaveAttribute("aria-disabled", "false");
     await expect(
-      tr.locator('[data-testid="count-stepper-value"]'),
+      tr.locator(HERE_VALUE),
     ).toHaveAttribute("aria-valuemin", "0");
 
     // A plain click, not `force`: an `aria-disabled` control would fail
@@ -1157,7 +1770,7 @@ test("emptying a deck moves its cards to the chosen destination", async ({
     // same-URL refetch left it applied on top of fresh totals and the emptied
     // deck's header read "1 here".
     const tr = rowFor(page, card.oracle_id);
-    await tr.locator('[data-testid="count-stepper-inc"]').click();
+    await tr.locator(HERE_INC).click();
     await page.locator('[data-testid="collection-title"]').click();
     await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
       "3 here",
@@ -1399,10 +2012,10 @@ test.describe("grid view (grid-toggle task)", () => {
 
       // Edit while list mode is showing — the only mode with a stepper at all.
       const tr = rowFor(page, card.oracle_id);
-      await tr.locator('[data-testid="count-stepper-inc"]').click();
+      await tr.locator(HERE_INC).click();
       await page.locator('[data-testid="collection-title"]').click();
       await expect(
-        tr.locator('[data-testid="count-stepper-value"]'),
+        tr.locator(HERE_VALUE),
       ).toHaveText("3");
       await expect(
         page.locator('[data-testid="collection-counts"]'),
@@ -1456,7 +2069,7 @@ test.describe("grid view (grid-toggle task)", () => {
       // which removes the holding server-side (undoable, but not undone
       // here).
       const tr = rowFor(page, zeroed.oracle_id);
-      await tr.locator('[data-testid="count-stepper-dec"]').click();
+      await tr.locator(HERE_DEC).click();
       await page.locator('[data-testid="collection-title"]').click();
       await expect(
         page.locator('[data-name="Toast"]', { hasText: "Removed" }),
@@ -1482,6 +2095,118 @@ test.describe("grid view (grid-toggle task)", () => {
       await expect(
         page.locator(
           `[data-testid="collection-tile"][data-oracle="${survivor.oracle_id}"][data-printing="${survivor.printing_id}"]`,
+        ),
+      ).toBeVisible();
+    } finally {
+      await deleteCollection(request, scratch);
+    }
+  });
+
+  // ------------------------------------------------------- live WANTED ----
+  // The same two defects, in the column the want-stepper task made editable
+  // (its review round 1, MAJOR). `HoldingTile` recomputed its WANTED badge
+  // from the frozen payload, and `live_rows` waved every `holding_id: None`
+  // row through unconditionally — which used to be sound (such a row had no
+  // stepper) and stopped being so the moment a want-only row got one. So a
+  // want edited in list mode read its old count in grid, and a zeroed want
+  // left a tile badged for a `desires` row that no longer exists. Fixed by
+  // extending `RowDeltas` with a `desire_id`-keyed overlay beside the
+  // `holding_id` one.
+
+  test("editing WANTED in list mode shows the new count once you switch to grid @fast", async ({
+    page,
+    request,
+  }) => {
+    const card = await somePrinting(request);
+    const scratch = await createCollection(
+      request,
+      "binder",
+      scratchName("grid-live-want"),
+    );
+    try {
+      await addWant(request, scratch, card.oracle_id, 2);
+      await page.goto(`/my/collections/${scratch}`);
+      await hydrated(page);
+
+      const tr = rowFor(page, card.oracle_id);
+      await tr
+        .locator(
+          '[data-testid="wanted-count"] [data-testid="count-stepper-inc"]',
+        )
+        .click();
+      await page.locator('[data-testid="collection-title"]').click();
+      await expect(wantedValue(tr)).toHaveText("3");
+
+      await page.getByRole("radio", { name: "Grid view" }).click();
+      await page.waitForURL((url) => url.searchParams.get("view") === "grid");
+
+      const tile = page.locator(
+        `[data-testid="collection-tile"][data-oracle="${card.oracle_id}"]`,
+      );
+      await expect(tile).toBeVisible();
+      // The new count (3), not the payload's original snapshot (2).
+      await expect(tile.getByTestId("wanted-badge")).toContainText("3 wanted");
+    } finally {
+      await deleteCollection(request, scratch);
+    }
+  });
+
+  test("zeroing a want in list mode leaves no tile for it once you switch to grid @fast", async ({
+    page,
+    request,
+  }) => {
+    // A survivor alongside it, for the same reason the HERE ghost test keeps
+    // one: an emptied collection collapses the grid to a zero-height
+    // container, which would make the absence assertion meaningless.
+    const trade = await collectionNamed(request, "Trade Binder");
+    const tradeView = await viewOf(request, trade.summary.id);
+    test.skip(
+      tradeView.cards.length < 2,
+      "dev seed's Trade Binder should hold two distinct printings",
+    );
+    const zeroed = tradeView.cards[0];
+    const survivor = tradeView.cards[1];
+    const scratch = await createCollection(
+      request,
+      "binder",
+      scratchName("grid-ghost-want"),
+    );
+    try {
+      // Want-only: nothing held, so zeroing the want leaves the row with
+      // nothing at all — the case `live_rows` used to wave through.
+      await addWant(request, scratch, zeroed.oracle_id, 1);
+      await addHave(request, scratch, survivor.printing_id, 2);
+      await page.goto(`/my/collections/${scratch}`);
+      await hydrated(page);
+
+      const tr = rowFor(page, zeroed.oracle_id);
+      await tr
+        .locator(
+          '[data-testid="wanted-count"] [data-testid="count-stepper-dec"]',
+        )
+        .click();
+      await page.locator('[data-testid="collection-title"]').click();
+      await expect(
+        page.locator('[data-name="Toast"]', { hasText: "from wants" }),
+      ).toBeVisible();
+      await expect(async () => {
+        const rows = (await viewOf(request, scratch)).cards;
+        expect(rows.some((r) => r.oracle_id === zeroed.oracle_id)).toBe(false);
+        expect(rows.some((r) => r.oracle_id === survivor.oracle_id)).toBe(true);
+      }).toPass({ timeout: 10_000 });
+
+      await page.getByRole("radio", { name: "Grid view" }).click();
+      await page.waitForURL((url) => url.searchParams.get("view") === "grid");
+
+      await expect(page.getByTestId("collection-grid")).toBeVisible();
+      await expect(
+        page.locator(
+          `[data-testid="collection-tile"][data-oracle="${zeroed.oracle_id}"]`,
+        ),
+      ).toHaveCount(0);
+      await expect(
+        page.locator(
+          `[data-testid="collection-tile"][data-oracle="${survivor.oracle_id}"]`,
         ),
       ).toBeVisible();
     } finally {

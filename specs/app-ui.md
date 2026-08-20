@@ -139,9 +139,37 @@ location summary (`7 across 3 collections`). Quick search input, keyset paging.
 
 **`/my/collections/:id`** — child collections as folder rows on top, cards
 below. Three right-aligned numeric columns under one header: HERE / WANTED /
-OWNED (WANTED only when set and different; OWNED collapses when equal to HERE;
-rolled-up child counts italic + dimmed). HERE is editable in place via the count
-stepper. Persistent in-collection quick-search/type-ahead in the header (`/`
+OWNED (OWNED collapses when equal to HERE; rolled-up child counts italic +
+dimmed). HERE is editable in place via the count stepper, and so is **WANTED**.
+
+**WANTED counts copies still needed here** — `max(desired − held, 0)` at
+`(oracle, board)` grain, printed once per card and board (maintainer ruling
+2026-08-19, WB-01M0DXVHB8V2JQRR5ES99SGME4; this supersedes the earlier "WANTED
+only when set and different", which printed the want's own target and
+collapsed to `—` when it was met or absent). It is the same number the needs
+page, the shopping list and the header's needs chip already speak in, so a
+deck row reading `2` means "buy two". The rules:
+
+- **Every row that prints one is steppable, including a `0`.** A met want and
+  a card nothing is wanted for both read `0`, and that zero is the control —
+  there is no `—` to click past.
+- **Committing a gap `v` sets the target to `held + v`.** Stepping up on a
+  card with no `desires` row **creates** one (unpinned, on the row's own
+  board); stepping to `0` on a row holding nothing **deletes** it.
+- **Stepping to `0` on a row that holds copies keeps the want**, at the level
+  held — a want means "keep N of these here", and forgetting one outright
+  stays `/cards/:id`'s job, the surface that lists wants as quantities rather
+  than gaps.
+- **The lower bound is 0** (no negative shortfall), and a want already spread
+  over several `desires` rows still refuses to be edited from one number.
+- **Grid tiles badge the same gap, but only when it is positive** — a tile has
+  no control, so `0 wanted` on every tile would be noise.
+
+The header's `· N wanted` clause and `/my/all`'s WANTED column deliberately
+still count **wants**, not gaps (ruling, rule 6) — see Open questions.
+
+Persistent in-collection
+quick-search/type-ahead in the header (`/`
 focus hint) that filters this collection and inline-adds catalog matches — the
 intake path. Per-row move (kebab / swipe / `m`) and select (checkbox /
 long-press / `x`) affordances. The needs chip
@@ -255,7 +283,19 @@ at this scale); no image pipeline this phase.
 
 ## Open questions
 
-None — all resolved at spec review (maintainer, 2026-07-17):
+**WANTED means two different things on one page (raised 2026-08-19, deferred by
+the same ruling).** The collection table's WANTED column now counts copies
+**still needed** (`desired − held`), while the header's `· N wanted` clause and
+`/my/all`'s WANTED column still count **wants** (`Σ desired`). A binder holding
+4 of a card it wants 4 of therefore reads `0` in the row and `· 4 wanted` in
+the header of the same page. That is deliberate for this branch — the ruling
+scoped the change to the table cell — and it is recorded here so the
+inconsistency is a decision rather than a drift. If it bothers the reader in
+use, the options are to re-word the header (`· N still needed`), to switch it
+to gaps (it would then duplicate the needs chip), or to leave it; the
+maintainer rules later.
+
+Everything else — all resolved at spec review (maintainer, 2026-07-17):
 
 - **Theme persistence** — **dark mode is the default**; an explicit toggle
   override is persisted as a saved user preference. The dark-palette task wires
@@ -7871,3 +7911,423 @@ same testability convention as `is_back_chord` right above it; middle-click
 (`auxclick`/`button() == 1`) stays uncovered, documented as a known gap in
 that function's own doc comment rather than a partial, engine-inconsistent
 fix. The printings table's four `TableHead`s gained `scope="col"`.
+
+### WANTED is steppable from the collection table (2026-08-19)
+
+`shared/src/collection.rs`, `app/src/backend/hosted.rs`,
+`app/src/components/holding_stepper.rs`, `app/src/my/collection.rs`,
+`end2end/tests/collection-view.spec.ts` — alpha feedback: "there's a stepper
+for changing the quantity of cards 'here' in a collection, but not for
+'Wanted'". Correct as reported; the WANTED cell was plain text on both
+layouts.
+
+**No new write path was needed.** `WantStepper` (`holding_stepper.rs`) already
+owned the wants semantics for `/cards/:id`'s "Your wants" rows — optimistic
+set, `set_desire_quantity`, and a committed zero that is a *direct,
+non-undoable delete* because desires carry no ledger. The collection table now
+mounts the same component through a thin page-local `WantedCount` wrapper, the
+exact shape `HereCount` already is for `HaveStepper`. The only real work was
+supplying the write target: `CardRow` gained **`desire_id`**, computed in the
+collection-view query the same way `holding_id` is (`CASE WHEN count(*) = 1
+THEN (array_agg(id))[1] END` over the `(oracle, board)` desires group), so a
+cell summing a printing-pinned want beside an unpinned one refuses rather than
+guessing which row a typed number meant.
+
+**The display rule was left alone, deliberately — and that is what got
+overruled.** This round kept "only when set and different", so a met want
+collapsed to `—` and was not adjustable from the table, and a want could not be
+created from zero here. Both were flagged as accepted limitations needing a
+maintainer call rather than a side-effect change. The call came (round 3,
+below): the column now counts copies still needed and is steppable on every row
+it prints, which closes both.
+
+**Two aggregates had to be taught about wants.** The header's `· N wanted`
+clause now carries a `want_delta` twin of `here_delta` (same payload zeroes
+both, same reason: a commit never refetches the view), and it gates on the
+*live* number so zeroing a collection's last want drops the clause instead of
+leaving a stale `· 1 wanted`. Deck section slot counts move through the
+existing `section_slot_delta` with its arguments swapped — the per-card
+contribution is `max(held, desired)`, which is symmetric, so a want change is
+the same function with `held` as the fixed side. That needed an *exact* `held`,
+not the row-local approximation `HereCount` uses: the WANTED cell sits on the
+group's **first** printing row, whose own `present` understates the group and
+would make the delta **overshoot** (`HereCount`'s approximation only ever
+undershoots, which is why it was allowed to stand). Hence `ViewRow::held_in_group`,
+folded in `view_rows` and unit-pinned against `section_slots` itself. The needs
+chip stays static until a refetch — unchanged, and already true of HERE
+commits.
+
+**A testid collision was designed out, not discovered.** *(Superseded — the
+`count_testid` prop described below is gone. The 2026-08-19 ruling made the
+collection table's WANTED cell stop sharing `WantStepper` with `/cards/:id`
+altogether, so the collision it avoided cannot arise: the only caller left
+uses the default. The round-2 review removed the now-dead machinery. The
+**lesson** below stands and is why the round-2 blocker was found at all.)* `refusal_span` /
+`removed_span` hardcoded `data-testid="here-count"`, which is a misnomer
+meaning "a count that is not the editable stepper". Reusing it in the WANTED
+cell would put two `here-count`s in one row (a want-only row's HERE cell is
+already a refusal span), breaking every row-scoped locator under Playwright's
+strict mode. `WantStepper` gained a `count_testid` prop defaulting to the old
+value; the collection table passes `wanted-placeholder`. For the same reason
+`collection-view.spec.ts`'s "no stepper on a row with nothing here to step"
+assertion is now scoped to the HERE **cell** rather than the row — the row is
+expected to carry a stepper now, in the other column.
+
+**Verification (round 1 — and how it was wrong).** The round-1 numbers
+reported for this task ("292 passed, exit 0") were **not evidence of a green
+suite**, and the mistake is worth writing down because it is invisible and
+repeatable: the run was `npx playwright test … | tail -60`, so the shell
+reported `tail`'s exit status, not Playwright's, and the line reporter's
+carriage-return redraw left only the *failure list* in the captured tail with
+the `N failed` summary line scrolled off. `.last-run.json` (`status`,
+`failedTests`) is the artifact that answers the question honestly; the tail of
+a piped line reporter is not. **Never pipe a Playwright run whose exit code
+you intend to quote** — redirect to a file and read `$?`, or read
+`test-results/.last-run.json`.
+
+The one measurement from that round that does stand: the `unownedCards`
+fixture-pool drain this suite already carries as debt — **7** free cards at
+`q=n&limit=200` against helpers asking for up to 13, with the helper's own
+`mine` read capped at 200 so it under-counts what the account owns. Measured
+again unchanged after round 2's fixes, so nothing in this task moved it.
+
+### WANTED stepper, review round 2: the blocker, two majors (2026-08-19)
+
+`app/src/my/collection.rs`, `end2end/tests/needs.spec.ts`,
+`end2end/tests/collection-view.spec.ts` — adversarial review of the entry
+immediately above.
+
+**BLOCKER — a stepper cell's text is not its number.** `needs.spec.ts`'s
+sideboard test asserted `toHaveText("1")` on the row's `wanted-count` *cell*.
+Once that cell became steppable the assertion failed deterministically, and
+the failure text is the lesson: `Received: "−1+"`. Playwright's text
+extraction skips `display:none` but **not** `opacity:0`, and `CountStepper`'s
+`−`/`+` are `hidden sm:inline-flex opacity-0` — laid out and readable at every
+width from `sm` up, which is every width the suite runs at. Migrated to the
+same inner-count locator `collection-view.spec.ts` uses (`count-stepper-value`
+or `wanted-placeholder`). Verified by reverting the assertion, watching it
+fail with that exact string, and restoring it.
+
+The generalisation, for anyone making another read-only cell editable: **grep
+the whole suite for `toHaveText` against that cell's testid before shipping
+it**, not just the spec file you are working in. The round-1 pass migrated
+`collection-view.spec.ts` and missed `needs.spec.ts` because nothing in the
+first file pointed at the second.
+
+**MAJOR — the grid's WANTED badge went stale, and zeroed wants left ghost
+tiles.** Exactly the HERE defect `RowDeltas` was built for, reintroduced in
+the other column: `HoldingTile` recomputed its badge from the frozen `view`
+snapshot, and `CollectionGrid::live_rows` kept every `holding_id: None` row
+unconditionally — sound while such a row had no stepper, false the moment a
+want-only row got one. So a want edited in list mode read its pre-edit count
+after toggling to grid, and zeroing a want-only card's last desire left a
+tile badged `1 wanted` for a `desires` row that no longer existed. Fixed by
+giving `RowDeltas` a second, `desire_id`-keyed map beside the `holding_id`
+one, and replacing the `holding_id.is_none() => keep` shortcut with
+[`row_survives`], which states what the shortcut actually meant: a row no
+stepper could address in *either* column cannot have been zeroed here, and an
+addressable one survives while it still has copies here **or** copies wanted
+here. That last clause is a small behavioural gain of its own — a
+held-and-wanted row whose HERE is stepped to zero now stays as a want-only
+tile, matching what the table's own row does and what the server still holds
+a `desires` row for, where before it vanished from the grid.
+
+(Round 2 originally kept a *snapshot* `present` in the tile's collapse test, so
+the two layouts could not disagree about whether a number printed. The ruling
+in the round-3 entry removed the collapse rule outright, and that reasoning
+went with it: the tile now folds the group's **live** held count and shows the
+same gap the cell does, badging it only when positive.)
+
+**MAJOR — the deck section header composed two edits in one row wrongly, and
+durably.** A section's contribution per card is `max(held, desired)`, and
+`HereCount` captured `desired` while `WantedCount` captured `held_in_group` —
+both as plain `i32`s, at construction. Each stepper therefore computed its
+slot delta against the *other* column's pre-edit value. Repro: held 2,
+desired 4 (header 4); WANTED 4 → 1 pushes −2 correctly (header 2); HERE 2 → 3
+then pushes `max(3,4) − max(2,4) = 0` against a `desired` that was 4 when the
+component mounted and is 1 by now — header stranded at 2 where the truth is 3,
+until a reload.
+
+Fixed with `GroupLive`: one `(held, desired)` pair of `RwSignal`s per
+`(oracle, board)`, built by `group_live` and handed to every row of the group.
+The contract is **read the other field untracked at commit time, then write
+your own** — neither is ever read to render, which is why plain signals are
+enough. Group-scoped rather than row-scoped on purpose: `desired` is
+oracle-grained and `held` is a sum over the card's printing rows, so a card
+held under two printings has two rows whose commits both move the one `held`
+the arithmetic asks about. That also retires the old row-local approximation
+`section_slot_delta`'s doc used to argue for (it "only under-shoots") — the
+HERE path is now exact too, and `section_slot_delta`'s third argument is
+renamed `fixed`, since which of the two numbers is moving depends on which
+stepper is calling.
+
+**Verification (round 2).** Unit: 438 + 44 passed, 0 failed — including three
+new pure tests (`both_steppers_in_one_row_compose_against_the_live_other_column`
+walks the exact repro above in both orders and asserts the header lands on
+`max(held, desired)` each time; `a_grid_row_survives_while_either_column…`;
+`a_tiles_wanted_badge_reads_the_live_desire…`). E2E: three new `@fast` cases —
+a deck section header composing a WANTED then a HERE edit in one row (with a
+reload cross-check against the server), and the two grid counterparts of the
+existing HERE live/ghost pair. Full `--project=chromium --workers=1` run
+recorded below with its real exit status, read from `.last-run.json` rather
+than a piped tail.
+
+### WANTED counts copies still needed — maintainer ruling (2026-08-19)
+
+`shared/src/collection.rs`, `app/src/lib.rs`, `app/src/my/collection.rs`,
+`end2end/tests/collection-view.spec.ts` — WB-01M0DXVHB8V2JQRR5ES99SGME4, taken
+from an explicit three-option dialog. The rule itself is in Design above
+(`/my/collections/:id`); this records why and what it cost.
+
+**What changed.** The collection table's WANTED column showed the want's own
+target and hid itself whenever that target was zero or already met — so the
+two things an alpha user most wants to do from a collection table (start
+wanting a card; stop needing one) were the two the column could not express.
+It now shows `max(desired − held, 0)` and is a control on every row it prints,
+zero included. The number matches what `/needs`, `/my/shopping` and the header
+chip already say, which is the deeper reason to prefer it: the table used to be
+the one surface on the page speaking in targets while everything around it
+spoke in gaps.
+
+**Committing a gap is not committing a quantity**, and that is the whole of the
+write logic: `desired' = held + v`. Three commits fall out of it, and one of
+them is the ruling's most deliberate choice — **stepping to zero on a row that
+holds copies keeps the want**, at the level held. A want is a standing intent
+("keep 4 of these here"), not a shopping-list line that evaporates when filled;
+deleting one outright stays `/cards/:id`'s job, the surface that lists wants as
+quantities. Only a row holding nothing reaches a target of 0, which deletes
+(`desires` has `CHECK quantity > 0`).
+
+**Create-from-zero needed a server fn, not a new authorization surface.**
+`crate::create_desire` is a thin wrapper over `CollectionStore::add_desire` —
+the same backend method `quick_add`'s Want arm and
+`POST /api/collections/{id}/want` already go through, so the hosted backend's
+RLS-scoped transaction stays the one terminus. It exists rather than a call to
+`quick_add` for two reasons `quick_add` structurally cannot cover: that fn
+hardcodes `Board::default()` (wrong for a deck's sideboard row — it would
+create a want the row does not display), and `QuickAddReceipt` carries only an
+undo id, while this caller must **rewire its stepper to the row it just
+made** or a second step in the same session creates-and-increments again
+instead of setting. `DesireLine` already carried the id; only the server fn was
+missing.
+
+**The gap is reactive on the other column, which is new.** Because the number
+is `desired − held`, the row's HERE stepper changes it: stepping HERE 2 → 3 on
+a 5-target row must take the WANTED cell from 3 to 2 with no refetch. That is
+an `Effect` on the shared `GroupLive` pair — the same signals round 2
+introduced for the section-header arithmetic. What was a correctness fix for an
+aggregate is now load-bearing for a *displayed* number, so `GroupLive` moved
+from "nice invariant" to "the mechanism the cell is built on".
+
+**`WantedCount` stopped sharing `WantStepper` with `/cards/:id`.** That
+component's contract — the value *is* the desire quantity, a committed zero
+deletes — is still exactly right on card detail. Here the value is a gap, a
+commit is `held + v`, and zero usually means "keep what you have". Sharing one
+component across those two would have forced one surface to lie about its own
+number, so the table composes `CountStepper` directly and card detail is
+untouched. Worth stating plainly because the round-1 entry above sells the
+sharing as the design's virtue: it was, until the semantics diverged.
+
+**Deliberately left inconsistent** (ruling, rule 6): the header's `· N wanted`
+clause and `/my/all`'s WANTED column still count wants, not gaps — so a binder
+holding all 4 of a card it wants 4 of reads `0` in the row and `· 4 wanted` in
+the header. Recorded as an Open question rather than quietly fixed.
+
+**One place the ruling's wording had to be read rather than followed
+literally.** "A stepper on EVERY row" is implemented as *every row that prints
+the column*, which keeps the existing `(oracle, board)` dedupe: `desired` is
+oracle-grained, so a card held under two printings has two rows over one
+`desires` row, and putting a control on both would double every aggregate
+either pushed and let two steppers disagree on screen about one number. The
+non-first row keeps its `—`. Flagged to the maintainer with the fix; if the
+intent was literally every row, the dedupe is the thing that has to go and the
+grain problem has to be solved first. Relatedly, the gap is measured against
+the **group's** held total (`ViewRow::held_in_group`), not the row's own
+`present` as the ruling's shorthand had it — the two differ only for
+multi-printing cards, where the row-local reading gives a visibly wrong gap
+(4 wanted, 1+2 held, would read 3 instead of 1) and disagrees with
+`read_need_gaps` server-side.
+
+### The serial full pass outlives its own login (2026-08-19)
+
+Not a product finding — a **suite-infrastructure** one, discovered while
+verifying the WANTED-column work and worth recording because it silently
+inflates every failure count on this branch and will do the same on the next.
+
+Both auth cookies (`tr_jwt`, `tr_session`) carry `Max-Age=900` —
+`session-fallback.spec.ts`'s own module doc states it. The login fixture runs
+once, as the `setup` project, and its `storageState` is what every authed test
+and every `APIRequestContext` in the suite reuses. A serial chromium pass now
+takes **~20 minutes** over 373 tests. So from roughly minute 15 onward, every
+API read in the suite returns **401**, and everything still to run fails for a
+reason that has nothing to do with the code under test.
+
+Measured on this branch, same build, same server:
+
+| Run | Result | 401s among the failures |
+|---|---|---|
+| `--project=chromium --workers=1` (full, ~20 min) | 270 passed / 105 failed | 84 |
+| the same 105, re-run with a fresh login (~14 min) | 66 passed / 40 failed | 0 |
+| `--shard=1/2` (~16 min) | 142 passed / 46 failed | 18 |
+| **4 shards, ~4–12 min each, a login per shard** | **342 passed / 36 failed** | **0** |
+
+The pattern is the tell: the 401 count tracks how far past minute 15 the run
+went, and re-running the failures with a fresh login clears two thirds of them
+without touching a line of code. The skill's own `247/259` baseline was
+measured at **12.4 minutes** — just inside the window — which is why this has
+not bitten before; the suite has since grown across the cookie lifetime.
+
+**Verify with shards, not one long pass.** Four shards
+(`--shard=N/4 --workers=1`, ~8 minutes each) each re-run the `setup` project,
+so each gets a login well inside 900s and the whole suite still gets covered.
+A single serial pass over ~15 minutes cannot be green on this fixture no
+matter what the code does, so quoting one as a task's verification is quoting
+an artifact.
+
+Two smaller traps found alongside it, both of which produced *wrong* numbers
+in this task's own round-1 report before they were caught:
+
+- **`npx playwright test … | tail -N` reports `tail`'s exit status**, not
+  Playwright's, and the line reporter's carriage-return redraw leaves only the
+  failure list in the captured tail with the `N failed` summary scrolled off.
+  Redirect to a file and read `$?`, or read `test-results/.last-run.json`
+  (`status`, `failedTests`) — that file is the honest answer.
+- **`--last-failed` reads `test-results/.last-run.json`**, which any
+  intervening run overwrites — including a bare `--project=setup` run. Copy it
+  aside first, or run `--last-failed` as one invocation and let `setup` come in
+  as the project dependency.
+
+The residual 36, once the session artifact is gone, are the two classes already
+filed and nothing else: the `unownedCards` fixture-pool drain (WB-01KZMVA2Y1 —
+"fewer than N catalog cards the dev user owns nowhere", "no genuinely unowned
+card found in the pool") and shared-dev-server contention/order sensitivity
+(WB-01KZRZ0TT7, WB-01KZNPJC9S — 30-second timeouts, disposed request contexts),
+spread over `removal` (9), `needs` (7), `batch-move` (6), `command-palette` (4),
+`filter-rail` (3), `collection-tree-manage` (3), `all-cards` (2), `responsive`
+(1) and `collection-undo-restore` (1). `collection-view.spec.ts` — which
+carries every test this branch added — `card-detail.spec.ts` and
+`quick-add.spec.ts` are clean.
+
+### WANTED shortfall, review round 2: four write-path defects (2026-08-19)
+
+`shared/src/collection.rs`, `app/src/backend/{hosted,native,mod,routes}.rs`,
+`app/src/lib.rs`, `app/src/my/collection.rs`,
+`end2end/tests/collection-view.spec.ts`. All four were introduced by the
+shortfall rework, and all four are the same *shape*: the column now **writes**
+a number it derives from other numbers (`desired' = held + gap`), so anything
+that makes one of those inputs stale or wrong stops being a display bug and
+becomes a silently wrong saved quantity. That is the sentence to keep.
+
+**BLOCKER — the gap was measured against a page fold.** `held` came from
+summing `present` over the rendered rows. Rows are one keyset page of 50,
+ordered `(name, printing_id, board)`, so a card held under two printings can
+straddle a page boundary — and `seen` resets per page, so *both* pages print a
+gap and both are wrong. The repro: printing A (present 2) last on page 1,
+printing B (present 2) first on page 2, desired 6 — both pages print `4` where
+the truth is `2`, and committing the `2` a reader can see writes `desired = 4`
+instead of `6`. Fixed at the source: the collection-view query folds
+`present_group` per `(oracle, board)` in SQL, from the `held` CTE it already
+builds, and `CardRow` carries it. Display and `desired_for_shortfall` both read
+it; `ViewRow::held_in_group` and the fold that produced it are gone. The grid
+folds only the *session's own* HERE deltas on top of the server number, which
+are page-local by construction (only rows on this page have steppers). Pinned
+as arithmetic in `the_gap_is_measured_against_the_servers_group_total`
+(including the straddling-page shape) and end-to-end against `Depth Box`, the
+one seeded collection holding two printings of one card — that test asserts
+`present_group == 3` while the two rows' own `present` are 1 and 2, which is
+what makes the server's number distinguishable from any fold at all.
+
+**MAJOR — `create_desire` incremented where its caller meant set.** It went
+through `add_desire`, whose upsert is `quantity = desires.quantity +
+EXCLUDED.quantity` — right for `+ Want`, which is a gesture ("and one more"),
+wrong for a caller that has already computed an absolute target from what it
+believes is there. A want created in another tab since the page loaded (held 2,
+someone else set 3, reader asks for a gap of 1 → the database lands 6), or two
+same-session commits racing before the created row's id comes back, both
+produce quantities nobody asked for. Split into `CollectionStore::upsert_desire`
+(`DO UPDATE SET quantity = EXCLUDED.quantity`) beside `add_desire`, sharing one
+`write_desire` helper so the two cannot drift on validation, ownership or the
+returned row — only on the conflict clause. `POST /api/collections/{id}/want/set`
+carries it for the native backend, same extractor and same guard as `want`.
+`quick_add` keeps incrementing. The e2e pin drives the API directly (the two
+semantics are indistinguishable from a browser that cannot race itself) and
+carries its own positive control: `+ Want` must still add, or the test would
+pass just as well if both routes had become SET.
+
+**MAJOR — a want created from zero was invisible to the grid.** The wants
+overlay was keyed by `desire_id`, which is not stable across the very edits it
+records: a want created from nothing has no id in the snapshot the grid reads
+(`desire_id: None`), so the delta filed under its brand-new id was unreachable
+there and the row could lose its tile; and a delete-then-recreate orphaned the
+first id's delta. Re-keyed to `(oracle_id, board)` — the row's standing
+identity, the grain `desired` is already at, and unchanged by create, delete
+and recreate. `row_survives` was left alone; it was correct.
+
+**MAJOR — a round trip through grid reverted the session, then wrote from the
+revert.** Round 1's `GroupLive` was a map of `RwSignal`s built by
+`CollectionTable`, so its lifetime was that component's *mount*; the deck
+section deltas were likewise `RwSignal`s created in its section loop. Toggling
+to grid and back rebuilt both from the frozen payload. Held 2, stepped to 5,
+out to grid and back: the cells read 2 again and the next WANTED commit wrote
+`2 + gap`. Fixed by lifetime, not by patching the symptom — `LiveGroups` and
+`SectionDeltas` are plain data in page-owned signals with the same lifecycle
+`row_deltas` already had, seeded **only if absent** so a remount cannot clobber
+what the session recorded, and cleared exactly when a fresh payload lands.
+
+*The e2e pin for it found a second half the review had not named:* the HERE
+stepper's own **displayed** value was still seeded from the payload prop, so
+the cell showed 2 even once the write path was right. `row_deltas` already held
+that overlay for the grid's tiles; `CardTableRow` now reads it for the table
+too. The pin asserts both halves — the number on screen *and* the target the
+next commit saves — because the first passing alone was exactly the state that
+hid this.
+
+**Minors folded:** the dead `count_testid` prop and its module doc; a
+supersession note on the round-1 testid entry above; and the multi-desires
+refusal span, which printed a gap under a title describing want quantities.
+
+**One confirmation the review asked for.** The full-run record had folded a
+single `responsive` failure into the debt classes without checking it
+individually, and this branch widens every row with a second stepper.
+`collection-view.spec.ts`'s "no collection table scrolls sideways at phone
+width" (390×844, measuring `TableWrapper`'s own scroll container) **passes**,
+and it passes for a reason rather than by luck: `CountStepper`'s ± buttons are
+`hidden sm:inline-flex`, so below 640px they leave the layout entirely and the
+WANTED cell renders only the number that column already showed. The `@fast`
+grid-overflow tests at the same width pass too.
+
+**Verification (round 2).** Unit: 440 + 44 passed, 0 failed — including
+`the_gap_is_measured_against_the_servers_group_total` (the straddling-page
+shape as arithmetic) and `committing_a_gap_sets_the_target_it_implies`. E2E:
+`collection-view.spec.ts` **41/41, no skips**; four new `@fast` pins (the
+server group total end-to-end against `Depth Box`, `want/set`'s
+set-not-add with a `+ Want` positive control, the grid round trip asserting
+both the number shown *and* the target the next commit writes, plus the
+existing shortfall cases). Full suite in 4 shards with a login each:
+**341 passed / 40 failed, zero 401s, zero strict-mode violations**, and zero
+failures in `collection-view.spec.ts`.
+
+**The 40 were confirmed individually this time, not folded** — the review's
+objection to the previous round. Six pool-drain and 29 timeout/contention
+failures in the two filed classes, plus five that had not been checked
+one-by-one before; all five re-run solo and all five are shared-fixture
+accumulation, measured rather than assumed:
+
+- `collection-undo-restore:208` expects 2 copies of its card in the Inbox and
+  finds **159** — every scratch delete relocates holdings there
+  (`HaveDisposition::ToParent`), so the Inbox is the suite's sediment.
+- `collection-undo-restore:312`/`:393` cannot find their own row in
+  `/my/recently-deleted`. That list is `LIMIT 50` and is **full**, its oldest
+  entry timestamped minutes earlier: the suite soft-deletes faster than the
+  window holds, so a subject falls out of it while its own test is still
+  running.
+- `responsive:430` walks every collection in the tree clicking through to
+  `/catalog`. The tree carries **137 leftover `zz-e2e` collections out of 146
+  live ones**, so that walk is now ~137 page loads and times out with an
+  unrendered grid. Its failure message even names another spec's leftover
+  (`zz-e2e-undo-res-subj-…`).
+- `collection-header-kebab:309` passed solo.
+
+None of the five reads a collection-table WANTED cell. Worth filing separately
+from the two existing debt tasks: **the suite has no teardown for soft-deleted
+collections**, and three distinct failure modes now trace to that one fact.

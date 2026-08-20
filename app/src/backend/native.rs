@@ -390,6 +390,15 @@ impl CollectionStore for NativeBackend {
         .await
     }
 
+    async fn upsert_desire(&self, collection_id: Id, req: AddWant) -> ApiResult<DesireLine> {
+        self.require_session()?;
+        self.post(
+            &super::paths::collection_op(collection_id, super::paths::op::WANT_SET),
+            &req,
+        )
+        .await
+    }
+
     async fn set_holding_quantity(
         &self,
         holding_id: Id,

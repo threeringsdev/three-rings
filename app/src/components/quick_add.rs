@@ -868,11 +868,13 @@ mod tests {
             type_line: None,
             colors: vec![],
             present,
+            present_group: present,
             desired: 0,
             owned: present,
             present_rollup: rollup,
             board: shared::Board::default(),
             holding_id: None,
+            desire_id: None,
             faces: vec![],
         }
     }

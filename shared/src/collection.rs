@@ -282,6 +282,25 @@ pub struct CardRow {
     /// Oracle-grained, so it repeats on every printing row of that oracle; the
     /// UI shows it once (see `crate::CardRow` consumers).
     pub desired: i32,
+    /// Copies of this **card** held here on this board, across every printing —
+    /// `present` re-grained from `(printing, board)` up to `(oracle, board)`,
+    /// which is the grain [`Self::desired`] is already at.
+    ///
+    /// **The WANTED column's arithmetic needs this and cannot fold it
+    /// client-side.** That column shows `max(desired − present_group, 0)` and
+    /// *writes* `desired' = present_group + committed_gap`, so a wrong value
+    /// here is a wrong number saved, not merely a wrong number shown. Summing
+    /// `present` over the rendered rows would do exactly that: rows are a
+    /// keyset page (50), ordered `(name, printing_id, board)`, so a card held
+    /// under two printings can straddle a page boundary and each page would
+    /// fold only its own half.
+    ///
+    /// Same grain and same scope as `read_need_gaps`' `present_here`, so this
+    /// cell, `/needs` and the header's needs chip cannot describe one card
+    /// differently. Repeats on every printing row of the group, as `desired`
+    /// does.
+    #[serde(default)]
+    pub present_group: i32,
     /// Owned — global aggregate of present across all the user's collections
     /// (per oracle card).
     pub owned: i32,
@@ -300,6 +319,21 @@ pub struct CardRow {
     /// cannot say which grain it meant.
     #[serde(default)]
     pub holding_id: Option<Id>,
+    /// The one `desires` row behind this row's WANTED cell — the in-place want
+    /// stepper's write target (`set_desire_quantity`), and the exact
+    /// counterpart of [`Self::holding_id`].
+    ///
+    /// `None` when the cell is **not** addressable by a single number: either
+    /// this collection's want for the card sums several `desires` rows (a
+    /// printing-pinned want alongside an unpinned one — `desires_uniq`'s grain
+    /// is `(collection, oracle, printing_id, board)` while `desired` here is
+    /// `(oracle, board)`), or nothing is wanted here at all.
+    ///
+    /// Repeats on every printing row of the same `(oracle, board)`, exactly as
+    /// [`Self::desired`] does; the UI stepper renders on the one row that
+    /// prints WANTED.
+    #[serde(default)]
+    pub desire_id: Option<Id>,
     /// Per-face flip data for **this row's printing** (not a representative
     /// one), so a collection row's preview flips the copy you actually hold.
     /// Non-empty only for a layout with a real back face — the same
@@ -906,6 +940,34 @@ mod tests {
             serde_json::from_str(r#"{"collection_id":"00000000-0000-0000-0000-000000000001"}"#)
                 .expect("id-only body");
         assert_eq!(wire, req);
+    }
+
+    /// `CardRow::desire_id` and `CardRow::present_group` are additive (the
+    /// want-stepper-in-collection-tables task and its round-2 review), exactly
+    /// as `holding_id` was before them: a payload encoded by an older hosted
+    /// API must still decode, because a native client can be a version ahead
+    /// of the API it talks to.
+    ///
+    /// **`present_group` defaulting to 0 is a safe fallback, not a silent
+    /// wrong answer.** The WANTED column reads it as the card's copies here,
+    /// so an older API makes every gap read as the full desire — visibly
+    /// generous rather than quietly under-counted, and it cannot make the
+    /// stepper *write* a smaller target than the reader asked for
+    /// (`desired' = present_group + gap` is monotonic in both).
+    #[test]
+    fn a_card_row_decodes_without_its_stepper_ids() {
+        let old: CardRow = serde_json::from_str(
+            r#"{"oracle_id":"00000000-0000-0000-0000-000000000001",
+                "printing_id":"00000000-0000-0000-0000-000000000002",
+                "name":"Lightning Bolt","set_code":"lea","collector_number":"161",
+                "image_uri":null,"mana_cost":"{R}","type_line":"Instant",
+                "colors":["R"],"present":3,"desired":4,"owned":7,
+                "present_rollup":0,"board":"main"}"#,
+        )
+        .expect("old card row, no holding_id or desire_id");
+        assert_eq!(old.holding_id, None);
+        assert_eq!(old.desire_id, None);
+        assert_eq!(old.present_group, 0);
     }
 
     /// The endpoint has always accepted `POST /api/collections/{id}/delete`

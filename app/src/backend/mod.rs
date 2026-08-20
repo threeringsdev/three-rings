@@ -128,6 +128,9 @@ pub mod paths {
         pub const REORDER: &str = "reorder";
         pub const HAVE: &str = "have";
         pub const WANT: &str = "want";
+        /// `want`'s set-don't-increment twin — see
+        /// [`crate::backend::CollectionStore::upsert_desire`].
+        pub const WANT_SET: &str = "want/set";
         pub const BATCH: &str = "batch";
         pub const VIEW: &str = "view";
         pub const TEARDOWN: &str = "teardown";
@@ -392,8 +395,22 @@ pub trait CollectionStore {
     async fn add_holding(&self, collection_id: Id, req: AddHave) -> ApiResult<HoldingLine>;
 
     /// `+ Want` — add a desired count for a card in a collection (upsert the
-    /// desire, increment quantity). Returns the resulting desire.
+    /// desire, **increment** quantity). Returns the resulting desire.
     async fn add_desire(&self, collection_id: Id, req: AddWant) -> ApiResult<DesireLine>;
+
+    /// The same upsert, **setting** the quantity instead of incrementing it —
+    /// last intent wins. Returns the resulting desire.
+    ///
+    /// Two callers with opposite needs is why both exist. `+ Want` is a
+    /// *gesture*: pressing it twice means "and one more", so it increments.
+    /// The collection table's WANTED stepper commits an **absolute target**
+    /// computed from what it believes is there (`crate::create_desire`), so an
+    /// increment turns any staleness into a silently wrong saved number — a
+    /// want created in another tab since the page loaded, or a second commit
+    /// racing the first in the same session, both land a quantity the reader
+    /// never asked for. Setting makes both cases converge on the last thing
+    /// the reader actually typed.
+    async fn upsert_desire(&self, collection_id: Id, req: AddWant) -> ApiResult<DesireLine>;
 
     /// Set a holding's absolute quantity (the stepper). `0` deletes the row and
     /// returns `None`; otherwise the updated holding.

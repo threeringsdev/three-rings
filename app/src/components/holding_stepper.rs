@@ -22,6 +22,17 @@
 //! `HaveStepper` does (a stale toast/undo must not write to a row the zero
 //! commit already deleted), so it keeps the same `removed`-gated shape.
 //!
+//! **[`WantStepper`] has one caller: `/cards/:id`'s "Your wants" rows.** It
+//! briefly had two — `/my/collections/:id`'s WANTED cell reused it when that
+//! column first became editable — and then the maintainer ruling of
+//! 2026-08-19 made that column show *copies still needed* rather than the
+//! want's own quantity. This component's contract is the quantity one (the
+//! value **is** `desires.quantity`, and a committed zero deletes the row),
+//! which is still exactly right on card detail and would be a lie in a column
+//! showing a gap. So `crate::my::collection::WantedCount` composes
+//! `CountStepper` directly and states its own write semantics, and nothing
+//! here changed for it. See specs/app-ui.md → Findings.
+//!
 //! Both components own their write, their optimistic update, and their own
 //! toast; what they do **not** own is any page-level aggregate (a header
 //! total, a deck section's slot count) or which secondary reads to refresh
@@ -67,11 +78,17 @@ fn stale_commit_should_be_dropped(row_removed: bool) -> bool {
     row_removed
 }
 
+/// The `data-testid` both placeholder spans carry. Historic and a slight
+/// misnomer — it means "a count that is *not* the editable stepper", which is
+/// what `/my/collections/:id`'s HERE cell and `/cards/:id`'s rows both assert
+/// against.
+const DEFAULT_COUNT_TESTID: &str = "here-count";
+
 /// A cell whose count cannot be edited in place — either it sums more than one
 /// underlying row, or (defensively) there is nothing here at all.
-fn refusal_span(n: i32, title: &'static str) -> impl IntoView {
+fn refusal_span(n: i32, title: &'static str, testid: &'static str) -> impl IntoView {
     view! {
-        <span class="text-muted-foreground" data-testid="here-count" title=title>
+        <span class="text-muted-foreground" data-testid=testid title=title>
             {count_or_dash(n)}
         </span>
     }
@@ -80,9 +97,9 @@ fn refusal_span(n: i32, title: &'static str) -> impl IntoView {
 /// The "row is gone" placeholder — shown once a committed zero has removed the
 /// backing row, until an ancestor refetch drops the row from view entirely (or,
 /// for a have, until the removal's own Undo restores it).
-fn removed_span(title: &'static str) -> impl IntoView {
+fn removed_span(title: &'static str, testid: &'static str) -> impl IntoView {
     view! {
-        <span class="text-muted-foreground" data-testid="here-count" title=title>
+        <span class="text-muted-foreground" data-testid=testid title=title>
             "—"
         </span>
     }
@@ -140,7 +157,7 @@ pub fn HaveStepper(
         } else {
             "wanted here, not held"
         };
-        return refusal_span(present, title).into_any();
+        return refusal_span(present, title, DEFAULT_COUNT_TESTID).into_any();
     };
 
     // A signal, not a plain `Id`: undoing a removal re-inserts the holding
@@ -293,7 +310,10 @@ pub fn HaveStepper(
         <Show
             when=move || !removed.get()
             fallback=move || {
-                removed_span("removed — Undo from the toast, or reload to see the card gone")
+                removed_span(
+                    "removed — Undo from the toast, or reload to see the card gone",
+                    DEFAULT_COUNT_TESTID,
+                )
             }
         >
             <CountStepper
@@ -337,7 +357,7 @@ pub fn WantStepper(
         } else {
             "not wanted here"
         };
-        return refusal_span(desired, title).into_any();
+        return refusal_span(desired, title, DEFAULT_COUNT_TESTID).into_any();
     };
 
     let desire_id = RwSignal::new(desire_id);
@@ -393,7 +413,12 @@ pub fn WantStepper(
     view! {
         <Show
             when=move || !removed.get()
-            fallback=move || removed_span("removed from your wants — reload to see it gone")
+            fallback=move || {
+                removed_span(
+                    "removed from your wants — reload to see it gone",
+                    DEFAULT_COUNT_TESTID,
+                )
+            }
         >
             <CountStepper
                 value

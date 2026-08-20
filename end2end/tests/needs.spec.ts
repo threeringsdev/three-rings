@@ -617,9 +617,17 @@ test("@fast a want on the sideboard of a card held on the mainboard is a need, a
     const sideRow = page.locator(
       `[data-testid="collection-row"][data-printing="${card.printing_id}"][data-board="side"]`,
     );
-    await expect(sideRow.locator('[data-testid="wanted-count"]')).toHaveText(
-      "1",
-    );
+    // The WANTED number lives in its own count element, not in the cell: the
+    // cell is a `CountStepper` wherever the want is editable (which this one
+    // is), and its text carries the `−`/`+` button labels too. Same two shapes
+    // `collection-view.spec.ts` reads — the stepper's value, or the
+    // non-editable placeholder.
+    await expect(
+      sideRow.locator(
+        '[data-testid="wanted-count"] [data-testid="count-stepper-value"],' +
+          ' [data-testid="wanted-count"] [data-testid="wanted-placeholder"]',
+      ),
+    ).toHaveText("1");
     // The chip is the half that used to be absent. Header and needs page are
     // fed by two different queries at the same grain, which is why they are
     // asserted together — a half-fix in either one is the failure mode.
