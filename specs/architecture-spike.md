@@ -300,6 +300,13 @@ Two changes, both inside `src-tauri/`:
 The web target stays untouched: `beforeBuildCommand` runs only for
 `cargo tauri build` / `cargo tauri android build`, never for the Render
 `Dockerfile` build or the merge gate's `cargo leptos build --release`.
+One local residue: after a Tauri build on a dev host, `target/site/index.html`
+exists, so a later `cargo leptos watch` serves the placeholder at
+`/index.html` (via `file_and_error_handler`) until a clean — cosmetic, and
+CI/Render never see it. The `cp` is guarded by `test -f target/site/pkg/app.js`
+so a mis-set-up worktree (frontendDist not populated — see the worktree
+release-APK skill note) fails the build loudly instead of shipping a
+placeholder-only APK.
 
 **Verified on the emulator** (Samsung_Flip_7 AVD, Android 16, two signed release
 APKs built from `68ac2f2` and from this branch; a debug APK proves nothing here
