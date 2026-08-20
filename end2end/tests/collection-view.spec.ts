@@ -42,6 +42,16 @@ test.use({ storageState: AUTH_STATE });
 
 const quick = expect.configure({ timeout: 2000 });
 
+/// HERE-cell-scoped stepper locators. Every collection row carries **two**
+/// steppers since WANTED became a still-needed count you can edit
+/// (specs/app-ui.md, maintainer ruling 2026-08-19), so a row-scoped
+/// `count-stepper-*` locator resolves to two elements and fails Playwright's
+/// strict mode. Say which column you mean.
+const HERE_VALUE =
+  '[data-testid="here-cell"] [data-testid="count-stepper-value"]';
+const HERE_INC = '[data-testid="here-cell"] [data-testid="count-stepper-inc"]';
+const HERE_DEC = '[data-testid="here-cell"] [data-testid="count-stepper-dec"]';
+
 type Summary = {
   id: string;
   parent_id: string | null;
@@ -1084,12 +1094,12 @@ test("the stepper edits HERE in place, and the header follows it @fast", async (
     );
 
     // Step up, then blur out of the stepper: one editing session, one commit.
-    await tr.locator('[data-testid="count-stepper-inc"]').click();
+    await tr.locator(HERE_INC).click();
     await page.locator('[data-testid="collection-title"]').click();
 
     // Both numbers move, and the *database* moved — asserting only the DOM
     // would pass with the save stubbed out.
-    await expect(tr.locator('[data-testid="count-stepper-value"]')).toHaveText(
+    await expect(tr.locator(HERE_VALUE)).toHaveText(
       "3",
     );
     await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
@@ -1111,7 +1121,7 @@ test("the stepper edits HERE in place, and the header follows it @fast", async (
     await expect(
       page.locator(`[data-tree-row="${scratch}"] [data-name="Badge"]`).first(),
     ).toHaveText("3");
-    await expect(tr.locator('[data-testid="count-stepper-value"]')).toHaveText(
+    await expect(tr.locator(HERE_VALUE)).toHaveText(
       "3",
     );
 
@@ -1119,7 +1129,7 @@ test("the stepper edits HERE in place, and the header follows it @fast", async (
     const toast = page.locator('[data-name="Toast"]', { hasText: "2 → 3" });
     await expect(toast).toBeVisible();
     await toast.getByRole("button", { name: "Undo" }).click();
-    await expect(tr.locator('[data-testid="count-stepper-value"]')).toHaveText(
+    await expect(tr.locator(HERE_VALUE)).toHaveText(
       "2",
     );
     await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
@@ -1484,10 +1494,10 @@ test("the stepper's last copy is removable, not floored @fast", async ({
     await hydrated(page);
 
     const tr = rowFor(page, card.oracle_id);
-    const dec = tr.locator('[data-testid="count-stepper-dec"]');
+    const dec = tr.locator(HERE_DEC);
     await expect(dec).toHaveAttribute("aria-disabled", "false");
     await expect(
-      tr.locator('[data-testid="count-stepper-value"]'),
+      tr.locator(HERE_VALUE),
     ).toHaveAttribute("aria-valuemin", "0");
 
     // A plain click, not `force`: an `aria-disabled` control would fail
@@ -1534,7 +1544,7 @@ test("emptying a deck moves its cards to the chosen destination", async ({
     // same-URL refetch left it applied on top of fresh totals and the emptied
     // deck's header read "1 here".
     const tr = rowFor(page, card.oracle_id);
-    await tr.locator('[data-testid="count-stepper-inc"]').click();
+    await tr.locator(HERE_INC).click();
     await page.locator('[data-testid="collection-title"]').click();
     await expect(page.locator('[data-testid="collection-counts"]')).toHaveText(
       "3 here",
@@ -1776,10 +1786,10 @@ test.describe("grid view (grid-toggle task)", () => {
 
       // Edit while list mode is showing — the only mode with a stepper at all.
       const tr = rowFor(page, card.oracle_id);
-      await tr.locator('[data-testid="count-stepper-inc"]').click();
+      await tr.locator(HERE_INC).click();
       await page.locator('[data-testid="collection-title"]').click();
       await expect(
-        tr.locator('[data-testid="count-stepper-value"]'),
+        tr.locator(HERE_VALUE),
       ).toHaveText("3");
       await expect(
         page.locator('[data-testid="collection-counts"]'),
@@ -1833,7 +1843,7 @@ test.describe("grid view (grid-toggle task)", () => {
       // which removes the holding server-side (undoable, but not undone
       // here).
       const tr = rowFor(page, zeroed.oracle_id);
-      await tr.locator('[data-testid="count-stepper-dec"]').click();
+      await tr.locator(HERE_DEC).click();
       await page.locator('[data-testid="collection-title"]').click();
       await expect(
         page.locator('[data-name="Toast"]', { hasText: "Removed" }),

@@ -614,13 +614,18 @@ test("a rename mid-toast leaves the stepper's Undo working @fast", async ({
     const row = page.locator(
       `[data-testid="collection-row"][data-oracle="${card.oracle_id}"]`,
     );
-    const count = row.locator('[data-testid="count-stepper-value"]');
+    // HERE-cell scoped: the WANTED cell carries a stepper of its own now.
+    const count = row.locator(
+      '[data-testid="here-cell"] [data-testid="count-stepper-value"]',
+    );
     await expect(count).toHaveText("3");
 
     // Commit 3 → 5 through the click-to-type path (no hover dependency on the
     // opacity-revealed ± buttons).
     await count.click();
-    await row.locator('[data-testid="count-stepper-input"]').waitFor();
+    await row
+      .locator('[data-testid="here-cell"] [data-testid="count-stepper-input"]')
+      .waitFor();
     await page.keyboard.type("5");
     await page.keyboard.press("Enter");
     await expect(count).toHaveText("5");

@@ -135,10 +135,13 @@ async function removeStack(page: Page, printingId: string, from: number) {
   // Wait for the *stepper* to read its count, not just for `data-hydrated`: the
   // global stamp does not mean this streamed island is wired yet, and a click
   // that lands early is silently swallowed (the documented flake in the skill).
-  await expect(row.locator("[data-testid=count-stepper-value]")).toHaveText(String(from));
-  await row.locator("[data-testid=count-stepper-value]").click();
-  await row.locator("[data-testid=count-stepper-input]").fill("0");
-  await row.locator("[data-testid=count-stepper-input]").press("Enter");
+  // Scoped to the HERE cell: the row's WANTED cell carries a stepper too.
+  const value = "[data-testid=here-cell] [data-testid=count-stepper-value]";
+  const input = "[data-testid=here-cell] [data-testid=count-stepper-input]";
+  await expect(row.locator(value)).toHaveText(String(from));
+  await row.locator(value).click();
+  await row.locator(input).fill("0");
+  await row.locator(input).press("Enter");
 }
 
 async function openPalette(page: Page) {

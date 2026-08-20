@@ -44,6 +44,16 @@ import { AUTH_STATE, hydrated } from "./helpers";
 
 test.use({ storageState: AUTH_STATE });
 
+/// HERE-cell-scoped stepper locators. Every collection row carries **two**
+/// steppers since WANTED became a still-needed count you can edit
+/// (specs/app-ui.md, maintainer ruling 2026-08-19), so a row-scoped
+/// `count-stepper-*` locator resolves to two elements and fails Playwright's
+/// strict mode. Say which column you mean.
+const HERE_VALUE =
+  '[data-testid="here-cell"] [data-testid="count-stepper-value"]';
+const HERE_INC = '[data-testid="here-cell"] [data-testid="count-stepper-inc"]';
+const HERE_DEC = '[data-testid="here-cell"] [data-testid="count-stepper-dec"]';
+
 const TRAY = '[data-testid="selection-tray"]';
 const COUNT = '[data-testid="tray-count"]';
 const MOVE = '[data-testid="tray-move"]';
@@ -483,7 +493,7 @@ test("@fast a batch of two rows moves the copies picked for each, and one Undo r
 
     // The page followed the write without a reload — the half-emptied row
     // counts down on its own.
-    await expect(rowB.locator('[data-testid="count-stepper-value"]')).toHaveText(
+    await expect(rowB.locator(HERE_VALUE)).toHaveText(
       "1",
     );
     // …and the database actually moved, which the toast alone cannot show.
@@ -501,7 +511,7 @@ test("@fast a batch of two rows moves the copies picked for each, and one Undo r
       expect(await present(request, source.id, printings)).toEqual([2, 2]);
       expect(await present(request, dest.id, printings)).toEqual([0, 0]);
     }).toPass({ timeout: 5000 });
-    await expect(rowB.locator('[data-testid="count-stepper-value"]')).toHaveText(
+    await expect(rowB.locator(HERE_VALUE)).toHaveText(
       "2",
     );
   } finally {
@@ -588,7 +598,7 @@ test("@fast a foil-only row moves as foil, alongside a plain one", async ({
     await hydrated(page);
     const foilRow = collectionRow(page, foil.printing_id as string);
     await expect(
-      foilRow.locator('[data-testid="count-stepper-value"]'),
+      foilRow.locator(HERE_VALUE),
       "the fixture must render the foil stack as an ordinary selectable row",
     ).toHaveText("1");
 
@@ -673,9 +683,7 @@ test("@fast a stack of several grains opens the picker as one row each, and move
     // HERE cell backed by more than one `holdings` row renders as plain text
     // (`collection.rs`), because there is no single row for it to commit to.
     await expect(row.locator('[data-testid="here-cell"]')).toHaveText("3");
-    await expect(row.locator('[data-testid="count-stepper-value"]')).toHaveCount(
-      0,
-    );
+    await expect(row.locator(HERE_VALUE)).toHaveCount(0);
     await select(row).click();
 
     await moveTo(page, dest.name);
