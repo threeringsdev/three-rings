@@ -12,6 +12,12 @@
 //! wires its handlers onto the rows — and owns the three ways *into* that menu
 //! (right-click, the row's `⋯` button, the keyboard's menu key; see
 //! [`RowShell`]), since drag alone is mouse-only.
+//!
+//! The **All cards** pinned row has the same three ways in, aimed at
+//! [`MenuTarget::Background`] — the top-level `New binder… / New deck…` pair.
+//! That menu was always reachable by right-clicking the rail background, which
+//! is not an affordance anyone discovers; the `⋯` on the row is
+//! ([`RowMenuButton`], shared verbatim with [`RowShell`]).
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_location;
@@ -22,7 +28,7 @@ use super::tree_manage::{commit_drop, DragState, DropIntent, MenuTarget, TreeMan
 use crate::components::states::{StateBadge, Tone};
 use crate::components::ui::badge::{Badge, BadgeSize, BadgeVariant};
 use crate::components::ui::collapsible::{Collapsible, CollapsibleContent, CollapsibleTrigger};
-use crate::components::ui::context_menu::{use_context_menu, ContextMenu};
+use crate::components::ui::context_menu::{use_context_menu, ContextMenu, ContextMenuHandle};
 use crate::components::ui::item::{Item, ItemSize};
 use crate::components::ui::separator::Separator;
 use crate::components::ui::skeleton::Skeleton;
@@ -285,6 +291,11 @@ fn TreeBody(t: AssembledTree, pathname: Memo<String>) -> impl IntoView {
                 icon="🗂"
                 label="All cards"
                 count=t.total_present
+                // The one pinned row that carries the tree menu: it is the
+                // aggregate root, so "add a binder" belongs on it (alpha
+                // feedback — the top-level create was reachable only by
+                // right-clicking blank rail, which nobody discovers).
+                menu=true
                 pathname
             />
             <Separator class="my-2" />
@@ -318,6 +329,10 @@ fn TreeBody(t: AssembledTree, pathname: Memo<String>) -> impl IntoView {
 /// `also` is a second path the row is current *on* but does not link *to* —
 /// still exact matching, not a prefix, because `/my` prefixes every collection
 /// route.
+///
+/// `menu` gives the row the tree menu's three ways in, aimed at
+/// [`MenuTarget::Background`] — see [`PINNED_MENU_KEY`] for which row gets it
+/// and why the others do not.
 #[component]
 fn PinnedRow(
     href: &'static str,
@@ -325,13 +340,19 @@ fn PinnedRow(
     icon: &'static str,
     label: &'static str,
     count: i64,
+    /// Carry the top-level create menu on this row (All cards only).
+    #[prop(optional)]
+    menu: bool,
     pathname: Memo<String>,
 ) -> impl IntoView {
-    view! {
+    let item = view! {
         <Item
             href=href
             size=ItemSize::Xs
-            class="aria-[current=page]:bg-accent aria-[current=page]:text-accent-foreground w-full"
+            // `min-w-0 flex-1` is inert outside a flex container and is what
+            // leaves room for the `⋯` inside one — the row renders the same
+            // either way rather than carrying two class strings that could drift.
+            class="aria-[current=page]:bg-accent aria-[current=page]:text-accent-foreground w-full min-w-0 flex-1"
             {..}
             aria-current=move || {
                 let p = pathname.get();
@@ -344,8 +365,51 @@ fn PinnedRow(
                 {count}
             </Badge>
         </Item>
+    };
+
+    if !menu {
+        return item.into_any();
     }
+
+    let manage = expect_context::<TreeManage>();
+    let handle = use_context_menu();
+    let aim = move || manage.menu_target.set(Some(MenuTarget::Background));
+
+    view! {
+        // `group/row` is what `RowMenuButton`'s hover reveal keys off — the
+        // same class name `RowShell`'s head carries, because it is the same
+        // button.
+        <div
+            data-tree-pinned=PINNED_MENU_KEY
+            class="group/row flex items-center"
+            on:contextmenu=move |ev| {
+                // Handled here even though bubbling to `data-tree-root` would
+                // reach the *same* target and the same anchor — this row's
+                // three ways in are then one thing, described in one place,
+                // instead of two that happen to agree. It is also what makes
+                // the row survive a future ancestor that stops the event.
+                open_menu_at_pointer(&ev, handle, aim);
+            }
+            on:keydown=move |ev| open_menu_on_menu_key(&ev, handle, aim)
+        >
+            {item}
+            <RowMenuButton key=PINNED_MENU_KEY label="All cards" aim=Callback::new(move |()| aim()) />
+        </div>
+    }
+        .into_any()
 }
+
+/// The `data-tree-pinned` / `data-tree-row-actions` value for the **All cards**
+/// row's menu — the one pinned row that carries one.
+///
+/// The other two are deliberately without it. **Shopping list** and **Recently
+/// deleted** are computed views, not containers: a binder created "inside"
+/// either has nowhere to go, so the menu would either lie or silently create
+/// something at the top level. **Inbox** is not a pinned row at all — `assemble`
+/// pins it to `roots[0]` and it renders through [`TreeRow`]/[`RowShell`] like
+/// any other collection, so it has had the `⋯` (and its own create-only menu
+/// arm, [`super::tree_manage::TreeMenu`]) since that button existed.
+const PINNED_MENU_KEY: &str = "all-cards";
 
 /// A pinned system row with no count badge — [`PinnedRow`] minus the number,
 /// for a destination that names *whether* it's reachable rather than *how
@@ -560,33 +624,8 @@ fn RowShell(
             style:padding-left=indent
             draggable=(!is_inbox).then_some("true")
             data-drop-hint=hint
-            on:contextmenu=move |ev| {
-                ev.prevent_default();
-                ev.stop_propagation();
-                aim();
-                if let Some(menu) = menu {
-                    menu.open_at(f64::from(ev.client_x()), f64::from(ev.client_y()));
-                }
-            }
-            on:keydown=move |ev| {
-                // The platform's own keyboard route to a context menu. Browsers
-                // *do* synthesize `contextmenu` from these, but at coordinates
-                // that are 0,0 on a keyboard activation — handling the keys
-                // ourselves (and `prevent_default`ing the synthesized event
-                // away) is what lets the panel be anchored to the row instead of
-                // the viewport corner.
-                let key = ev.key();
-                if key != "ContextMenu" && !(key == "F10" && ev.shift_key()) {
-                    return;
-                }
-                ev.prevent_default();
-                ev.stop_propagation();
-                aim();
-                if let Some(menu) = menu {
-                    let (x, y) = element_anchor(ev.as_ref()).unwrap_or((0.0, 0.0));
-                    menu.open_at(x, y);
-                }
-            }
+            on:contextmenu=move |ev| open_menu_at_pointer(&ev, menu, aim)
+            on:keydown=move |ev| open_menu_on_menu_key(&ev, menu, aim)
             on:dragstart=move |ev| {
                 if is_inbox {
                     // The Inbox is pinned and unreparentable — cancel the
@@ -641,35 +680,112 @@ fn RowShell(
             }
         >
             {children()}
-            // The mouse-free trigger. `opacity-0` and not `hidden` at `md` and
-            // up: a hidden button is not tab-reachable, and being reachable by
-            // Tab is the entire point of it — `focus-visible` brings it back
-            // into view for whoever got here without a pointer.
-            <button
-                type="button"
-                data-tree-row-actions=id.to_string()
-                aria-haspopup="menu"
-                aria-label=format!("Actions for {}", row_name.get_value())
-                class="text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:ring-ring mr-1 w-5 shrink-0 rounded-sm text-center text-sm leading-5 focus-visible:ring-1 focus-visible:outline-none md:opacity-0 md:group-hover/row:opacity-100 md:focus-visible:opacity-100"
-                on:click=move |ev| {
-                    // The row is a link; a click on its actions button is not a
-                    // navigation.
-                    ev.prevent_default();
-                    ev.stop_propagation();
-                    aim();
-                    if let Some(menu) = menu {
-                        // The button's own rect, never `client_x/y`: a keyboard
-                        // activation (⏎/space on the focused button) fires a
-                        // click whose coordinates are 0,0, which would park the
-                        // panel in the viewport corner.
-                        let (x, y) = element_anchor(ev.as_ref()).unwrap_or((0.0, 0.0));
-                        menu.open_at(x, y);
-                    }
-                }
-            >
-                <span aria-hidden="true">"⋯"</span>
-            </button>
+            <RowMenuButton
+                key=id.to_string()
+                label=row_name.get_value()
+                aim=Callback::new(move |()| aim())
+            />
         </div>
+    }
+}
+
+/// The `⋯` trigger — the tab- and tap-reachable way into the shared tree menu,
+/// rendered identically by [`RowShell`] (every collection row) and by the
+/// pinned **All cards** row.
+///
+/// One component rather than two copies of the markup, because the button *is*
+/// the discoverable affordance: the two surfaces must not drift on its reveal
+/// rule, its hit area, or the shape of its accessible name. `aim` is the only
+/// thing that differs between them — a collection row aims at itself, All cards
+/// aims at [`MenuTarget::Background`].
+///
+/// `opacity-0` and not `hidden` at `md` and up: a hidden button is not
+/// tab-reachable, and being reachable by Tab is the entire point of it —
+/// `focus-visible` brings it back into view for whoever got here without a
+/// pointer. Below `md` it is always shown, since there is no hover there.
+#[component]
+fn RowMenuButton(
+    /// `data-tree-row-actions`: the collection's id, or [`PINNED_MENU_KEY`].
+    #[prop(into)]
+    key: String,
+    /// What the accessible name says these actions belong to.
+    #[prop(into)]
+    label: String,
+    /// Sets `TreeManage::menu_target` — what the shared panel will describe.
+    aim: Callback<()>,
+) -> impl IntoView {
+    let menu = use_context_menu();
+    view! {
+        <button
+            type="button"
+            data-tree-row-actions=key
+            aria-haspopup="menu"
+            aria-label=format!("Actions for {label}")
+            class="text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:ring-ring mr-1 w-5 shrink-0 rounded-sm text-center text-sm leading-5 focus-visible:ring-1 focus-visible:outline-none md:opacity-0 md:group-hover/row:opacity-100 md:focus-visible:opacity-100"
+            on:click=move |ev| {
+                // The row is a link; a click on its actions button is not a
+                // navigation.
+                ev.prevent_default();
+                ev.stop_propagation();
+                aim.run(());
+                if let Some(menu) = menu {
+                    // The button's own rect, never `client_x/y`: a keyboard
+                    // activation (⏎/space on the focused button) fires a click
+                    // whose coordinates are 0,0, which would park the panel in
+                    // the viewport corner.
+                    let (x, y) = element_anchor(ev.as_ref()).unwrap_or((0.0, 0.0));
+                    menu.open_at(x, y);
+                }
+            }
+        >
+            <span aria-hidden="true">"⋯"</span>
+        </button>
+    }
+}
+
+/// Right-click on a row → aim the shared menu and open it at the pointer.
+///
+/// Shared by [`RowShell`] and the All-cards pinned row for the same reason
+/// [`RowMenuButton`] is: two rows offering the same gesture must not be able to
+/// implement it differently. `stop_propagation` keeps the row's own aim from
+/// being overwritten by the rail background's handler, which fires next and
+/// aims at [`MenuTarget::Background`].
+fn open_menu_at_pointer(
+    ev: &leptos::web_sys::MouseEvent,
+    menu: Option<ContextMenuHandle>,
+    aim: impl Fn(),
+) {
+    ev.prevent_default();
+    ev.stop_propagation();
+    aim();
+    if let Some(menu) = menu {
+        menu.open_at(f64::from(ev.client_x()), f64::from(ev.client_y()));
+    }
+}
+
+/// `ContextMenu` / `Shift+F10` anywhere in a row → the same menu, anchored to
+/// the row rather than to the pointer.
+///
+/// The platform's own keyboard route to a context menu. Browsers *do*
+/// synthesize `contextmenu` from these, but at coordinates that are 0,0 on a
+/// keyboard activation — handling the keys ourselves (and `prevent_default`ing
+/// the synthesized event away) is what lets the panel be anchored to the row
+/// instead of the viewport corner.
+fn open_menu_on_menu_key(
+    ev: &leptos::web_sys::KeyboardEvent,
+    menu: Option<ContextMenuHandle>,
+    aim: impl Fn(),
+) {
+    let key = ev.key();
+    if key != "ContextMenu" && !(key == "F10" && ev.shift_key()) {
+        return;
+    }
+    ev.prevent_default();
+    ev.stop_propagation();
+    aim();
+    if let Some(menu) = menu {
+        let (x, y) = element_anchor(ev.as_ref()).unwrap_or((0.0, 0.0));
+        menu.open_at(x, y);
     }
 }
 

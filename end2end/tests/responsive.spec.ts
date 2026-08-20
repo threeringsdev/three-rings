@@ -336,7 +336,13 @@ test.describe("affordances asserted by computed style, not visibility", () => {
     await page.goto("/my");
     await hydrated(page);
 
-    const actions = page.locator("[data-tree-row-actions]").first();
+    // Scoped to a real collection row: the pinned **All cards** row carries the
+    // same `RowMenuButton` now (`app/src/my/tree.rs`) and sits above the tree,
+    // so a bare `[data-tree-row-actions]` would silently retarget this test at
+    // the pinned row. Its own reveal is asserted in
+    // `collection-tree-manage.spec.ts` → "All cards row menu".
+    const treeRowActions = "li[data-tree-row] [data-tree-row-actions]";
+    const actions = page.locator(treeRowActions).first();
     // `opacity-0`, deliberately not `hidden`, so it stays tab-reachable. Both
     // states read as "visible" to Playwright, so nothing but computed opacity
     // can tell them apart — and nothing pinned this before.
@@ -344,7 +350,7 @@ test.describe("affordances asserted by computed style, not visibility", () => {
       .poll(() => actions.evaluate((el) => getComputedStyle(el).opacity))
       .toBe("0");
     // Still in layout while transparent: that is what makes it reachable at all.
-    expect((await rect(page, "[data-tree-row-actions]")).w).toBeGreaterThan(0);
+    expect((await rect(page, treeRowActions)).w).toBeGreaterThan(0);
 
     await actions.focus();
     await expect

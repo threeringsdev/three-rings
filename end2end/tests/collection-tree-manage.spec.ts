@@ -4,7 +4,7 @@ import {
   type APIRequestContext,
   type Page,
 } from "@playwright/test";
-import { AUTH_STATE, hydrated } from "./helpers";
+import { AUTH_STATE, clickUntil, hydrated } from "./helpers";
 
 // Collection-tree management (specs/app-ui.md "Collection tree", management
 // half; design/information-architecture.md → "Tree management … happens in
@@ -214,6 +214,22 @@ async function openRowMenu(page: Page, id: string) {
   return menu;
 }
 
+const treeMenu = (page: Page) => page.locator("#context-menu-tree");
+
+const menuOpen = (page: Page) =>
+  treeMenu(page).evaluate((el: HTMLElement) => el.matches(":popover-open"));
+
+async function closeTreeMenu(page: Page) {
+  await page.keyboard.press("Escape");
+  await expect.poll(() => menuOpen(page)).toBe(false);
+}
+
+// The pinned **All cards** row and its own `⋯` (`app/src/my/tree.rs` —
+// `PinnedRow menu=true` / `RowMenuButton`, `PINNED_MENU_KEY`).
+const allCardsRow = (page: Page) => page.locator('[data-tree-pinned="all-cards"]');
+const allCardsKebab = (page: Page) =>
+  page.locator('[data-tree-row-actions="all-cards"]');
+
 // Dispatch a full HTML5 drag sequence with one shared DataTransfer, dropping
 // at a fractional Y in the target row (top band = before, middle = into,
 // bottom = after — matches RowShell's `drop_intent`). Playwright's own
@@ -292,6 +308,156 @@ test.describe("context menu", () => {
     ).toBeVisible();
     await expect(menu.locator('[role="menuitem"]', { hasText: "Rename…" })).toHaveCount(0);
     await expect(menu.locator('[role="menuitem"]', { hasText: "Delete…" })).toHaveCount(0);
+  });
+});
+
+// The pinned **All cards** row now carries the same three ways into the shared
+// menu that every collection row has (`app/src/my/tree.rs`). The capability was
+// never missing — a right-click on blank rail has always opened
+// `MenuTarget::Background` — but the only *discoverable* trigger for it was a
+// right-click on nothing, which is why the alpha report said "a user must right
+// click to discover this option". So these tests are about the affordance and
+// about the menu being aimed at the top level, not about a new server path.
+test.describe("All cards row menu", () => {
+  test("the ⋯ is revealed on hover and on focus, transparent at rest @fast", async ({
+    page,
+  }) => {
+    await page.goto("/my");
+    await hydrated(page);
+    const kebab = allCardsKebab(page);
+    const opacity = () => kebab.evaluate((el) => getComputedStyle(el).opacity);
+
+    // `md:opacity-0`, deliberately not `hidden` — both read as "visible" to
+    // Playwright, so computed opacity is the only thing that can tell the
+    // at-rest state from the revealed one (the same trap `responsive.spec.ts`
+    // records for the tree rows' own ⋯).
+    await expect.poll(opacity).toBe("0");
+    expect((await kebab.boundingBox())!.width).toBeGreaterThan(0);
+
+    await allCardsRow(page).hover();
+    await expect.poll(opacity).toBe("1");
+
+    // Off the row again: back to transparent, so the hover reveal is really
+    // the hover's doing and not a button that was always shown.
+    await page.mouse.move(0, 0);
+    await expect.poll(opacity).toBe("0");
+
+    await kebab.focus();
+    await expect.poll(opacity).toBe("1");
+  });
+
+  test("the ⋯ opens the top-level create menu, and only that @fast", async ({
+    page,
+  }) => {
+    await page.goto("/my");
+    await hydrated(page);
+    const menu = treeMenu(page);
+    await clickUntil(allCardsKebab(page), () => menuOpen(page));
+
+    // Exactly the two create items — the Background arm. The count is the
+    // load-bearing half: it is what fails if this row ever starts aiming at a
+    // `MenuTarget::Row` and offers Move/Rename/Delete for a virtual view that
+    // has no collection behind it to move, rename or delete.
+    await expect(menu.locator('[role="menuitem"]')).toHaveCount(2);
+    await expect(menu.locator('[role="menuitem"]').nth(0)).toHaveText("New binder…");
+    await expect(menu.locator('[role="menuitem"]').nth(1)).toHaveText("New deck…");
+
+    await closeTreeMenu(page);
+  });
+
+  test("right-click and Shift+F10 on the row open the same menu @fast", async ({
+    page,
+  }) => {
+    await page.goto("/my");
+    await hydrated(page);
+    const menu = treeMenu(page);
+    const items = menu.locator('[role="menuitem"]');
+
+    await allCardsRow(page).click({ button: "right" });
+    await expect.poll(() => menuOpen(page)).toBe(true);
+    await expect(items).toHaveCount(2);
+    await expect(items.nth(0)).toHaveText("New binder…");
+    await closeTreeMenu(page);
+
+    // The platform keyboard chord, from the row's own link — the row head is a
+    // `<div>`, so the keydown has to reach it by bubbling from a focused child.
+    await allCardsRow(page).locator("a").focus();
+    await page.keyboard.press("Shift+F10");
+    await expect.poll(() => menuOpen(page)).toBe(true);
+    await expect(items).toHaveCount(2);
+    await expect(items.nth(0)).toHaveText("New binder…");
+    await closeTreeMenu(page);
+  });
+
+  test("New binder… from the All cards menu creates a top-level binder @fast", async ({
+    page,
+  }) => {
+    const name = scratchName("all-cr");
+    let createdId: string | undefined;
+    try {
+      await page.goto("/my");
+      await hydrated(page);
+      await clickUntil(allCardsKebab(page), () => menuOpen(page));
+      await treeMenu(page)
+        .locator('[role="menuitem"]', { hasText: "New binder…" })
+        .click();
+
+      const dialog = page.locator('[role="dialog"]', { hasText: "New binder" });
+      await expect(dialog).toContainText("top level");
+      await dialog.locator("#tree-create-name").fill(name);
+      await dialog.locator("#tree-create-confirm").click();
+
+      // Same shape as the background-right-click test above: poll for the row
+      // rather than for its `parent_id`, which is `null` at the top level — the
+      // very value under test, so it cannot double as a "found?" sentinel.
+      await expect
+        .poll(async () => {
+          const row = (await fetchTree(page)).find((r) => r.summary.name === name);
+          createdId = row?.summary.id;
+          return row ? "found" : "missing";
+        })
+        .toBe("found");
+      const row = (await fetchTree(page)).find((r) => r.summary.name === name)!;
+      expect(row.summary.parent_id).toBeNull();
+      // …and it rendered into the tree, not just into the database.
+      await expect(
+        page.locator("nav[aria-label='Collections']", { hasText: name }),
+      ).toBeVisible();
+    } finally {
+      if (createdId) await deleteCollection(page, createdId);
+    }
+  });
+
+  test("a collection row's own ⋯ still opens its row menu @fast", async ({
+    page,
+  }) => {
+    // The regression check on the refactor: both rows now render the *same*
+    // `RowMenuButton`, so the thing that could break is a row's button aiming
+    // at the background target (create-only) instead of at itself.
+    const c = await createCollection(page, { name: scratchName("row-kebab") });
+    try {
+      await page.goto("/my");
+      await hydrated(page);
+      const kebab = page.locator(`[data-tree-row-actions="${c.id}"]`);
+      await rowHead(page, c.id).hover();
+      await clickUntil(kebab, () => menuOpen(page));
+
+      const menu = treeMenu(page);
+      for (const label of [
+        "New binder inside…",
+        "New deck inside…",
+        "Move to…",
+        "Rename…",
+        "Delete…",
+      ]) {
+        await expect(menu.locator('[role="menuitem"]', { hasText: label })).toBeVisible();
+      }
+      // The row arm names its subject; the background arm names nothing.
+      await expect(menu).toContainText(c.name);
+      await closeTreeMenu(page);
+    } finally {
+      await deleteCollection(page, c.id);
+    }
   });
 });
 

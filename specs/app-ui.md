@@ -224,6 +224,9 @@ Want. E2E asserts the keystroke contract.
    rows (All cards / Inbox / Shopping list), selection, rolled-up count badges,
    drag reparent/reorder, context-menu management. Built in two tasks
    (read-only, then management) on `collapsible`/`item`/`badge`/`context_menu`.
+   Every collection row **and** the pinned All-cards row carry the same `⋯`
+   trigger (`RowMenuButton`); the All-cards one opens the top-level
+   `New binder… / New deck…` pair (2026-08-19 Findings).
 2. **Count stepper** — hover/focus-revealed `− n +`, click-to-type, keyboard ±
    on the focused row, commit-on-blur; optimistic update + undo toast. Composed
    from `button` + `input`.
@@ -8409,3 +8412,100 @@ documents at the helper:
   `overflow: auto` ancestor still has a box and still reports visible;
   `document.elementFromPoint` at the element's own centre is what distinguishes
   "on screen" from "somewhere in the scroll range".
+
+### "All cards" grew the tree's `⋯`, and the button became one component (2026-08-19, WB-01M0AW6SAB)
+
+`app/src/my/tree.rs`, `end2end/tests/collection-tree-manage.spec.ts`. Alpha
+feedback: *"Collections show a '…' menu that when clicked offers options like
+'New binder inside…'. However on 'All cards' there is no such menu; a user must
+right click to discover this option."*
+
+**The capability was never missing — only the affordance was.** `TreeBody`'s
+root `<div data-tree-root>` has always answered `contextmenu` by aiming
+`MenuTarget::Background`, whose panel is exactly `New binder… / New deck…`. But
+the only trigger for it was a right-click on *blank rail*, and a right-click on
+nothing is not something a user discovers; on touch it is not even reachable (a
+held touch produces no `contextmenu` on the Android webview — measured, 2026-07-26
+Findings). The report's real content is therefore "the top-level create has no
+visible entry point", and the fix is a trigger, not a new menu.
+
+**`PinnedRow` gained `menu: bool`, true for All cards only.** When set it wraps
+the `Item` in a `group/row flex` head carrying the same three ways in that
+`RowShell` gives a collection row — right-click, the `⋯` button, `ContextMenu`/
+`Shift+F10` — all aimed at `MenuTarget::Background`. The row keeps its own
+`data-tree-pinned="all-cards"` attribute rather than borrowing
+`data-tree-row-head`, so the suite's several generic `[data-tree-row-head]`
+sweeps (`sidebar-scroll.spec.ts`) keep counting collection rows and only
+collection rows.
+
+**Three call sites, one button: `RowMenuButton` + `open_menu_at_pointer` /
+`open_menu_on_menu_key`.** `RowShell`'s `⋯` markup and its two gesture handlers
+were lifted out verbatim and are now shared with the pinned row. This is the
+point of the change rather than a tidy-up: the button *is* the discoverable
+affordance, so two copies of it could drift on the reveal rule
+(`md:opacity-0` + `md:group-hover/row:opacity-100`, deliberately not `hidden` so
+it stays tab-reachable), on the hit area, or on the `element_anchor` rect that
+keeps a keyboard activation's 0,0 click from parking the panel in the viewport
+corner. `aim` is the only thing the two call sites differ by.
+
+**The Inbox needed nothing, and the other two pinned rows must not have it.**
+The premise that Inbox is a pinned row is wrong: `assemble` pins it to
+`roots[0]` and it renders through `TreeRow`/`RowShell` like any collection, so
+it has carried the `⋯` since that button existed, with `TreeMenu` already
+withholding Move/Rename/Delete from its arm. **Shopping list** and **Recently
+deleted** are the other pinned rows and were deliberately left alone: both are
+computed views, not containers, so "New binder inside…" has nowhere to put
+anything — the menu would either lie or silently create at the top level.
+`PINNED_MENU_KEY`'s doc comment carries this reasoning next to the code. The
+mobile `/my` drill-down list (`app/src/my/root.rs`) is also untouched: its rows
+have deliberately never carried a `⋯` (2026-07-26 Findings — the rail drawer
+keeps the management job on touch), and inventing one there is a different task.
+
+**e2e: 5 new tests in the `All cards row menu` block, all `@fast`, all
+kill-verified** by rebuilding with `menu=false` and re-running. 4 of the 5 fail
+on the unpatched row; the 5th ("a collection row's own `⋯` still opens its row
+menu") passes on both, which is what it is for — it guards the refactor, not the
+feature. One honest caveat on the failure evidence: the right-click half of
+"right-click and Shift+F10 open the same menu" fails pre-fix only because
+`[data-tree-pinned]` does not exist to locate, not because right-clicking the row
+was broken — it already bubbled to `data-tree-root`. The `Shift+F10` half is a
+genuine pre-fix failure: the root `<div>` has a `contextmenu` handler and no
+`keydown` handler, so the platform chord did nothing anywhere on that row.
+
+**Verification, and an honest note on what could not be run.** Gate lines all
+green on macOS (`fmt`; workspace clippy `--exclude frontend --exclude
+three_rings`; `-p frontend` wasm; `-p app --features native`; both
+`component-bench` lines; `cargo test --workspace` 0 failed). The tree's own
+blast radius — `collection-tree`, `collection-tree-manage`, `collection-tree-move`,
+`collection-header-kebab`, `sidebar-scroll`, `my-root`, `responsive` — ran
+serially at `@fast`: **81 passed, 7 failed**, and all seven are pre-existing
+fixture debt with the receipts to prove it, not code: two are
+`genuinelyUnownedCard`'s own "pool exhausted" throw, one reads **171** copies in
+the Inbox where it wants 1 (relocate-on-delete accumulation), two match a
+**stale duplicate-named** `zz-e2e` leftover (the dev branch holds 159 of them
+against 168 collections total — the teardown backlog, measured this task), and
+two are 30 s timeouts on a machine at load 14. None touch `[data-tree-pinned]`,
+`[data-tree-row-actions]`, or the `⋯`. **The whole `@fast` tier was not run
+serially to completion**: at ~24 s/test under that load it projected past two
+hours, and the parallel pass it replaced is the mode this repo has already
+ruled proves nothing (contention class, `specs/ui-work-loop.md`).
+
+**Phone width, measured rather than assumed** (390×844, rail drawer open):
+the pinned row is 207 px wide inside a 239 px rail, the button's right edge is
+219 against the row's 223, `opacity` is `1` (there is no hover below `md`), and
+neither the document (390/390) nor the rail (239/239) gains a sideways scroll —
+the `Item`'s `min-w-0 flex-1` absorbs the new element by truncating the label,
+which is what that class pair is there for. The button measures 20×20, i.e.
+**below the 44 px touch target** the responsive audit holds other controls to —
+unchanged, and identical to every tree row's `⋯`, because it is now literally
+the same component. Widening it is a tree-wide layout change and belongs to its
+own task, not to this one; recorded here so the gap is filed rather than
+rediscovered.
+
+**Two existing assertions were re-scoped rather than left to drift.**
+`responsive.spec.ts`'s "the tree row's `⋯` is transparent at rest" and
+`my-root.spec.ts`'s drawer-management check both located
+`[data-tree-row-actions]` unqualified and took `.first()`. The pinned row's
+button now *is* first in document order, so both would have silently retargeted
+at it — still green, no longer testing what their titles say. Both are now
+`li[data-tree-row] [data-tree-row-actions]`.
