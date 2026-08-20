@@ -170,9 +170,10 @@ pub fn run() {
                     tauri::async_runtime::block_on(async move { app::build_router(conf.leptos_options) });
 
                 // The one route the shell adds to the app's router: the launch
-                // splash the window is pointed at first (see `splash`). Cheap
-                // enough that mounting it on every platform costs nothing —
-                // Android simply never navigates there today.
+                // splash the window is pointed at first (see `splash`). Every
+                // platform navigates there — desktop from the `setup` hook
+                // below, Android from `on_page_load` (its webview does not exist
+                // yet at this point).
                 let router = splash::mount(router);
 
                 let (port, listener) = tauri::async_runtime::block_on(async {
@@ -356,10 +357,32 @@ pub fn run() {
             }
         })
         .on_page_load(|_webview, _payload| {
-            // Android release: the initial page is the asset protocol's
-            // "asset not found: index.html" (SSR ships no index.html). Once that
-            // load finishes the webview provably exists, so redirect it to the
-            // in-process server. Guarded so it fires only for non-server URLs.
+            // Android release: the initial page is whatever the *asset protocol*
+            // serves at its root, which no Rust code gets to steer — the webview
+            // is created before `setup` can navigate it. That used to be the
+            // protocol's own "asset not found: index.html" error page (SSR emits
+            // no index.html), which is the launch defect in WB-01M0DT7YTF; the
+            // bundled `src-tauri/launch-placeholder.html` now occupies that slot
+            // (tauri.conf.json's `beforeBuildCommand` copies it into
+            // `frontendDist`). Either way, once that first load *finishes* the
+            // webview provably exists, so this is where the shell takes over.
+            //
+            // Destination: the splash, not `/`. `/` is remote-blocked —
+            // `SsrMode::Async` sends no HTML until Neon Auth and the hosted API
+            // have answered (1 s warm, 15 s measured cold;
+            // specs/architecture-spike.md) — and the webview keeps painting the
+            // *current* document for that whole time. Sending it to `/__loading`
+            // first means the wait happens behind the same branded loading state
+            // desktop gets, and the splash's own `location.replace("/")` carries
+            // it on once it has painted.
+            //
+            // The loop guard is the host, and it holds across all three loads:
+            // the placeholder is served over the asset protocol
+            // (`http://tauri.localhost/…`) so it navigates; `/__loading` and
+            // everything the splash hands off to are on `127.0.0.1`, so they do
+            // not. Keep the host as the raw bind address — desktop's `localhost`
+            // rewrite (see the navigate in `setup`) is deliberately not applied
+            // here, and this guard depends on the literal it produces.
             #[cfg(all(not(debug_assertions), target_os = "android"))]
             {
                 use tauri::Manager;
@@ -367,7 +390,9 @@ pub fn run() {
                     && _payload.url().host_str() != Some("127.0.0.1")
                 {
                     if let Some(port) = _webview.try_state::<ServerPort>() {
-                        if let Ok(url) = format!("http://127.0.0.1:{}", port.0).parse() {
+                        if let Ok(url) =
+                            format!("http://127.0.0.1:{}{}", port.0, splash::PATH).parse()
+                        {
                             let _ = _webview.navigate(url);
                         }
                     }

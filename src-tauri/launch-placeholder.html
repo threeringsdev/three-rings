@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<!--
+  The very first frame of a release launch.
+
+  Copied to <frontendDist>/index.html by tauri.conf.json's beforeBuildCommand
+  (cargo-leptos owns the rest of that directory and SSR emits no index.html of
+  its own). The webview's *initial* load is the Tauri asset protocol's root,
+  which happens before any Rust code can steer it — with no index.html there,
+  Android painted the asset protocol's "asset not found: index.html" error page
+  and kept it up for the whole remote-blocked SSR chain
+  (specs/architecture-spike.md, WB-01M0DT7YTF).
+
+  So this file is what that first instant shows: the dark ground and the same
+  rings/wordmark as src-tauri/src/splash.rs, which the shell navigates to a
+  moment later from `on_page_load`. Deliberately inert — no script, no
+  stylesheet, no image, and no redirect of its own (it is reached over the
+  asset protocol, where a self-redirect to "/" would just reload this same
+  document). The shell moves the webview off it; this page never moves itself.
+
+  It cannot read the `tr_theme` cookie (no server, no script), so it is the
+  dark default. A light-theme user sees dark for the few hundred ms before the
+  splash, which does read the cookie, replaces it.
+
+  Kept in sync with the splash by unit tests in src-tauri/src/splash.rs — the
+  vars, CSS, SVG and copy below are asserted to be the splash's own.
+-->
+<html lang="en" style="--bg:#161616;--fg:#fafafa;--muted:#a1a1a1;--dim:#3a3a3a;color-scheme:dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Three Rings</title><style>
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);
+font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+display:grid;place-items:center}
+/* Held back a beat: a signed-out (or already-warm) launch answers `/` in
+   milliseconds, and a spinner that flashes for one frame reads as a glitch.
+   A slow launch never notices the delay. */
+main{display:grid;justify-items:center;gap:.75rem;padding:2rem;text-align:center;
+animation:fade .3s ease .15s both}
+.rings{display:block}
+.r{transform-box:view-box;transform-origin:50% 50%;animation:spin 1.6s linear infinite}
+.r2{animation-duration:1.2s;animation-direction:reverse}
+.r3{animation-duration:.9s}
+.wordmark{margin:0;font-size:.9375rem;font-weight:600;letter-spacing:-.01em}
+.status{margin:0;font-size:.8125rem;color:var(--muted)}
+.slow{margin:0;font-size:.8125rem;color:var(--muted);opacity:0;transition:opacity .4s ease}
+.slow.on{opacity:1}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+@media (prefers-reduced-motion:reduce){
+.r{animation:none}
+main{animation:fade .01s linear .15s both}
+.slow{transition:none}}
+</style></head><body><main><svg class="rings" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><circle cx="32" cy="32" r="28" stroke="var(--dim)"/><circle cx="32" cy="32" r="20" stroke="var(--dim)"/><circle cx="32" cy="32" r="12" stroke="var(--dim)"/><circle class="r r1" cx="32" cy="32" r="28" stroke="var(--fg)" stroke-dasharray="44 132"/><circle class="r r2" cx="32" cy="32" r="20" stroke="var(--fg)" stroke-dasharray="31 95"/><circle class="r r3" cx="32" cy="32" r="12" stroke="var(--fg)" stroke-dasharray="19 57"/></svg><p class="wordmark">Three Rings</p><p class="status">Signing you in…</p><p class="slow" id="slow">Still working — the server may be waking up.</p></main></body></html>
