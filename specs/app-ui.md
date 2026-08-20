@@ -8726,10 +8726,21 @@ the open state, not unconditional, for two independent reasons — the hint has
 to already be in effect when the *opening* transition starts (a layer created
 mid-animation is still dropped at the end), and `CardPreview` mounts one
 `Sheet` per catalog row, so a permanent hint would permanently promote a layer
-per row. Dropping it as the panel begins closing is safe and measured clean:
-that commit repaints the panel anyway. Post-fix runs: filter open **clean**,
-filter close **clean**, card open **clean**, with the slide animations
-themselves unchanged (5–11 % per-frame deltas across the 300 ms).
+per row. Post-fix runs: filter open **clean**, filter close **clean**, card
+open **clean**, with the slide animations themselves unchanged (5–11 %
+per-frame deltas across the 300 ms).
+
+**What the fix does not claim about the close path.** The hint drops the moment
+`data-state` flips to `closed` — the *start* of the closing transition — so the
+closing de-promotion is unchanged from baseline. The close measured clean on
+the emulator after the fix all the same; the mechanism for that is
+**unexplained**. If a close-side flash returns on a real device, read it as
+something this change never fixed, not as a regression of it.
+
+**Side effect of the hint.** `will-change` establishes a containing block, so
+while the panel is open a `position: fixed` descendant resolves against the
+panel rather than the viewport. Nothing inside a sheet is `fixed` today; a
+future Popover/Tooltip nested in one will mis-position while the sheet is open.
 
 **Desktop WKWebView: not the same surface, and not measurable here.** Neither
 reported gesture exists on the desktop app as used — `wants_sheet` is

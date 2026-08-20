@@ -11,6 +11,9 @@
 //! - scroll locking calls the vendored Rust [`super::scroll_lock`] directly
 //! - `strum` derives on the direction enum hand-written; the `icons` `X`
 //!   inlined (Lucide, ISC)
+//! - **`data-[state=open]:will-change-transform` on `SheetContent`** — not
+//!   upstream; a compositing fix for the Android System WebView's
+//!   end-of-transition layer drop (see the comment on `base_class`)
 //! - the mobile chrome (grabber, drag-to-dismiss, snap heights) is ours on
 //!   top later, per the gap analysis
 
@@ -205,7 +208,7 @@ pub fn SheetContent(
     // (WB-01M0DT5XSA). Without the hint Chromium promotes this panel to its own
     // composited layer only for the duration of the `transition-transform`, then
     // drops the layer on the commit after the transition ends. On the Android
-    // WebView that de-promotion costs one bad frame: for ~2 frames (~33 ms)
+    // WebView that de-promotion costs 2–3 frames (~33–50 ms) in which
     // neither this panel's `bg-card` nor the backdrop's `bg-black/50` paints, so
     // the page underneath shows through at full brightness and the whole screen
     // appears to flash. Measured on the emulator, filter drawer, 60 fps device
@@ -219,8 +222,19 @@ pub fn SheetContent(
     // the end-of-transition drop happens anyway), and it must NOT be permanent:
     // `crate::cards::CardPreview` mounts one `Sheet` per catalog row, so an
     // unconditional `will-change` would permanently promote a layer per row.
-    // Dropping the hint as the panel starts closing is safe — that commit
-    // repaints the panel anyway, and the measured close is clean.
+    //
+    // Note what that does *not* buy on the close path: the hint drops the
+    // moment `data-state` flips to `closed`, i.e. at the *start* of the closing
+    // transition, so closing de-promotes exactly as it did before this change.
+    // The close nevertheless measured clean on the emulator after the fix —
+    // mechanism unexplained. Treat a returning close-side flash as unfixed by
+    // this commit rather than as a regression of it.
+    //
+    // One side effect worth knowing: `will-change` establishes a containing
+    // block, so while the panel is open any `position: fixed` descendant
+    // resolves against the panel instead of the viewport. Nothing inside a
+    // sheet is `fixed` today; a future Popover/Tooltip nested in one will
+    // mis-position while the sheet is open.
     let base_class = tw_merge!(
         "fixed z-100 bg-card shadow-lg p-6 transition-transform duration-300 overflow-y-auto overscroll-y-contain data-[state=closed]:pointer-events-none data-[state=open]:will-change-transform",
         direction.initial_position(),

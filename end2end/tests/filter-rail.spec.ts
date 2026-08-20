@@ -998,7 +998,7 @@ test.describe("mobile", () => {
     // `transition-transform` gets that layer dropped on the commit after the
     // transition ends, and the WebView pays for the de-promotion with one bad
     // frame: neither the panel's `bg-card` nor the backdrop's `bg-black/50`
-    // paints for ~2 frames (~33 ms, measured at 67 % of the screen deviating
+    // paints for 2–3 frames (~33–50 ms, measured at 67 % of the screen deviating
     // from the settled frame, on open *and* on close). `will-change: transform`
     // while the sheet is open keeps the layer alive across the whole animation
     // and removes the end-of-transition drop.
@@ -1027,7 +1027,12 @@ test.describe("mobile", () => {
     expect(await willChange()).toBe("transform");
 
     // Dropped again once it closes, so the hint costs nothing at rest.
-    await page.locator("#catalog-filters_backdrop").click();
+    // Escape, not a backdrop click: `SheetBackdrop` is `fixed inset-0`, so its
+    // bounding box is the whole viewport and Playwright aims at the centre —
+    // which hit-tests to the open panel (`z-100`) sitting over it (`z-60`), and
+    // the actionability check then spins until it times out. Escape is the
+    // sheet's own dismissal, the same signal a real backdrop tap flips.
+    await page.keyboard.press("Escape");
     await expect(panel).toHaveAttribute("data-state", "closed");
     expect(await willChange()).toBe("auto");
   });
