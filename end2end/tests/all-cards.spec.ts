@@ -859,6 +859,87 @@ test.describe("desktop — the name column is allocated like the catalog's", () 
     expect(type, "the Type column collapsed to its longest word").toBeGreaterThan(150);
     expect(mana, "the Mana column collapsed to one symbol per line").toBeGreaterThan(80);
   });
+
+  test("@fast a folder-ONLY collection gets the same Card column as any other", async ({
+    page,
+    request,
+  }) => {
+    // The row-kind trap, pinned. `CollectionTable` renders two row kinds and
+    // `CollectionBody`'s empty state only fires when *both* are absent
+    // (`cards_empty && no_folders`), so a binder whose children are all folders
+    // renders this table with folder rows alone — reachable in two clicks from
+    // the tree. Folder name cells are `max-w-0` (they must be: the names are
+    // user-chosen), so in that shape *nothing* contributes intrinsic width to
+    // the Card column, and leaving the allocation to row content gave it 164px
+    // of 1150 (14%) while the empty Mana/WANTED/OWNED columns took 179/229/216
+    // on their header words alone. The width is declared on the `<th>` instead,
+    // and this test is what says so. The seeded fixtures cannot cover it — every
+    // one of them holds cards — so it builds its own, two API calls, and
+    // discards it again.
+    const suffix = `${test.info().workerIndex}-${Date.now().toString(36)}`;
+    const parentName = `zz-e2e-folder-only-${suffix}`;
+    // Long enough that a starved column must ellipsize it, short enough that a
+    // healthy one need not: ~45 chars against the ~397px a 38% column leaves
+    // after padding and the folder icon.
+    const childName = `zz-e2e-ChildBinderWithAGoodLongName-${suffix}`;
+    expect(
+      childName.length,
+      "the probe name must be long enough for a starved column to clip",
+    ).toBeGreaterThanOrEqual(40);
+
+    const mk = async (name: string, parent_id: string | null) => {
+      const res = await request.post("/api/collections", {
+        data: { parent_id, kind: "binder", name, format: null },
+      });
+      expect(res.status(), `create ${name}`).toBe(200);
+      return ((await res.json()) as { id: string }).id;
+    };
+    const parent = await mk(parentName, null);
+    let child: string | undefined;
+    try {
+      child = await mk(childName, parent);
+
+      await page.goto(`/my/collections/${parent}`);
+      await hydrated(page);
+      await expect(page.getByTestId("collection-table")).toBeVisible();
+      // The fixture shape this test exists for — and the control that keeps it
+      // from quietly becoming a second mixed-collection test.
+      await expect(page.locator('[data-testid="folder-row"]')).toHaveCount(1);
+      await expect(page.locator('[data-testid="collection-row"]')).toHaveCount(0);
+
+      const view = await columnMetrics(page, "collection-table", 2);
+      expect(view.widths, "the collection header shape changed").toHaveLength(7);
+      expect(view.overflow, "collection table overflows its wrapper").toBeLessThanOrEqual(1);
+      const card = view.widths[1];
+      expect(
+        card / view.total,
+        "a folder-only collection should get the same Card share as any other",
+      ).toBeGreaterThan(0.3);
+
+      // …and the name that column exists for is neither wrapped nor ellipsized.
+      const name = page
+        .locator('[data-testid="folder-row"] td:nth-child(2) span.truncate')
+        .first();
+      await expect(name).toHaveText(childName);
+      const shape = await name.evaluate((el) => ({
+        clipped: el.scrollWidth - el.clientWidth,
+        lines: Math.round(
+          el.getBoundingClientRect().height /
+            parseFloat(getComputedStyle(el).lineHeight),
+        ),
+      }));
+      expect(shape.lines, "the folder name should render on one line").toBe(1);
+      expect(
+        shape.clipped,
+        "the folder name is being ellipsized — the Card column is too narrow",
+      ).toBeLessThanOrEqual(1);
+    } finally {
+      // Discard, child first: these binders hold nothing, so the default
+      // `ToParent` disposition has no copies to relocate (P6-188).
+      if (child) await request.post(`/api/collections/${child}/delete`, { data: {} });
+      await request.post(`/api/collections/${parent}/delete`, { data: {} });
+    }
+  });
 });
 
 test.describe("390px — bounding WHERE did not cost the phone layout", () => {
@@ -890,6 +971,13 @@ test.describe("390px — bounding WHERE did not cost the phone layout", () => {
       "WHERE should not hoard the phone table either",
     ).toBeLessThan(0.35);
     expect(card, "the Card column should still lead at 390px").toBeGreaterThan(where);
+    // Same base control as the desktop test: the Card column only *means*
+    // anything here if the fixture's first page carries a name long enough to
+    // be squeezed by a badly-allocated column.
+    expect(
+      my.longestName?.length ?? 0,
+      "the fixture's first page should carry a name long enough to be squeezed",
+    ).toBeGreaterThanOrEqual(20);
   });
 });
 

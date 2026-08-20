@@ -744,7 +744,7 @@ fn CardsRow(row: AllCardsRow) -> impl IntoView {
             </TableCell>
             <TableCell class="text-muted-foreground hidden p-2 lg:table-cell">{type_line}</TableCell>
             <TableCell class="text-muted-foreground hidden p-2 sm:table-cell">{mana_cost}</TableCell>
-            // `max-w-0 w-full` (P6-020): under `table-layout: auto` a plain
+            // `max-w-0` (P6-020): under `table-layout: auto` a plain
             // `truncate` on the content does not stop a long, unbreakable
             // collection name from setting this column's min-content width —
             // the column's own auto-computed width is content-driven, and

@@ -2116,7 +2116,26 @@ fn CollectionTable(
                         <TableHead class="w-11 md:w-8">
                             <span class="sr-only">"Select"</span>
                         </TableHead>
-                        <TableHead>"Card"</TableHead>
+                        // The Card column's share is declared **here, on the
+                        // column**, not left to whichever row kinds a given
+                        // collection happens to contain (WB-01M0AWAM8Z).
+                        // `CollectionTable` renders two row kinds and the
+                        // empty state only fires when *both* are absent
+                        // (`CollectionBody`: `cards_empty && no_folders`), so
+                        // a collection whose children are all folders — a
+                        // binder inside a binder, two clicks from the tree —
+                        // renders this table with folder rows alone. Those
+                        // cells are `max-w-0` (they must be: folder names are
+                        // user-chosen and would otherwise set the column's
+                        // width), which means nothing at all contributes
+                        // intrinsic width to this column in that case:
+                        // measured 164px of 1150 (14%), with the *empty*
+                        // Mana/WANTED/OWNED columns taking 179/229/216 on
+                        // their header words alone, and a 39-char child name
+                        // ellipsized. A percentage on the `<th>` sets the
+                        // column's width for every row kind and both cases
+                        // land the same.
+                        <TableHead class="w-[38%]">"Card"</TableHead>
                         // `lg`, not `md` (P6-001): Type's own text is
                         // untruncated (a truncating `max-w` measurably *forced*
                         // the column to that width under `table-layout: auto`
@@ -2279,12 +2298,18 @@ fn FolderTableRow(
             // collapsed to 84px, wrapping a type line onto four lines, and
             // Mana to 52px, one symbol per line. Collections without folder
             // rows were already fine, which is why this only showed up on
-            // some pages. Dropping `w-full` leaves the column's width to the
-            // *card* rows that share it (measured 259px here, one line per
-            // name, Type back to 356px) while `max-w-0` still stops a long
-            // unbreakable folder name from widening it — the invariant P6-020
-            // actually landed. Nothing here needs the leftover width: the
-            // folder name truncates inside whatever the card rows establish.
+            // some pages.
+            //
+            // This cell now claims **no width at all** — the Card column's
+            // share is declared on its `<th>` (see `CollectionTable`'s
+            // header), so it is the same 38% whether this page has folder
+            // rows, card rows, or only folder rows. Deliberately not a
+            // per-cell width: a width here would be one row kind deciding a
+            // column two row kinds share, which is the class of bug this
+            // whole change is about. `max-w-0` stays and is doing its own,
+            // separate job — stopping a long unbreakable folder name from
+            // widening the column — which is the invariant P6-020 landed.
+            // The name then ellipsizes inside the column the header sized.
             <TableCell class="max-w-0 p-2">
                 <a
                     href=format!("/my/collections/{id}")

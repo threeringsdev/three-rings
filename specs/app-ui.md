@@ -6588,7 +6588,9 @@ reference the feedback names):
 | `/my/all` before | 24 | **118 (10%)** | 101 | 52 | **726 (63%)** | 67 | 63 | **4** |
 | `/my/all` after | 32 | **320 (28%)** | 294 | 99 | 276 (24%) | 67 | 63 | 1 |
 | collection w/ folder rows, before | 24 | **743 (65%)** | 84 | 52 | 92 | 92 | 63 | 1 |
-| collection w/ folder rows, after | 32 | 259 (23%) | 356 | 139 | 135 | 135 | 92 | 1 |
+| collection w/ folder rows, after | 32 | 437 (38%) | 283 | 110 | 107 | 107 | 73 | 1 |
+| collection, cards only, before | 33 | 281 (24%) | 363 | 131 | 128 | 128 | 87 | 1 |
+| collection, cards only, after | 32 | 437 (38%) | 295 | 107 | 104 | 104 | 71 | 1 |
 
 Two cells carried it and both are fixed, differently, because they want different things:
 
@@ -6597,21 +6599,53 @@ Two cells carried it and both are fixed, differently, because they want differen
   `hidden lg:table-cell` right beside it — at `lg` a seventh column appears and WHERE gives some
   back. The remaining width is then shared content-proportionally, which is all "follow a similar
   layout to the catalog" ever meant: Card:Type comes out 320:294 against the catalog's own 449:417.
-- **`collection.rs`'s `FolderTableRow` name cell** needs *no* width — it shares the Card column with
-  the card rows, which already size it well. `w-full` was simply **dropped**, leaving bare
-  `max-w-0`. This one is worth flagging as the sneakier of the two: it only misbehaved on
-  collections that actually *have* child rows, so a collection page with no folders looked correct
-  and the P6-020 measurements (taken on the seeded fixture) missed it.
+- **`collection.rs`'s `FolderTableRow` name cell** claims **no width at all** now, and the Card
+  column's share moved to its `<th>` instead (`w-[38%]` on `CollectionTable`'s "Card" header).
+
+**Why the collection table's fix is header-level, not cell-level (adversarial review, round 1).**
+The first cut simply dropped `w-full` from the folder cell and left the column to the *card* rows
+that share it. That is wrong for a shape the seeded fixtures do not contain: `CollectionTable`
+renders two row kinds, and `CollectionBody`'s empty state only fires when **both** are absent
+(`cards_empty && no_folders`), so a binder whose children are all folders — a binder inside a
+binder, two clicks from the tree — renders this table with folder rows **alone**. Those cells are
+`max-w-0`, so in that shape nothing contributes intrinsic width to the Card column at all, and it
+collapsed to 164px of 1150 (14%) while the *empty* Mana / WANTED / OWNED columns took 179 / 229 /
+216 on their header words alone. Measured, all at 1440×900 on a scratch `zz-e2e` binder holding one
+child binder and no cards:
+
+| folder-ONLY collection | Select | Card | Type | Mana | Here | Wanted | Owned |
+|---|---|---|---|---|---|---|---|
+| before this task (`w-full` on the folder cell) | 16 | **857 (75%)** | 48 | 52 | 48 | 67 | 63 |
+| first cut (`w-full` dropped, no `<th>` width) | 32 | **164 (14%)** | 167 | 179 | 164 | 229 | 216 |
+| shipped (`<th class="w-[38%]">`) | 32 | **437 (38%)** | 119 | 128 | 117 | 163 | 154 |
+
+Note the first row: this shape was *already* broken before the task, just in the opposite
+direction. The header-level width is the first thing that makes all three collection shapes agree —
+folder-only, mixed and cards-only now all land Card at 437px (38%) at 1440, and 135px (38%) at 390.
+The general lesson is the one the two-row-kind table teaches: **a width that only some row kinds
+carry is a column policy that depends on the data**. Put it on the `<th>`.
 
 **The general rule, so the next cell gets it right:** `max-w-0` is the part that buys
 data-independence — it caps this cell's contribution to the column's intrinsic-width pass at zero,
 so no user-chosen string can widen the column. `w-full` is a *separate*, much stronger claim, and
 appropriate only when a column genuinely should absorb every spare pixel. Pair `max-w-0` with a
-percentage when the column needs a floor, or with nothing at all when its siblings already size it.
+percentage when the column needs a floor of its own, or with nothing at all when the column's width
+is declared on its header — and prefer the header whenever more than one row kind shares the column.
 
-**Evidence.** Three new e2e tests, all three kill-verified by restoring `w-full` on both cells,
-rebuilding, and rerunning (they failed at Card = 10.3% of the table, folder-row Card = 64.6%, and
-Card 110px < WHERE 122px respectively):
+**The `md` band (768px), measured rather than assumed.** Type is `hidden lg:table-cell`, so the
+768–1023 band runs five visible columns inside a 478px table (the 240px rail takes the rest), and
+`/my/all`'s card names wrap to four lines there. That is *not* an overflow: measured post-fix, the
+`TableWrapper` is `scrollWidth − clientWidth = 0` and the document likewise — the names wrapping is
+precisely what absorbs the width instead of the table growing. Pre-fix at the same width the table
+also did not overflow (Card 118px / WHERE 155px, vs. 121px / 143px after), so this band is a
+pre-existing squeeze that this task slightly improves and does not regress. It is left alone: with
+select 32 + Mana 53 + WANTED 67 + OWNED 63 already spoken for, Card and WHERE are splitting 263px,
+and no allocation of those 263px puts a 30-character card name on one line.
+
+**Evidence.** Four new e2e tests, each kill-verified by reverting the lever it guards, rebuilding,
+and rerunning — restoring `w-full` on both cells failed them at Card = 10.3% of the table,
+folder-row Card = 64.6% and Card 110px < WHERE 122px, and removing the `<th>` width failed the
+folder-only pin at Card = 14.25%:
 
 - `all-cards.spec.ts`, "desktop — the name column is allocated like the catalog's" → "/my/all gives
   Card a catalog-sized share and WHERE stops hoarding". Reads `/catalog?view=list` **live** in the
@@ -6621,6 +6655,12 @@ Card 110px < WHERE 122px respectively):
   since a wrapping assertion over short names is vacuous.
 - same describe → "a collection table with folder rows keeps Type and Mana readable", on the seeded
   Shoebox (it holds *Rares*, so `folder-row` is actually present — the shape the assertion needs).
+- same describe → "a folder-ONLY collection gets the same Card column as any other". No seeded
+  fixture has this shape (they all hold cards), so it builds one — two `POST /api/collections`
+  calls, a `zz-e2e-` parent and one child binder — asserts `folder-row` = 1 and `collection-row` = 0
+  as the shape control, then that the Card column is over 30% of the table and that the ~45-char
+  child name is neither wrapped (one line) nor ellipsized (`scrollWidth − clientWidth ≤ 1`), and
+  discards both binders in a `finally`.
 - `all-cards.spec.ts`, "390px — bounding WHERE did not cost the phone layout". WHERE is now sized by
   a number rather than by "whatever is left", so the phone width had to be re-measured rather than
   assumed: 0px of `TableWrapper` overflow, 0px of document overflow, Type/Mana measuring 0 (the
