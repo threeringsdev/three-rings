@@ -702,6 +702,285 @@ test.describe("reached by a client-side navigation", () => {
 // applies the file's `test.use({ storageState })` to it — so an anonymous
 // case belongs in a file that isn't signed in, which smoke.spec.ts is.
 
+// ------------------------------------------------- column allocation ------
+// Alpha feedback (WB-01M0AWAM8Z): "on the /my cards list table, the card name
+// column is way too narrow… the columns are not exactly the same as on the
+// catalog, but they should still follow a similar layout."
+//
+// Root cause was P6-020's own fix over-applied: `max-w-0 w-full` on the WHERE
+// cell is the "this column takes the table's *whole* leftover width" idiom, so
+// under `table-layout: auto` every other column collapsed to its min-content
+// (its longest word) and the WHERE column kept the rest. Measured at 1440×900
+// before the fix: WHERE 726px of a 1150px table (63%) against a 118px Card
+// column (10%), with card names on four lines. `w-full` → a bounded percentage
+// is the fix; these assertions are what stop it coming back.
+//
+// Everything here is DOM-measured against the *catalog* table read in the same
+// run, because "like the catalog" is what the feedback actually asks for and a
+// hardcoded pixel budget would only encode today's fixture.
+
+/// Header-cell widths (the column widths, under either table layout), plus how
+/// many lines the card-name links actually wrap to.
+///
+/// The name link is the FIRST `/cards/:id` anchor in its cell: `CardPreview`
+/// nests further anchors in the hover-card content, which is in the same cell
+/// but contributes no height (a closed popover is still in the DOM — see the
+/// e2e-suite skill's "assertions that lie").
+async function columnMetrics(page: Page, testid: string, nameColumn: number) {
+  return await page.evaluate(
+    ({ testid, nameColumn }) => {
+      const table = document.querySelector(`[data-testid="${testid}"]`);
+      if (!table) throw new Error(`no [data-testid="${testid}"] on the page`);
+      const total = table.getBoundingClientRect().width;
+      const wrapper = table.closest('[data-name="TableWrapper"]');
+      if (!wrapper) throw new Error("the table has no TableWrapper to scroll in");
+      const names = [...table.querySelectorAll("tbody tr")]
+        .map((r) =>
+          r
+            .querySelector(`td:nth-child(${nameColumn})`)
+            ?.querySelector('a[href^="/cards/"]'),
+        )
+        .filter((a): a is HTMLAnchorElement => !!a);
+      return {
+        total,
+        overflow: wrapper.scrollWidth - wrapper.clientWidth,
+        widths: [...table.querySelectorAll("thead th")].map(
+          (h) => h.getBoundingClientRect().width,
+        ),
+        nameLines: names.map((a) =>
+          Math.round(
+            a.getBoundingClientRect().height /
+              parseFloat(getComputedStyle(a).lineHeight),
+          ),
+        ),
+        longestName: names
+          .map((a) => a.textContent!.trim())
+          .sort((a, b) => b.length - a.length)[0],
+      };
+    },
+    { testid, nameColumn },
+  );
+}
+
+test.describe("desktop — the name column is allocated like the catalog's", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("@fast /my/all gives Card a catalog-sized share and WHERE stops hoarding", async ({
+    page,
+  }) => {
+    // The reference table, read live rather than hardcoded. Its Name column is
+    // column 1 (no select column). This half is also the "catalog unchanged"
+    // guard: both tables share `components/ui/table.rs`, so a fix applied there
+    // instead of on the WHERE cell would move these numbers too.
+    await page.goto("/catalog?view=list");
+    await hydrated(page);
+    await expect(page.getByTestId("results-list")).toBeVisible();
+    const catalog = await columnMetrics(page, "results-list", 1);
+    expect(catalog.total, "catalog table has no width").toBeGreaterThan(0);
+    expect(catalog.overflow, "catalog table overflows its wrapper").toBeLessThanOrEqual(1);
+    const catalogNameShare = catalog.widths[0] / catalog.total;
+    expect(
+      catalogNameShare,
+      "the catalog's own Name column should still be ~40% of the table",
+    ).toBeGreaterThan(0.3);
+    expect(
+      Math.max(...catalog.nameLines),
+      "catalog card names should render on one line at 1440px",
+    ).toBeLessThanOrEqual(1);
+
+    await page.goto("/my/all");
+    await hydrated(page);
+    await settled(page);
+    const my = await columnMetrics(page, "all-cards-table", 2);
+    expect(my.total, "/my/all table has no width").toBeGreaterThan(0);
+    expect(my.overflow, "/my/all table overflows its wrapper").toBeLessThanOrEqual(1);
+    // Select, Card, Type, Mana, Where, Wanted, Owned — see `CardsTable`.
+    expect(my.widths, "the /my/all header shape changed").toHaveLength(7);
+    const [, card, , , where] = my.widths;
+
+    // The bug, stated as a number: WHERE took 63% of the table. Half of the
+    // catalog's Name share is a floor no plausible content can push Card under
+    // once WHERE is bounded, and one the pre-fix layout (10%) cannot reach.
+    expect(
+      card / my.total,
+      "the Card column is too narrow a share of the table",
+    ).toBeGreaterThan(catalogNameShare / 2);
+    expect(
+      where / my.total,
+      "the WHERE column is hoarding the table's leftover width",
+    ).toBeLessThan(0.35);
+    expect(
+      card,
+      "the Card column should be at least as wide as WHERE",
+    ).toBeGreaterThanOrEqual(where);
+
+    // Base control: an assertion about wrapping is vacuous on a fixture of
+    // short names, and this account's first page is whatever the seed holds.
+    expect(
+      my.longestName?.length ?? 0,
+      "the fixture's first page should carry a name long enough to wrap in a narrow column",
+    ).toBeGreaterThanOrEqual(20);
+    expect(
+      Math.max(...my.nameLines),
+      "card names should not wrap past two lines at 1440px",
+    ).toBeLessThanOrEqual(2);
+  });
+
+  test("@fast a collection table with folder rows keeps Type and Mana readable", async ({
+    page,
+  }) => {
+    // `FolderTableRow` carried the same `max-w-0 w-full`, on the *Card* cell —
+    // the mirror image of `/my/all`'s bug: Card took 743px of 1150 and Type
+    // collapsed to 84px, wrapping "Legendary Creature — Human Rogue" onto four
+    // lines. Only collections that actually have child rows showed it, which is
+    // why the seeded Shoebox (it holds "Rares") is the fixture here.
+    const tree = await page.request.get("/api/collection_tree");
+    expect(tree.ok(), "GET /api/collection_tree").toBeTruthy();
+    const rows = (
+      (await tree.json()) as { collections: { summary: { id: string; name: string } }[] }
+    ).collections;
+    const shoebox = rows.find((r) => r.summary.name === "Shoebox")?.summary;
+    expect(shoebox, "the dev seed must contain Shoebox").toBeTruthy();
+
+    await page.goto(`/my/collections/${shoebox!.id}`);
+    await hydrated(page);
+    await expect(page.getByTestId("collection-table")).toBeVisible();
+    await expect(page.locator('[data-testid="folder-row"]').first()).toBeVisible();
+
+    const view = await columnMetrics(page, "collection-table", 2);
+    // Select, Card, Type, Mana, Here, Wanted, Owned — see `CollectionTable`.
+    expect(view.widths, "the collection header shape changed").toHaveLength(7);
+    const [, card, type, mana] = view.widths;
+    expect(view.overflow, "collection table overflows its wrapper").toBeLessThanOrEqual(1);
+    expect(
+      card / view.total,
+      "a folder row should not hand the Card column the whole table",
+    ).toBeLessThan(0.5);
+    expect(type, "the Type column collapsed to its longest word").toBeGreaterThan(150);
+    expect(mana, "the Mana column collapsed to one symbol per line").toBeGreaterThan(80);
+  });
+
+  test("@fast a folder-ONLY collection gets the same Card column as any other", async ({
+    page,
+    request,
+  }) => {
+    // The row-kind trap, pinned. `CollectionTable` renders two row kinds and
+    // `CollectionBody`'s empty state only fires when *both* are absent
+    // (`cards_empty && no_folders`), so a binder whose children are all folders
+    // renders this table with folder rows alone — reachable in two clicks from
+    // the tree. Folder name cells are `max-w-0` (they must be: the names are
+    // user-chosen), so in that shape *nothing* contributes intrinsic width to
+    // the Card column, and leaving the allocation to row content gave it 164px
+    // of 1150 (14%) while the empty Mana/WANTED/OWNED columns took 179/229/216
+    // on their header words alone. The width is declared on the `<th>` instead,
+    // and this test is what says so. The seeded fixtures cannot cover it — every
+    // one of them holds cards — so it builds its own, two API calls, and
+    // discards it again.
+    const suffix = `${test.info().workerIndex}-${Date.now().toString(36)}`;
+    const parentName = `zz-e2e-folder-only-${suffix}`;
+    // Long enough that a starved column must ellipsize it, short enough that a
+    // healthy one need not: ~45 chars against the ~397px a 38% column leaves
+    // after padding and the folder icon.
+    const childName = `zz-e2e-ChildBinderWithAGoodLongName-${suffix}`;
+    expect(
+      childName.length,
+      "the probe name must be long enough for a starved column to clip",
+    ).toBeGreaterThanOrEqual(40);
+
+    const mk = async (name: string, parent_id: string | null) => {
+      const res = await request.post("/api/collections", {
+        data: { parent_id, kind: "binder", name, format: null },
+      });
+      expect(res.status(), `create ${name}`).toBe(200);
+      return ((await res.json()) as { id: string }).id;
+    };
+    const parent = await mk(parentName, null);
+    let child: string | undefined;
+    try {
+      child = await mk(childName, parent);
+
+      await page.goto(`/my/collections/${parent}`);
+      await hydrated(page);
+      await expect(page.getByTestId("collection-table")).toBeVisible();
+      // The fixture shape this test exists for — and the control that keeps it
+      // from quietly becoming a second mixed-collection test.
+      await expect(page.locator('[data-testid="folder-row"]')).toHaveCount(1);
+      await expect(page.locator('[data-testid="collection-row"]')).toHaveCount(0);
+
+      const view = await columnMetrics(page, "collection-table", 2);
+      expect(view.widths, "the collection header shape changed").toHaveLength(7);
+      expect(view.overflow, "collection table overflows its wrapper").toBeLessThanOrEqual(1);
+      const card = view.widths[1];
+      expect(
+        card / view.total,
+        "a folder-only collection should get the same Card share as any other",
+      ).toBeGreaterThan(0.3);
+
+      // …and the name that column exists for is neither wrapped nor ellipsized.
+      const name = page
+        .locator('[data-testid="folder-row"] td:nth-child(2) span.truncate')
+        .first();
+      await expect(name).toHaveText(childName);
+      const shape = await name.evaluate((el) => ({
+        clipped: el.scrollWidth - el.clientWidth,
+        lines: Math.round(
+          el.getBoundingClientRect().height /
+            parseFloat(getComputedStyle(el).lineHeight),
+        ),
+      }));
+      expect(shape.lines, "the folder name should render on one line").toBe(1);
+      expect(
+        shape.clipped,
+        "the folder name is being ellipsized — the Card column is too narrow",
+      ).toBeLessThanOrEqual(1);
+    } finally {
+      // Discard, child first: these binders hold nothing, so the default
+      // `ToParent` disposition has no copies to relocate (P6-188).
+      if (child) await request.post(`/api/collections/${child}/delete`, { data: {} });
+      await request.post(`/api/collections/${parent}/delete`, { data: {} });
+    }
+  });
+});
+
+test.describe("390px — bounding WHERE did not cost the phone layout", () => {
+  // The other half of the same change: `w-full` → a percentage means WHERE is
+  // now sized by a *number* rather than by "whatever is left", so the phone
+  // width where P6-001 measured the table down to 0px of overflow has to be
+  // re-measured rather than assumed. Measure the scroll container, not the
+  // document — `TableWrapper` is `overflow-auto`, so a too-wide table is a
+  // wrapper-local scroll the document check alone misses.
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test("@fast /my/all still fits a 390px viewport, WHERE included", async ({ page }) => {
+    await page.goto("/my/all");
+    await hydrated(page);
+    await settled(page);
+    const my = await columnMetrics(page, "all-cards-table", 2);
+    expect(my.overflow, "the table overflows its wrapper at 390px").toBeLessThanOrEqual(1);
+    const doc = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(doc, "the page overflows the document at 390px").toBeLessThanOrEqual(1);
+    // Type and Mana are `hidden` here, so their header cells measure 0 — that
+    // is the shape this width is supposed to have, and asserting it keeps this
+    // from silently becoming a five-column measurement.
+    const [, card, type, mana, where] = my.widths;
+    expect([type, mana], "Type/Mana should be hidden below lg/sm").toEqual([0, 0]);
+    expect(
+      where / my.total,
+      "WHERE should not hoard the phone table either",
+    ).toBeLessThan(0.35);
+    expect(card, "the Card column should still lead at 390px").toBeGreaterThan(where);
+    // Same base control as the desktop test: the Card column only *means*
+    // anything here if the fixture's first page carries a name long enough to
+    // be squeezed by a badly-allocated column.
+    expect(
+      my.longestName?.length ?? 0,
+      "the fixture's first page should carry a name long enough to be squeezed",
+    ).toBeGreaterThanOrEqual(20);
+  });
+});
+
 test.describe("mobile — a long collection name does not widen the table (P6-020)", () => {
   // `/my` below `md` is the drill-down list (app/src/my/root.rs); only
   // `/my/all` (`ALL_CARDS_PATH`) renders this table at phone width, which is

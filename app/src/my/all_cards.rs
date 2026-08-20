@@ -744,7 +744,7 @@ fn CardsRow(row: AllCardsRow) -> impl IntoView {
             </TableCell>
             <TableCell class="text-muted-foreground hidden p-2 lg:table-cell">{type_line}</TableCell>
             <TableCell class="text-muted-foreground hidden p-2 sm:table-cell">{mana_cost}</TableCell>
-            // `max-w-0 w-full` (P6-020): under `table-layout: auto` a plain
+            // `max-w-0` (P6-020): under `table-layout: auto` a plain
             // `truncate` on the content does not stop a long, unbreakable
             // collection name from setting this column's min-content width —
             // the column's own auto-computed width is content-driven, and
@@ -754,11 +754,27 @@ fn CardsRow(row: AllCardsRow) -> impl IntoView {
             // text is untruncated" — the same mechanism, worse here because
             // the name isn't from a bounded vocabulary). `max-w-0` on the
             // cell itself caps this column's own contribution to that pass
-            // at zero regardless of content; `w-full` is the auto-layout
-            // hint that the column should still claim the table's leftover
-            // width. Together the column lands at a real, data-independent
-            // width and `LocationSummary`'s `truncate` ellipsizes within it.
-            <TableCell class="max-w-0 w-full px-1 py-2 md:px-2">
+            // at zero regardless of content, so the column's width comes
+            // from a number instead of from the data, and
+            // `LocationSummary`'s `truncate` ellipsizes within it.
+            //
+            // **A percentage, not `w-full` (WB-01M0AWAM8Z).** P6-020 paired
+            // `max-w-0` with `w-full`, which is the "this column takes the
+            // table's *whole* leftover width" idiom — and it did: measured at
+            // 1440×900, WHERE was 726px of a 1150px table (63%) while every
+            // other column collapsed to its own min-content, i.e. its longest
+            // word. Card came out 118px (10%) with names on four lines, Type
+            // one word per line, Mana one symbol per line — the alpha
+            // feedback's complaint exactly. A bounded percentage keeps the
+            // data-independence `max-w-0` buys while leaving the rest of the
+            // table to be shared content-proportionally the way `/catalog`'s
+            // list already is. Two steps because Type is `hidden lg:table-cell`
+            // just below: at `lg` there is a seventh column to pay for, so
+            // WHERE gives some back. Measured after, at 1440: Card 320 / Type
+            // 294 / Mana 99 / WHERE 276, every name on one line, and 0px of
+            // wrapper overflow from 390px up (`all-cards.spec.ts`, "the name
+            // column is allocated like the catalog's" + the 390px arm).
+            <TableCell class="max-w-0 w-[30%] px-1 py-2 md:px-2 lg:w-[24%]">
                 <LocationSummary oracle_id owned locations />
             </TableCell>
             <TableCell
