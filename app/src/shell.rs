@@ -529,8 +529,8 @@ fn SidebarRail(my_mode: Memo<bool>, rail_open: RwSignal<bool>) -> impl IntoView 
         // in viewport coordinates.
         // `top-14` would leave a gap (or, worse, a seam under the header)
         // now that the header's own height grows by the status-bar inset —
-        // these two are mobile-only (`md:hidden` / `md:static`), so the
-        // desktop `md:top-14` sibling below is untouched.
+        // hence the `calc(3.5rem + env(safe-area-inset-top))` here, which the
+        // desktop sticky offset below now spells the same way.
         <Show when=move || rail_open.get()>
             <div
                 class="fixed inset-x-0 top-[calc(3.5rem_+_env(safe-area-inset-top))] bottom-0 z-40 bg-black/50 md:hidden"
@@ -544,7 +544,38 @@ fn SidebarRail(my_mode: Memo<bool>, rail_open: RwSignal<bool>) -> impl IntoView 
             data-open=move || rail_open.get().then_some("true")
             class="bg-background invisible fixed top-[calc(3.5rem_+_env(safe-area-inset-top))] bottom-0 -left-60 z-50 w-60 shrink-0 overflow-y-auto border-r transition-[left] duration-200 data-[open=true]:visible data-[open=true]:left-0 md:visible md:static md:z-auto md:overflow-visible"
         >
-            <div class="space-y-4 p-4 md:sticky md:top-14">
+            // Desktop: the sticky rail is its OWN scroll container, capped at
+            // the viewport below the header (WB-01M0AW176E). Sticky alone made
+            // everything past the fold unreachable: once the rail pins under
+            // the header, scrolling the page moves the main pane and leaves the
+            // rail exactly where it is, so with every filter section expanded
+            // (or a tall collection tree) the last sections could never be
+            // scrolled to. Capping the height and letting *this* element
+            // scroll is the fix; the `<aside>` keeps its layout role, so
+            // `border-r` still runs the full page height rather than stopping
+            // at the fold.
+            //
+            // `max-h`, not `h`: a rail that fits shows no scrollbar at all.
+            // `dvh` over `vh` for a retracting browser toolbar at tablet
+            // widths (both are the same number in the Tauri webviews, which
+            // have no such toolbar). Fixed-unit `calc()` on purpose — no
+            // percentage-height chain to resolve, which is the WebKit/Chromium
+            // divergence this repo keeps getting bitten by.
+            //
+            // The offset is the header's own height expression, inset
+            // included, rather than the bare `top-14` this used to carry: the
+            // header is `h-[calc(3.5rem + env(safe-area-inset-top))]`, so on
+            // any md-width surface with a status-bar inset the old value slid
+            // the rail under the header. `env()` reads 0 everywhere else, so
+            // desktop layout is byte-identical to before.
+            //
+            // Popovers anchored inside the rail are unaffected: `popover.rs`
+            // and `context_menu.rs` are native top-layer popovers, which no
+            // ancestor's overflow clips.
+            <div
+                data-testid="sidebar-rail-scroll"
+                class="space-y-4 p-4 md:sticky md:top-[calc(3.5rem_+_env(safe-area-inset-top))] md:max-h-[calc(100dvh_-_3.5rem_-_env(safe-area-inset-top))] md:overflow-y-auto"
+            >
                 <Show
                     when=move || my_mode.get()
                     fallback=|| view! { <crate::catalog::rail::FilterRail /> }
