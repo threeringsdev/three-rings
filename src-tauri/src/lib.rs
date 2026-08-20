@@ -1,3 +1,10 @@
+/// The launch splash the window paints while the first real page is still
+/// being server-rendered. Only release builds run the embedded server that
+/// serves it (debug rides `devUrl`), so it is compiled for release — plus
+/// `cfg(test)`, which is a debug build, so its unit tests still run.
+#[cfg(any(not(debug_assertions), test))]
+mod splash;
+
 /// Holds the in-process Axum server task handle so it can be
 /// gracefully aborted when the window is closed.
 ///
@@ -162,6 +169,12 @@ pub fn run() {
                 let router =
                     tauri::async_runtime::block_on(async move { app::build_router(conf.leptos_options) });
 
+                // The one route the shell adds to the app's router: the launch
+                // splash the window is pointed at first (see `splash`). Cheap
+                // enough that mounting it on every platform costs nothing —
+                // Android simply never navigates there today.
+                let router = splash::mount(router);
+
                 let (port, listener) = tauri::async_runtime::block_on(async {
                     let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
                         Ok(l) => l,
@@ -304,7 +317,18 @@ pub fn run() {
                     let window = app.get_webview_window("main").ok_or_else(|| {
                         Box::<dyn std::error::Error>::from("Failed to get main window")
                     })?;
-                    let url = tauri::Url::parse(&embedded_origin).map_err(|e| {
+                    // …and to the *splash* on that origin, not straight to
+                    // `/`. Every top-level route is `SsrMode::Async`, so `/`
+                    // sends no HTML until `fetch_current_user` has been out to
+                    // Neon Auth and `/my` out to the hosted API — 1–2s with
+                    // everything warm, 15s measured against a cold hosted
+                    // container — and a WKWebView paints nothing at all while a
+                    // navigation is provisional. The splash answers off the
+                    // loopback interface with no awaits, then hands the webview
+                    // on to `/` once it has painted; the webview keeps showing
+                    // it until the real response commits. See `splash`.
+                    let splash_url = format!("{embedded_origin}{}", splash::PATH);
+                    let url = tauri::Url::parse(&splash_url).map_err(|e| {
                         Box::<dyn std::error::Error>::from(format!(
                             "Failed to parse URL: {}",
                             e
