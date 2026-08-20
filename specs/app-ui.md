@@ -73,7 +73,10 @@ update delivery.
 Two top-level modes — **Catalog** ("what exists?") and **My cards** ("what do I
 have and where?") — switched in the top bar (desktop) / bottom tabs (mobile).
 The sidebar rail is mode-filled: filter rail in Catalog, collection tree in My
-cards. The selection tray docks at the bottom and survives mode switches.
+cards. The selection tray docks at the bottom and survives mode switches. On
+desktop the rail is **its own scroll container**, capped at the window below the
+header: a fully-expanded filter set, or a tree longer than the window, scrolls
+inside the rail instead of pinning past the fold (Findings, 2026-08-19).
 
 ### Per-page acceptance criteria (distilled; wireframes govern detail)
 
@@ -8331,3 +8334,78 @@ accumulation, measured rather than assumed:
 None of the five reads a collection-table WANTED cell. Worth filing separately
 from the two existing debt tasks: **the suite has no teardown for soft-deleted
 collections**, and three distinct failure modes now trace to that one fact.
+
+### The sidebar rail scrolls its own overflow (2026-08-19, WB-01M0AW176E)
+
+`app/src/shell.rs` (`SidebarRail`), `end2end/tests/sidebar-scroll.spec.ts`.
+Alpha feedback: *"Expanding all the sidebar filters puts some of them below the
+fold. There's no vertical scroll within the sidebar, so these filters become
+unreachable."*
+
+**The mechanism, measured rather than assumed.** The rail's inner panel was
+`md:sticky md:top-14` with nothing bounding its height, inside an `<aside>`
+carrying `md:overflow-visible`. At 1280×600 with every `<details>` open the
+panel is 972–1156 px tall against 544 px of window below the header, and it
+does not scroll: `scrollHeight === clientHeight`, because an unbounded box
+simply grows to fit. What page scrolling does to it is the part worth
+recording, because it is *not* quite "unreachable":
+
+| page scrollTop | rail top | `#filter-rail-mv` top | reachable? |
+|---|---|---|---|
+| 0 | 56 | 980 | no (380 px past the fold) |
+| 400 | 56 (pinned) | 1164 | no — sticky pinned it, the field did not move |
+| 2798 (bottom of a 3398 px page) | −556 | 552 | yes |
+
+So the last sections are reachable **only** by scrolling a catalog page to its
+absolute end, at which point the sticky box finally un-pins at the bottom of its
+containing block and the *top* of the rail is off screen instead. For the first
+~2200 px of scrolling the rail is frozen — which is exactly the experience the
+report describes, and on `/my` (a 146-row tree, 4 626 px tall) it is the whole
+page's worth of scrolling to reach the last binder. The premise was right; the
+precise word is "frozen, then only at the very bottom", not "absent from the
+document".
+
+**The fix** is the standard sidebar shape, on the inner panel only:
+`md:max-h-[calc(100dvh - 3.5rem - env(safe-area-inset-top))]` +
+`md:overflow-y-auto`, with the sticky offset spelled the same way
+(`md:top-[calc(3.5rem + env(safe-area-inset-top))]`, replacing a bare
+`md:top-14` that slid the rail under the header on any md-width surface with a
+status-bar inset). Three deliberate choices:
+
+- **The panel scrolls, not the `<aside>`.** The aside keeps its layout role as
+  a stretched flex item, so `border-r` still runs the full page height rather
+  than stopping at the fold.
+- **`max-h`, not `h`.** A rail with room to spare grows no scroll range and no
+  scrollbar gutter. Pinned by its own test rather than left to inspection.
+- **Fixed-unit `calc()` with `dvh`, no percentage-height chain.** Percentage
+  heights are the WebKit/Chromium divergence this repo keeps getting bitten by
+  (`command.rs`'s `h-full` collapse, twice); `dvh` resolves against the visual
+  viewport with no ancestor chain to resolve, is the same number as `vh` in
+  both webviews we ship (neither has a retracting toolbar), and only differs at
+  tablet widths in a mobile *browser*, where it is the better answer anyway.
+
+**Top-layer overlays are unaffected, verified rather than assumed.** The rail is
+now an `overflow: auto` ancestor, which would clip an absolutely-positioned
+panel. `context_menu.rs` and `popover.rs` are native popovers, and the top layer
+is outside every ancestor's overflow: opened from the last row of a
+scrolled-to-the-bottom tree, the tree's `⋯` panel measures 199→423 px across a
+239 px rail — it escapes the column, which is the proof, and it lands fully
+inside the viewport. **The Set facet is not a popover at all** (the task brief
+assumed it was): it is an inline `Command` with a `max-h-56` list, i.e. a
+*nested* scroll container. Its test drives a real pick from a scrolled rail
+instead of asking a clipping question that does not apply to it.
+
+**e2e.** `sidebar-scroll.spec.ts`, 5 tests, all `@fast`. Each was run against
+the unpatched layout: 4 of the 5 fail there (the fifth, "a rail that fits the
+window gets no scrollbar", passes on both — it guards against over-fixing, not
+against the bug). Two traps the first draft walked into and the file now
+documents at the helper:
+
+- **Never ask `scrollHeight > clientHeight` of an unbounded box.** It is false
+  on precisely the broken layout, so a `test.skip` guarded that way skipped
+  both tree tests into green silence on the build that has the bug. Overflow is
+  measured against the *window below the header* instead.
+- **`toBeVisible()` cannot see a scroll container.** A row scrolled out of an
+  `overflow: auto` ancestor still has a box and still reports visible;
+  `document.elementFromPoint` at the element's own centre is what distinguishes
+  "on screen" from "somewhere in the scroll range".
